@@ -111,6 +111,9 @@ async function pathMomentCount(
       .dohcDesktop;
     if (!api) throw new Error("desktop bridge is unavailable");
     const result = await api.listEngineMoments({ workspaceId, limit: 500 });
+    if ("status" in result) {
+      throw new Error("History was still updating after the sync wait.");
+    }
     return result.moments.filter((moment) => moment.path === path).length;
   }, { workspaceId, path });
 }

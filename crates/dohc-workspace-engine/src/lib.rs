@@ -10,7 +10,7 @@ pub mod rehearsal_harness;
 pub mod shadow_fence;
 
 #[cfg(feature = "harness")]
-pub use capture_driver::CaptureApplyProbe;
+pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
 pub use capture_sink::{SelfWriteSuppression, StoreCaptureSink};
 
 use base64::Engine as _;
@@ -870,6 +870,15 @@ impl OpenWorkspace {
         }
     }
 
+    /// Signal the capture loop to stop without removing its handle. A version
+    /// fence that already owns the apply gate can still finish against the
+    /// driver; teardown takes the handle only after acquiring that gate.
+    fn request_capture_shutdown(&self) {
+        if let Some(driver) = lock(&self.capture).as_ref() {
+            driver.request_shutdown();
+        }
+    }
+
     /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
     /// aborted RPC future can never leave a driver un-cancelled), returning
     /// the join handle for callers that must await the full drain.
@@ -1168,6 +1177,7 @@ impl EngineService {
     ) -> Result<ServiceResponse, WireError> {
         let id = request.id;
         self.ensure_handle_allows_method(request.workspace.as_ref(), &request.method)?;
+        self.require_initial_capture_ready(request.workspace.as_ref(), &request.method)?;
         if request.method == "versionedBinary.readBlob" {
             let (result, blob_egress) = self
                 .versioned_binary_read_blob(&ctx, request.workspace, request.params, id)
@@ -1271,9 +1281,6 @@ impl EngineService {
             }
             "share.view.pull" => {
                 Box::pin(self.share_view_pull(&ctx, request.workspace, request.params)).await?
-            }
-            "share.view.push" => {
-                Box::pin(self.share_view_push(&ctx, request.workspace, request.params)).await?
             }
             "share.view.recordIdentity" => {
                 Box::pin(self.share_view_record_identity(&ctx, request.workspace, request.params))
@@ -1816,6 +1823,34 @@ impl EngineService {
         Ok(())
     }
 
+    /// Fence reads and barriers while the initial file baseline has no declared
+    /// outcome. The bounded startup decision releases them in either `Ready` or
+    /// explicit `Degraded`; recovery may continue from there, like any later
+    /// watcher pass. The classifier is centralized so an early handle cannot
+    /// leak an unreported import prefix through one handler while another stays
+    /// fenced.
+    fn require_initial_capture_ready(
+        &self,
+        handle: Option<&WorkspaceHandle>,
+        method: &str,
+    ) -> Result<(), WireError> {
+        if !method_requires_initial_capture_ready(method) {
+            return Ok(());
+        }
+        let Some(handle) = handle else {
+            return Ok(());
+        };
+        let open = self.open(Some(handle))?;
+        let phase = lock(&open.capture)
+            .as_ref()
+            .map(|driver| driver.status().snapshot().phase)
+            .unwrap_or(capture_driver::CapturePhase::Ready);
+        if !initial_capture_phase_requires_fence(phase) {
+            return Ok(());
+        }
+        Err(initial_capture_updating())
+    }
+
     /// Tear down every open workspace's capture driver (watcher joined,
     /// files actor closed). Called at daemon shutdown AFTER the transport's
     /// workspace close hook: store actors are already gone by then, so any
@@ -2112,16 +2147,18 @@ impl EngineService {
                     self.leases.scoped(&root),
                     self.self_writes.scoped(&root),
                     Arc::clone(&capture_apply_gate),
+                    actor_open.store_freshly_created,
                     capture_author_json.flatten(),
                     self.events.clone(),
                     #[cfg(feature = "harness")]
                     self.capture_apply_probe.clone(),
                 )
             });
-            // STARTUP ORDERING BARRIER: the baseline reconcile (closed-period
-            // disk state) must apply before the handle is handed out, or a
-            // caller's first write could later be overwritten by a capture of
-            // stale disk bytes.
+            // STARTUP ORDERING BARRIER: existing stores and uncertain scans
+            // apply the closed-period baseline before the handle is handed
+            // out. A proven fresh, all-Added import may return earlier; Added
+            // capture never claims a foreign head, so a caller's first write
+            // wins while the bounded import finishes behind the handle.
             //
             // CANCELLATION: nothing owns the store actor yet (the handle is
             // inserted below), so an abort here would leak it. The `open_guard`
@@ -2146,7 +2183,7 @@ impl EngineService {
                 .await?;
             }
             if let Some(capture) = &capture {
-                capture.wait_for_baseline().await;
+                capture.wait_for_open_ready().await;
             }
             capture
         };
@@ -2228,43 +2265,24 @@ impl EngineService {
 
     async fn workspace_close(&self, handle: Option<WorkspaceHandle>) -> Result<Value, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
-        let open = self.open(Some(&handle))?;
-        if !open.handle_kind.owns_binding() {
-            let _serial = self.open_lock.lock().await;
-            let removed = lock(&self.handles).remove(&handle).is_some();
-            lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
-            lock(&self.sessions).retain(|_, session| session.workspace != handle);
-            return Ok(json!({ "closed": false, "attachmentClosed": removed }));
-        }
-        // The same capture→sessions order as `fence_version_snapshot`.
-        // Holding the capture gate through driver cancellation/drain means no
-        // apply can be queued behind a session-first close and form the
-        // close→driver→switch deadlock triangle.
-        let _barriers = self
-            .acquire_workspace_barriers(&open, None, "workspace.close", false)
-            .await?;
         let supervisor = self.supervisor;
-        // Hold open_lock only across the handle removal and the synchronous
-        // begin_close, so a workspace_open already waiting on `handles` cannot
-        // slip in after the removal and reach supervisor.open before the global
-        // Closing marker is installed. Once begin_close has marked Closing, the
-        // lock is released — the marker (not this lock) serializes reopen, and
-        // the detached finish stays cancellation-safe.
-        let (closing, removed) = {
+        // Revalidate and claim teardown under the same serial lock as open.
+        // After this await there is no cancellable point until a detached task
+        // owns every remaining step.
+        let (closing, removed, attached_handles) = {
             let _serial = self.open_lock.lock().await;
-            let db_path = {
-                let guard = lock(&self.handles);
-                guard
-                    .get(&handle)
-                    .ok_or_else(workspace_unavailable)?
-                    .db_path
-                    .clone()
-            };
+            let open = self.open(Some(&handle))?;
+            if !open.handle_kind.owns_binding() {
+                let removed = lock(&self.handles).remove(&handle).is_some();
+                lock(&self.pending_cursors).retain(|_, pending| pending.handle != handle);
+                lock(&self.sessions).retain(|_, session| session.workspace != handle);
+                return Ok(json!({ "closed": false, "attachmentClosed": removed }));
+            }
             // Install the GLOBAL Closing marker BEFORE removing the handle, so a
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
-            let closing = supervisor.begin_close(&db_path).map_err(map_runtime)?;
+            let closing = supervisor.begin_close(&open.db_path).map_err(map_runtime)?;
             let (removed, attached_handles) = {
                 let mut handles = lock(&self.handles);
                 let removed = handles.remove(&handle);
@@ -2281,43 +2299,39 @@ impl EngineService {
             lock(&self.pending_cursors).retain(|_, pending| {
                 pending.handle != handle && !attached_handles.contains(&pending.handle)
             });
-            // Sessions (and their lease guards) evict only AFTER this close
-            // owns the teardown — evicting earlier meant a close future
-            // dropped while waiting on open_lock had already stranded live
-            // editors (ydoc-session-not-found) and released their leases for
-            // a workspace that stayed open.
-            lock(&self.sessions).retain(|_, session| {
-                session.workspace != handle && !attached_handles.contains(&session.workspace)
-            });
-            (closing, removed)
+            (closing, removed, attached_handles)
         };
-        // The capture driver is CANCELLED synchronously here (an aborted close
-        // future can never leave it running), and the detached task below owns
-        // both the drain and the actor close from the start — so cancellation
-        // at ANY await point leaves the #201 backstop semantics intact while
-        // the teardown order stays strictly files-then-actor: the driver
-        // drains its in-flight apply BEFORE the store actor goes down.
-        let capture_drain = removed
-            .as_ref()
-            .and_then(OpenWorkspace::begin_capture_shutdown);
+        let removed = removed.ok_or_else(workspace_unavailable)?;
         let closed = closing.is_some();
+        let capture_gate = Arc::clone(&removed.capture_apply_gate);
+        let session_gate = Arc::clone(&removed.session_ops);
+        let sessions = Arc::clone(&self.sessions);
         // Suppression entries clear AFTER the capture drain: an in-flight
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
         // capture write (provenance flip) during teardown.
-        let clear_suppression = removed.as_ref().map(|removed| {
-            (
-                self.self_writes.scoped(&removed.root),
-                removed.workspace_id.clone(),
-            )
-        });
+        let clear_suppression = (
+            self.self_writes.scoped(&removed.root),
+            removed.workspace_id.clone(),
+        );
+        // Signal cancellation without taking the driver. A paused fresh import
+        // releases the capture gate promptly, while a version fence that already
+        // owns the gate can still read the driver and finish. Cancellation is
+        // idempotent when the detached task takes the driver below.
+        removed.request_capture_shutdown();
         let close_task = tokio::spawn(async move {
+            let _capture = capture_gate.lock_owned().await;
+            let capture_drain = removed.begin_capture_shutdown();
+            let _session = session_gate.lock_owned().await;
+            // Session rows stay present until in-flight session work drains,
+            // then their lease guards are released.
+            lock(&sessions).retain(|_, session| {
+                session.workspace != handle && !attached_handles.contains(&session.workspace)
+            });
             if let Some(drain) = capture_drain {
                 let _ = drain.await;
             }
-            if let Some((self_writes, workspace_id)) = clear_suppression {
-                self_writes.clear_workspace(&workspace_id);
-            }
+            clear_suppression.0.clear_workspace(&clear_suppression.1);
             tokio::task::spawn_blocking(move || match closing {
                 Some(closing) => closing.finish(),
                 None => Ok(()),
@@ -2775,46 +2789,15 @@ impl EngineService {
         Ok(result)
     }
 
-    /// Push this replica's own chat about a RECEIVED file share (#646 PR2).
-    ///
-    /// Takes the SAME pinned selector the pull takes, and refuses an
-    /// unreadable level the same way: the grant decides which of this
-    /// replica's ops belong to the share, so a caller that cannot state it
-    /// must not push through it.
-    async fn share_view_push(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: ShareViewParams = parse(params)?;
-        let granted = share_grant(params.granted_selector)?;
-        let (open, configuration) = self.relay_open(handle.as_ref(), &params.workspace_id)?;
-        let outcome = self
-            .relay_execute(
-                ctx,
-                &open,
-                configuration,
-                RelayOperation::PushShareView {
-                    workspace_id: open.workspace_id.clone(),
-                    share_id: params.share_id,
-                    granted,
-                },
-                "share.view.push",
-            )
-            .await?;
-        relay_outcome_json(outcome)
-    }
-
     /// Record this share view's own replica identity (#646 PR3-1). Run at
     /// open and again at every refresh; the engine writes the row once and
     /// later calls answer `already-recorded`.
     ///
     /// Takes no `shareId`: `sync_identity` is per WORKSPACE, and a share view
     /// mirrors exactly one share. It takes the pinned selector because the
-    /// LEVEL decides — a `view` share may push nothing, so it records
-    /// nothing — and refuses an unreadable level the same way the pull and
-    /// the push do.
+    /// LEVEL decides — only an `edit` share can send file changes, so View
+    /// and Comment record nothing — and refuses an unreadable level the same
+    /// way the pull does.
     ///
     /// The three identity components are minted HERE, not by the caller, for
     /// the same reason `sync.claim` mints its own: the durable row is the
@@ -2858,10 +2841,10 @@ impl EngineService {
     /// Offer this replica's own edits of a RECEIVED file share to the granter
     /// (#646 PR3).
     ///
-    /// Takes the SAME pinned selector the pull and the chat push take, and
-    /// refuses an unreadable level the same way. The client refuses again
-    /// below `edit` — the caller states the level it pinned, and a level this
-    /// process cannot read is not a narrower grant.
+    /// Takes the same pinned selector the pull takes and refuses an unreadable
+    /// level the same way. The client refuses again below `edit` — the caller
+    /// states the level it pinned, and a level this process cannot read is not
+    /// a narrower grant.
     async fn share_proposal_submit(
         &self,
         ctx: &RequestContext,
@@ -4218,11 +4201,17 @@ impl EngineService {
                     "running": snapshot.running,
                     "degraded": snapshot.degraded,
                     "terminal": snapshot.terminal,
+                    "phase": snapshot.phase.as_str(),
                 })
             }
             // The driver is only absent mid-teardown; report an honest
             // "down" rather than erroring a racing status poll.
-            None => json!({ "running": false, "degraded": true, "terminal": false }),
+            None => json!({
+                "running": false,
+                "degraded": true,
+                "terminal": false,
+                "phase": "degraded",
+            }),
         })
     }
 
@@ -4259,17 +4248,29 @@ impl EngineService {
         // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
-        let sender = lock(&open.capture)
-            .as_ref()
-            .map(capture_driver::CaptureDriver::flush_sender);
+        let capture = lock(&open.capture).as_ref().map(|driver| {
+            let snapshot = driver.status().snapshot();
+            (driver.flush_sender(), snapshot)
+        });
         let unavailable = capture_driver::FlushOutcome {
             settled: false,
             running: false,
             degraded: true,
         };
-        let Some(sender) = sender else {
+        let Some((sender, initial_snapshot)) = capture else {
             return Ok(unavailable);
         };
+        // `Degraded` is a settled startup DECISION, not a settled flush. Let
+        // it reach the driver so a clean recovery tick can make the stronger
+        // quiescence promise. Persistent failures still answer false through
+        // the ordinary driver outcome; only Starting/Importing stay fenced.
+        if initial_capture_phase_requires_fence(initial_snapshot.phase) {
+            return Ok(capture_driver::FlushOutcome {
+                settled: false,
+                running: initial_snapshot.running,
+                degraded: initial_snapshot.degraded,
+            });
+        }
         // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
         // a full flush queue — a cancelled/deadlined caller must get its
         // answer NOW, like every other workspace RPC. The driver still
@@ -7970,6 +7971,36 @@ impl EngineService {
             .is_some_and(|expected| expected != probe.key.object_id.as_str())
         {
             return Err(wire(ErrorCode::InvalidParams, "ydoc-object-changed"));
+        }
+        let capture_phase = lock(&open.capture)
+            .as_ref()
+            .map(|driver| driver.status().snapshot().phase)
+            .unwrap_or(capture_driver::CapturePhase::Ready);
+        if probe.head_blob_sha256.is_none() && capture_phase != capture_driver::CapturePhase::Ready
+        {
+            let artifact_path = open.root.join(&params.path);
+            let artifact_probe = tokio::task::spawn_blocking(move || {
+                matches!(
+                    std::fs::symlink_metadata(artifact_path),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                )
+            });
+            let artifact_is_proven_absent = tokio::select! {
+                biased;
+                () = cancellation.token.cancelled() => {
+                    return Err(cancellation.interruption("ydoc.open (artifact probe)"));
+                }
+                probed = artifact_probe => {
+                    probed.map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
+                }
+            };
+            if !artifact_is_proven_absent {
+                // The initial scan has seen this artifact but has not installed
+                // its head yet. Refuse before lease acquisition; otherwise a new
+                // absent-lineage session can block capture and turn disk bytes
+                // into a misleading uncaptured-artifact failure.
+                return Err(initial_capture_updating());
+            }
         }
         let lease =
             self.leases
@@ -12321,9 +12352,9 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
                 dohc_engine_runtime::ShareViewIdentityRecord::AlreadyRecorded => {
                     "already-recorded"
                 }
-                // A `view` share may push nothing, so it is given no identity
-                // — and saying "already recorded" would claim a row that does
-                // not exist.
+                // View and Comment send no workspace replication ops, so they
+                // are given no identity. Saying "already recorded" would
+                // claim a row that does not exist.
                 dohc_engine_runtime::ShareViewIdentityRecord::NotRequired => "not-required",
             },
         }),
@@ -12739,10 +12770,12 @@ fn map_relay_code(error: RelayError) -> ErrorCode {
         // it, because the share-view pull records it as a skipped op instead.
         | RelayError::ShareBlobOverCeiling { .. } => ErrorCode::PayloadTooLarge,
         RelayError::QuotaExceeded => ErrorCode::QuotaExceeded,
-        // A 429 on link reads asks the caller to back off and retry, which is
-        // exactly Overloaded's wire contract (Retryability::AfterBackoff) —
-        // unlike QuotaExceeded, which reads as a persistent ceiling.
-        RelayError::LinkReadRateLimited => ErrorCode::Overloaded,
+        // A 429 asks the caller to back off and retry, which is exactly
+        // Overloaded's wire contract (Retryability::AfterBackoff) — unlike
+        // QuotaExceeded, which reads as a persistent ceiling.
+        RelayError::DiscussionRateLimited | RelayError::LinkReadRateLimited => {
+            ErrorCode::Overloaded
+        }
         RelayError::NoProgress => ErrorCode::RelayNoProgress,
         RelayError::BlobMissing => ErrorCode::BlobMissing,
         RelayError::BlobReferenceMissing => ErrorCode::BlobReferenceMissing,
@@ -12898,6 +12931,47 @@ fn map_search_code(error: SearchError) -> ErrorCode {
 
 fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
     wire(ErrorCode::InvalidParams, "shadow workspace refused")
+}
+
+fn method_requires_initial_capture_ready(method: &str) -> bool {
+    method.starts_with("sync.")
+        || method.starts_with("share.")
+        || method.starts_with("search.")
+        || method.starts_with("collections.")
+        || (method.starts_with("versions.") && method != "versions.ensureMain")
+        || method.starts_with("conflicts.")
+        || (method.starts_with("secrets.") && method != "secrets.write")
+        || matches!(
+            method,
+            "capture.reconcile"
+                | "versionedText.list"
+                | "versionedText.read"
+                | "versionedText.readBlob"
+                | "versionedText.compare"
+                | "versionedText.rename"
+                | "versionedText.delete"
+                | "versionedText.rollback"
+                | "versionedText.merge"
+                | "versionedBinary.read"
+                | "versionedBinary.readBlob"
+                | "moments.list"
+                | "moments.get"
+                | "history.page"
+        )
+}
+
+fn initial_capture_phase_requires_fence(phase: capture_driver::CapturePhase) -> bool {
+    matches!(
+        phase,
+        capture_driver::CapturePhase::Starting | capture_driver::CapturePhase::Importing
+    )
+}
+
+fn initial_capture_updating() -> WireError {
+    wire(
+        ErrorCode::Overloaded,
+        "Workspace is still updating. Try again.",
+    )
 }
 
 fn workspace_unavailable() -> WireError {
@@ -13212,6 +13286,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn only_idempotent_version_bootstrap_bypasses_the_initial_capture_fence() {
+        assert!(!method_requires_initial_capture_ready(
+            "versions.ensureMain"
+        ));
+        for method in [
+            "versions.active",
+            "versions.list",
+            "versions.createNamed",
+            "versions.setActive",
+            "collections.list",
+            "collections.get",
+            "collections.query",
+            "collections.getRecord",
+            "collections.listPendingAdoptions",
+        ] {
+            assert!(method_requires_initial_capture_ready(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn only_secret_write_bypasses_the_initial_capture_fence() {
+        assert!(!method_requires_initial_capture_ready("secrets.write"));
+        for method in [
+            "secrets.list",
+            "secrets.stateExists",
+            "secrets.delete",
+            "secrets.fork",
+            "secrets.moments.list",
+            "secrets.moments.get",
+            "secrets.compare",
+            "secrets.apply",
+            "secrets.restore",
+            "secrets.materialize",
+        ] {
+            assert!(method_requires_initial_capture_ready(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn bounded_degraded_startup_releases_safe_reads() {
+        assert!(initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Starting
+        ));
+        assert!(initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Importing
+        ));
+        assert!(!initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Ready
+        ));
+        assert!(!initial_capture_phase_requires_fence(
+            capture_driver::CapturePhase::Degraded
+        ));
+    }
+
     /// #595 round 8: the artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as
     /// `file-locked` — the desktop turns that message into "another program
@@ -13424,6 +13553,38 @@ mod tests {
             .expect("engine.ping must answer");
         assert_eq!(answer.response.id, 1);
         assert_eq!(answer.response.result, json!({ "ok": true }));
+    }
+
+    #[tokio::test]
+    async fn share_view_push_is_not_a_registered_method() {
+        let service = EngineService::new();
+        let error = service
+            .call(
+                RequestContext::unbounded(),
+                Request {
+                    id: 2,
+                    method: "share.view.push".to_owned(),
+                    workspace: None,
+                    deadline_ms: None,
+                    idempotency_key: None,
+                    params: json!({
+                        "workspaceId": "workspace",
+                        "shareId": "share",
+                        "grantedSelector": {
+                            "paths": ["shared.md"],
+                            "versionId": null,
+                            "access": "comment",
+                        },
+                    }),
+                },
+            )
+            .await
+            .expect_err("share.view.push must be removed from the daemon API");
+        assert_eq!(
+            error.code,
+            ErrorCode::MethodNotFound,
+            "MUTATION: restoring a dispatch arm makes the obsolete push API callable",
+        );
     }
 
     #[test]
@@ -14161,6 +14322,8 @@ mod tests {
                 ErrorCode::IdentityNotRecognized,
             ),
             (RelayError::QuotaExceeded, ErrorCode::QuotaExceeded),
+            (RelayError::DiscussionRateLimited, ErrorCode::Overloaded),
+            (RelayError::LinkReadRateLimited, ErrorCode::Overloaded),
             (RelayError::PayloadTooLarge, ErrorCode::PayloadTooLarge),
             (RelayError::Forbidden, ErrorCode::Forbidden),
             (RelayError::ShareReadOnly, ErrorCode::ShareReadOnly),
@@ -14209,6 +14372,21 @@ mod tests {
         assert_eq!(
             map_relay_code(RelayError::Partitioned),
             ErrorCode::WorkspaceUnavailable
+        );
+        for relay in [
+            RelayError::DiscussionRateLimited,
+            RelayError::LinkReadRateLimited,
+        ] {
+            let wire = map_runtime(RuntimeError::Relay(relay));
+            assert_eq!(wire.code, ErrorCode::Overloaded);
+            assert_eq!(wire.retry, dohc_engine_protocol::Retryability::AfterBackoff);
+        }
+        let permanent_limit = map_runtime(RuntimeError::Relay(RelayError::QuotaExceeded));
+        assert_eq!(permanent_limit.code, ErrorCode::QuotaExceeded);
+        assert_eq!(
+            permanent_limit.retry,
+            dohc_engine_protocol::Retryability::No,
+            "MUTATION: a permanent discussion limit must not ask the client to retry"
         );
     }
 
@@ -14711,6 +14889,100 @@ mod tests {
             .await
             .expect("final workspace close");
         assert_eq!(supervisor.actor_count(), baseline);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn aborted_workspace_close_cannot_retain_a_cancelled_capture_driver() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        std::fs::write(scratch.path().join("seed.md"), "captured before close").expect("seed file");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = Arc::new(EngineService::with_supervisor(supervisor));
+        let open_params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "cancelled-capture-close"
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), open_params.clone())
+            .await
+            .expect("initial workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        let held_sessions = {
+            let open = lock(&service.handles)
+                .get(&handle)
+                .expect("open workspace")
+                .clone();
+            Arc::clone(&open.session_ops).lock_owned().await
+        };
+
+        let closing_service = Arc::clone(&service);
+        let closing_handle = handle.clone();
+        let closing =
+            tokio::spawn(
+                async move { closing_service.workspace_close(Some(closing_handle)).await },
+            );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while lock(&service.handles).contains_key(&handle) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("close must own and remove the handle before waiting on sessions");
+
+        closing.abort();
+        assert!(
+            closing
+                .await
+                .expect_err("close RPC was cancelled")
+                .is_cancelled()
+        );
+        let stale = service
+            .capture_flush(&RequestContext::unbounded(), Some(handle.clone()))
+            .await
+            .expect_err("an owned close must not retain a live handle");
+        assert_eq!(stale.code, ErrorCode::WorkspaceUnavailable);
+
+        let reopening_service = Arc::clone(&service);
+        let mut reopening = tokio::spawn(async move {
+            reopening_service
+                .workspace_open(&RequestContext::unbounded(), open_params)
+                .await
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut reopening)
+                .await
+                .is_err(),
+            "the detached close must retain the global Closing marker"
+        );
+        drop(held_sessions);
+
+        let reopened = tokio::time::timeout(Duration::from_secs(10), reopening)
+            .await
+            .expect("reopen completed after the session barrier released")
+            .expect("reopen task")
+            .expect("workspace reopen");
+        let reopened_handle: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("reopened handle");
+        let flush = service
+            .capture_flush(&RequestContext::unbounded(), Some(reopened_handle.clone()))
+            .await
+            .expect("reopened capture flush");
+        assert_eq!(flush["settled"], json!(true));
+        service
+            .history_page(
+                &RequestContext::unbounded(),
+                Some(reopened_handle.clone()),
+                json!({ "workspaceId": "cancelled-capture-close" }),
+            )
+            .await
+            .expect("reopened history read");
+        service
+            .workspace_close(Some(reopened_handle))
+            .await
+            .expect("final workspace close");
     }
 
     #[tokio::test]

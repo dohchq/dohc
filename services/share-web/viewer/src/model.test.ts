@@ -3,6 +3,12 @@ import {
   filesFromAccumulator,
   filesFromLog,
   foldLogOps,
+  mergeDiscussionMessages,
+  mergeDiscussionWindowMessages,
+  parseDiscussionAppendResult,
+  parseDiscussionActivity,
+  parseDiscussionPage,
+  parseDiscussionWriteState,
   type RelayOp,
   type SharedFile,
 } from "./model";
@@ -231,5 +237,497 @@ describe("filesFromLog", () => {
       blobSha256: ARRIVED_SHA,
       contentKind: "text",
     }]);
+  });
+});
+
+describe("public discussion projection", () => {
+  const named = {
+    messageId: "message-named",
+    createdAtMs: 1_000,
+    deleted: false as const,
+    body: "Named body",
+    author: { kind: "named" as const, displayName: "Named Person" },
+  };
+  const link = {
+    messageId: "message-link",
+    createdAtMs: 2_000,
+    deleted: false as const,
+    body: "Link body",
+    author: {
+      kind: "link" as const,
+      displayName: "Link Person",
+      unverified: true as const,
+    },
+  };
+  const tombstone = {
+    messageId: "message-deleted",
+    createdAtMs: 3_000,
+    deleted: true as const,
+  };
+
+  it("parses only the exact public page and append unions", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_1",
+      profileName: null,
+    })).toEqual({
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_1",
+      activityRevision: 7,
+      profileName: null,
+    });
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual({
+      kind: "live",
+      message: link,
+    });
+  });
+
+  it("validates newest-first pages and returns their loaded window chronologically", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [tombstone, link, named],
+      nextCursor: "cursor_older",
+      profileName: null,
+    }, "newest-first")).toEqual({
+      messages: [named, link, tombstone],
+      nextCursor: "cursor_older",
+      activityRevision: 7,
+      profileName: null,
+    });
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [named, link],
+      nextCursor: null,
+      profileName: null,
+    }, "newest-first")).toBeNull();
+  });
+
+  it("parses only the committed name without accepting profile identifiers", () => {
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: "Stable Name",
+    })).toEqual({
+      messages: [],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: "Stable Name",
+    });
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: null,
+    })).toEqual({
+      messages: [],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: null,
+    });
+    for (const internal of [
+      { principalId: "principal-sentinel" },
+      { profileTokenHash: "profile-sentinel" },
+    ]) {
+      expect(parseDiscussionPage({
+        ok: true,
+        activityRevision: 7,
+        messages: [],
+        nextCursor: null,
+        profileName: "Stable Name",
+        ...internal,
+      })).toBeNull();
+    }
+  });
+
+  it("accepts only an exact link append or deleted replay acknowledgement", () => {
+    expect(parseDiscussionAppendResult({ ok: true, message: link })).toEqual({
+      kind: "live",
+      message: link,
+    });
+    expect(parseDiscussionAppendResult({ ok: true, message: named })).toBeNull();
+    expect(parseDiscussionAppendResult({ ok: true, message: tombstone })).toEqual({
+      kind: "deleted",
+      message: tombstone,
+    });
+    for (const malformed of [
+      { ...tombstone, body: "deleted body" },
+      { ...tombstone, author: link.author },
+      { messageId: tombstone.messageId, deleted: true },
+      { ...tombstone, createdAtMs: -1 },
+    ]) {
+      expect(parseDiscussionAppendResult({ ok: true, message: malformed })).toBeNull();
+    }
+    expect(parseDiscussionAppendResult({
+      ok: true,
+      message: tombstone,
+      principalId: "private",
+    })).toBeNull();
+  });
+
+  it.each([
+    ["a missing profile name", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+    }],
+    ["an empty profile name", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: "",
+    }],
+    ["an internal page field", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: null,
+      profileName: null,
+      shareId: "secret",
+    }],
+    ["an internal message field", {
+      ok: true,
+      activityRevision: 7,
+      messages: [{ ...named, linkPrincipalId: "secret" }],
+      nextCursor: null,
+      profileName: null,
+    }],
+    ["a tombstone body", {
+      ok: true,
+      activityRevision: 7,
+      messages: [{ ...tombstone, body: "deleted body" }],
+      nextCursor: null,
+      profileName: null,
+    }],
+    ["a tombstone author", {
+      ok: true,
+      activityRevision: 7,
+      messages: [{ ...tombstone, author: named.author }],
+      nextCursor: null,
+      profileName: null,
+    }],
+    ["a live row without an exact author", {
+      ok: true,
+      activityRevision: 7,
+      messages: [{ ...link, author: { ...link.author, unverified: false } }],
+      nextCursor: null,
+      profileName: null,
+    }],
+    ["an out-of-order page", {
+      ok: true,
+      activityRevision: 7,
+      messages: [link, named],
+      nextCursor: null,
+      profileName: null,
+    }],
+    ["a malformed cursor", {
+      ok: true,
+      activityRevision: 7,
+      messages: [],
+      nextCursor: "cursor/value",
+      profileName: null,
+    }],
+  ])("refuses %s", (_case, value) => {
+    expect(parseDiscussionPage(value)).toBeNull();
+  });
+
+  it("merges exact repeats once and replaces a live row with its tombstone in place", () => {
+    const deletedLink = {
+      messageId: link.messageId,
+      createdAtMs: link.createdAtMs,
+      deleted: true as const,
+    };
+    expect(mergeDiscussionMessages([named, link], [link, tombstone])).toEqual([
+      named,
+      link,
+      tombstone,
+    ]);
+    expect(mergeDiscussionMessages([named, link, tombstone], [deletedLink])).toEqual([
+      named,
+      deletedLink,
+      tombstone,
+    ]);
+  });
+
+  it("keeps an exact tombstone when its prior live representation arrives later", () => {
+    const deletedLink = {
+      messageId: link.messageId,
+      createdAtMs: link.createdAtMs,
+      deleted: true as const,
+    };
+
+    expect(mergeDiscussionMessages([deletedLink], [link])).toEqual([deletedLink]);
+    expect(mergeDiscussionMessages([deletedLink], [{
+      ...link,
+      createdAtMs: link.createdAtMs + 1,
+    }])).toBeNull();
+  });
+
+  it("inserts an unseen row with an earlier creation time into canonical order", () => {
+    const tail = {
+      ...link,
+      messageId: "message-a",
+    };
+    const earlierTime = {
+      ...named,
+      messageId: "message-older-time",
+      createdAtMs: tail.createdAtMs - 1,
+    };
+
+    expect(mergeDiscussionMessages([tail], [earlierTime])).toEqual([
+      earlierTime,
+      tail,
+    ]);
+  });
+
+  it("uses relay keyset order for message ids with the same creation time", () => {
+    const first = {
+      ...named,
+      messageId: "message-Z",
+      createdAtMs: 4_000,
+    };
+    const second = {
+      ...link,
+      messageId: "message-a",
+      createdAtMs: first.createdAtMs,
+    };
+
+    expect(parseDiscussionPage({
+      ok: true,
+      activityRevision: 7,
+      messages: [first, second],
+      nextCursor: null,
+      profileName: null,
+    })).toEqual({
+      messages: [first, second],
+      nextCursor: null,
+      activityRevision: 7,
+      profileName: null,
+    });
+    expect(mergeDiscussionMessages([first], [second])).toEqual([first, second]);
+  });
+
+  it("inserts an unseen same-millisecond message into canonical keyset order", () => {
+    const earlierId = {
+      ...named,
+      messageId: "message-a",
+      createdAtMs: 4_000,
+    };
+    const laterId = {
+      ...link,
+      messageId: "message-b",
+      createdAtMs: earlierId.createdAtMs,
+    };
+
+    expect(mergeDiscussionMessages([laterId], [earlierId, laterId])).toEqual([
+      earlierId,
+      laterId,
+    ]);
+    expect(mergeDiscussionMessages([laterId], [
+      earlierId,
+      { ...laterId, body: "conflicting body" },
+    ])).toBeNull();
+  });
+
+  it("accepts unseen live activity before a loaded window without importing tombstones", () => {
+    const olderUnseen = {
+      ...named,
+      messageId: "message-before-window",
+      createdAtMs: link.createdAtMs - 1,
+    };
+    const newerUnseen = {
+      ...named,
+      messageId: "message-after-window",
+      createdAtMs: link.createdAtMs + 1,
+    };
+    const unseenTombstone = {
+      messageId: "message-deleted-before-window",
+      createdAtMs: link.createdAtMs - 2,
+      deleted: true as const,
+    };
+
+    expect(mergeDiscussionWindowMessages(
+      [link],
+      [unseenTombstone, olderUnseen, newerUnseen],
+    ))
+      .toEqual({
+        messages: [olderUnseen, link, newerUnseen],
+        withheldTombstones: [unseenTombstone],
+      });
+    expect(mergeDiscussionWindowMessages([link], [{ ...link, body: "conflict" }]))
+      .toBeNull();
+  });
+
+  it("refuses every conflicting message-id reuse", () => {
+    expect(mergeDiscussionMessages([link], [{ ...link, body: "forged" }])).toBeNull();
+    expect(mergeDiscussionMessages([tombstone], [{ ...tombstone, createdAtMs: 4_000 }]))
+      .toBeNull();
+  });
+
+  it("parses only an exact, ordered public discussion activity delta", () => {
+    expect(parseDiscussionActivity({
+      ok: true,
+      access: "comment",
+      latestRevision: 9,
+      cursorRevision: 8,
+      hasMore: true,
+      messages: [named, link],
+      composerState: "blocked",
+      profileName: "Stable Name",
+    })).toEqual({
+      access: "comment",
+      latestRevision: 9,
+      cursorRevision: 8,
+      hasMore: true,
+      messages: [named, link],
+      composerState: "blocked",
+      profileName: "Stable Name",
+    });
+
+    for (const value of [
+      {
+        ok: true,
+        access: "comment",
+        latestRevision: 9,
+        cursorRevision: 8,
+        hasMore: true,
+        messages: [named, link],
+        composerState: "available",
+        profileName: null,
+        grantId: "internal",
+      },
+      {
+        ok: true,
+        access: "comment",
+        latestRevision: 8,
+        cursorRevision: 9,
+        hasMore: true,
+        messages: [],
+        composerState: "available",
+        profileName: null,
+      },
+      {
+        ok: true,
+        access: "comment",
+        latestRevision: 9,
+        cursorRevision: 8,
+        hasMore: "yes",
+        messages: [],
+        composerState: "available",
+        profileName: null,
+      },
+      {
+        ok: true,
+        access: "comment",
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [link, named],
+        composerState: "available",
+        profileName: null,
+      },
+      {
+        ok: true,
+        access: "comment",
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "disabled",
+        profileName: null,
+      },
+      {
+        ok: true,
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
+        profileName: null,
+      },
+      {
+        ok: true,
+        access: "edit",
+        latestRevision: 9,
+        cursorRevision: 9,
+        hasMore: false,
+        messages: [],
+        composerState: "available",
+        profileName: null,
+      },
+    ]) {
+      expect(parseDiscussionActivity(value)).toBeNull();
+    }
+  });
+
+  it("requires the exact current-profile field on public activity", () => {
+    const activity = {
+      ok: true,
+      access: "comment",
+      latestRevision: 9,
+      cursorRevision: 9,
+      hasMore: false,
+      messages: [],
+      composerState: "available",
+    };
+
+    expect(parseDiscussionActivity({ ...activity, profileName: null }))
+      .toMatchObject({ profileName: null });
+    expect(parseDiscussionActivity({ ...activity, profileName: "Stable Name" }))
+      .toMatchObject({ profileName: "Stable Name" });
+    expect(parseDiscussionActivity(activity)).toBeNull();
+    expect(parseDiscussionActivity({ ...activity, profileName: "" })).toBeNull();
+    expect(parseDiscussionActivity({
+      ...activity,
+      profileName: "Stable Name",
+      profileTokenHash: "private",
+    })).toBeNull();
+  });
+
+  it("parses only exact revisioned reversible states and a revisionless durable limit", () => {
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "blocked",
+      activityRevision: 8,
+    })).toEqual({ state: "blocked", activityRevision: 8 });
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "paused",
+      activityRevision: Number.MAX_SAFE_INTEGER,
+    })).toEqual({
+      state: "paused",
+      activityRevision: Number.MAX_SAFE_INTEGER,
+    });
+    expect(parseDiscussionWriteState({
+      ok: false,
+      state: "limit-reached",
+    })).toEqual({ state: "limit-reached" });
+
+    for (const value of [
+      { ok: false, state: "blocked" },
+      { ok: false, state: "paused", activityRevision: -1 },
+      { ok: false, state: "blocked", activityRevision: 1.5 },
+      {
+        ok: false,
+        state: "paused",
+        activityRevision: Number.MAX_SAFE_INTEGER + 1,
+      },
+      { ok: false, state: "blocked", activityRevision: 8, internal: true },
+      { ok: false, state: "limit-reached", activityRevision: 8 },
+      { ok: false, state: "limit-reached", code: "discussion_limit_reached" },
+      { ok: false, state: "limit-reach" },
+      { ok: true, state: "limit-reached" },
+      { ok: false, state: "discussion-limit" },
+    ]) {
+      expect(parseDiscussionWriteState(value)).toBeNull();
+    }
   });
 });

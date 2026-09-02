@@ -10,6 +10,7 @@ import {
 import type {
   SyncRelayShareGrantRow,
   SyncRelayShareRow,
+  SyncRelayShareWithGrantRow,
   SyncRelayStorage,
 } from "./storage";
 
@@ -40,6 +41,15 @@ export interface AuthorizedShareAction<Selector extends AnyShareSelector = AnySh
 export type ShareAuthorizationResult<Selector extends AnyShareSelector = AnyShareSelector> =
   | AuthorizedShareAction<Selector>
   | { ok: false; reason: "gauntlet" | "denied" };
+
+export type ReceivedShareAuthorityResult =
+  | (AuthorizedShareAction & { genericChatWritable: boolean })
+  | {
+      ok: false;
+      reason: "gauntlet";
+      genericChatWritable: false;
+      fallback: SyncRelayShareWithGrantRow | null;
+    };
 
 type ShareAuthorizationInput = {
   storage: ShareAuthorizationStorage;
@@ -78,7 +88,6 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
   let authorized: AuthorizedShareAction | null = null;
   let denied = false;
   for (const grant of grants) {
-    if (grant.shareId !== input.shareId) continue;
     const result = authorizeShareGrantAction({
       storage: input.storage,
       grantId: grant.grantId,
@@ -101,6 +110,41 @@ export function authorizeShareAction(input: ShareAuthorizationInput): ShareAutho
   return authorized ?? { ok: false, reason: denied ? "denied" : "gauntlet" };
 }
 
+export function resolveReceivedShareAuthority(
+  input: Omit<ShareAuthorizationInput, "action">,
+): ReceivedShareAuthorityResult {
+  const grants = input.storage.listActiveShareGrantsForRecipient(
+    input.shareId,
+    input.actorUserId,
+  );
+  let readable: AuthorizedShareAction | null = null;
+  let genericChatWritable = false;
+  let fallback: SyncRelayShareWithGrantRow | null = null;
+  for (const grant of grants) {
+    const current = resolveCurrentShareGrant({
+      storage: input.storage,
+      grantId: grant.grantId,
+      principalKind: "user",
+      principalUserId: input.actorUserId,
+    });
+    if (!current) continue;
+    fallback ??= current;
+    const validated = validateCurrentShareGrant(input.storage, current);
+    if (!validated.ok) continue;
+    if (
+      readable === null ||
+      effectiveAccessRank(validated.effectiveSelector) >
+        effectiveAccessRank(readable.effectiveSelector)
+    ) {
+      readable = validated;
+    }
+    genericChatWritable ||= actionAllowed(validated, "append");
+  }
+  return readable
+    ? { ...readable, genericChatWritable }
+    : { ok: false, reason: "gauntlet", genericChatWritable: false, fallback };
+}
+
 export function authorizeLinkShareAction(
   input: Omit<ShareGrantAuthorizationInput, "principalKind" | "principalUserId">,
 ): ShareAuthorizationResult<ShareSelector> {
@@ -114,6 +158,25 @@ export function authorizeLinkShareAction(
 function authorizeShareGrantAction(
   input: ShareGrantAuthorizationInput,
 ): ShareAuthorizationResult {
+  const validated = validateShareGrant(input);
+  if (!validated.ok) return validated;
+  return actionAllowed(validated, input.action)
+    ? validated
+    : { ok: false, reason: "denied" };
+}
+
+function validateShareGrant(
+  input: Omit<ShareGrantAuthorizationInput, "action">,
+): ShareAuthorizationResult {
+  const current = resolveCurrentShareGrant(input);
+  return current
+    ? validateCurrentShareGrant(input.storage, current)
+    : { ok: false, reason: "gauntlet" };
+}
+
+function resolveCurrentShareGrant(
+  input: Omit<ShareGrantAuthorizationInput, "action">,
+): SyncRelayShareWithGrantRow | null {
   const grant = input.storage.getShareGrant(input.grantId);
   if (
     !grant ||
@@ -125,11 +188,11 @@ function authorizeShareGrantAction(
     !validStoredPrincipal(grant) ||
     (input.principalKind === "user" && grant.principalUserId !== input.principalUserId)
   ) {
-    return { ok: false, reason: "gauntlet" };
+    return null;
   }
   const share = input.storage.getShare(grant.shareId);
   if (!share || !input.storage.workspaceIsOwnedBy(share.workspaceId, share.granterUserId)) {
-    return { ok: false, reason: "gauntlet" };
+    return null;
   }
   if (grant.parentGrantId !== null) {
     const parent = input.storage.getShareGrant(grant.parentGrantId);
@@ -142,44 +205,58 @@ function authorizeShareGrantAction(
       parent.revokedAtMs !== null ||
       !accessAtMost(grant.access, parent.access)
     ) {
-      return { ok: false, reason: "gauntlet" };
+      return null;
     }
   }
 
+  return { share, grant };
+}
+
+function validateCurrentShareGrant(
+  storage: ShareAuthorizationStorage,
+  current: SyncRelayShareWithGrantRow,
+): ShareAuthorizationResult {
+  const { share, grant } = current;
   const storedSelector = parseStoredAnyShareSelectorJson(share.selectorJson);
   if (!storedSelector) return { ok: false, reason: "gauntlet" };
 
-  if (selectorTargetsBlockedChannel(input.storage, share.workspaceId, storedSelector)) {
+  if (selectorTargetsBlockedChannel(storage, share.workspaceId, storedSelector)) {
     return { ok: false, reason: "gauntlet" };
   }
   const effectiveSelector = effectiveShareSelector(storedSelector, grant.access);
   if (!effectiveSelector) return { ok: false, reason: "gauntlet" };
 
-  switch (input.action) {
+  return { ok: true, share, grant, effectiveSelector };
+}
+
+function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): boolean {
+  switch (action) {
     case "read":
     case "presence":
     case "list-own-proposals":
     case "withdraw-proposal":
-      return { ok: true, share, grant, effectiveSelector };
+      return true;
     case "append":
+      if (authorized.grant.parentGrantId !== null) return false;
       if (
-        isChatChannelSelector(effectiveSelector)
-          ? effectiveSelector.access === "read-write"
-          : effectiveSelector.paths.length > 0 &&
-            (effectiveSelector.access === "comment" || effectiveSelector.access === "edit")
+        isChatChannelSelector(authorized.effectiveSelector)
+          ? authorized.effectiveSelector.access === "read-write"
+          : authorized.effectiveSelector.paths.length > 0 &&
+            (authorized.effectiveSelector.access === "comment" ||
+              authorized.effectiveSelector.access === "edit")
       ) {
-        return { ok: true, share, grant, effectiveSelector };
+        return true;
       }
-      return { ok: false, reason: "denied" };
+      return false;
     case "propose":
       if (
-        !isChatChannelSelector(effectiveSelector) &&
-        effectiveSelector.paths.length > 0 &&
-        effectiveSelector.access === "edit"
+        !isChatChannelSelector(authorized.effectiveSelector) &&
+        authorized.effectiveSelector.paths.length > 0 &&
+        authorized.effectiveSelector.access === "edit"
       ) {
-        return { ok: true, share, grant, effectiveSelector };
+        return true;
       }
-      return { ok: false, reason: "denied" };
+      return false;
   }
 }
 

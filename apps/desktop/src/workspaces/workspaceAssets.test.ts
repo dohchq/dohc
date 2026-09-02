@@ -814,6 +814,20 @@ describe("writeWorkspaceText atomic replacement + optimistic conflicts", () => {
     );
   });
 
+  it.runIf(process.platform === "win32")(
+    "accepts equivalent Windows root spellings for an active lease",
+    async () => {
+      const scheduler = createWorkspaceOperationScheduler();
+
+      await expect(
+        scheduler.exclusive("C:/workspace", async (_markChanged, lease) => {
+          scheduler.assertActiveLease("C:\\workspace", lease);
+          return "active";
+        }),
+      ).resolves.toBe("active");
+    },
+  );
+
   it("keeps leased target work behind an ordinary order on the same target", async () => {
     const rootPath = "C:/workspace";
     const resolvedTarget = "C:/workspace/notes/a.md";

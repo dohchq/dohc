@@ -1883,6 +1883,10 @@ export function ChatsView(props: {
   // separate revisions so a channel refresh cannot wake suspended DM sync.
   onThreadRead?: () => void;
   readRevision?: number;
+  // Starting a thread changes the durable channel count. The page reports
+  // that write to the shell, which tells the persistent navigator to refetch.
+  onThreadStarted?: () => void;
+  threadRevision?: number;
   onDmRead?: () => void;
   dmReadRevision?: number;
   // The persistent panel navigator sets this while a Chats editor tab is
@@ -2808,13 +2812,24 @@ export function ChatsView(props: {
   // badges would keep the counts fetched at mount until it remounted. The
   // shell bumps readRevision after each landed local-thread read; the mount
   // value belongs to the load effect above, so only later ones refetch.
-  const seenReadRevision = useRef(props.readRevision);
+  const seenOverviewRevisions = useRef({
+    read: props.readRevision,
+    thread: props.threadRevision,
+  });
   useEffect(() => {
-    const revision = props.readRevision;
-    if (revision === seenReadRevision.current) return;
-    seenReadRevision.current = revision;
+    const revisions = {
+      read: props.readRevision,
+      thread: props.threadRevision,
+    };
+    if (
+      revisions.read === seenOverviewRevisions.current.read &&
+      revisions.thread === seenOverviewRevisions.current.thread
+    ) {
+      return;
+    }
+    seenOverviewRevisions.current = revisions;
     void refreshOverview({ background: true });
-  }, [props.readRevision, refreshOverview]);
+  }, [props.readRevision, props.threadRevision, refreshOverview]);
 
   // A landed DM read moves the cursor syncDms reads from. While the navigator
   // is suspended, this DM-specific signal is the only path that clears its
@@ -3364,6 +3379,7 @@ export function ChatsView(props: {
           : {}),
       });
       if (token !== liveToken.current) return;
+      props.onThreadStarted?.();
       setNewThreadBody("");
       // The completion is the user's command landing: report it through the
       // seam in the same tick as the nav write (see openConversation).

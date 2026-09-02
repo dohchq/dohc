@@ -11,8 +11,7 @@ import type { RunnerSettings } from "../../settings/userSettings";
 import { bridge } from "../bridge";
 import { SwitchControl } from "./SettingRow";
 
-const RUNNER_COMMAND_PLACEHOLDER =
-  'claude -p --permission-mode acceptEdits --allowedTools "Bash(dohc chat:*)"';
+const RUNNER_COMMAND_PLACEHOLDER = "Enter the command that starts your agent";
 
 type SelfTestState =
   | { status: "idle" }

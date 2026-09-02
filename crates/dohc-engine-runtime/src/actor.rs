@@ -28,13 +28,14 @@
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
+use crate::search::index::update_file_search_index_for_capture;
 use crate::search::{
     GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
     delete_file_search_index, ensure_search_index_for_version,
     query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
     upsert_file_search_index,
 };
-use crate::search::{read_engine_search_policy, resolve_effective_policy};
+use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
     LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
@@ -43,38 +44,39 @@ use dohc_engine_collab::{
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry,
-    CaptureRetire, CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChannelThreadSummary,
-    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
-    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
-    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
-    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
-    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
-    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
-    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
-    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
-    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
-    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
-    capture_ingest_binary_with_admission_in_tx, capture_ingest_with_admission_in_tx,
-    capture_manifest_seed, capture_retire_in_tx, capture_secret_retire_with,
-    collection_record_id_mismatch_in_tx, collection_record_markdown_with_id,
-    compare_secret_files_page_keyless, decline_oversized_collection_adoption_in_tx,
-    decode_binary_rollback_job_identity, delete_collection_adoption_binding_in_tx,
-    delete_secret_file_keyless_with, derive_capture_object_id, enqueue_binary_delete,
-    enqueue_binary_rename, enqueue_write, fork_version_keyless_with, get_collection,
-    get_collection_record, get_secret_moment_keyless, has_secret_state,
-    insert_text_conflict_if_absent, is_collection_record_bound_in_tx, list_collections,
-    list_pending_collection_adoptions, list_secret_files_keyless, list_secret_files_keyless_page,
+    CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark,
+    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
+    ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
+    ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection,
+    ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
+    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
+    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
+    CollectionSummary, CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult,
+    DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret,
+    InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
+    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
+    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
+    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
+    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
+    capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
+    capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
+    capture_secret_retire_with, collection_record_id_mismatch_in_tx,
+    collection_record_markdown_with_id, compare_secret_files_page_keyless,
+    decline_oversized_collection_adoption_in_tx, decode_binary_rollback_job_identity,
+    delete_collection_adoption_binding_in_tx, delete_secret_file_keyless_with,
+    derive_capture_object_id, enqueue_binary_delete, enqueue_binary_rename, enqueue_write,
+    ensure_main_version_in_tx, fork_version_keyless_with, get_collection, get_collection_record,
+    get_secret_moment_keyless, has_secret_state, insert_text_conflict_if_absent,
+    is_collection_record_bound_in_tx, list_collections, list_pending_collection_adoptions,
+    list_secret_files_keyless, list_secret_files_keyless_page,
     list_secret_moments_in_time_window_keyless, list_secret_moments_page_keyless,
     query_collection_records, reconcile_collections_in_tx,
     restore_secret_file_verbatim_with_metadata_and_after, rollback_compensating_moment_id,
@@ -109,7 +111,7 @@ use dohc_engine_sync::{
     ydoc_update_payload,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
@@ -127,6 +129,11 @@ pub use dohc_engine_sync::SharingDeclined;
 /// Bound on the actor's command queue. Backpressure blocks the sender rather
 /// than growing an unbounded queue (`plan §Rust policy`: bounded everything).
 const COMMAND_QUEUE_CAPACITY: usize = 64;
+
+/// Maximum work accepted by one capture batch actor command. Keeping both
+/// bounds here lets the actor serve queued interactive work between chunks.
+pub const MAX_CAPTURE_INGEST_BATCH_OPS: usize = 256;
+pub const MAX_CAPTURE_INGEST_BATCH_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostCommitMaterializeOutcome {
@@ -385,8 +392,8 @@ pub enum RelayOperation {
         /// recipient on first read. Required: there is no unscoped pull.
         granted: dohc_engine_sync::ShareGrant,
     },
-    /// Record a share view's own replica identity, once, before the first
-    /// pull or push.
+    /// Record an editable share view's own replica identity once, before it
+    /// can submit file changes.
     ///
     /// Carries the ACCESS and nothing else of the grant. The RPC boundary
     /// still parses the whole selector, but this operation expresses exactly
@@ -400,19 +407,10 @@ pub enum RelayOperation {
         stream_identity: String,
         created_at_ms: i64,
     },
-    /// Push this replica's own chat about a RECEIVED file share back to the
-    /// granter (#646 PR2). The grant is required for the same reason the pull
-    /// requires it: it decides which of this replica's ops belong to the
-    /// share.
-    PushShareView {
-        workspace_id: String,
-        share_id: String,
-        granted: dohc_engine_sync::ShareGrant,
-    },
     /// Offer this replica's own edits of a RECEIVED file share back to the
-    /// granter, for the granter to accept or decline (#646 PR3). The grant is
-    /// required for the same reason the pull and the chat push require it, and
-    /// carries the level the client refuses below `edit` on.
+    /// granter, for the granter to accept or decline (#646 PR3). The grant
+    /// scopes the files and carries the level the client refuses below `edit`
+    /// on.
     SubmitShareProposal {
         workspace_id: String,
         share_id: String,
@@ -1200,8 +1198,8 @@ pub enum RelayOperationOutcome {
 /// journal layer cannot give.
 ///
 /// `NotRequired` lives HERE rather than in `dohc-engine-sync` because it is
-/// the LEVEL's answer, and the level is read here: a `view` share never
-/// reaches the store at all. Keeping it out of the journal layer means that
+/// the LEVEL's answer, and the level is read here: View and Comment never
+/// reach the store at all. Keeping it out of the journal layer means that
 /// function has no variant it can never return.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareViewIdentityRecord {
@@ -1221,9 +1219,42 @@ pub trait SelfWriteRecorder: Send + Sync {
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
+/// Capture-owned proof that a filesystem pathname still names the workspace
+/// root selected before an actor command entered the queue.
+pub trait WorkspaceRootGuard: Send + Sync {
+    fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError>;
+}
+
+type CommandWorkspaceRoot = (PathBuf, Option<Arc<dyn WorkspaceRootGuard>>);
+
+fn command_workspace_root_parts(
+    workspace_root: Option<&CommandWorkspaceRoot>,
+) -> (Option<&std::path::Path>, Option<&dyn WorkspaceRootGuard>) {
+    match workspace_root {
+        Some((root_dir, root_guard)) => (Some(root_dir.as_path()), root_guard.as_deref()),
+        None => (None, None),
+    }
+}
+
+fn validate_workspace_root(
+    root_dir: &std::path::Path,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+) -> Result<(), RuntimeError> {
+    if let Some(root_guard) = root_guard {
+        root_guard.validate(root_dir)?;
+    }
+    Ok(())
+}
+
 struct YdocCloseMaterialization {
     root_dir: PathBuf,
     self_writes: Arc<dyn SelfWriteRecorder>,
+}
+
+enum CaptureIndexing {
+    Skip,
+    ReadRoot(PathBuf),
+    UseSnapshot(Arc<SearchPolicySnapshot>),
 }
 
 enum Command {
@@ -1313,11 +1344,21 @@ enum Command {
     },
     CaptureIngest {
         input: CaptureIngest,
-        root_dir: Option<PathBuf>,
+        indexing: CaptureIndexing,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
+    },
+    CaptureIngestBatch {
+        inputs: Vec<CaptureIngest>,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_dir: PathBuf,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError>>,
     },
     CaptureIngestBinary {
         input: CaptureIngestBinary,
@@ -1336,6 +1377,7 @@ enum Command {
         workspace_id: String,
         version_id: String,
         root_dir: PathBuf,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
         leases: LeaseRegistry,
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
@@ -1382,6 +1424,7 @@ enum Command {
     },
     CaptureSecretRetire {
         input: CaptureSecretRetire,
+        workspace_root: Option<CommandWorkspaceRoot>,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
@@ -1392,7 +1435,7 @@ enum Command {
     },
     CaptureRetire {
         input: CaptureRetire,
-        root_dir: Option<PathBuf>,
+        workspace_root: Option<CommandWorkspaceRoot>,
         self_writes: Option<Arc<dyn SelfWriteRecorder>>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
@@ -2252,6 +2295,10 @@ enum Command {
 pub struct WorkspaceActor {
     identity: EngineDbIdentity,
     generation: u64,
+    /// Authoritative open disposition reported by [`EngineStore`]. This is
+    /// true only when this actor created a brand-new schema; opening an
+    /// existing, migrated, or recovered database always reports false.
+    store_freshly_created: bool,
     tx: mpsc::Sender<Command>,
     /// A permit for the `Close` command, reserved at spawn from the dedicated
     /// extra channel slot. `close` consumes it to deliver `Close` in bounded
@@ -2302,7 +2349,7 @@ impl WorkspaceActor {
         let state = Arc::new(AtomicU8::new(LifecycleState::Opening.as_u8()));
         // Startup handshake uses a std channel: `spawn` runs in a synchronous
         // context, so the open result must not depend on a tokio runtime.
-        let (startup_tx, startup_rx) = std_sync_channel::<Result<(), StorageError>>(1);
+        let (startup_tx, startup_rx) = std_sync_channel::<Result<bool, StorageError>>(1);
 
         let worker_state = Arc::clone(&state);
         let worker = std::thread::Builder::new()
@@ -2311,9 +2358,10 @@ impl WorkspaceActor {
             .map_err(RuntimeError::ThreadSpawn)?;
 
         match startup_rx.recv() {
-            Ok(Ok(())) => Ok(WorkspaceActor {
+            Ok(Ok(store_freshly_created)) => Ok(WorkspaceActor {
                 identity,
                 generation,
+                store_freshly_created,
                 tx,
                 close_permit,
                 state,
@@ -2347,6 +2395,11 @@ impl WorkspaceActor {
     /// The session generation (incremented on restart).
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Whether this actor's store open created a brand-new database schema.
+    pub fn store_was_freshly_created(&self) -> bool {
+        self.store_freshly_created
     }
 
     /// The current lifecycle state.
@@ -2504,25 +2557,60 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, None, leases, faults)
+        self.capture_ingest_blocking_with_indexing(input, CaptureIndexing::Skip, leases, faults)
     }
 
-    /// Capture and index a text file when the owning workspace session can
-    /// supply its authoritative root.
-    pub fn capture_ingest_indexed_blocking(
+    /// Capture and index text against one reconcile-owned policy snapshot.
+    pub fn capture_ingest_with_search_policy_blocking(
         &self,
         input: CaptureIngest,
-        root_dir: PathBuf,
+        search_policy: Arc<SearchPolicySnapshot>,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        self.capture_ingest_blocking_with_root(input, Some(root_dir), leases, faults)
+        self.capture_ingest_blocking_with_indexing(
+            input,
+            CaptureIndexing::UseSnapshot(search_policy),
+            leases,
+            faults,
+        )
     }
 
-    fn capture_ingest_blocking_with_root(
+    /// Capture a bounded text chunk in one durable transaction. A clean chunk
+    /// shares one rollback scope. If an item fails, the chunk is replayed with
+    /// per-item savepoints so successful siblings still commit.
+    pub fn capture_ingest_batch_blocking(
+        &self,
+        inputs: Vec<CaptureIngest>,
+        search_policy: Arc<SearchPolicySnapshot>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_dir: PathBuf,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+        debug_assert_sync_context();
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .blocking_send(Command::CaptureIngestBatch {
+                inputs,
+                search_policy,
+                leases,
+                faults,
+                root_dir,
+                root_guard,
+                token: CancellationToken::new(),
+                reply,
+            })
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx
+            .blocking_recv()
+            .map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    fn capture_ingest_blocking_with_indexing(
         &self,
         input: CaptureIngest,
-        root_dir: Option<PathBuf>,
+        indexing: CaptureIndexing,
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
@@ -2531,7 +2619,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureIngest {
                 input,
-                root_dir,
+                indexing,
                 leases,
                 faults,
                 token: CancellationToken::new(),
@@ -2600,6 +2688,54 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Vec<String>, RuntimeError> {
+        self.reconcile_collections_blocking_with_guard(
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn reconcile_collections_blocking_guarded(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Vec<String>, RuntimeError> {
+        self.reconcile_collections_blocking_with_guard(
+            workspace_id,
+            version_id,
+            root_dir,
+            leases,
+            self_writes,
+            now_ms,
+            faults,
+            Some(root_guard),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reconcile_collections_blocking_with_guard(
+        &self,
+        workspace_id: String,
+        version_id: String,
+        root_dir: PathBuf,
+        leases: LeaseRegistry,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+    ) -> Result<Vec<String>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -2607,6 +2743,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard,
                 leases,
                 self_writes,
                 now_ms,
@@ -2651,11 +2788,33 @@ impl ActorHandle {
         input: CaptureSecretRetire,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        self.capture_secret_retire_blocking_with_guard(input, faults, None)
+    }
+
+    pub fn capture_secret_retire_blocking_guarded(
+        &self,
+        input: CaptureSecretRetire,
+        root_dir: PathBuf,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
+        self.capture_secret_retire_blocking_with_guard(input, faults, Some((root_dir, root_guard)))
+    }
+
+    fn capture_secret_retire_blocking_with_guard(
+        &self,
+        input: CaptureSecretRetire,
+        faults: Arc<dyn FaultInjector>,
+        guarded_root: Option<(PathBuf, Arc<dyn WorkspaceRootGuard>)>,
+    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
+        let workspace_root =
+            guarded_root.map(|(root_dir, root_guard)| (root_dir, Some(root_guard)));
         self.tx
             .blocking_send(Command::CaptureSecretRetire {
                 input,
+                workspace_root,
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2711,7 +2870,7 @@ impl ActorHandle {
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
-                root_dir: None,
+                workspace_root: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -2734,12 +2893,50 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.capture_retire_materialized_blocking_with_guard(
+            input,
+            root_dir,
+            self_writes,
+            leases,
+            faults,
+            None,
+        )
+    }
+
+    pub fn capture_retire_materialized_blocking_guarded(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Arc<dyn WorkspaceRootGuard>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
+        self.capture_retire_materialized_blocking_with_guard(
+            input,
+            root_dir,
+            self_writes,
+            leases,
+            faults,
+            Some(root_guard),
+        )
+    }
+
+    fn capture_retire_materialized_blocking_with_guard(
+        &self,
+        input: CaptureRetire,
+        root_dir: PathBuf,
+        self_writes: Arc<dyn SelfWriteRecorder>,
+        leases: LeaseRegistry,
+        faults: Arc<dyn FaultInjector>,
+        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
+    ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
-                root_dir: Some(root_dir),
+                workspace_root: Some((root_dir, root_guard)),
                 self_writes: Some(self_writes),
                 leases,
                 faults,
@@ -3035,11 +3232,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
+        let indexing = root_dir.map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CaptureIngest {
                 input,
-                root_dir,
+                indexing,
                 leases,
                 faults,
                 token,
@@ -3090,6 +3288,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard: None,
                 leases,
                 self_writes,
                 now_ms,
@@ -3921,6 +4120,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureSecretRetire {
                 input,
+                workspace_root: None,
                 faults,
                 token,
                 reply,
@@ -3942,7 +4142,7 @@ impl ActorHandle {
         self.tx
             .send(Command::CaptureRetire {
                 input,
-                root_dir: None,
+                workspace_root: None,
                 self_writes: None,
                 leases,
                 faults,
@@ -7561,20 +7761,14 @@ fn execute_relay_operation(
             stream_identity,
             created_at_ms,
         } => {
-            // THE level gate, and the only place it is read. A `view` share
-            // may push nothing, so it needs no identity and the store is not
-            // touched at all.
-            if access == dohc_engine_sync::ShareAccess::View {
+            // THE level gate, and the only place it is read. Only Edit sends
+            // workspace replication ops, so View and Comment need no
+            // identity and the store is not touched at all.
+            if access != dohc_engine_sync::ShareAccess::Edit {
                 return Ok(RelayOperationOutcome::ShareViewIdentity(
                     ShareViewIdentityRecord::NotRequired,
                 ));
             }
-            // Only `edit` can send file changes back, so only `edit` gets the
-            // lane fact. A `comment` share gets the identity its chat push
-            // uses and no lane: its file writes are refused at the desktop's
-            // write gate, and journaling them would leave rows the share
-            // cannot drain.
-            let drains_file_moments = access == dohc_engine_sync::ShareAccess::Edit;
             match dohc_engine_sync::record_share_view_identity(
                 store,
                 &workspace_id,
@@ -7583,7 +7777,6 @@ fn execute_relay_operation(
                     replication_epoch: &replication_epoch,
                     stream_identity: &stream_identity,
                 },
-                drains_file_moments,
                 created_at_ms,
                 &NoFaults,
             )? {
@@ -7600,14 +7793,6 @@ fn execute_relay_operation(
                 TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
             }
         }
-        RelayOperation::PushShareView {
-            workspace_id,
-            share_id,
-            granted,
-        } => client
-            .push_share_view(store, &workspace_id, &share_id, &granted, &NoFaults)
-            .map(RelayOperationOutcome::SharedChannelPushed)
-            .map_err(RuntimeError::from),
         RelayOperation::SubmitShareProposal {
             workspace_id,
             share_id,
@@ -7642,7 +7827,7 @@ fn worker_main(
     read_only: bool,
     mut rx: mpsc::Receiver<Command>,
     state: Arc<AtomicU8>,
-    startup_tx: std::sync::mpsc::SyncSender<Result<(), StorageError>>,
+    startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
 ) {
     // Publish Closed on ANY exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
@@ -7668,10 +7853,13 @@ fn worker_main(
             return;
         }
     };
+    let store_freshly_created = store.was_freshly_created();
     // Publish Ready *before* acking the open, so a caller that observes the
-    // successful open also observes Ready.
+    // successful open also observes Ready. The same handshake carries the
+    // store's authoritative freshness disposition; no caller infers it from
+    // file existence or actor-registry ownership.
     state.store(LifecycleState::Ready.as_u8(), Ordering::Release);
-    if startup_tx.send(Ok(())).is_err() {
+    if startup_tx.send(Ok(store_freshly_created)).is_err() {
         // The spawner unwound before the actor was built; nothing to serve.
         return;
     }
@@ -7859,7 +8047,7 @@ fn worker_main(
             }
             Command::CaptureIngest {
                 input,
-                root_dir,
+                indexing,
                 leases,
                 faults,
                 token,
@@ -7869,10 +8057,33 @@ fn worker_main(
                     capture_ingest_on_store(
                         &mut store,
                         &input,
-                        root_dir.as_deref(),
+                        &indexing,
                         &leases,
                         faults.as_ref(),
                         &token,
+                    )
+                });
+                let _ = reply.send(outcome);
+            }
+            Command::CaptureIngestBatch {
+                inputs,
+                search_policy,
+                leases,
+                faults,
+                root_dir,
+                root_guard,
+                token,
+                reply,
+            } => {
+                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
+                    capture_ingest_batch_on_store(
+                        &mut store,
+                        &inputs,
+                        &search_policy,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                        (&root_dir, root_guard.as_ref()),
                     )
                 });
                 let _ = reply.send(outcome);
@@ -7917,6 +8128,7 @@ fn worker_main(
                 workspace_id,
                 version_id,
                 root_dir,
+                root_guard,
                 leases,
                 self_writes,
                 now_ms,
@@ -7930,6 +8142,7 @@ fn worker_main(
                     &workspace_id,
                     &version_id,
                     &root_dir,
+                    root_guard.as_deref(),
                     &leases,
                     self_writes.as_ref(),
                     now_ms,
@@ -8023,12 +8236,20 @@ fn worker_main(
             }
             Command::CaptureSecretRetire {
                 input,
+                workspace_root,
                 faults,
                 token,
                 reply,
             } => {
-                let outcome =
-                    capture_secret_retire_on_store(&mut store, &input, faults.as_ref(), &token);
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+                let outcome = capture_secret_retire_on_store(
+                    &mut store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    faults.as_ref(),
+                    &token,
+                );
                 let _ = reply.send(outcome);
             }
             Command::SecretStateExists {
@@ -8602,18 +8823,20 @@ fn worker_main(
             }
             Command::CaptureRetire {
                 input,
-                root_dir,
+                workspace_root,
                 self_writes,
                 leases,
                 faults,
                 token,
                 reply,
             } => {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
                 let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
                     capture_retire_on_store(
                         &mut store,
                         &input,
-                        root_dir.as_deref(),
+                        root_dir,
+                        root_guard,
                         self_writes.as_deref(),
                         &leases,
                         faults.as_ref(),
@@ -8798,6 +9021,7 @@ fn worker_main(
                     now_ms,
                     faults.as_ref(),
                     &token,
+                    None,
                 );
                 let _ = reply.send(outcome);
             }
@@ -11190,6 +11414,7 @@ fn ydoc_settle_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<YdocSettlement, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
@@ -11360,6 +11585,7 @@ fn ydoc_settle_on_store(
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
         if let Some(job) = pending_job {
+            validate_workspace_root(root_dir, root_guard)?;
             // Suppression BEFORE the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
@@ -11616,21 +11842,24 @@ fn ydoc_settle_on_store(
     // could then prune the CRDT with the artifact never materialized or
     // suppressed. Once committed, the settle runs to completion.
     //
-    // The suppression identity registers BEFORE the file replace: the watcher
-    // can observe the materialized bytes the instant they land, and a
-    // record-after-replace left a window where capture queued an ingest that
-    // would claim the settle as an external edit.
-    self_writes.record(
-        &key.workspace_id,
-        &write.snapshot.path,
-        &write.snapshot.blob_sha256,
-    );
     let job_id = format!("ydoc-mat_{}", write.moment.moment_id);
     let job = store.load_materialization_job(&job_id)?.ok_or_else(|| {
         RuntimeError::Domain(dohc_engine_domain::DomainError::StateCorrupt {
             reason: "Y.Doc settle materialization job is missing",
         })
     })?;
+    validate_workspace_root(root_dir, root_guard)?;
+    // The suppression identity registers BEFORE the file replace: the watcher
+    // can observe the materialized bytes the instant they land, and a
+    // record-after-replace left a window where capture queued an ingest that
+    // would claim the settle as an external edit. Root validation comes first
+    // so a refused replacement cannot leave an identity for a write that never
+    // happened.
+    self_writes.record(
+        &key.workspace_id,
+        &write.snapshot.path,
+        &write.snapshot.blob_sha256,
+    );
     let job_outcome = materialize_one(
         store,
         root_dir,
@@ -12256,10 +12485,31 @@ fn journal_moment_outbound_in_tx(
     moment_id: &str,
     deduped: bool,
 ) -> Result<(), DomainError> {
-    if deduped
-        || !dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-            .map_err(outbound_domain)?
-    {
+    let mut eligibility = None;
+    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, &mut eligibility)
+}
+
+fn journal_moment_outbound_with_batch_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    workspace_id: &str,
+    moment_id: &str,
+    deduped: bool,
+    eligibility: &mut Option<bool>,
+) -> Result<(), DomainError> {
+    if deduped {
+        return Ok(());
+    }
+    let journals_file_moments = match *eligibility {
+        Some(eligible) => eligible,
+        None => {
+            let eligible =
+                dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
+                    .map_err(outbound_domain)?;
+            *eligibility = Some(eligible);
+            eligible
+        }
+    };
+    if !journals_file_moments {
         return Ok(());
     }
     dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
@@ -12496,7 +12746,8 @@ fn versioned_text_delete_on_store(
                 &asset_jobs,
                 self_writes,
                 faults,
-            );
+                None,
+            )?;
             Ok(result)
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -12775,6 +13026,7 @@ fn scene_asset_delete_jobs_in_tx(
     Ok(jobs)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn materialize_scene_asset_deletes(
     store: &EngineStore,
     root_dir: &std::path::Path,
@@ -12782,8 +13034,10 @@ fn materialize_scene_asset_deletes(
     jobs: &[(String, i64)],
     self_writes: &dyn SelfWriteRecorder,
     faults: &dyn FaultInjector,
-) {
+    root_guard: Option<&dyn WorkspaceRootGuard>,
+) -> Result<(), RuntimeError> {
     for (job_id, recorded_at_ms) in jobs {
+        validate_workspace_root(root_dir, root_guard)?;
         materialize_expected_job(
             store,
             root_dir,
@@ -12794,6 +13048,7 @@ fn materialize_scene_asset_deletes(
             faults,
         );
     }
+    Ok(())
 }
 
 fn materialize_expected_job(
@@ -13822,6 +14077,7 @@ fn adopt_collection_record_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<Option<CollectionAdoptionExecution>, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
@@ -13930,6 +14186,7 @@ fn adopt_collection_record_on_store(
     else {
         return Ok(Some(CollectionAdoptionExecution::DeclinedOversized));
     };
+    validate_workspace_root(root_dir, root_guard)?;
     let changed_path = Some(
         ydoc_settle_on_store(
             store,
@@ -13946,6 +14203,7 @@ fn adopt_collection_record_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         )?
         .path,
     );
@@ -13971,6 +14229,7 @@ fn cleanup_collection_relation_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
 ) -> Result<CollectionRelationCleanupExecution, RuntimeError> {
     let probe = ydoc_open_state_on_store(
         store,
@@ -14088,6 +14347,7 @@ fn cleanup_collection_relation_on_store(
         faults,
         token,
     )?;
+    validate_workspace_root(root_dir, root_guard)?;
     let settlement = ydoc_settle_on_store(
         store,
         doc_cache,
@@ -14106,6 +14366,7 @@ fn cleanup_collection_relation_on_store(
         now_ms,
         faults,
         token,
+        root_guard,
     )?;
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
@@ -14117,6 +14378,7 @@ fn reconcile_collections_on_store(
     workspace_id: &str,
     version_id: &str,
     root_dir: &std::path::Path,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     leases: &LeaseRegistry,
     self_writes: &dyn SelfWriteRecorder,
     now_ms: i64,
@@ -14126,6 +14388,7 @@ fn reconcile_collections_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
+    validate_workspace_root(root_dir, root_guard)?;
     let reconciliation = match store.write_with(faults, |tx| {
         reconcile_collections_in_tx(tx, workspace_id, version_id).map_err(RuntimeError::from)
     })? {
@@ -14152,6 +14415,7 @@ fn reconcile_collections_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         ) {
             Ok(Some(CollectionAdoptionExecution::Applied { changed_path })) => {
                 persist_collection_adoption_state(
@@ -14229,6 +14493,7 @@ fn reconcile_collections_on_store(
             now_ms,
             faults,
             token,
+            root_guard,
         ) {
             Ok(CollectionRelationCleanupExecution::Applied(path)) => {
                 if !changed_paths.contains(&path) {
@@ -14279,7 +14544,7 @@ fn capture_agent_origin_id(author_json: Option<&str>) -> Option<String> {
 fn capture_ingest_on_store(
     store: &mut EngineStore,
     input: &CaptureIngest,
-    root_dir: Option<&std::path::Path>,
+    indexing: &CaptureIndexing,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -14297,10 +14562,42 @@ fn capture_ingest_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
     let outcome = store.write_with(faults, |tx| {
-        let mut admitted = false;
-        let result = capture_ingest_with_admission_in_tx(
+        capture_ingest_in_tx(tx, input, indexing, leases, None)
+    })?;
+    match outcome {
+        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+struct CaptureBatchSharedContext {
+    capture: CaptureIngestBatchContext,
+    has_ydoc_state: Option<bool>,
+    journals_file_moments: Option<bool>,
+}
+
+fn capture_ingest_in_tx(
+    tx: &Transaction<'_>,
+    input: &CaptureIngest,
+    indexing: &CaptureIndexing,
+    leases: &LeaseRegistry,
+    mut batch: Option<&mut CaptureBatchSharedContext>,
+) -> Result<WriteResult, RuntimeError> {
+    let actor_origin_id = capture_agent_origin_id(input.author_json.as_deref());
+    let mut admitted = false;
+    let result = match batch.as_deref_mut() {
+        Some(batch) => capture_ingest_in_batch_with_admission_in_tx(
+            tx,
+            input,
+            &mut batch.capture,
+            |workspace_id, version_id, object_id| {
+                ensure_capture_target_not_leased(leases, workspace_id, version_id, object_id)?;
+                admitted = true;
+                Ok::<_, RuntimeError>(())
+            },
+        )?,
+        None => capture_ingest_with_admission_in_tx(
             tx,
             input,
             |workspace_id, version_id, object_id| {
@@ -14308,8 +14605,25 @@ fn capture_ingest_on_store(
                 admitted = true;
                 Ok::<_, RuntimeError>(())
             },
-        )?;
-        if admitted {
+        )?,
+    };
+    if admitted {
+        let has_ydoc_state = match batch.as_deref_mut() {
+            Some(batch) => match batch.has_ydoc_state {
+                Some(has_ydoc_state) => has_ydoc_state,
+                None => {
+                    let has_ydoc_state = dohc_engine_sync::workspace_has_ydoc_state_in_tx(
+                        tx,
+                        &input.workspace_id,
+                        &input.version_id,
+                    )?;
+                    batch.has_ydoc_state = Some(has_ydoc_state);
+                    has_ydoc_state
+                }
+            },
+            None => true,
+        };
+        if has_ydoc_state {
             dohc_engine_sync::reconcile_local_resulting_head_in_tx(
                 tx,
                 &input.workspace_id,
@@ -14323,10 +14637,11 @@ fn capture_ingest_on_store(
                 input.now_ms,
             )?;
         }
-        if !result.deduped
-            && let Some(root_dir) = root_dir
-        {
-            upsert_file_search_index(
+    }
+    if !result.deduped {
+        match indexing {
+            CaptureIndexing::Skip => {}
+            CaptureIndexing::ReadRoot(root_dir) => upsert_file_search_index(
                 tx,
                 root_dir,
                 &input.workspace_id,
@@ -14335,20 +14650,388 @@ fn capture_ingest_on_store(
                 &result.snapshot.path,
                 &result.snapshot.text,
             )
-            .map_err(RuntimeError::from)?;
+            .map_err(RuntimeError::from)?,
+            CaptureIndexing::UseSnapshot(policy) => update_file_search_index_for_capture(
+                tx,
+                policy,
+                &input.workspace_id,
+                &input.version_id,
+                &result.snapshot.object_id,
+                &result.snapshot.path,
+                &result.snapshot.text,
+                result.moment.before_present,
+            )
+            .map_err(RuntimeError::from)?,
         }
-        journal_moment_outbound_in_tx(
+    }
+    match batch {
+        Some(batch) => journal_moment_outbound_with_batch_in_tx(
             tx,
             &input.workspace_id,
             &result.moment.moment_id,
             result.deduped,
-        )
-        .map_err(RuntimeError::from)?;
-        Ok::<_, RuntimeError>(result)
+            &mut batch.journals_file_moments,
+        ),
+        None => journal_moment_outbound_in_tx(
+            tx,
+            &input.workspace_id,
+            &result.moment.moment_id,
+            result.deduped,
+        ),
+    }
+    .map_err(RuntimeError::from)?;
+    Ok(result)
+}
+
+fn capture_ingest_batch_on_store(
+    store: &mut EngineStore,
+    inputs: &[CaptureIngest],
+    search_policy: &Arc<SearchPolicySnapshot>,
+    leases: &LeaseRegistry,
+    faults: &dyn FaultInjector,
+    token: &CancellationToken,
+    workspace_root: (&std::path::Path, &dyn WorkspaceRootGuard),
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let (root_dir, root_guard) = workspace_root;
+    let Some(first) = inputs.first() else {
+        return Ok(Vec::new());
+    };
+    let total_bytes = inputs
+        .iter()
+        .try_fold(0usize, |total, input| total.checked_add(input.text.len()))
+        .ok_or(DomainError::InvalidInput {
+            reason: "capture batch byte count overflowed",
+        })?;
+    if inputs.len() > MAX_CAPTURE_INGEST_BATCH_OPS || total_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds",
+        }
+        .into());
+    }
+    if token.is_cancelled() {
+        return Err(RuntimeError::Cancelled);
+    }
+    if inputs.iter().any(|input| {
+        input.workspace_id != first.workspace_id || input.version_id != first.version_id
+    }) {
+        return Err(DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match",
+        }
+        .into());
+    }
+    validate_workspace_root(root_dir, Some(root_guard))?;
+    let bootstrap_main = {
+        let versions = VersionedTextStore::new(store);
+        let missing_main = versions.get_main_version(&first.workspace_id)?.is_none();
+        if missing_main && first.version_id != "main" {
+            return Err(DomainError::VersionNotFound.into());
+        }
+        missing_main
+    };
+
+    let outcome = store.write_with(faults, |tx| {
+        if bootstrap_main {
+            ensure_main_version_in_tx(tx, &first.workspace_id, &first.version_id, first.now_ms)?;
+        }
+        if token.is_cancelled() {
+            return Err(RuntimeError::Cancelled);
+        }
+        validate_workspace_root(root_dir, Some(root_guard))?;
+        let indexing = CaptureIndexing::UseSnapshot(Arc::clone(search_policy));
+
+        // Most startup batches are clean. Keep their database and FTS work in
+        // one rollback scope instead of preparing and releasing a savepoint
+        // for every file. If any item needs isolation, roll the optimistic
+        // attempt back and replay through the existing partial-success path.
+        // Callers therefore keep the same per-item result contract while the
+        // common case pays one savepoint per batch rather than one per file.
+        tx.execute_batch("SAVEPOINT dohc_capture_batch_fast")
+            .map_err(StorageError::persist_public)?;
+        match capture_ingest_batch_all_or_none_in_tx(tx, inputs, &indexing, leases) {
+            Ok(results) => {
+                tx.execute_batch("RELEASE dohc_capture_batch_fast")
+                    .map_err(StorageError::persist_public)?;
+                Ok(results.into_iter().map(Ok).collect())
+            }
+            Err(_) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_capture_batch_fast; \
+                     RELEASE dohc_capture_batch_fast",
+                )
+                .map_err(StorageError::persist_public)?;
+                capture_ingest_batch_with_item_savepoints_in_tx(tx, inputs, &indexing, leases)
+            }
+        }
     })?;
     match outcome {
-        TxnOutcome::Committed(result) => Ok(result),
+        TxnOutcome::Committed(results) => Ok(results),
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
+    }
+}
+
+fn capture_ingest_batch_all_or_none_in_tx(
+    tx: &Transaction<'_>,
+    inputs: &[CaptureIngest],
+    indexing: &CaptureIndexing,
+    leases: &LeaseRegistry,
+) -> Result<Vec<WriteResult>, RuntimeError> {
+    let first = inputs.first().ok_or(DomainError::InvalidInput {
+        reason: "capture batch is empty",
+    })?;
+    let mut results = Vec::with_capacity(inputs.len());
+    let mut batch = CaptureBatchSharedContext {
+        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+        has_ydoc_state: None,
+        journals_file_moments: None,
+    };
+    for input in inputs {
+        let result = capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch))?;
+        batch.capture.commit_result(&result)?;
+        results.push(result);
+    }
+    Ok(results)
+}
+
+fn capture_ingest_batch_with_item_savepoints_in_tx(
+    tx: &Transaction<'_>,
+    inputs: &[CaptureIngest],
+    indexing: &CaptureIndexing,
+    leases: &LeaseRegistry,
+) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
+    let first = inputs.first().ok_or(DomainError::InvalidInput {
+        reason: "capture batch is empty",
+    })?;
+    let mut results = Vec::with_capacity(inputs.len());
+    let mut batch = CaptureBatchSharedContext {
+        capture: CaptureIngestBatchContext::new(tx, &first.workspace_id, &first.version_id)?,
+        has_ydoc_state: None,
+        journals_file_moments: None,
+    };
+    for input in inputs {
+        tx.execute_batch("SAVEPOINT dohc_capture_batch_item")
+            .map_err(StorageError::persist_public)?;
+        match capture_ingest_in_tx(tx, input, indexing, leases, Some(&mut batch)) {
+            Ok(result) => {
+                tx.execute_batch("RELEASE dohc_capture_batch_item")
+                    .map_err(StorageError::persist_public)?;
+                batch.capture.commit_result(&result)?;
+                results.push(Ok(result));
+            }
+            Err(error) => {
+                tx.execute_batch(
+                    "ROLLBACK TO dohc_capture_batch_item; \
+                     RELEASE dohc_capture_batch_item",
+                )
+                .map_err(StorageError::persist_public)?;
+                results.push(Err(error));
+            }
+        }
+    }
+    Ok(results)
+}
+
+#[cfg(test)]
+mod capture_batch_fast_path_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+    use rusqlite::hooks::{AuthAction, Authorization, TransactionOperation};
+    use std::sync::Mutex;
+
+    struct ExistingRootGuard;
+
+    impl WorkspaceRootGuard for ExistingRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            root_dir
+                .is_dir()
+                .then_some(())
+                .ok_or(RuntimeError::Identity {
+                    reason: "test workspace root disappeared",
+                    source: None,
+                })
+        }
+    }
+
+    #[test]
+    fn clean_capture_batch_uses_one_batch_savepoint() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
+        let observed_savepoints = Arc::clone(&begun_savepoints);
+        store
+            .read_with(|conn| {
+                conn.authorizer(Some(move |context: rusqlite::hooks::AuthContext<'_>| {
+                    if let AuthAction::Savepoint {
+                        operation: TransactionOperation::Begin,
+                        savepoint_name,
+                    } = context.action
+                    {
+                        observed_savepoints
+                            .lock()
+                            .expect("record begun savepoint")
+                            .push(savepoint_name.to_owned());
+                    }
+                    Authorization::Allow
+                }))
+            })
+            .expect("install savepoint observer");
+        let inputs = (0..3)
+            .map(|index| CaptureIngest {
+                workspace_id: "fresh-batch-workspace".to_owned(),
+                version_id: "main".to_owned(),
+                path: format!("note-{index}.md"),
+                text: format!("body {index}"),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("fresh-batch".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            })
+            .collect::<Vec<_>>();
+        let policy = Arc::new(read_engine_search_policy(scratch.path()));
+
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &inputs,
+            &policy,
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &ExistingRootGuard),
+        )
+        .expect("capture clean batch");
+
+        assert!(results.iter().all(Result::is_ok));
+        assert_eq!(
+            *begun_savepoints.lock().expect("read begun savepoints"),
+            vec!["dohc_capture_batch_fast"],
+            "a clean batch must use one rollback scope instead of one per item"
+        );
+    }
+
+    #[test]
+    fn fallback_batch_commits_siblings_and_rolls_back_the_leased_item() {
+        const WORKSPACE_ID: &str = "fallback-batch-workspace";
+        const VERSION_ID: &str = "main";
+        const FAILED_PATH: &str = "note-1.md";
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let inputs = (0..3)
+            .map(|index| CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: format!("note-{index}.md"),
+                text: format!("body {index}"),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("fallback-batch".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            })
+            .collect::<Vec<_>>();
+        let failed_object_id = derive_capture_object_id(WORKSPACE_ID, VERSION_ID, FAILED_PATH);
+        let leases = LeaseRegistry::new();
+        let failed_key =
+            DocKey::new(WORKSPACE_ID, VERSION_ID, &failed_object_id).expect("failed item key");
+        let _failed_lease = leases.acquire(&failed_key).expect("hold failed item lease");
+        let policy = Arc::new(read_engine_search_policy(scratch.path()));
+
+        let results = capture_ingest_batch_on_store(
+            &mut store,
+            &inputs,
+            &policy,
+            &leases,
+            &NoFaults,
+            &CancellationToken::new(),
+            (scratch.path(), &ExistingRootGuard),
+        )
+        .expect("capture fallback batch");
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok(), "the first sibling must commit");
+        assert!(matches!(
+            &results[1],
+            Err(RuntimeError::Sync(
+                dohc_engine_sync::SyncError::RetryableState {
+                    reason: "ydoc-session-live"
+                }
+            ))
+        ));
+        assert!(results[2].is_ok(), "the final sibling must commit");
+        let first_order = results[0]
+            .as_ref()
+            .expect("first sibling result")
+            .moment
+            .moment_order;
+        let final_order = results[2]
+            .as_ref()
+            .expect("final sibling result")
+            .moment
+            .moment_order;
+        assert_eq!(
+            final_order,
+            first_order + 1,
+            "the rolled-back item must not advance the shared moment cursor"
+        );
+
+        drop(store);
+        let mut reopened = EngineStore::open(&db, 1).expect("reopen store");
+        let versioned = VersionedTextStore::new(&mut reopened);
+        assert_eq!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, "note-0.md")
+                .expect("read first sibling")
+                .expect("first sibling head")
+                .text,
+            "body 0"
+        );
+        assert_eq!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, "note-2.md")
+                .expect("read final sibling")
+                .expect("final sibling head")
+                .text,
+            "body 2"
+        );
+        assert!(
+            versioned
+                .read_text(WORKSPACE_ID, VERSION_ID, FAILED_PATH)
+                .expect("read failed item")
+                .is_none(),
+            "the failed item must have no readable head"
+        );
+        let (snapshots, moments, search_rows): (i64, i64, i64) = reopened
+            .read_with(|conn| {
+                Ok::<_, rusqlite::Error>((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM snapshots WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM moments WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
+                        (WORKSPACE_ID, VERSION_ID, &failed_object_id),
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .expect("read failed item durable rows");
+        assert_eq!(
+            (snapshots, moments, search_rows),
+            (0, 0, 0),
+            "the failed item must leave no snapshot, moment, or search row"
+        );
     }
 }
 
@@ -14460,11 +15143,16 @@ fn capture_secret_on_store(
 fn capture_secret_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureSecretRetire,
+    root_dir: Option<&std::path::Path>,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
 ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if let Some(root_dir) = root_dir {
+        validate_workspace_root(root_dir, root_guard)?;
     }
     ensure_mutation_version_on_store(
         store,
@@ -14480,10 +15168,12 @@ fn capture_secret_retire_on_store(
         .map_err(RuntimeError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn capture_retire_on_store(
     store: &mut EngineStore,
     input: &CaptureRetire,
     root_dir: Option<&std::path::Path>,
+    root_guard: Option<&dyn WorkspaceRootGuard>,
     self_writes: Option<&dyn SelfWriteRecorder>,
     leases: &LeaseRegistry,
     faults: &dyn FaultInjector,
@@ -14491,6 +15181,9 @@ fn capture_retire_on_store(
 ) -> Result<CaptureRetireResult, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
+    }
+    if let Some(root_dir) = root_dir {
+        validate_workspace_root(root_dir, root_guard)?;
     }
     ensure_mutation_version_on_store(
         store,
@@ -14560,6 +15253,7 @@ fn capture_retire_on_store(
     match outcome {
         TxnOutcome::Committed((result, asset_jobs)) => {
             if let (Some(root_dir), Some(self_writes)) = (root_dir, self_writes) {
+                validate_workspace_root(root_dir, root_guard)?;
                 materialize_scene_asset_deletes(
                     store,
                     root_dir,
@@ -14567,7 +15261,8 @@ fn capture_retire_on_store(
                     &asset_jobs,
                     self_writes,
                     faults,
-                );
+                    root_guard,
+                )?;
             }
             Ok(result)
         }
@@ -14903,6 +15598,7 @@ mod collection_relation_cleanup_tests {
             5,
             &NoFaults,
             &CancellationToken::new(),
+            None,
         )
         .expect("clean absent relation target");
         assert!(matches!(
@@ -15418,8 +16114,8 @@ mod share_view_identity_tests {
             .expect("read identity")
     }
 
-    /// A `view` share may push nothing, so it is given no identity — and the
-    /// absence is what keeps its file writes local.
+    /// A View share sends no workspace replication ops, so it is given no
+    /// identity. The absence keeps its file writes local.
     #[test]
     fn a_view_share_is_never_enrolled() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -15436,6 +16132,22 @@ mod share_view_identity_tests {
         );
     }
 
+    #[test]
+    fn a_comment_share_is_never_enrolled() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = scratch.engine_db_path().expect("db path");
+        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        assert_eq!(
+            record(&mut store, ShareAccess::Comment),
+            ShareViewIdentityRecord::NotRequired,
+        );
+        assert_eq!(
+            identity(&store),
+            None,
+            "MUTATION: comment discussion no longer uses the workspace sync identity",
+        );
+    }
+
     fn file_lane(store: &EngineStore) -> bool {
         store
             .read_with(|conn| {
@@ -15448,59 +16160,493 @@ mod share_view_identity_tests {
             .expect("read file lane")
     }
 
-    /// THE level mapping, at the one place that makes it: only `edit` can send
-    /// file changes back, so only `edit` takes the lane fact. A `comment`
-    /// share gets the identity its chat push uses and nothing more — its file
-    /// writes are refused at the desktop's write gate, and journaling them
-    /// would leave rows the share cannot drain.
+    /// THE level mapping, at the one place that makes it: only Edit can send
+    /// workspace replication ops, so only Edit records an identity and takes
+    /// the file lane.
     #[test]
     fn only_an_edit_share_takes_the_file_lane() {
-        for (access, expected) in [(ShareAccess::Comment, false), (ShareAccess::Edit, true)] {
+        for access in [ShareAccess::View, ShareAccess::Comment] {
             let scratch = ScratchDir::new().expect("scratch");
             let path = scratch.engine_db_path().expect("db path");
             let mut store = EngineStore::open(&path, 1_000).expect("open");
             assert_eq!(
                 record(&mut store, access),
-                ShareViewIdentityRecord::Recorded
+                ShareViewIdentityRecord::NotRequired
             );
             assert_eq!(
-                file_lane(&store),
-                expected,
-                "MUTATION: {access:?} must {} the file lane",
-                if expected { "take" } else { "not take" },
+                identity(&store),
+                None,
+                "MUTATION: {access:?} must not record an identity",
+            );
+            assert!(
+                !file_lane(&store),
+                "MUTATION: {access:?} takes no file lane"
             );
         }
+
         let scratch = ScratchDir::new().expect("scratch");
         let path = scratch.engine_db_path().expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
-            record(&mut store, ShareAccess::View),
-            ShareViewIdentityRecord::NotRequired,
+            record(&mut store, ShareAccess::Edit),
+            ShareViewIdentityRecord::Recorded
         );
-        assert!(
-            !file_lane(&store),
-            "MUTATION: a view share takes neither an identity nor a lane",
-        );
+        assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
+        assert!(file_lane(&store), "MUTATION: Edit must take the file lane");
     }
 
-    /// Comment and edit both write back, so both record — once.
+    /// Edit records once; repeated refreshes cannot split the replica log.
     #[test]
-    fn a_writable_share_enrols_once_per_workspace() {
-        for access in [ShareAccess::Comment, ShareAccess::Edit] {
-            let scratch = ScratchDir::new().expect("scratch");
-            let path = scratch.engine_db_path().expect("db path");
-            let mut store = EngineStore::open(&path, 1_000).expect("open");
-            assert_eq!(
-                record(&mut store, access),
-                ShareViewIdentityRecord::Recorded,
-                "MUTATION: {access:?} writes back, so it needs an identity",
-            );
-            assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
-            assert_eq!(
-                record(&mut store, access),
-                ShareViewIdentityRecord::AlreadyRecorded,
-                "MUTATION: every refresh calls this; a second row would split the log",
-            );
+    fn an_edit_share_enrols_once_per_workspace() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let path = scratch.engine_db_path().expect("db path");
+        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        assert_eq!(
+            record(&mut store, ShareAccess::Edit),
+            ShareViewIdentityRecord::Recorded,
+        );
+        assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
+        assert_eq!(
+            record(&mut store, ShareAccess::Edit),
+            ShareViewIdentityRecord::AlreadyRecorded,
+            "MUTATION: every refresh calls this; a second row would split the log",
+        );
+    }
+}
+
+#[cfg(test)]
+mod capture_secret_root_guard_tests {
+    use super::*;
+    use crate::WorkspaceSupervisor;
+    use dohc_engine_testkit::ScratchDir;
+    use std::sync::Condvar;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::time::Duration;
+
+    const WORKSPACE_ID: &str = "workspace";
+    const VERSION_ID: &str = "main";
+    const SECRET_PATH: &str = ".env";
+
+    struct BoundRootGuard {
+        identity: file_id::FileId,
+    }
+
+    impl BoundRootGuard {
+        fn bind(root: &std::path::Path) -> Self {
+            Self {
+                identity: file_id::get_file_id(root).expect("bind workspace root identity"),
+            }
         }
+    }
+
+    impl WorkspaceRootGuard for BoundRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            (file_id::get_file_id(root_dir).ok() == Some(self.identity))
+                .then_some(())
+                .ok_or(RuntimeError::Identity {
+                    reason: "workspace root changed during capture",
+                    source: None,
+                })
+        }
+    }
+
+    struct PausedRootGuard {
+        bound: BoundRootGuard,
+        reached: (Mutex<bool>, Condvar),
+        released: (Mutex<bool>, Condvar),
+    }
+
+    impl PausedRootGuard {
+        fn bind(root: &std::path::Path) -> Arc<Self> {
+            Arc::new(Self {
+                bound: BoundRootGuard::bind(root),
+                reached: (Mutex::new(false), Condvar::new()),
+                released: (Mutex::new(false), Condvar::new()),
+            })
+        }
+
+        fn wait_until_reached(&self) {
+            let reached = self.reached.0.lock().expect("lock reached state");
+            let (reached, timeout) = self
+                .reached
+                .1
+                .wait_timeout_while(reached, Duration::from_secs(10), |reached| !*reached)
+                .expect("wait for actor blocker");
+            assert!(*reached, "actor did not reach the blocking command");
+            assert!(!timeout.timed_out(), "actor blocker timed out");
+        }
+
+        fn release(&self) {
+            let mut released = self.released.0.lock().expect("lock release state");
+            *released = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl WorkspaceRootGuard for PausedRootGuard {
+        fn validate(&self, root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            {
+                let mut reached = self.reached.0.lock().expect("lock reached state");
+                *reached = true;
+                self.reached.1.notify_all();
+            }
+            let released = self.released.0.lock().expect("lock release state");
+            let (released, timeout) = self
+                .released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                .expect("wait for root replacement");
+            if timeout.timed_out() || !*released {
+                return Err(RuntimeError::Identity {
+                    reason: "test root guard release timed out",
+                    source: None,
+                });
+            }
+            self.bound.validate(root_dir)
+        }
+    }
+
+    struct RejectSecondValidation {
+        calls: AtomicUsize,
+    }
+
+    impl WorkspaceRootGuard for RejectSecondValidation {
+        fn validate(&self, _root_dir: &std::path::Path) -> Result<(), RuntimeError> {
+            if self.calls.fetch_add(1, AtomicOrdering::SeqCst) == 0 {
+                Ok(())
+            } else {
+                Err(RuntimeError::Identity {
+                    reason: "workspace root changed during capture",
+                    source: None,
+                })
+            }
+        }
+    }
+
+    #[test]
+    fn capture_batch_rolls_back_version_bootstrap_when_final_root_fence_rejects() {
+        const PATH: &str = "notes/fenced.md";
+
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let root = root_scratch.path();
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let mut store = EngineStore::open(&db, 1).expect("open store");
+        let guard = RejectSecondValidation {
+            calls: AtomicUsize::new(0),
+        };
+        let result = capture_ingest_batch_on_store(
+            &mut store,
+            &[CaptureIngest {
+                workspace_id: WORKSPACE_ID.to_owned(),
+                version_id: VERSION_ID.to_owned(),
+                path: PATH.to_owned(),
+                text: "fenced body".to_owned(),
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: Some("Reconciled offline edits".to_owned()),
+                metadata_correlation_id: Some("second-root-fence".to_owned()),
+                author_json: None,
+                now_ms: 2,
+                request_id: None,
+                claim_foreign_head: false,
+            }],
+            &Arc::new(read_engine_search_policy(root)),
+            &LeaseRegistry::new(),
+            &NoFaults,
+            &CancellationToken::new(),
+            (root, &guard),
+        );
+
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(guard.calls.load(AtomicOrdering::SeqCst), 2);
+        assert!(
+            VersionedTextStore::new(&mut store)
+                .get_main_version(WORKSPACE_ID)
+                .expect("read rolled-back version")
+                .is_none(),
+            "the rejected transaction must roll back its version bootstrap"
+        );
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM versions WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1)",
+                    [WORKSPACE_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count rolled-back rows");
+        assert_eq!(durable_rows, 0);
+    }
+
+    #[test]
+    fn queued_capture_batch_refuses_a_replacement_workspace_root() {
+        const PATH: &str = "notes/queued.md";
+
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let moved_scratch = ScratchDir::new().expect("moved root scratch");
+        let root = root_scratch.path().to_path_buf();
+        let moved_root = moved_scratch.path().join("original-root");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        std::fs::create_dir_all(root.join("notes")).expect("create original notes");
+        std::fs::write(root.join(PATH), b"original body").expect("write original file");
+
+        // Hold the writer on a command already ahead of the batch. Enqueuing
+        // both commands directly proves the root replacement happens after the
+        // batch entered the actor queue and before its transaction can start.
+        let blocker = PausedRootGuard::bind(&root);
+        let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureRetire {
+                input: CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "missing.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                workspace_root: Some((root.clone(), Some(blocker_guard))),
+                self_writes: None,
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: blocker_reply,
+            })
+            .expect("queue actor blocker");
+        blocker.wait_until_reached();
+
+        let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
+        let (batch_reply, batch_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureIngestBatch {
+                inputs: vec![CaptureIngest {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: PATH.to_owned(),
+                    text: "original body".to_owned(),
+                    metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                    metadata_summary: Some("Reconciled offline edits".to_owned()),
+                    metadata_correlation_id: Some("queued-root-swap".to_owned()),
+                    author_json: None,
+                    now_ms: 3,
+                    request_id: None,
+                    claim_foreign_head: false,
+                }],
+                search_policy: Arc::new(read_engine_search_policy(&root)),
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                root_dir: root.clone(),
+                root_guard: captured_guard,
+                token: CancellationToken::new(),
+                reply: batch_reply,
+            })
+            .expect("queue capture batch behind blocker");
+
+        std::fs::rename(&root, &moved_root).expect("move original workspace root");
+        std::fs::create_dir_all(root.join("notes")).expect("create replacement notes");
+        std::fs::write(root.join(PATH), b"replacement body").expect("write replacement file");
+        let replacement_before = std::fs::read(root.join(PATH)).expect("read replacement file");
+        blocker.release();
+        let blocker_result = blocker_reply_rx
+            .blocking_recv()
+            .expect("receive blocker result");
+        let batch_result = batch_reply_rx
+            .blocking_recv()
+            .expect("receive batch result");
+        let replacement_after = std::fs::read(root.join(PATH)).expect("reread replacement file");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
+        std::fs::rename(&moved_root, &root).expect("restore original workspace root");
+        drop(actor);
+        supervisor.close(&db).expect("close actor");
+        let mut store = EngineStore::open(&db, 5).expect("reopen store");
+        let main_version = VersionedTextStore::new(&mut store)
+            .get_main_version(WORKSPACE_ID)
+            .expect("read refused workspace version");
+        let durable_rows = store
+            .read_with(|conn| {
+                conn.query_row(
+                    "SELECT \
+                       (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM replication_log WHERE workspace_id=?1) + \
+                       (SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1)",
+                    [WORKSPACE_ID],
+                    |row| row.get::<_, i64>(0),
+                )
+            })
+            .expect("count durable capture rows");
+
+        assert!(matches!(
+            blocker_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert!(matches!(
+            batch_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert!(
+            main_version.is_none(),
+            "the queued batch must not create a version"
+        );
+        assert_eq!(
+            durable_rows, 0,
+            "snapshots, moments, replication, and search must remain unchanged"
+        );
+        assert_eq!(replacement_after, replacement_before);
+    }
+
+    #[test]
+    fn queued_capture_secret_retire_refuses_a_replacement_workspace_root() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let root_scratch = ScratchDir::new().expect("workspace root scratch");
+        let moved_scratch = ScratchDir::new().expect("moved root scratch");
+        let root = root_scratch.path().to_path_buf();
+        let moved_root = moved_scratch.path().join("original-root");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        std::fs::write(root.join(SECRET_PATH), b"TOKEN=original").expect("write original secret");
+        actor
+            .capture_secret_blocking(
+                CaptureSecret {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: SECRET_PATH.to_owned(),
+                    text: "TOKEN=original".to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_correlation_id: None,
+                    now_ms: 2,
+                    claim_foreign_head: true,
+                },
+                SecretDataKey::from_bytes(&[0x41; 32]).expect("secret key"),
+                Arc::new(NoFaults),
+            )
+            .expect("seed captured secret");
+        std::fs::remove_file(root.join(SECRET_PATH)).expect("observe original secret removal");
+
+        // Hold the worker on a command already ahead of the secret retire.
+        // Sending the retire below therefore proves it entered the real actor
+        // queue before the pathname is rebound to a replacement directory.
+        let blocker = PausedRootGuard::bind(&root);
+        let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+        let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureRetire {
+                input: CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "missing.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 3,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                workspace_root: Some((root.clone(), Some(blocker_guard))),
+                self_writes: None,
+                leases: LeaseRegistry::new(),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: blocker_reply,
+            })
+            .expect("queue actor blocker");
+        blocker.wait_until_reached();
+
+        let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
+        let (retire_reply, retire_reply_rx) = oneshot::channel();
+        actor
+            .tx
+            .blocking_send(Command::CaptureSecretRetire {
+                input: CaptureSecretRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: SECRET_PATH.to_owned(),
+                    metadata_origin: "local-file".to_owned(),
+                    metadata_correlation_id: None,
+                    now_ms: 4,
+                    only_if_own_origin: true,
+                },
+                workspace_root: Some((root.clone(), Some(captured_guard))),
+                faults: Arc::new(NoFaults),
+                token: CancellationToken::new(),
+                reply: retire_reply,
+            })
+            .expect("queue secret retire behind blocker");
+
+        std::fs::rename(&root, &moved_root).expect("move original workspace root");
+        std::fs::create_dir(&root).expect("create replacement workspace root");
+        std::fs::write(root.join(SECRET_PATH), b"TOKEN=replacement")
+            .expect("write replacement secret");
+        let replacement_before =
+            std::fs::read(root.join(SECRET_PATH)).expect("read replacement secret");
+        blocker.release();
+        let blocker_result = blocker_reply_rx
+            .blocking_recv()
+            .expect("receive blocker result");
+        let retire_result = retire_reply_rx
+            .blocking_recv()
+            .expect("receive secret retire result");
+        let replacement_after =
+            std::fs::read(root.join(SECRET_PATH)).expect("reread replacement secret");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement workspace root");
+        std::fs::rename(&moved_root, &root).expect("restore original workspace root");
+        drop(actor);
+        supervisor.close(&db).expect("close actor");
+        let store = EngineStore::open(&db, 5).expect("reopen store");
+        let retained = secret_file_len_keyless(&store, WORKSPACE_ID, VERSION_ID, SECRET_PATH)
+            .expect("read retained secret tip");
+
+        assert!(matches!(
+            blocker_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(retained, Some(14), "the current encrypted tip must survive");
+        assert_eq!(replacement_after, replacement_before);
+        assert!(matches!(
+            retire_result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
     }
 }

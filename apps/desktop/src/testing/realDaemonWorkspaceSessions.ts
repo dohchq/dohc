@@ -14,8 +14,10 @@ const REAL_DAEMON_WORKSPACE_OPEN_DEADLINE_MS = 10_000;
  */
 export function createRealDaemonWorkspaceSessions(
   source: EngineDaemonClientSource,
+  options: { workspaceOpenDeadlineMs?: number } = {},
 ): EngineWorkspaceSessions {
   return new EngineWorkspaceSessions(source, {
-    workspaceOpenDeadlineMs: REAL_DAEMON_WORKSPACE_OPEN_DEADLINE_MS,
+    workspaceOpenDeadlineMs:
+      options.workspaceOpenDeadlineMs ?? REAL_DAEMON_WORKSPACE_OPEN_DEADLINE_MS,
   });
 }

@@ -1,6 +1,8 @@
+import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 import {
   CancelWorkspaceSearchPayload,
   WorkspaceSearchPayload,
+  WorkspaceSearchStartResult,
 } from "./bridgeContract";
 import { CHANNELS } from "./channels";
 import type {
@@ -42,7 +44,7 @@ export function registerWorkspaceSearchIpcHandlers<
     async (event, payload) => {
       dependencies.assertTrustedSender(event);
       const input = WorkspaceSearchPayload.parse(payload);
-      const accepted = Promise.withResolvers<void>();
+      const accepted = Promise.withResolvers<WorkspaceSearchStartResult>();
       let wasAccepted = false;
       const activity = dependencies.withWorkspaceOperation(
         event,
@@ -54,18 +56,25 @@ export function registerWorkspaceSearchIpcHandlers<
             input,
           );
           wasAccepted = true;
-          accepted.resolve();
+          accepted.resolve({ status: "accepted" });
           await started.settled;
         },
       );
       void activity.catch((error: unknown) => {
         if (!wasAccepted) {
+          if (isWorkspaceUpdatingRefusal(error)) {
+            accepted.resolve({
+              status: "refused",
+              code: "workspace-updating",
+            });
+            return;
+          }
           accepted.reject(error);
           return;
         }
         dependencies.onActivityError(error);
       });
-      await accepted.promise;
+      return WorkspaceSearchStartResult.parse(await accepted.promise);
     },
   );
 

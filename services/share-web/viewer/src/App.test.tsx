@@ -32,7 +32,25 @@ const DEFAULT_META: ViewMeta = {
 };
 
 function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
+  let responseValue = value;
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    if (
+      "composerState" in value &&
+      "latestRevision" in value &&
+      !("profileName" in value)
+    ) {
+      responseValue = { ...value, profileName: null };
+    } else if (
+      "ok" in value &&
+      value.ok === false &&
+      "state" in value &&
+      (value.state === "blocked" || value.state === "paused") &&
+      !("activityRevision" in value)
+    ) {
+      responseValue = { ...value, activityRevision: 7 };
+    }
+  }
+  return new Response(JSON.stringify(responseValue), {
     status,
     headers: { "content-type": "application/json" },
   });
@@ -214,6 +232,21 @@ describe("App", () => {
     });
   }
 
+  function setControlValue(
+    control: HTMLInputElement | HTMLTextAreaElement,
+    value: string,
+  ): void {
+    const prototype = control instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    if (!setter) throw new Error("control value setter is missing");
+    act(() => {
+      setter.call(control, value);
+      control.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  }
+
   function handoffCalls(fetchMock: ReturnType<typeof vi.fn>): Array<unknown[]> {
     return fetchMock.mock.calls.filter(
       ([input]) => requestPath(input as RequestInfo | URL) === "/api/handoff",
@@ -222,16 +255,59 @@ describe("App", () => {
 
   function viewerFetch(
     handoff: (init: RequestInit | undefined) => Response | Promise<Response>,
+    onDiscussionPark: (signal: AbortSignal) => void = () => undefined,
   ) {
     return vi.fn<typeof fetch>(async (input, init) => {
       const path = requestPath(input);
       if (path === "/api/view/meta") return jsonResponse(DEFAULT_META);
       if (path === "/api/view/current") return currentPage([], 0);
       if (path === "/api/view/log?since=0&limit=500") return logPage([]);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 0,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=0&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        onDiscussionPark(signal);
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
       if (path === "/api/handoff") return handoff(init);
       throw new Error(`Unexpected request: ${path}`);
     });
   }
+
+  it("aborts parked Comments activity when the viewer unmounts", async () => {
+    let parkedSignal: AbortSignal | undefined;
+    const fetchMock = viewerFetch(
+      () => jsonResponse({
+        ok: true,
+        code: FIRST_HANDOFF_CODE,
+        relayUrl: PUBLIC_RELAY_URL,
+        expiresAtMs: Date.now() + 60_000,
+      }),
+      (signal) => {
+        parkedSignal = signal;
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => parkedSignal !== undefined);
+    act(() => root?.unmount());
+    root = null;
+
+    expect(parkedSignal?.aborted).toBe(true);
+  });
 
   it("builds the browser handoff coordinate with the canonical issuer relay", () => {
     expect(
@@ -3303,6 +3379,264 @@ describe("App", () => {
     );
     expect(container.textContent).not.toContain("This link isn't available.");
     expect(renderedFilePaths()).toEqual([file.path]);
+  });
+
+  it("loads Comment access without widening file authority", async () => {
+    let activitySignal: AbortSignal | undefined;
+    let unexpectedRequests = 0;
+    const file: SharedFile = {
+      path: "docs/commented.md",
+      blobSha256: "9".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 7,
+          messages: [{
+            messageId: "comment-app",
+            createdAtMs: 1,
+            deleted: false,
+            body: "Shared comment",
+            author: { kind: "named", displayName: "Named Person" },
+          }],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        activitySignal = signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Commented file\n\nFile bytes stay read-only.");
+      }
+      if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      unexpectedRequests += 1;
+      throw new Error(`Unexpected request: ${path} ${String(init?.method)}`);
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await renderApp();
+    await settle(() => container.textContent?.includes("Shared comment") === true);
+    await settle(() => activitySignal !== undefined);
+
+    expect(container.querySelector(".badge")?.textContent).toBe("Comment");
+    expect(container.querySelector("main.content")?.textContent).toContain(
+      "File bytes stay read-only.",
+    );
+    expect(container.querySelector(".comments-panel")?.textContent).toContain("Shared comment");
+    expect(container.querySelector(".comments-panel form")).not.toBeNull();
+    expect(container.querySelector("main.content textarea")).toBeNull();
+    expect(container.querySelector('main.content [contenteditable="true"]')).toBeNull();
+    expect(unexpectedRequests).toBe(0);
+    act(() => root?.unmount());
+    root = null;
+    await settle(() => activitySignal?.aborted === true);
+
+    expect(activitySignal).toBeInstanceOf(AbortSignal);
+    expect(activitySignal?.aborted).toBe(true);
+  });
+
+  it("applies narrowed View access from activity and ignores stale Comment metadata", async () => {
+    vi.useFakeTimers();
+    const file: SharedFile = {
+      path: "docs/narrowed.md",
+      blobSha256: "7".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    let metaCalls = 0;
+    let parkedSignal: AbortSignal | undefined;
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/meta") {
+        metaCalls += 1;
+        return jsonResponse(commentMeta);
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 7,
+          messages: [],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "view",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        parkedSignal = init?.signal ?? undefined;
+        return await new Promise<Response>(() => undefined);
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) {
+        return new Response("# Narrowed link");
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() =>
+      parkedSignal !== undefined &&
+      container.querySelector(".badge")?.textContent === "View"
+    );
+
+    expect(container.querySelector(".comments-panel form")).toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4 * 60_000);
+    });
+    await settle(() => metaCalls === 1);
+
+    expect(container.querySelector(".badge")?.textContent).toBe("View");
+    expect(container.querySelector(".comments-panel form")).toBeNull();
+  });
+
+  it.each([
+    ["blocked", "The owner turned off comments for this browser."],
+    ["paused", "The owner paused comments. You can still read everything."],
+  ] as const)("keeps the file and timeline readable when Comment append is %s", async (writeState, copy) => {
+    let activitySignal: AbortSignal | undefined;
+    let unexpectedRequests = 0;
+    const file: SharedFile = {
+      path: "docs/readable.md",
+      blobSha256: "8".repeat(64),
+      contentKind: "text",
+    };
+    const commentMeta: ViewMeta = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "comment" },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
+      if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
+      if (path === "/api/view/discussion" && init?.method === "POST") {
+        return jsonResponse({ ok: false, state: writeState }, 403);
+      }
+      if (path === "/api/view/discussion?direction=newest-first") {
+        return jsonResponse({
+          ok: true,
+          activityRevision: 7,
+          messages: [{
+            messageId: "readable-comment",
+            createdAtMs: 1,
+            deleted: false,
+            body: "Readable timeline",
+            author: { kind: "named", displayName: "Named Person" },
+          }],
+          nextCursor: null,
+          profileName: null,
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
+        return jsonResponse({
+          ok: true,
+          access: "comment",
+          latestRevision: 7,
+          cursorRevision: 7,
+          hasMore: false,
+          messages: [],
+          composerState: "available",
+        });
+      }
+      if (path === "/api/view/discussion/activity?since=7&hold=30000&limit=100") {
+        const signal = init?.signal;
+        if (!signal) throw new Error("Discussion activity request has no abort signal");
+        activitySignal = signal;
+        return await new Promise<Response>((_resolve, reject) => {
+          const abort = () => reject(new DOMException("Aborted", "AbortError"));
+          if (signal.aborted) abort();
+          else signal.addEventListener("abort", abort, { once: true });
+        });
+      }
+      if (path === `/api/view/blob/${file.blobSha256}`) return new Response("Readable file bytes");
+      if (path === "/api/view/meta") return jsonResponse(commentMeta);
+      unexpectedRequests += 1;
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+    await settle(() =>
+      container.querySelector("main.content")?.textContent?.includes(
+        "Readable file bytes",
+      ) === true &&
+      container.querySelector(".comments-panel")?.textContent?.includes(
+        "Readable timeline",
+      ) === true &&
+      activitySignal !== undefined
+    );
+    const body = container.querySelector<HTMLTextAreaElement>('textarea[name="body"]');
+    if (!body) throw new Error("comment body is missing");
+    setControlValue(body, "Refused comment");
+    clickButton("Post comment");
+    await settle(() => container.textContent?.includes(copy) === true);
+
+    expect(container.querySelector("main.content")?.textContent).toContain("Readable file bytes");
+    expect(container.querySelector(".comments-panel")?.textContent).toContain("Readable timeline");
+    expect(body.disabled).toBe(true);
+    expect(unexpectedRequests).toBe(0);
+    act(() => root?.unmount());
+    root = null;
+    await settle(() => activitySignal?.aborted === true);
+
+    expect(activitySignal).toBeInstanceOf(AbortSignal);
+    expect(activitySignal?.aborted).toBe(true);
+  });
+
+  it("refuses mismatched top-level and effective Comment access", async () => {
+    const mismatched = {
+      ...DEFAULT_META,
+      access: "comment",
+      effectiveSelector: { ...DEFAULT_META.effectiveSelector, access: "view" },
+    };
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input) => {
+      const path = requestPath(input);
+      if (path === "/api/view/current") {
+        return jsonResponse({
+          ok: true,
+          ...mismatched,
+          files: [],
+          nextCursor: 0,
+          epochLogFloor: 0,
+        });
+      }
+      throw new Error(`Unexpected request: ${path}`);
+    }));
+
+    await renderApp();
+
+    expect(container.textContent).toBe("This link isn't available.");
   });
 
   describe("log rate limits", () => {

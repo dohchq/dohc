@@ -33,6 +33,31 @@ async function testStorage(): Promise<SyncRelayStorage> {
   return storage;
 }
 
+function countChannelKindLookups(storage: SyncRelayStorage): {
+  storage: SyncRelayStorage;
+  lookupsFor: (workspaceId: string, channelWireId: string) => number;
+} {
+  const lookups = new Map<string, number>();
+  const counted = new Proxy(storage, {
+    get(target, property) {
+      if (property === "findChannelCreateKind") {
+        return (workspaceId: string, channelWireId: string) => {
+          const key = `${workspaceId}\0${channelWireId}`;
+          lookups.set(key, (lookups.get(key) ?? 0) + 1);
+          return target.findChannelCreateKind(workspaceId, channelWireId);
+        };
+      }
+      const value = Reflect.get(target, property);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return {
+    storage: counted,
+    lookupsFor: (workspaceId, channelWireId) =>
+      lookups.get(`${workspaceId}\0${channelWireId}`) ?? 0,
+  };
+}
+
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
     const auth = request.headers.get("authorization") ?? "";
@@ -366,6 +391,21 @@ describe("shared channels (MU-C4)", () => {
     });
     // The member never learns the owner's workspace id.
     expect(received[0]).not.toHaveProperty("workspaceId");
+  });
+
+  it("checks a stable readable channel once while listing it for the recipient", async () => {
+    const storage = await testStorage();
+    const counted = countChannelKindLookups(storage);
+    const h = handler(counted.storage);
+    await seedOwnerWorkspace(h);
+    const shareId = await createChannelShare(h, MEMBER_A);
+    const beforeList = counted.lookupsFor(WORKSPACE, SHARED_WIRE);
+
+    const received = (await json(await h(request(MEMBER_A, "/sync/shares"))))
+      .received as Array<Record<string, unknown>>;
+
+    expect(received).toContainEqual(expect.objectContaining({ shareId }));
+    expect(counted.lookupsFor(WORKSPACE, SHARED_WIRE) - beforeList).toBe(1);
   });
 
   it("refuses invalid chat selectors at grant time", async () => {

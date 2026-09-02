@@ -2,8 +2,9 @@ mod common;
 
 use common::Scratch;
 use dohc_engine_files::{
-    CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError, IngestOutcome,
-    IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner, apply_then_ack,
+    BatchIngestResult, CancellationToken, CaptureError, CaptureOp, CaptureSink, FilesError,
+    IngestOutcome, IngestReason, ReconcileController, ReconcileRun, ScanBounds, Scanner,
+    apply_reconcile_plan_cancellable, apply_then_ack,
 };
 use dohc_engine_storage::NoFaults;
 use std::collections::{BTreeMap, BTreeSet};
@@ -62,6 +63,78 @@ impl CaptureSink for IdempotentSink {
     }
 }
 
+#[derive(Default)]
+struct TwoAtATimeSink(IdempotentSink);
+
+impl CaptureSink for TwoAtATimeSink {
+    fn ingest(
+        &mut self,
+        path: &str,
+        size: u64,
+        sha256: &str,
+        media_type: &str,
+        reason: IngestReason,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.0.ingest(path, size, sha256, media_type, reason)
+    }
+
+    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+        self.0.retire(path)
+    }
+
+    fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        if ops.len() < 2 || ops.iter().any(|op| !matches!(op, CaptureOp::Ingest { .. })) {
+            return None;
+        }
+        let outcomes = ops[..2]
+            .iter()
+            .map(|op| match op {
+                CaptureOp::Ingest {
+                    path,
+                    size,
+                    sha256,
+                    media_type,
+                    reason,
+                    ..
+                } => self.0.ingest(path, *size, sha256, media_type, *reason),
+                CaptureOp::Retire { .. } => unreachable!("batch prefix was checked"),
+            })
+            .collect();
+        Some(BatchIngestResult::Committed(outcomes))
+    }
+}
+
+struct ReportingBatchSink {
+    reported: Option<BatchIngestResult>,
+    ordinary_calls: Vec<String>,
+}
+
+impl CaptureSink for ReportingBatchSink {
+    fn ingest(
+        &mut self,
+        path: &str,
+        size: u64,
+        sha256: &str,
+        _media_type: &str,
+        _reason: IngestReason,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.ordinary_calls.push(path.to_owned());
+        Ok(IngestOutcome::Captured {
+            size,
+            sha256: sha256.to_owned(),
+        })
+    }
+
+    fn retire(&mut self, path: &str) -> Result<(), CaptureError> {
+        self.ordinary_calls.push(path.to_owned());
+        Ok(())
+    }
+
+    fn ingest_batch(&mut self, _ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        self.reported.take()
+    }
+}
+
 fn completed(run: ReconcileRun) -> dohc_engine_files::ReconcilePlan {
     match run {
         ReconcileRun::Completed(plan) => plan,
@@ -103,6 +176,110 @@ fn failed_apply_keeps_prior_manifest_entry_and_continues_the_batch() {
             .expect("retry prepare"),
     );
     assert!(matches!(retry.ops.as_slice(), [CaptureOp::Ingest { path, .. }] if path == "a.md"));
+}
+
+#[test]
+fn uncertain_batch_prefix_stays_failed_and_the_suffix_continues() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    ws.write("b.md", b"b");
+    ws.write("c.md", b"c");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let mut sink = ReportingBatchSink {
+        reported: Some(BatchIngestResult::Uncertain { attempted: 2 }),
+        ordinary_calls: Vec::new(),
+    };
+
+    let result =
+        apply_reconcile_plan_cancellable(&plan, &mut sink, &NoFaults, &CancellationToken::new());
+
+    assert_eq!(result.failed_applies, ["a.md", "b.md"]);
+    assert_eq!(result.applied_paths, ["c.md"]);
+    assert_eq!(sink.ordinary_calls, ["c.md"]);
+    assert!(result.crashed_after_durable_boundary.is_none());
+}
+
+#[test]
+fn invalid_batch_prefix_reports_fail_closed_without_ordinary_apply() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    ws.write("b.md", b"b");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+
+    for reported in [
+        BatchIngestResult::Uncertain { attempted: 0 },
+        BatchIngestResult::Committed(vec![
+            Ok(IngestOutcome::NotOwned),
+            Ok(IngestOutcome::NotOwned),
+            Ok(IngestOutcome::NotOwned),
+        ]),
+    ] {
+        let mut sink = ReportingBatchSink {
+            reported: Some(reported),
+            ordinary_calls: Vec::new(),
+        };
+        let result = apply_reconcile_plan_cancellable(
+            &plan,
+            &mut sink,
+            &NoFaults,
+            &CancellationToken::new(),
+        );
+        assert_eq!(result.failed_applies, ["a.md", "b.md"]);
+        assert!(result.applied_paths.is_empty());
+        assert!(sink.ordinary_calls.is_empty());
+    }
+}
+
+#[test]
+fn batch_prefix_that_contains_a_retire_is_rejected() {
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let baseline = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("baseline prepare"),
+    );
+    apply_then_ack(
+        &mut controller,
+        &baseline,
+        &mut IdempotentSink::default(),
+        &NoFaults,
+    )
+    .expect("baseline ack");
+    ws.remove("a.md");
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("retire prepare"),
+    );
+    assert!(matches!(plan.ops.as_slice(), [CaptureOp::Retire { .. }]));
+    let mut sink = ReportingBatchSink {
+        reported: Some(BatchIngestResult::Committed(vec![Ok(
+            IngestOutcome::NotOwned,
+        )])),
+        ordinary_calls: Vec::new(),
+    };
+
+    let result =
+        apply_reconcile_plan_cancellable(&plan, &mut sink, &NoFaults, &CancellationToken::new());
+
+    assert_eq!(result.failed_applies, ["a.md"]);
+    assert!(result.applied_paths.is_empty());
+    assert!(sink.ordinary_calls.is_empty());
 }
 
 #[test]
@@ -324,7 +501,10 @@ fn crash_after_op_apply_before_ack_restarts_without_lost_or_double_applied_captu
         faults.as_ref(),
     )
     .expect("simulated crash result");
-    assert_eq!(crashed.crashed_after_apply.as_deref(), Some("a.md"));
+    assert_eq!(
+        crashed.crashed_after_durable_boundary.as_deref(),
+        Some("a.md")
+    );
     assert_eq!(sink.moments, 1, "domain transaction committed once");
     assert_eq!(
         first_controller.generation().0,
@@ -349,4 +529,96 @@ fn crash_after_op_apply_before_ack_restarts_without_lost_or_double_applied_captu
     );
     assert_eq!(restarted.tracked_len(), 1);
     assert!(!restarted.is_dirty());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn batch_crash_seam_fires_once_after_the_committed_prefix() {
+    use dohc_engine_storage::FaultPoint;
+    use dohc_engine_testkit::ScriptedFaults;
+
+    let ws = Scratch::new();
+    ws.write("a.md", b"alpha");
+    ws.write("b.md", b"bravo");
+    ws.write("c.md", b"charlie");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut first_controller = ReconcileController::new();
+    let first_plan = completed(
+        first_controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::CaptureAfterOpApplyBeforeAck);
+    let mut sink = TwoAtATimeSink::default();
+    let crashed = apply_then_ack(
+        &mut first_controller,
+        &first_plan,
+        &mut sink,
+        faults.as_ref(),
+    )
+    .expect("simulated crash result");
+
+    assert_eq!(
+        crashed.crashed_after_durable_boundary.as_deref(),
+        Some("b.md"),
+        "the seam labels the last path in the committed batch, not its first outcome"
+    );
+    assert_eq!(sink.0.moments, 2, "one two-path batch committed");
+    assert_eq!(sink.0.calls, ["a.md", "b.md"]);
+    assert_eq!(
+        first_controller.generation().0,
+        0,
+        "no ack crossed the seam"
+    );
+
+    let mut restarted = ReconcileController::new();
+    let retry_plan = completed(
+        restarted
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("restart prepare"),
+    );
+    let retried = apply_then_ack(&mut restarted, &retry_plan, &mut sink, &NoFaults)
+        .expect("restart apply/ack");
+    assert!(retried.failed_applies.is_empty());
+    assert_eq!(
+        sink.0.moments, 3,
+        "replay dedupes the committed prefix and appends only the remaining path"
+    );
+    assert_eq!(restarted.tracked_len(), 3);
+    assert!(!restarted.is_dirty());
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn uncertain_batch_prefix_does_not_poll_the_post_commit_crash_seam() {
+    use dohc_engine_storage::FaultPoint;
+    use dohc_engine_testkit::ScriptedFaults;
+
+    let ws = Scratch::new();
+    ws.write("a.md", b"a");
+    ws.write("b.md", b"b");
+    let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
+    let mut controller = ReconcileController::new();
+    let plan = completed(
+        controller
+            .reconcile(&scanner, ws.path(), &CancellationToken::new())
+            .expect("prepare"),
+    );
+    let faults = ScriptedFaults::crash_at(FaultPoint::CaptureAfterOpApplyBeforeAck);
+    let mut sink = ReportingBatchSink {
+        reported: Some(BatchIngestResult::Uncertain { attempted: 2 }),
+        ordinary_calls: Vec::new(),
+    };
+
+    let result = apply_reconcile_plan_cancellable(
+        &plan,
+        &mut sink,
+        faults.as_ref(),
+        &CancellationToken::new(),
+    );
+
+    assert_eq!(result.failed_applies, ["a.md", "b.md"]);
+    assert!(result.crashed_after_durable_boundary.is_none());
+    assert!(!faults.fired());
+    assert!(sink.ordinary_calls.is_empty());
 }

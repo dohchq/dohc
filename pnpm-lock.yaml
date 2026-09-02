@@ -733,6 +733,9 @@ importers:
 
   services/share-web:
     dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../../packages/security-contract
       '@dohc/workspace-contracts':
         specifier: workspace:*
         version: link:../../packages/workspace-contracts

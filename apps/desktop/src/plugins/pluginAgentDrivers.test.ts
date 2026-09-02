@@ -1,4 +1,4 @@
-import { cp, mkdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ import {
   type AgentSession,
 } from "../agents/AgentDriver";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
-import { createTestScratch } from "../workspaces/testTemp";
+import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginChildProcessBroker } from "./pluginChildProcessBroker";
 import {
@@ -37,9 +37,7 @@ const liveBrokers: PluginChildProcessBroker[] = [];
 afterEach(async () => {
   await Promise.allSettled(liveHosts.splice(0).map((host) => host.stopAll()));
   await Promise.allSettled(liveBrokers.splice(0).map((broker) => broker.dispose()));
-  await Promise.all(
-    scratchRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
+  await Promise.all(scratchRoots.splice(0).map((root) => removeTestScratch(root)));
 });
 
 async function until<T>(
@@ -70,6 +68,7 @@ interface DriverFixture {
   host: PluginHost;
   workspaceRoot: string;
   heartbeatPath: string;
+  disposedPath: string;
   warnings: string[];
   pluginStderr: () => string[];
 }
@@ -91,6 +90,7 @@ async function startDriverPlugin(
   const pluginRoot = join(root, "plugins", "driver-plugin");
   await cp(driverPluginSource, pluginRoot, { recursive: true });
   const heartbeatPath = join(workspaceRoot, "harness-heartbeat.txt");
+  const disposedPath = join(workspaceRoot, "session-disposed.txt");
 
   const broker = new PluginChildProcessBroker({
     dohcDir: root,
@@ -106,6 +106,10 @@ async function startDriverPlugin(
         if (!host) throw new Error("The plugin host is not running.");
         return host.requestDriver(pluginId, spawnId, method, params);
       },
+      stopDriverSpawn: (pluginId, spawnId) => {
+        if (!host) return Promise.resolve();
+        return host.stopDriverSpawn(pluginId, spawnId);
+      },
     },
     reservedDriverIds: BUILT_IN_DRIVER_IDS,
     onWarning: (message) => warnings.push(message),
@@ -119,6 +123,7 @@ async function startDriverPlugin(
       env: {
         DOHC_PLUGIN_FIXTURE_MODE: mode,
         DOHC_DRIVER_FIXTURE_HEARTBEAT: heartbeatPath,
+        DOHC_DRIVER_FIXTURE_DISPOSED: disposedPath,
       },
       detached: true,
       label: `plugin ${params.pluginId}`,
@@ -171,6 +176,7 @@ async function startDriverPlugin(
     host,
     workspaceRoot,
     heartbeatPath,
+    disposedPath,
     warnings,
     pluginStderr: () => host?.getStderrLog("driver-plugin") ?? [],
   };
@@ -410,6 +416,32 @@ describe("plugin agent drivers, through the real plugin process", () => {
       await expect(startSession(fixture)).rejects.toThrow(
         /resumeCursor must be JSON data/,
       );
+      expect(await readFile(fixture.disposedPath, "utf8")).toBe("disposed");
+    },
+    30_000,
+  );
+
+  it.each([
+    "invalid-session-cleanup-hangs",
+    "invalid-session-cleanup-rejects",
+  ])(
+    "stops the plugin process tree when %s",
+    async (mode) => {
+      const fixture = await startDriverPlugin(mode);
+
+      await expect(startSession(fixture)).rejects.toThrow(
+        /resumeCursor must be JSON data.*Session cleanup also failed/,
+      );
+      const harnessPid = Number.parseInt(
+        await readFile(fixture.disposedPath, "utf8"),
+        10,
+      );
+      expect(Number.isSafeInteger(harnessPid)).toBe(true);
+      await until(
+        () => (isAlive(harnessPid) ? undefined : true),
+        "the rejected session's harness to stop",
+      );
+      expect(fixture.drivers.list()).toEqual([]);
     },
     30_000,
   );
@@ -564,6 +596,7 @@ describe("the plugin driver registry", () => {
           calls.push({ method, params });
           return {} as T;
         },
+        stopDriverSpawn: async () => {},
       },
       reservedDriverIds: BUILT_IN_DRIVER_IDS,
       onWarning: (message) => warnings.push(message),

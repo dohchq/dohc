@@ -16,6 +16,7 @@ import {
   createListJoinedSharedChannelsIpcHandler,
   createMarkChatThreadReadIpcHandler,
   createSetChatReactionIpcHandler,
+  createWritableChatIpcHandler,
   reactionsForViewer,
   readRelayChatShareLanes,
   RelaySessionError,
@@ -1426,8 +1427,8 @@ describe("chat scope write gate (#646 PR2)", () => {
       kind: "share",
       workspace: { workspaceId },
       access: "comment",
+      genericChatWritable: true,
       ended: false,
-      authorUserId: "recipient",
       ...over,
     };
   }
@@ -1479,7 +1480,7 @@ describe("chat scope write gate (#646 PR2)", () => {
       }),
     );
     await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
     expect(
       run,
@@ -1498,7 +1499,7 @@ describe("chat scope write gate (#646 PR2)", () => {
       }),
     );
     await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).rejects.toThrow(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
     expect(
       run,
@@ -1506,9 +1507,18 @@ describe("chat scope write gate (#646 PR2)", () => {
     ).not.toHaveBeenCalled();
   });
 
-  it("runs the same mutation at comment and at edit", async () => {
-    for (const access of ["comment", "edit"] as const) {
-      const { ipc, run, deps } = harnessFor(shareScope({ access }));
+  it("refuses generic chat before the store when effective append authority is false or missing", async () => {
+    for (const [label, scope] of [
+      ["dependent Comment", shareScope({ genericChatWritable: false })],
+      [
+        "missing capability",
+        {
+          ...shareScope({}),
+          genericChatWritable: undefined,
+        } as unknown as ChatScope,
+      ],
+    ] as const) {
+      const { ipc, run, deps } = harnessFor(scope);
       ipc.handle(
         CHANNELS.setChatReaction,
         createSetChatReactionIpcHandler({
@@ -1518,10 +1528,64 @@ describe("chat scope write gate (#646 PR2)", () => {
           queueCloudSync: () => undefined,
         }),
       );
-      await expect(ipc.invoke(CHANNELS.setChatReaction, { workspaceId })).resolves.toEqual({
-        ok: true,
-      });
-      expect(run, access).toHaveBeenCalledTimes(1);
+      await expect(
+        ipc.invoke(CHANNELS.setChatReaction, { workspaceId }),
+        label,
+      ).rejects.toThrow("Chats are read-only in this shared view.");
+      expect(run, `MUTATION: ${label} committed before its authority gate`).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses thread creation before the store for an independent Comment share", async () => {
+    const { ipc, deps } = harnessFor(
+      shareScope({ access: "comment", genericChatWritable: true }),
+    );
+    const createThread = vi.fn(async () => ({ ok: true }));
+    ipc.handle(
+      CHANNELS.createFileChat,
+      createWritableChatIpcHandler({
+        ...deps,
+        assertWritable: assertChatWritable,
+        run: createThread,
+      }),
+    );
+
+    const outcome = await ipc
+      .invoke(CHANNELS.createFileChat, { workspaceId })
+      .then(() => "answered", (error: unknown) => String(error));
+    expect(
+      createThread,
+      "MUTATION: genericChatWritable admitted a received-share thread row",
+    ).not.toHaveBeenCalled();
+    expect(outcome).toContain("Chats are read-only in this shared view.");
+  });
+
+  it("refuses message and decision mutations before the store for an Edit share", async () => {
+    for (const [channel, label] of [
+      [CHANNELS.sendChatMessage, "message"],
+      [CHANNELS.resolveChatDecision, "decision"],
+    ] as const) {
+      const { ipc, deps } = harnessFor(
+        shareScope({ access: "edit", genericChatWritable: true }),
+      );
+      const writeRow = vi.fn(async () => ({ ok: true }));
+      ipc.handle(
+        channel,
+        createWritableChatIpcHandler({
+          ...deps,
+          assertWritable: assertChatWritable,
+          run: writeRow,
+        }),
+      );
+
+      const outcome = await ipc
+        .invoke(channel, { workspaceId })
+        .then(() => "answered", (error: unknown) => String(error));
+      expect(
+        writeRow,
+        `MUTATION: genericChatWritable admitted a received-share ${label} row`,
+      ).not.toHaveBeenCalled();
+      expect(outcome, label).toContain("Chats are read-only in this shared view.");
     }
   });
 

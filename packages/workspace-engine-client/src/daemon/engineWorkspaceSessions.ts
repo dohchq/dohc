@@ -2,6 +2,7 @@ import {
   DaemonRefusalError,
   isDaemonReconnectError,
   isEngineStoreBusyRefusal,
+  isWorkspaceUpdatingRefusal,
   isYdocOpenOperationCrashedRefusal,
   isYdocOpenStorageFailureRefusal,
   isYdocSessionBusyRefusal,
@@ -91,11 +92,11 @@ export interface EngineWorkspaceSessionsOptions {
   now?: () => number;
   /**
    * Deadline for a single daemon `workspace.open`. Defaults to
-   * WORKSPACE_OPEN_DEADLINE_MS, which is the product guarantee about
-   * workspace-open latency — production must not pass anything else. Test
-   * harnesses that run many daemons at once can raise it, because there the
-   * cause of a missed deadline is suite contention rather than the code under
-   * test.
+   * WORKSPACE_OPEN_DEADLINE_MS. An application may pass a larger positive
+   * integer within the supported timer range when measured work is deliberately
+   * part of `workspace.open`. Test harnesses may also account for aggregate
+   * suite contention. This changes only the request deadline, never when a
+   * handle becomes usable.
    */
   workspaceOpenDeadlineMs?: number;
 }
@@ -218,8 +219,9 @@ export class EngineWorkspaceShuttingDownError extends Error {
 
 // The refusals a document open must NOT answer with the writable plain editor.
 // Each means the same thing to the surface — the engine did not open this
-// document, and may still own it — so each keeps it read-only
-// (#533/#564/#616).
+// document, and the writable plain editor is not safe. The engine may still
+// own the document, or initial capture may not have installed its head yet,
+// so each keeps it read-only (#533/#564/#616).
 //
 // `ydoc-session-busy` is the daemon SAYING SO, and it is not scoped to the
 // timeout that motivated it. Whenever a lease is held, the daemon's Y.Doc is
@@ -234,6 +236,7 @@ export function isEngineWorkspaceOpenRefusedError(error: unknown): boolean {
     error instanceof EngineWorkspaceRetryDeadlineError ||
     error instanceof EngineWorkspaceShuttingDownError ||
     error instanceof YdocOpenTimedOutError ||
+    isWorkspaceUpdatingRefusal(error) ||
     isYdocSessionBusyRefusal(error) ||
     isYdocArtifactAssetsPendingRefusal(error) ||
     isYdocArtifactAssetsInvalidRefusal(error) ||

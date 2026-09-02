@@ -76,6 +76,8 @@ Settle first: whether previous values in event payloads truncate for large text 
 
 Gate: a plugin subscribed on device B receives the field-change event for an edit made on device A, through sync, in the e2e suite. Capability tests prove path scoping: a plugin granted one collection cannot read or write another. An agent-side walkthrough mirrors the Phase 2 human walkthrough: an agent creates a collection and its records through file writes, sets fields through MCP tools, and queries the result, while an open desktop view reflects every step live; record history attributes each change to the agent.
 
+The gate also requires one cross-program conformance test with the share-links program: share a collection, converge a named-user edit across devices, prove a link holder sees the converged state, revoke the share, and prove collection operations over the share stop. The two programs are compatible by construction — collections ride `ydoc.update`, shares select paths, and ADR 0004's lane is a collection under a create-only grant — but this test is the first thing that proves it.
+
 ## Phase 4: automations
 
 - Settle first, as an ADR: the exactly-one-executor design. No cross-device lease exists; the collab leases are process-local. The nearest prior art is the chat dispatch claim ledger journaled in engine.db; evaluate extending that pattern before inventing one.

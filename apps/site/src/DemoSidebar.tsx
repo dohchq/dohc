@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import type {
   EngineMomentRecord,
   WorkspaceFileEntry,
@@ -91,7 +91,27 @@ export function DemoSidebar(props: {
   const [openTabs, setOpenTabs] = useState<string[]>(() =>
     props.documents.slice(0, 5).map((document) => document.path),
   );
-  const search = useWorkspaceSearch("marketing-demo");
+  const [searchError, setSearchError] = useState<{
+    message: string;
+    retry: () => void;
+  } | null>(null);
+  const reportSearchError = useCallback((error: unknown, retry: () => void) => {
+    const fallback = "dohc could not search this workspace.";
+    const detail = error instanceof Error ? error.message.trim() : "";
+    setSearchError({
+      message:
+        detail && detail !== fallback && !detail.startsWith(`${fallback} `)
+          ? `${fallback} ${detail}`
+          : detail || fallback,
+      retry,
+    });
+  }, []);
+  const clearSearchError = useCallback(() => setSearchError(null), []);
+  const search = useWorkspaceSearch(
+    "marketing-demo",
+    reportSearchError,
+    clearSearchError,
+  );
   const files = useMemo<WorkspaceFileEntry[]>(
     () =>
       props.documents.map((document) => ({
@@ -202,7 +222,28 @@ export function DemoSidebar(props: {
           onNewFileDialog={props.onCreateDocument}
         />
       ) : props.activePanel === "search" ? (
-        <SearchView search={search} onOpenResult={(path) => open(path)} />
+        <div className="flex min-h-0 flex-1 flex-col">
+          {searchError ? (
+            <div
+              role="alert"
+              className="flex min-h-8 shrink-0 items-center gap-2 border-b border-line bg-danger/10 px-3 text-[12px] text-danger"
+            >
+              <span className="min-w-0 flex-1 truncate">{searchError.message}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const retry = searchError.retry;
+                  setSearchError(null);
+                  retry();
+                }}
+                className="h-6 shrink-0 cursor-pointer rounded border border-danger/40 px-2 text-[11px] transition-colors hover:bg-danger/10"
+              >
+                Try again
+              </button>
+            </div>
+          ) : null}
+          <SearchView search={search} onOpenResult={(path) => open(path)} />
+        </div>
       ) : props.activePanel === "chats" ? (
         <ChatsView
           workspaceId="marketing-demo"

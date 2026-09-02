@@ -161,6 +161,15 @@ describe("EngineWorkspaceSessions", () => {
     ).toBe(false);
   });
 
+  it("recognizes the initial-capture workspace-updating refusal", () => {
+    const refusal = daemonRefusal(
+      "OVERLOADED",
+      "Workspace is still updating. Try again.",
+      "afterBackoff",
+    );
+    expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+  });
+
   it("keeps a canonical scene read-only when linked asset authority is corrupt", () => {
     const refusal = new DaemonRefusalError(
       {

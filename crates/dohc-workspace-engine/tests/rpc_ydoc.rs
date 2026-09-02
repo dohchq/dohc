@@ -102,7 +102,29 @@ async fn open_workspace(
         )
         .await
         .expect("workspace open");
-    serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle")
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut status_id = id.saturating_add(1_000_000);
+    loop {
+        let status = transport
+            .call(
+                RequestContext::unbounded(),
+                request(status_id, "watcher.status", Some(handle.clone()), json!({})),
+            )
+            .await
+            .expect("watcher.status");
+        status_id += 1;
+        if status.result["phase"] == json!("ready") {
+            return handle;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "startup capture never became ready: {}",
+            status.result
+        );
+        tokio::task::yield_now().await;
+    }
 }
 
 fn write_file(root: &Path, path: &str, bytes: &[u8]) {

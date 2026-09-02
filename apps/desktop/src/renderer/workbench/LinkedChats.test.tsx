@@ -63,8 +63,178 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.clearAllMocks();
+});
+
+describe("LinkedChatsPanel startup", () => {
+  it("keeps loading and retries while the workspace import is still settling", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats
+      .mockResolvedValueOnce({
+        status: "refused",
+        code: "workspace-updating",
+      })
+      .mockResolvedValue({ fileObjectId: "object-1", threads: [] });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("Loading Chats...")).toBeTruthy();
+    expect(screen.queryByText("Try again")).toBeNull();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+  });
+
+  it("shows an ordinary load failure without retrying it", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats.mockRejectedValue(new Error("offline"));
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("offline")).toBeTruthy();
+    expect(screen.getByText("Try again")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry an error that only has the old updating message", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats.mockRejectedValue(
+      new Error("Workspace is still updating. Try again."),
+    );
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => undefined);
+    expect(screen.getByText("Try again")).toBeTruthy();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops persistent updating retries at the limit", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats.mockResolvedValue({
+      status: "refused",
+      code: "workspace-updating",
+    });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(121_000);
+    });
+
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
+    expect(screen.getByText("Workspace is still updating. Try again.")).toBeTruthy();
+    expect(screen.getByText("Try again")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(122);
+
+    bridgeMock.listFileChats.mockResolvedValueOnce({
+      fileObjectId: "object-1",
+      threads: [],
+    });
+    await act(async () => screen.getByText("Try again").click());
+    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(123);
+  });
+
+  it("cancels an updating retry when the selected file changes", async () => {
+    vi.useFakeTimers();
+    bridgeMock.listFileChats
+      .mockResolvedValueOnce({
+        status: "refused",
+        code: "workspace-updating",
+      })
+      .mockResolvedValue({ fileObjectId: "object-2", threads: [] });
+    const view = render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/old.md"
+        onError={() => undefined}
+      />,
+    );
+    await act(async () => undefined);
+
+    view.rerender(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/new.md"
+        onError={() => undefined}
+      />,
+    );
+    await act(async () => undefined);
+    expect(screen.getByTestId("linked-chats-panel")).toBeTruthy();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+    expect(bridgeMock.listFileChats).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      path: "docs/new.md",
+    });
+  });
+
+  it("keeps manual recovery for an ordinary load failure", async () => {
+    bridgeMock.listFileChats
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValue({ fileObjectId: "object-1", threads: [] });
+
+    render(
+      <LinkedChatsPanel
+        workspaceId="workspace-1"
+        filePath="docs/plan.md"
+        onError={() => undefined}
+      />,
+    );
+
+    const retry = await screen.findByText("Try again");
+    await act(async () => retry.click());
+    expect(await screen.findByTestId("linked-chats-panel")).toBeTruthy();
+    expect(bridgeMock.listFileChats).toHaveBeenCalledTimes(2);
+  });
 });
 
 // Mirrors the Shell's Chats panel: searchChatThread state feeding
@@ -428,7 +598,7 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-composer")).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
   });
 
@@ -438,7 +608,7 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chats-panel")).toBeTruthy());
     expect(screen.queryByTestId("linked-chat-new")).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
     expect(bridgeMock.createFileChat).not.toHaveBeenCalled();
   });
@@ -470,7 +640,7 @@ describe("LinkedChatsPanel share level", () => {
       "MUTATION: a share whose grant cannot be read must not offer a composer",
     ).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
-      "This shared file is read-only for you.",
+      "Chats are read-only in this shared view.",
     );
   });
 

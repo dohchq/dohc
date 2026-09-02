@@ -128,6 +128,18 @@ function refusalMessageOf(
   return typeof wireError.message === "string" ? wireError.message : null;
 }
 
+// Initial capture can temporarily refuse a History read or a workspace-backed
+// open. Keep the exact discriminator at the daemon boundary while the typed
+// refusal still exists; Electron does not preserve this prototype on a
+// rejected invoke.
+export function isWorkspaceUpdatingRefusal(error: unknown): boolean {
+  const message = refusalMessageOf(error, "OVERLOADED");
+  return (
+    message === "History is still updating. Try again." ||
+    message === "Workspace is still updating. Try again."
+  );
+}
+
 export function isYdocSessionNotFoundRefusal(error: unknown): boolean {
   return refusalMessageOf(error) === "ydoc-session-not-found";
 }

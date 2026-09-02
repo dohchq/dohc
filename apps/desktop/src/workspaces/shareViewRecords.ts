@@ -153,7 +153,7 @@ export function shareViewIdentitySelector(input: {
   if (!shareView || shareView.ended === true) return null;
   const grantedSelector = recordedShareSelector(shareView.grantedSelector);
   if (!grantedSelector) return null;
-  if (grantedSelector.access === "view") return null;
+  if (grantedSelector.access !== "edit") return null;
   if (!relayUrl) return null;
   if (shareView.relayUrl && !relayUrlsMatch(relayUrl, shareView.relayUrl)) {
     return null;

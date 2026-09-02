@@ -85,7 +85,9 @@ export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
-// MOMENT id, not legacy change-set id.
+// MOMENT id, not legacy change-set id. The id alone is the tab identity: it
+// is contract-bounded, while a percent-encoded valid workspace path can
+// exceed the UI-state path bound. The moment record supplies its display path.
 export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 // A collection folder opened as its views (Phase 2 collections). Keyed by
 // the folder path, so reopening re-activates instead of duplicating.

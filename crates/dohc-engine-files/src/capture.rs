@@ -1,15 +1,15 @@
-//! Two-phase reconcile capture: apply one operation, then acknowledge it.
+//! Two-phase reconcile capture: durably apply operations, then acknowledge them.
 //!
-//! Each [`CaptureOp`](crate::reconcile::CaptureOp) is sent to its sink in a
-//! separate call. A bad path is recorded and the remaining bounded batch keeps
-//! moving, matching the TS desktop capture chain's per-path transaction
-//! posture. Only successfully applied paths enter the acknowledgement receipt;
-//! failed paths retain their prior manifest entry and keep the controller dirty
-//! for retry.
+//! The default path sends each [`CaptureOp`](crate::reconcile::CaptureOp) to its
+//! sink separately. A sink may durably batch a bounded all-ingest plan while
+//! preserving one outcome per path. Only successfully applied paths enter the
+//! acknowledgement receipt; failed paths retain their prior manifest entry and
+//! keep the controller dirty for retry.
 //!
-//! The crash seam sits after the sink call and before the receipt records that
-//! path. A restart may therefore reapply an operation whose domain transaction
-//! already committed. That is safe by contract: text/secret writes are
+//! The crash seam sits after one durable sink unit—an ordinary operation or a
+//! committed batch prefix—and before the receipt records that unit. A restart
+//! may therefore reapply domain transactions that already committed. That is
+//! safe by contract: text/secret writes are
 //! content-equality no-ops and deletes are absent-tip no-ops. The manifest is
 //! never advanced past an unapplied path, while redundant replay cannot append
 //! a second user-visible moment. Together those two halves prevent both lost
@@ -20,6 +20,7 @@
 //! `SecretFileStore`, and skip `Ignored` using [`crate::policy`], without
 //! introducing the forbidden files -> domain dependency cycle.
 
+use crate::CancellationToken;
 use crate::error::FilesError;
 use crate::reconcile::{CaptureOp, IngestReason, ReconcileController, ReconcilePlan};
 use dohc_engine_storage::FaultInjector;
@@ -61,8 +62,21 @@ pub struct CapturedIngest {
     pub sha256: String,
 }
 
-/// The narrow downstream contract. Each call is one idempotent domain
-/// transaction; the capture loop never batches multiple paths into one commit.
+/// Result of attempting one bounded batch prefix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BatchIngestResult {
+    /// The returned outcomes committed together and align with the same-size
+    /// prefix of the requested operations.
+    Committed(Vec<Result<IngestOutcome, CaptureError>>),
+    /// The sink could not certify a commit for this many leading operations.
+    /// They remain dirty and the capture crash seam must not be polled.
+    Uncertain { attempted: usize },
+}
+
+/// The narrow downstream contract. The default path applies one idempotent
+/// domain transaction per operation. A sink may override [`Self::ingest_batch`]
+/// when it can commit a bounded all-ingest plan atomically while returning one
+/// durable outcome per path.
 pub trait CaptureSink {
     fn ingest(
         &mut self,
@@ -74,6 +88,16 @@ pub trait CaptureSink {
     ) -> Result<IngestOutcome, CaptureError>;
 
     fn retire(&mut self, path: &str) -> Result<(), CaptureError>;
+
+    /// Try one bounded all-ingest prefix. `None` asks the capture loop to use
+    /// the ordinary per-operation contract for the whole plan. A committed
+    /// result is one durability boundary; its non-empty outcomes must align
+    /// with a prefix of `ops`. An uncertain result likewise consumes a
+    /// non-empty prefix, but certifies no commit and therefore receives no
+    /// post-commit crash poll.
+    fn ingest_batch(&mut self, _ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        None
+    }
 }
 
 /// Bounded receipt from the apply phase.
@@ -91,9 +115,10 @@ pub struct CaptureApplyResult {
     pub not_owned_paths: Vec<String>,
     /// Sink failures, in deterministic plan order. These remain dirty.
     pub failed_applies: Vec<String>,
-    /// The path applied immediately before the injected crash. It is excluded
-    /// from `applied_paths`, so a restarted controller retries it.
-    pub crashed_after_apply: Option<String>,
+    /// The last path in the durable unit committed immediately before the
+    /// injected crash. The whole plan remains unacknowledged, so a restarted
+    /// controller safely retries that unit and any earlier committed units.
+    pub crashed_after_durable_boundary: Option<String>,
     /// Scan degradation or any contained apply failure.
     pub degraded: bool,
 }
@@ -101,7 +126,7 @@ pub struct CaptureApplyResult {
 impl CaptureApplyResult {
     /// Whether the apply phase reached the end without the crash seam firing.
     pub fn completed(&self) -> bool {
-        self.crashed_after_apply.is_none()
+        self.crashed_after_durable_boundary.is_none()
     }
 }
 
@@ -117,23 +142,65 @@ fn should_crash(_faults: &dyn FaultInjector) -> bool {
     false
 }
 
-/// Apply a prepared plan one operation at a time. Sink errors are contained and
-/// surfaced in the receipt; the loop continues with the next independent path.
+/// Apply a prepared plan. Sink errors are contained and surfaced in the
+/// receipt; independent paths continue.
 pub fn apply_reconcile_plan(
     plan: &ReconcilePlan,
     sink: &mut dyn CaptureSink,
     faults: &dyn FaultInjector,
 ) -> CaptureApplyResult {
-    let mut applied_paths = Vec::with_capacity(plan.ops.len());
-    let mut captured = Vec::new();
-    let mut not_owned_paths = Vec::new();
-    let mut failed_applies = Vec::new();
-    for op in &plan.ops {
-        enum Applied {
-            Ingested { size: u64, sha256: String },
-            Retired,
-            NotOwned,
+    apply_reconcile_plan_cancellable(plan, sink, faults, &CancellationToken::new())
+}
+
+/// Apply a prepared plan, stopping cooperatively between bounded sink calls.
+/// The unprocessed suffix is reported failed so acknowledgement leaves it
+/// dirty for the next startup instead of losing it during close.
+pub fn apply_reconcile_plan_cancellable(
+    plan: &ReconcilePlan,
+    sink: &mut dyn CaptureSink,
+    faults: &dyn FaultInjector,
+    cancel: &CancellationToken,
+) -> CaptureApplyResult {
+    let mut receipt = Receipt::with_capacity(plan.ops.len());
+    let mut cursor = 0;
+    let mut try_batch = true;
+    while cursor < plan.ops.len() {
+        if cancel.is_cancelled() {
+            receipt.fail_all(&plan.ops[cursor..]);
+            break;
         }
+        if try_batch {
+            match sink.ingest_batch(&plan.ops[cursor..]) {
+                Some(BatchIngestResult::Committed(outcomes)) => {
+                    let count = outcomes.len();
+                    if !valid_batch_prefix(&plan.ops[cursor..], count) {
+                        receipt.fail_all(&plan.ops[cursor..]);
+                        break;
+                    }
+                    let boundary = &plan.ops[cursor + count - 1];
+                    if should_crash(faults) {
+                        return receipt.crashed(boundary.path());
+                    }
+                    for (op, outcome) in plan.ops[cursor..cursor + count].iter().zip(outcomes) {
+                        receipt.fold(op, outcome.map(Applied::from));
+                    }
+                    cursor += count;
+                    continue;
+                }
+                Some(BatchIngestResult::Uncertain { attempted }) => {
+                    if !valid_batch_prefix(&plan.ops[cursor..], attempted) {
+                        receipt.fail_all(&plan.ops[cursor..]);
+                        break;
+                    }
+                    receipt.fail_all(&plan.ops[cursor..cursor + attempted]);
+                    cursor += attempted;
+                    continue;
+                }
+                None => try_batch = false,
+            }
+        }
+
+        let op = &plan.ops[cursor];
         let outcome = match op {
             CaptureOp::Ingest {
                 path,
@@ -144,52 +211,102 @@ pub fn apply_reconcile_plan(
                 mtime_ms: _,
                 media_type,
                 reason,
-            } => {
-                sink.ingest(path, *size, sha256, media_type, *reason)
-                    .map(|outcome| match outcome {
-                        IngestOutcome::Captured { size, sha256 } => {
-                            Applied::Ingested { size, sha256 }
-                        }
-                        IngestOutcome::NotOwned => Applied::NotOwned,
-                    })
-            }
+            } => sink
+                .ingest(path, *size, sha256, media_type, *reason)
+                .map(Applied::from),
             CaptureOp::Retire { path } => sink.retire(path).map(|()| Applied::Retired),
         };
-        let Ok(outcome) = outcome else {
-            failed_applies.push(op.path().to_owned());
-            continue;
-        };
-        if should_crash(faults) {
-            return CaptureApplyResult {
-                applied_paths,
-                captured,
-                not_owned_paths,
-                failed_applies,
-                crashed_after_apply: Some(op.path().to_owned()),
-                degraded: true,
-            };
+        if outcome.is_ok() && should_crash(faults) {
+            return receipt.crashed(op.path());
         }
+        receipt.fold(op, outcome);
+        cursor += 1;
+    }
+    receipt.finish(plan.degraded)
+}
+
+fn valid_batch_prefix(ops: &[CaptureOp], count: usize) -> bool {
+    count > 0
+        && count <= ops.len()
+        && ops[..count]
+            .iter()
+            .all(|op| matches!(op, CaptureOp::Ingest { .. }))
+}
+
+enum Applied {
+    Ingested { size: u64, sha256: String },
+    Retired,
+    NotOwned,
+}
+
+impl From<IngestOutcome> for Applied {
+    fn from(outcome: IngestOutcome) -> Self {
         match outcome {
-            Applied::Ingested { size, sha256 } => {
-                applied_paths.push(op.path().to_owned());
-                captured.push(CapturedIngest {
+            IngestOutcome::Captured { size, sha256 } => Self::Ingested { size, sha256 },
+            IngestOutcome::NotOwned => Self::NotOwned,
+        }
+    }
+}
+
+struct Receipt {
+    applied_paths: Vec<String>,
+    captured: Vec<CapturedIngest>,
+    not_owned_paths: Vec<String>,
+    failed_applies: Vec<String>,
+}
+
+impl Receipt {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            applied_paths: Vec::with_capacity(capacity),
+            captured: Vec::with_capacity(capacity),
+            not_owned_paths: Vec::new(),
+            failed_applies: Vec::new(),
+        }
+    }
+
+    fn fold(&mut self, op: &CaptureOp, outcome: Result<Applied, CaptureError>) {
+        match outcome {
+            Ok(Applied::Ingested { size, sha256 }) => {
+                self.applied_paths.push(op.path().to_owned());
+                self.captured.push(CapturedIngest {
                     path: op.path().to_owned(),
                     size,
                     sha256,
                 });
             }
-            Applied::Retired => applied_paths.push(op.path().to_owned()),
-            Applied::NotOwned => not_owned_paths.push(op.path().to_owned()),
+            Ok(Applied::Retired) => self.applied_paths.push(op.path().to_owned()),
+            Ok(Applied::NotOwned) => self.not_owned_paths.push(op.path().to_owned()),
+            Err(_) => self.failed_applies.push(op.path().to_owned()),
         }
     }
-    let degraded = plan.degraded || !failed_applies.is_empty();
-    CaptureApplyResult {
-        applied_paths,
-        captured,
-        not_owned_paths,
-        failed_applies,
-        crashed_after_apply: None,
-        degraded,
+
+    fn fail_all(&mut self, ops: &[CaptureOp]) {
+        self.failed_applies
+            .extend(ops.iter().map(|op| op.path().to_owned()));
+    }
+
+    fn crashed(self, boundary_path: &str) -> CaptureApplyResult {
+        CaptureApplyResult {
+            applied_paths: self.applied_paths,
+            captured: self.captured,
+            not_owned_paths: self.not_owned_paths,
+            failed_applies: self.failed_applies,
+            crashed_after_durable_boundary: Some(boundary_path.to_owned()),
+            degraded: true,
+        }
+    }
+
+    fn finish(self, scan_degraded: bool) -> CaptureApplyResult {
+        let degraded = scan_degraded || !self.failed_applies.is_empty();
+        CaptureApplyResult {
+            applied_paths: self.applied_paths,
+            captured: self.captured,
+            not_owned_paths: self.not_owned_paths,
+            failed_applies: self.failed_applies,
+            crashed_after_durable_boundary: None,
+            degraded,
+        }
     }
 }
 

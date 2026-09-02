@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/security-contract": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
     "@excalidraw/excalidraw": "0.18.1",
     "dompurify": "3.4.13",

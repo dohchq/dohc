@@ -107,7 +107,12 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     const safeImage = article.getByRole("img", { name: "Seeded safe image" });
     await expect(safeImage).toBeVisible();
     await expect.poll(() => safeImageResponses.length).toBeGreaterThan(0);
-    await page.waitForLoadState("networkidle");
+    await expect.poll(() => safeImage.evaluate((element) =>
+      element instanceof HTMLImageElement &&
+      element.complete &&
+      element.naturalWidth === 1 &&
+      element.naturalHeight === 1
+    )).toBe(true);
 
     expect(exchangeRequests).toHaveLength(1);
     const exchangeRequestBody = record(exchangeRequests[0]!.postDataJSON());
@@ -158,32 +163,50 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
     expect(page.url().includes(seeded.secret)).toBe(false);
     expect(responseSession).not.toBe(FAKE_AUTHORED_SESSION);
 
-    const setCookie = await exchangeResponse.headerValue("set-cookie");
-    const cookieParts = setCookie?.split(";").map((part) => part.trim()) ?? [];
-    const cookieNameValue = cookieParts[0] ?? "";
-    const cookieSeparator = cookieNameValue.indexOf("=");
-    const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
-    const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
-    const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
-    expect({
-      attributes: cookieAttributes
-        .filter((attribute) => !attribute.startsWith("max-age="))
-        .sort(),
-      hasDomainAttribute: cookieAttributes.some((attribute) =>
-        attribute.startsWith("domain=")
-      ),
-      hasPositiveMaxAge: cookieAttributes.some((attribute) =>
-        /^max-age=[1-9][0-9]*$/u.test(attribute)
-      ),
-      name: cookieName,
-      valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
-    }).toEqual({
-      attributes: ["httponly", "path=/", "samesite=strict", "secure"],
-      hasDomainAttribute: false,
-      hasPositiveMaxAge: true,
-      name: `dohc_share_${responseSession}`,
-      valueHasOpaqueShape: true,
-    });
+    const cookieEvidence = (await exchangeResponse.headerValues("set-cookie"))
+      .map((setCookie) => {
+        const cookieParts = setCookie.split(";").map((part) => part.trim());
+        const cookieNameValue = cookieParts[0] ?? "";
+        const cookieSeparator = cookieNameValue.indexOf("=");
+        const cookieName = cookieSeparator < 0 ? "" : cookieNameValue.slice(0, cookieSeparator);
+        const cookieValue = cookieSeparator < 0 ? "" : cookieNameValue.slice(cookieSeparator + 1);
+        const cookieAttributes = cookieParts.slice(1).map((part) => part.toLowerCase());
+        return {
+          attributes: cookieAttributes
+            .filter((attribute) => !attribute.startsWith("max-age="))
+            .sort(),
+          hasDomainAttribute: cookieAttributes.some((attribute) =>
+            attribute.startsWith("domain=")
+          ),
+          hasPositiveMaxAge: cookieAttributes.some((attribute) =>
+            /^max-age=[1-9][0-9]*$/u.test(attribute)
+          ),
+          name: cookieName,
+          secret: cookieValue,
+          valueHasOpaqueShape: /^[A-Za-z0-9_-]{16,}$/u.test(cookieValue),
+        };
+      });
+    expect(new Set(cookieEvidence.map((cookie) => cookie.secret)).size).toBe(2);
+    expect(Object.fromEntries(cookieEvidence.map((cookie) => [cookie.name, {
+      attributes: cookie.attributes,
+      hasDomainAttribute: cookie.hasDomainAttribute,
+      hasPositiveMaxAge: cookie.hasPositiveMaxAge,
+      valueHasOpaqueShape: cookie.valueHasOpaqueShape,
+    }])))
+      .toEqual({
+        [`dohc_share_${responseSession}`]: {
+          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+          hasDomainAttribute: false,
+          hasPositiveMaxAge: true,
+          valueHasOpaqueShape: true,
+        },
+        [`dohc_share_profile_${responseSession}`]: {
+          attributes: ["httponly", "path=/", "samesite=strict", "secure"],
+          hasDomainAttribute: false,
+          hasPositiveMaxAge: true,
+          valueHasOpaqueShape: true,
+        },
+      });
 
     const shareCookies = (await context.cookies())
       .filter((cookie) => cookie.name.startsWith("dohc_share_"))
@@ -196,16 +219,28 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
         path: cookie.path,
         sameSite: cookie.sameSite,
         secure: cookie.secure,
-      }));
-    expect(shareCookies).toEqual([{
-      domain: "127.0.0.1",
-      hostOnlyEquivalent: true,
-      httpOnly: true,
-      name: `dohc_share_${responseSession}`,
-      path: "/",
-      sameSite: "Strict",
-      secure: true,
-    }]);
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+    expect(shareCookies).toEqual([
+      {
+        domain: "127.0.0.1",
+        hostOnlyEquivalent: true,
+        httpOnly: true,
+        name: `dohc_share_${responseSession}`,
+        path: "/",
+        sameSite: "Strict",
+        secure: true,
+      },
+      {
+        domain: "127.0.0.1",
+        hostOnlyEquivalent: true,
+        httpOnly: true,
+        name: `dohc_share_profile_${responseSession}`,
+        path: "/",
+        sameSite: "Strict",
+        secure: true,
+      },
+    ].sort((left, right) => left.name.localeCompare(right.name)));
     expect((await page.evaluate(() => document.cookie)).includes("dohc_share_"))
       .toBe(false);
 
@@ -240,21 +275,13 @@ test("keeps the viewer bearer and authored credential probes outside page reach"
       "src",
       `/api/view/blob/${safeBlobSha256}?session=${responseSession}`,
     );
-    expect(await safeImage.evaluate((element) =>
-      element instanceof HTMLImageElement &&
-      element.complete &&
-      element.naturalWidth === 1 &&
-      element.naturalHeight === 1
-    )).toBe(true);
-
     const finalUrl = page.url();
     await page.goto("about:blank");
     await page.goBack({ waitUntil: "domcontentloaded" });
     await expect(page.locator("article.markdown")).toContainText(
       "Viewer credential browser conformance",
     );
-    await page.waitForLoadState("networkidle");
-    expect(page.url()).toBe(finalUrl);
+    await expect(page).toHaveURL(finalUrl);
     expect(new URL(page.url()).hash).toBe("");
     expect(page.url().includes(seeded.secret)).toBe(false);
     expect(exchangeRequests).toHaveLength(1);

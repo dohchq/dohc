@@ -6,20 +6,22 @@ use dohc_engine_domain::{COLLECTION_SCHEMA_FILENAME, DomainError};
 use dohc_engine_files::media::is_text_media_type;
 use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 use dohc_engine_files::{
-    CaptureError, CaptureSink, IngestOutcome, IngestReason, MAX_CAPTURE_BINARY_BYTES,
-    MAX_CAPTURE_TEXT_BYTES,
+    BatchIngestResult, CaptureError, CaptureOp, CaptureSink, IngestOutcome, IngestReason,
+    MAX_CAPTURE_BINARY_BYTES, MAX_CAPTURE_TEXT_BYTES,
 };
 use dohc_engine_runtime::search::{
-    FilesPolicyRule, read_engine_search_policy, resolve_effective_policy,
+    FilesPolicyRule, SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy,
 };
 use dohc_engine_runtime::{
     ActorHandle, CaptureIngest, CaptureIngestBinary, CaptureRetire, CaptureSecret,
-    CaptureSecretRetire, NoFaults, RuntimeError,
+    CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
+    RuntimeError, WorkspaceRootGuard,
 };
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
 /// The encrypted store validates origins against the TS `WRITE_ORIGINS` set,
@@ -58,6 +60,10 @@ const POLICY_UNAVAILABLE: CaptureError = CaptureError {
 const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
     reason: "workspace secret key unavailable",
 };
+/// Secure file preparation is I/O-bound on Windows. Eight readers saturate
+/// that syscall path on the launch profile without competing with the actor's
+/// serialized database writer.
+const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
 /// pass stamps ONE summary + correlation id across every moment it records
@@ -200,6 +206,72 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     }
 }
 
+/// The physical directory selected for one reconcile generation.
+///
+/// A canonical pathname is not an identity: the original root can be renamed
+/// and a different directory created at the same pathname. The file id closes
+/// that gap. On Unix the open directory handle pins the inode so its number
+/// cannot be recycled while this binding is live; Windows file ids do not need
+/// that pin, and an open directory handle would prevent the replacement this
+/// guard must detect.
+pub(crate) struct CapturedRoot {
+    canonical_path: PathBuf,
+    identity: file_id::FileId,
+    #[cfg(unix)]
+    _pin: File,
+}
+
+impl WorkspaceRootGuard for CapturedRoot {
+    fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+        self.still_names(root_dir)
+            .then_some(())
+            .ok_or(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                source: None,
+            })
+    }
+}
+
+impl CapturedRoot {
+    #[cfg(unix)]
+    pub(crate) fn bind(root: &Path) -> Result<Self, CaptureError> {
+        use std::os::unix::fs::MetadataExt;
+
+        let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
+        let pin = File::open(&canonical_path).map_err(|_| ESCAPES_ROOT)?;
+        let metadata = pin.metadata().map_err(|_| ESCAPES_ROOT)?;
+        if !metadata.is_dir() {
+            return Err(ESCAPES_ROOT);
+        }
+        Ok(CapturedRoot {
+            canonical_path,
+            identity: file_id::FileId::new_inode(metadata.dev(), metadata.ino()),
+            _pin: pin,
+        })
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn bind(root: &Path) -> Result<Self, CaptureError> {
+        let canonical_path = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
+        if !canonical_path
+            .metadata()
+            .map_err(|_| ESCAPES_ROOT)?
+            .is_dir()
+        {
+            return Err(ESCAPES_ROOT);
+        }
+        let identity = file_id::get_file_id(&canonical_path).map_err(|_| ESCAPES_ROOT)?;
+        Ok(CapturedRoot {
+            canonical_path,
+            identity,
+        })
+    }
+
+    fn still_names(&self, root: &Path) -> bool {
+        file_id::get_file_id(root).is_ok_and(|current| current == self.identity)
+    }
+}
+
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
 /// The adapter is intentionally not wired into workspace open/close yet. Its
@@ -212,8 +284,13 @@ pub struct StoreCaptureSink {
     workspace_id: String,
     version_id: String,
     shadow_root: PathBuf,
+    /// The root binding is stable for one reconcile generation. Every bind
+    /// failure rejects this generation; a later rescan builds a fresh sink and
+    /// takes its policy snapshot from the directory it actually binds.
+    captured_root: Result<Arc<CapturedRoot>, CaptureError>,
     now_ms: i64,
     author_json: Option<String>,
+    search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
     /// Set when any op this run was HELD on an unreadable policy. The driver
     /// reads it after the apply to arm its policy-recovery trigger — a
@@ -268,6 +345,7 @@ impl StoreCaptureSink {
         )
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_self_writes(
         actor: ActorHandle,
@@ -281,11 +359,69 @@ impl StoreCaptureSink {
         provenance: CaptureProvenance,
     ) -> Self {
         let shadow_root = shadow_root.into();
+        // Bind before reading any root-scoped policy. A failed bind rejects
+        // this generation instead of letting a later directory inherit the
+        // absent root's default policy snapshot.
+        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+        Self::new_with_captured_root(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root,
+            captured_root,
+            now_ms,
+            author_json,
+            leases,
+            self_writes,
+            provenance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_bound_root(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: impl Into<PathBuf>,
+        captured_root: Arc<CapturedRoot>,
+        now_ms: i64,
+        author_json: Option<String>,
+        leases: LeaseRegistry,
+        self_writes: SelfWriteSuppression,
+        provenance: CaptureProvenance,
+    ) -> Self {
+        Self::new_with_captured_root(
+            actor,
+            workspace_id,
+            version_id,
+            shadow_root.into(),
+            Ok(captured_root),
+            now_ms,
+            author_json,
+            leases,
+            self_writes,
+            provenance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_captured_root(
+        actor: ActorHandle,
+        workspace_id: impl Into<String>,
+        version_id: impl Into<String>,
+        shadow_root: PathBuf,
+        captured_root: Result<Arc<CapturedRoot>, CaptureError>,
+        now_ms: i64,
+        author_json: Option<String>,
+        leases: LeaseRegistry,
+        self_writes: SelfWriteSuppression,
+        provenance: CaptureProvenance,
+    ) -> Self {
         // `.dohc/files.toml` can only NARROW engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
         // split: only a file that exists but cannot be READ makes ownership
         // unknown; malformed keeps the WS-F floor-only rule.
-        let snapshot = read_engine_search_policy(&shadow_root);
+        let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
         let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
             diagnostic.file == "files.toml"
                 && diagnostic.reason == dohc_engine_runtime::search::DiagnosticReason::Unreadable
@@ -293,7 +429,7 @@ impl StoreCaptureSink {
         let files_policy = if files_unreadable {
             PolicyState::Unavailable
         } else {
-            PolicyState::Known(snapshot.files_policy)
+            PolicyState::Known(snapshot.files_policy.clone())
         };
         StoreCaptureSink {
             actor,
@@ -301,8 +437,10 @@ impl StoreCaptureSink {
             workspace_id: workspace_id.into(),
             version_id: version_id.into(),
             shadow_root,
+            captured_root,
             now_ms,
             author_json,
+            search_policy: snapshot,
             files_policy,
             policy_held: std::cell::Cell::new(false),
             secret_key: None,
@@ -311,9 +449,54 @@ impl StoreCaptureSink {
         }
     }
 
+    fn captured_root(&self) -> Result<&CapturedRoot, CaptureError> {
+        let root = self.captured_root.as_deref().map_err(|error| *error)?;
+        root.still_names(&self.shadow_root)
+            .then_some(root)
+            .ok_or(ESCAPES_ROOT)
+    }
+
+    fn canonical_shadow_root(&self) -> Result<&Path, CaptureError> {
+        self.captured_root()
+            .map(|root| root.canonical_path.as_path())
+    }
+
+    fn require_captured_root(&self) -> Result<(), CaptureError> {
+        self.captured_root().map(|_| ())
+    }
+
+    fn root_guard(&self) -> Result<Arc<dyn WorkspaceRootGuard>, CaptureError> {
+        match &self.captured_root {
+            Ok(root) if root.still_names(&self.shadow_root) => {
+                let root = Arc::clone(root);
+                Ok(root)
+            }
+            Ok(_) => Err(ESCAPES_ROOT),
+            Err(error) => Err(*error),
+        }
+    }
+
+    fn path_containment(&self, rel_path: &str) -> Containment {
+        if self
+            .captured_root
+            .as_ref()
+            .is_ok_and(|root| !root.still_names(&self.shadow_root))
+        {
+            return Containment::Escaped;
+        }
+        path_containment_with_root(&self.shadow_root, rel_path, || self.canonical_shadow_root())
+    }
+
     fn ensure_secret_key(&mut self) -> Result<&SecretDataKey, CaptureError> {
         if self.secret_key.is_none() {
-            let key = match load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)? {
+            // Key I/O is workspace-scoped state, not a best-effort read. Check
+            // the physical root before and after every path-based operation so
+            // a renamed-and-recreated workspace cannot supply or receive this
+            // workspace's encryption key.
+            self.require_captured_root()?;
+            let loaded = load_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+            self.require_captured_root()?;
+            let key = match loaded {
                 Some(key) => key,
                 None => {
                     // NEVER mint over existing encrypted state: a missing key
@@ -329,7 +512,11 @@ impl StoreCaptureSink {
                     if has_state {
                         return Err(SECRET_KEY_UNAVAILABLE);
                     }
-                    create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?
+                    self.require_captured_root()?;
+                    let key =
+                        create_key_file(&self.shadow_root).map_err(|_| SECRET_KEY_UNAVAILABLE)?;
+                    self.require_captured_root()?;
+                    key
                 }
             };
             self.secret_key = Some(key);
@@ -346,7 +533,11 @@ impl StoreCaptureSink {
     /// pass. Adoption uses the runtime's ordinary Y.Doc update + settle path,
     /// including durable replication journaling and self-write suppression.
     pub(crate) fn reconcile_collections(&self) -> Result<Vec<String>, RuntimeError> {
-        self.actor.reconcile_collections_blocking(
+        let root_guard = self.root_guard().map_err(|_| RuntimeError::Identity {
+            reason: "workspace root changed during capture",
+            source: None,
+        })?;
+        self.actor.reconcile_collections_blocking_guarded(
             self.workspace_id.clone(),
             self.version_id.clone(),
             self.shadow_root.clone(),
@@ -354,6 +545,7 @@ impl StoreCaptureSink {
             Arc::new(self.self_writes.clone()),
             self.now_ms,
             Arc::new(NoFaults),
+            root_guard,
         )
     }
 
@@ -404,84 +596,22 @@ impl StoreCaptureSink {
     /// privilege; identity-by-handle needs APIs std does not expose) —
     /// candidate hardening for the composition driver.
     fn read_current(&self, path: &str, media_type: &str) -> Result<CurrentContent, CaptureError> {
-        let absolute = self.shadow_root.join(path);
-        match contained_parent(&self.shadow_root, path) {
+        match self.path_containment(path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(CurrentContent::Absent),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
-        // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
-        // entries are not engine-ownable); the no-follow open below is what
-        // actually closes the check-then-open race.
-        match std::fs::symlink_metadata(&absolute) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
-                return Ok(CurrentContent::NonOwnable);
-            }
-            Ok(_) => {}
-            Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
-            Err(_) => return Err(READ_FAILED),
-        }
-        let file = match open_no_follow(&absolute) {
-            NoFollowOpen::Opened(file) => file,
-            NoFollowOpen::Refused => return Ok(CurrentContent::NonOwnable),
-            NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
-            NoFollowOpen::Failed => return Err(READ_FAILED),
-        };
-        verify_opened_containment(&self.shadow_root, path, &file)?;
-        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
-        if !metadata.file_type().is_file() {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        // Between the capture cap and the SCAN cap (64 MiB) the scanner still
-        // lists the file, so a grow-past-capture-cap lands here and retires.
-        // PAST the scan cap the plan classifies it `retained_over_cap` and the
-        // sink is never called — deliberately NOT a retire: the ratified CAL-3
-        // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
-        // false-deleting live user data behind an operational scan bound.
-        // Collection schemas are a reserved engine control file. The generic
-        // scanner deliberately classifies unknown extensions as binary, but
-        // collection discovery reads this YAML from the plaintext store.
-        let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
-            || is_text_media_type(media_type, path);
-        let content_cap = if text_media {
-            MAX_CAPTURE_TEXT_BYTES
-        } else {
-            MAX_CAPTURE_BINARY_BYTES
-        };
-        if metadata.len() > content_cap {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(content_cap.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > content_cap {
-            return Ok(CurrentContent::NonOwnable);
-        }
-        if !text_media {
-            // Non-text media is engine-ownable BINARY content: the TS oracle
-            // routes it to the binary store before any UTF-8 sniffing, so a
-            // UTF-8-clean `.png` must never land in the plaintext store.
-            return Ok(CurrentContent::Binary(bytes));
-        }
-        match String::from_utf8(bytes) {
-            Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
-                // Genuine text over the text cap stays untracked (established
-                // TS behavior), even though binary of the same size would be
-                // ownable.
-                Ok(CurrentContent::NonOwnable)
-            }
-            Ok(text) => Ok(CurrentContent::Text(text)),
-            // A text-suffixed path can be binary in disguise (invalid UTF-8);
-            // the store accepts that as binary up to the binary cap.
-            Err(err)
-                if path.to_ascii_lowercase().ends_with(".excalidraw")
-                    || err.as_bytes().len() as u64 > MAX_CAPTURE_BINARY_BYTES =>
-            {
-                Ok(CurrentContent::NonOwnable)
-            }
-            Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
-        }
+        let captured_root = self.captured_root()?;
+        let content = read_contained_current(
+            &self.shadow_root,
+            &captured_root.canonical_path,
+            path,
+            media_type,
+        )?;
+        captured_root
+            .still_names(&self.shadow_root)
+            .then_some(content)
+            .ok_or(ESCAPES_ROOT)
     }
 
     // The blocking actor calls below carry no timeout; this adapter is dormant
@@ -493,7 +623,7 @@ impl StoreCaptureSink {
         text: String,
         claim_foreign_head: bool,
     ) -> Result<DomainIngest, CaptureError> {
-        match self.actor.capture_ingest_indexed_blocking(
+        match self.actor.capture_ingest_with_search_policy_blocking(
             CaptureIngest {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -507,7 +637,7 @@ impl StoreCaptureSink {
                 request_id: None,
                 claim_foreign_head,
             },
-            self.shadow_root.clone(),
+            Arc::clone(&self.search_policy),
             self.leases.clone(),
             Arc::new(NoFaults),
         ) {
@@ -577,7 +707,19 @@ impl StoreCaptureSink {
         claim_foreign_head: bool,
         suppress_self_write: bool,
     ) -> Result<IngestOutcome, CaptureError> {
-        match self.read_current_secret(path)? {
+        let content = self.read_current_secret(path)?;
+        self.ingest_secret_content(path, claim_foreign_head, suppress_self_write, content)
+    }
+
+    fn ingest_secret_content(
+        &mut self,
+        path: &str,
+        claim_foreign_head: bool,
+        suppress_self_write: bool,
+        content: SecretContent,
+    ) -> Result<IngestOutcome, CaptureError> {
+        self.require_captured_root()?;
+        match content {
             SecretContent::Text(text) => {
                 let size = text.len() as u64;
                 let sha256 = sha256_hex(text.as_bytes());
@@ -588,6 +730,7 @@ impl StoreCaptureSink {
                 }
                 self.ensure_secret_key()?;
                 let key = self.secret_key.clone().expect("key ensured just above");
+                self.require_captured_root()?;
                 match self.actor.capture_secret_blocking(
                     CaptureSecret {
                         workspace_id: self.workspace_id.clone(),
@@ -632,47 +775,59 @@ impl StoreCaptureSink {
     /// the text read, text-cap bound, UTF-8-or-untracked (no binary route).
     fn read_current_secret(&self, path: &str) -> Result<SecretContent, CaptureError> {
         let absolute = self.shadow_root.join(path);
-        match contained_parent(&self.shadow_root, path) {
+        match self.path_containment(path) {
             Containment::Contained => {}
             Containment::Absent => return Ok(SecretContent::Untracked),
             Containment::Escaped => return Err(ESCAPES_ROOT),
         }
-        match std::fs::symlink_metadata(&absolute) {
-            Ok(metadata) if !metadata.file_type().is_file() => {
+        let captured_root = self.captured_root()?;
+        let content = (|| -> Result<SecretContent, CaptureError> {
+            match std::fs::symlink_metadata(&absolute) {
+                Ok(metadata) if !metadata.file_type().is_file() => {
+                    return Ok(SecretContent::Untracked);
+                }
+                Ok(_) => {}
+                Err(err) if absent_error(&err) => return Ok(SecretContent::Untracked),
+                Err(_) => return Err(READ_FAILED),
+            }
+            let file = match open_no_follow(&absolute) {
+                NoFollowOpen::Opened(file) => file,
+                NoFollowOpen::Refused | NoFollowOpen::Absent => {
+                    return Ok(SecretContent::Untracked);
+                }
+                NoFollowOpen::Failed => return Err(READ_FAILED),
+            };
+            verify_opened_containment(
+                &self.shadow_root,
+                &captured_root.canonical_path,
+                path,
+                &file,
+            )?;
+            let metadata = file.metadata().map_err(|_| READ_FAILED)?;
+            if !metadata.file_type().is_file() || metadata.len() > MAX_CAPTURE_TEXT_BYTES {
                 return Ok(SecretContent::Untracked);
             }
-            Ok(_) => {}
-            Err(err) if absent_error(&err) => return Ok(SecretContent::Untracked),
-            Err(_) => return Err(READ_FAILED),
-        }
-        let file = match open_no_follow(&absolute) {
-            NoFollowOpen::Opened(file) => file,
-            NoFollowOpen::Refused | NoFollowOpen::Absent => return Ok(SecretContent::Untracked),
-            NoFollowOpen::Failed => return Err(READ_FAILED),
-        };
-        verify_opened_containment(&self.shadow_root, path, &file)?;
-        let metadata = file.metadata().map_err(|_| READ_FAILED)?;
-        if !metadata.file_type().is_file() {
-            return Ok(SecretContent::Untracked);
-        }
-        if metadata.len() > MAX_CAPTURE_TEXT_BYTES {
-            return Ok(SecretContent::Untracked);
-        }
-        let mut bytes = Vec::with_capacity(metadata.len() as usize);
-        file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
-            .read_to_end(&mut bytes)
-            .map_err(|_| READ_FAILED)?;
-        if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
-            return Ok(SecretContent::Untracked);
-        }
-        match String::from_utf8(bytes) {
-            Ok(text) => Ok(SecretContent::Text(text)),
-            Err(_) => Ok(SecretContent::Untracked),
-        }
+            let mut bytes = Vec::with_capacity(metadata.len() as usize);
+            file.take(MAX_CAPTURE_TEXT_BYTES.saturating_add(1))
+                .read_to_end(&mut bytes)
+                .map_err(|_| READ_FAILED)?;
+            if bytes.len() as u64 > MAX_CAPTURE_TEXT_BYTES {
+                return Ok(SecretContent::Untracked);
+            }
+            match String::from_utf8(bytes) {
+                Ok(text) => Ok(SecretContent::Text(text)),
+                Err(_) => Ok(SecretContent::Untracked),
+            }
+        })()?;
+        captured_root
+            .still_names(&self.shadow_root)
+            .then_some(content)
+            .ok_or(ESCAPES_ROOT)
     }
 
     fn retire_secret(&self, path: &str) -> Result<(), CaptureError> {
-        match self.actor.capture_secret_retire_blocking(
+        let root_guard = self.root_guard()?;
+        match self.actor.capture_secret_retire_blocking_guarded(
             CaptureSecretRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -682,7 +837,9 @@ impl StoreCaptureSink {
                 now_ms: self.now_ms,
                 only_if_own_origin: true,
             },
+            self.shadow_root.clone(),
             Arc::new(NoFaults),
+            root_guard,
         ) {
             Ok(_) => Ok(()),
             Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => Ok(()),
@@ -713,7 +870,8 @@ impl StoreCaptureSink {
         summary: Option<String>,
         allow_ydoc_origin: bool,
     ) -> Result<(), CaptureError> {
-        match self.actor.capture_retire_materialized_blocking(
+        let root_guard = self.root_guard()?;
+        match self.actor.capture_retire_materialized_blocking_guarded(
             CaptureRetire {
                 workspace_id: self.workspace_id.clone(),
                 version_id: self.version_id.clone(),
@@ -730,6 +888,7 @@ impl StoreCaptureSink {
             Arc::new(self.self_writes.clone()),
             self.leases.clone(),
             Arc::new(NoFaults),
+            root_guard,
         ) {
             Ok(_) => Ok(()),
             // A name the store refuses to address can never hold a head;
@@ -750,7 +909,263 @@ enum DomainIngest {
     ForeignHead,
 }
 
+struct PreparedTextCapture {
+    input: CaptureIngest,
+    size: u64,
+    sha256: String,
+}
+
+#[derive(Clone, Copy)]
+struct AddedTextCandidate<'a> {
+    path: &'a str,
+    media_type: &'static str,
+}
+
+struct PreparedTextContent {
+    text: String,
+    size: u64,
+    sha256: String,
+}
+
+enum PreparedTextPrefix {
+    Ready(Vec<PreparedTextContent>),
+    FallbackFirst,
+    RootMismatch { attempted: usize },
+}
+
+enum PreparedCandidate {
+    Text(PreparedTextContent),
+    Fallback,
+    RootMismatch,
+}
+
+/// Securely prepare an ordered batch prefix with a fixed reader ceiling.
+///
+/// Workers only reopen and hash files. The actor/database write remains on
+/// the caller's thread and preserves plan order. At most one worker window is
+/// retained beyond the 4 MiB actor batch, bounding speculative content to
+/// `workers * MAX_CAPTURE_TEXT_BYTES` when files grow after the scan.
+fn prepare_added_text_prefix_parallel(
+    root: &Path,
+    captured_root: &CapturedRoot,
+    candidates: &[AddedTextCandidate<'_>],
+) -> PreparedTextPrefix {
+    prepare_added_text_prefix_parallel_with(
+        candidates,
+        |candidate| {
+            read_current_with_canonical_root(
+                root,
+                captured_root,
+                candidate.path,
+                candidate.media_type,
+            )
+        },
+        || captured_root.still_names(root),
+    )
+}
+
+fn prepare_added_text_prefix_parallel_with(
+    candidates: &[AddedTextCandidate<'_>],
+    read_candidate: impl Fn(AddedTextCandidate<'_>) -> Result<CurrentContent, CaptureError> + Sync,
+    root_still_names: impl Fn() -> bool + Sync,
+) -> PreparedTextPrefix {
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(MAX_ADDED_TEXT_PREPARE_WORKERS)
+        .min(candidates.len());
+    let mut pending = Vec::with_capacity(candidates.len());
+    let mut pending_bytes = 0usize;
+
+    std::thread::scope(|scope| {
+        let (result_tx, result_rx) = mpsc::sync_channel::<(usize, PreparedCandidate)>(workers);
+        let mut task_txs = Vec::with_capacity(workers);
+
+        for _ in 0..workers {
+            let (task_tx, task_rx) = mpsc::sync_channel::<usize>(1);
+            task_txs.push(task_tx);
+            let result_tx = result_tx.clone();
+            let read_candidate = &read_candidate;
+            let root_still_names = &root_still_names;
+            scope.spawn(move || {
+                while let Ok(index) = task_rx.recv() {
+                    let candidate = candidates[index];
+                    let prepared = match read_candidate(candidate) {
+                        Ok(CurrentContent::Text(text)) => {
+                            let size = text.len() as u64;
+                            let sha256 = sha256_hex(text.as_bytes());
+                            PreparedCandidate::Text(PreparedTextContent { text, size, sha256 })
+                        }
+                        Ok(
+                            CurrentContent::Binary(_)
+                            | CurrentContent::Absent
+                            | CurrentContent::NonOwnable,
+                        ) => PreparedCandidate::Fallback,
+                        Err(error) if error == ESCAPES_ROOT && !root_still_names() => {
+                            PreparedCandidate::RootMismatch
+                        }
+                        Err(_) => PreparedCandidate::Fallback,
+                    };
+                    if result_tx.send((index, prepared)).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        drop(result_tx);
+
+        'windows: for window_start in (0..candidates.len()).step_by(workers) {
+            let window_end = (window_start + workers).min(candidates.len());
+            for (task_tx, index) in task_txs.iter().zip(window_start..window_end) {
+                if task_tx.send(index).is_err() {
+                    return if pending.is_empty() {
+                        PreparedTextPrefix::FallbackFirst
+                    } else {
+                        PreparedTextPrefix::Ready(pending)
+                    };
+                }
+            }
+
+            let mut window = (window_start..window_end)
+                .map(|_| None)
+                .collect::<Vec<Option<PreparedCandidate>>>();
+            for _ in window_start..window_end {
+                let Ok((index, prepared)) = result_rx.recv() else {
+                    return if pending.is_empty() {
+                        PreparedTextPrefix::FallbackFirst
+                    } else {
+                        PreparedTextPrefix::Ready(pending)
+                    };
+                };
+                window[index - window_start] = Some(prepared);
+            }
+
+            if window
+                .iter()
+                .any(|prepared| matches!(prepared, Some(PreparedCandidate::RootMismatch)))
+            {
+                return PreparedTextPrefix::RootMismatch {
+                    attempted: window_end,
+                };
+            }
+
+            for prepared in window {
+                let Some(PreparedCandidate::Text(prepared)) = prepared else {
+                    if pending.is_empty() {
+                        return PreparedTextPrefix::FallbackFirst;
+                    }
+                    break 'windows;
+                };
+                let text_bytes = prepared.text.len();
+                if text_bytes > MAX_CAPTURE_INGEST_BATCH_BYTES {
+                    if pending.is_empty() {
+                        return PreparedTextPrefix::FallbackFirst;
+                    }
+                    break 'windows;
+                }
+                if !pending.is_empty()
+                    && (pending.len() >= MAX_CAPTURE_INGEST_BATCH_OPS
+                        || pending_bytes.saturating_add(text_bytes)
+                            > MAX_CAPTURE_INGEST_BATCH_BYTES)
+                {
+                    break 'windows;
+                }
+                pending_bytes = pending_bytes.saturating_add(text_bytes);
+                pending.push(prepared);
+            }
+        }
+        drop(task_txs);
+        PreparedTextPrefix::Ready(pending)
+    })
+}
+
 impl StoreCaptureSink {
+    fn prepared_text_capture(
+        &self,
+        candidate: AddedTextCandidate<'_>,
+        prepared: PreparedTextContent,
+    ) -> PreparedTextCapture {
+        PreparedTextCapture {
+            input: CaptureIngest {
+                workspace_id: self.workspace_id.clone(),
+                version_id: self.version_id.clone(),
+                path: candidate.path.to_owned(),
+                text: prepared.text,
+                metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+                metadata_summary: self.provenance.summary.clone(),
+                metadata_correlation_id: self.provenance.correlation_id.clone(),
+                author_json: self.author_json.clone(),
+                now_ms: self.now_ms,
+                request_id: None,
+                claim_foreign_head: false,
+            },
+            size: prepared.size,
+            sha256: prepared.sha256,
+        }
+    }
+
+    fn ingest_single_added_op(&mut self, op: &CaptureOp) -> BatchIngestResult {
+        let CaptureOp::Ingest {
+            path,
+            size,
+            sha256,
+            media_type,
+            reason,
+            ..
+        } = op
+        else {
+            unreachable!("the batch path only receives Added ingests");
+        };
+        match self.ingest(path, *size, sha256, media_type, *reason) {
+            Ok(outcome) => BatchIngestResult::Committed(vec![Ok(outcome)]),
+            Err(_) => BatchIngestResult::Uncertain { attempted: 1 },
+        }
+    }
+
+    fn commit_added_text_batch(&self, batch: Vec<PreparedTextCapture>) -> BatchIngestResult {
+        let root_guard = match self.root_guard() {
+            Ok(root_guard) => root_guard,
+            Err(_) => {
+                return BatchIngestResult::Uncertain {
+                    attempted: batch.len(),
+                };
+            }
+        };
+        let mut inputs = Vec::with_capacity(batch.len());
+        let mut identities = Vec::with_capacity(batch.len());
+        for prepared in batch {
+            inputs.push(prepared.input);
+            identities.push((prepared.size, prepared.sha256));
+        }
+        let results = self.actor.capture_ingest_batch_blocking(
+            inputs,
+            Arc::clone(&self.search_policy),
+            self.leases.clone(),
+            Arc::new(NoFaults),
+            self.shadow_root.clone(),
+            root_guard,
+        );
+        match results {
+            Ok(results) if results.len() == identities.len() => {
+                let mut outcomes = Vec::with_capacity(results.len());
+                for (result, (size, sha256)) in results.into_iter().zip(identities) {
+                    outcomes.push(match result {
+                        Ok(_) | Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
+                            Ok(IngestOutcome::Captured { size, sha256 })
+                        }
+                        Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
+                            Ok(IngestOutcome::NotOwned)
+                        }
+                        Err(_) => Err(INGEST_FAILED),
+                    });
+                }
+                BatchIngestResult::Committed(outcomes)
+            }
+            Ok(_) | Err(_) => BatchIngestResult::Uncertain {
+                attempted: identities.len(),
+            },
+        }
+    }
+
     /// Retire a path the CURRENT policy excludes, WITHOUT the absence check.
     ///
     /// The driver calls this for `retained_over_cap` paths: they are still on
@@ -772,6 +1187,66 @@ impl StoreCaptureSink {
 }
 
 impl CaptureSink for StoreCaptureSink {
+    fn ingest_batch(&mut self, ops: &[CaptureOp]) -> Option<BatchIngestResult> {
+        if ops.len() < 2
+            || ops.iter().any(|op| {
+                !matches!(
+                    op,
+                    CaptureOp::Ingest {
+                        reason: IngestReason::Added,
+                        ..
+                    }
+                )
+            })
+        {
+            return None;
+        }
+
+        let mut candidates = Vec::with_capacity(MAX_CAPTURE_INGEST_BATCH_OPS);
+        for op in ops.iter().take(MAX_CAPTURE_INGEST_BATCH_OPS) {
+            let CaptureOp::Ingest {
+                path, media_type, ..
+            } = op
+            else {
+                unreachable!("all operations were checked as Added ingests");
+            };
+            if !matches!(
+                classify_engine_file_path_normalized(path),
+                (PathClassification::Tracked, Some(normalized)) if normalized == path.as_str()
+            ) || !self.policy_tracks(path).unwrap_or(false)
+            {
+                break;
+            }
+            candidates.push(AddedTextCandidate { path, media_type });
+        }
+        if candidates.is_empty() {
+            return Some(self.ingest_single_added_op(&ops[0]));
+        }
+
+        let captured_root = match self.captured_root() {
+            Ok(root) => root,
+            Err(_) => return Some(self.ingest_single_added_op(&ops[0])),
+        };
+        let prepared =
+            prepare_added_text_prefix_parallel(&self.shadow_root, captured_root, &candidates);
+        let prepared = match prepared {
+            PreparedTextPrefix::Ready(prepared) => prepared,
+            PreparedTextPrefix::FallbackFirst => {
+                return Some(self.ingest_single_added_op(&ops[0]));
+            }
+            PreparedTextPrefix::RootMismatch { attempted } => {
+                return Some(BatchIngestResult::Uncertain { attempted });
+            }
+        };
+        debug_assert!(!prepared.is_empty());
+        let pending = candidates
+            .into_iter()
+            .zip(prepared)
+            .map(|(candidate, prepared)| self.prepared_text_capture(candidate, prepared))
+            .collect();
+        Some(self.commit_added_text_batch(pending))
+    }
+
     fn ingest(
         &mut self,
         path: &str,
@@ -940,7 +1415,7 @@ impl CaptureSink for StoreCaptureSink {
                 // retire (a delete never decrypts). Mirrors the text arm's
                 // reappearance refusal.
                 let absolute = self.shadow_root.join(path);
-                match contained_parent(&self.shadow_root, path) {
+                match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => return self.retire_secret(path),
                     Containment::Escaped => return Err(ESCAPES_ROOT),
@@ -964,7 +1439,7 @@ impl CaptureSink for StoreCaptureSink {
                 // verdict must never be based on an off-root file reached
                 // through a symlinked ancestor. A missing parent confirms the
                 // tracked file gone; an escape retains last-known-good.
-                match contained_parent(&self.shadow_root, path) {
+                match self.path_containment(path) {
                     Containment::Contained => {}
                     Containment::Absent => {
                         return self.retire_head(path, false, self.provenance.summary.clone());
@@ -1020,6 +1495,115 @@ enum CurrentContent {
     NonOwnable,
 }
 
+/// Parallel preparation already owns the generation's canonical root, so it
+/// can apply the shared strict parent check without touching
+/// `StoreCaptureSink`'s non-`Sync` policy state.
+fn read_current_with_canonical_root(
+    root: &Path,
+    captured_root: &CapturedRoot,
+    path: &str,
+    media_type: &str,
+) -> Result<CurrentContent, CaptureError> {
+    if !captured_root.still_names(root) {
+        return Err(ESCAPES_ROOT);
+    }
+    match path_containment_with_root(root, path, || Ok(captured_root.canonical_path.as_path())) {
+        Containment::Contained => {
+            let content =
+                read_contained_current(root, &captured_root.canonical_path, path, media_type)?;
+            captured_root
+                .still_names(root)
+                .then_some(content)
+                .ok_or(ESCAPES_ROOT)
+        }
+        Containment::Absent => Ok(CurrentContent::Absent),
+        Containment::Escaped => Err(ESCAPES_ROOT),
+    }
+}
+
+/// Read a path whose parent has already passed the generation's containment
+/// check. Both the ordinary sink path and the bounded parallel preparation
+/// path use this exact reopen, post-open containment, type, and size logic.
+fn read_contained_current(
+    root: &Path,
+    canonical_root: &Path,
+    path: &str,
+    media_type: &str,
+) -> Result<CurrentContent, CaptureError> {
+    let absolute = root.join(path);
+    // Advisory lstat mirror of the TS refusal (symlink leaf and non-file
+    // entries are not engine-ownable); the no-follow open below is what
+    // actually closes the check-then-open race.
+    match std::fs::symlink_metadata(&absolute) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Ok(CurrentContent::NonOwnable);
+        }
+        Ok(_) => {}
+        Err(err) if absent_error(&err) => return Ok(CurrentContent::Absent),
+        Err(_) => return Err(READ_FAILED),
+    }
+    let file = match open_no_follow(&absolute) {
+        NoFollowOpen::Opened(file) => file,
+        NoFollowOpen::Refused => return Ok(CurrentContent::NonOwnable),
+        NoFollowOpen::Absent => return Ok(CurrentContent::Absent),
+        NoFollowOpen::Failed => return Err(READ_FAILED),
+    };
+    verify_opened_containment(root, canonical_root, path, &file)?;
+    let metadata = file.metadata().map_err(|_| READ_FAILED)?;
+    if !metadata.file_type().is_file() {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    // Between the capture cap and the SCAN cap (64 MiB) the scanner still
+    // lists the file, so a grow-past-capture-cap lands here and retires.
+    // PAST the scan cap the plan classifies it `retained_over_cap` and the
+    // sink is never called — deliberately NOT a retire: the ratified CAL-3
+    // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
+    // false-deleting live user data behind an operational scan bound.
+    // Collection schemas are a reserved engine control file. The generic
+    // scanner deliberately classifies unknown extensions as binary, but
+    // collection discovery reads this YAML from the plaintext store.
+    let text_media = path.rsplit('/').next() == Some(COLLECTION_SCHEMA_FILENAME)
+        || is_text_media_type(media_type, path);
+    let content_cap = if text_media {
+        MAX_CAPTURE_TEXT_BYTES
+    } else {
+        MAX_CAPTURE_BINARY_BYTES
+    };
+    if metadata.len() > content_cap {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(content_cap.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|_| READ_FAILED)?;
+    if bytes.len() as u64 > content_cap {
+        return Ok(CurrentContent::NonOwnable);
+    }
+    if !text_media {
+        // Non-text media is engine-ownable BINARY content: the TS oracle
+        // routes it to the binary store before any UTF-8 sniffing, so a
+        // UTF-8-clean `.png` must never land in the plaintext store.
+        return Ok(CurrentContent::Binary(bytes));
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) if text.len() as u64 > MAX_CAPTURE_TEXT_BYTES => {
+            // Genuine text over the text cap stays untracked (established TS
+            // behavior), even though binary of the same size would be ownable.
+            Ok(CurrentContent::NonOwnable)
+        }
+        Ok(text) => Ok(CurrentContent::Text(text)),
+        // A text-suffixed path can be binary in disguise (invalid UTF-8); the
+        // store accepts that as binary up to the binary cap.
+        Err(err)
+            if path.to_ascii_lowercase().ends_with(".excalidraw")
+                || err.as_bytes().len() as u64 > MAX_CAPTURE_BINARY_BYTES =>
+        {
+            Ok(CurrentContent::NonOwnable)
+        }
+        Err(err) => Ok(CurrentContent::Binary(err.into_bytes())),
+    }
+}
+
 fn absent_error(err: &std::io::Error) -> bool {
     matches!(err.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
 }
@@ -1028,6 +1612,34 @@ enum Containment {
     Contained,
     Absent,
     Escaped,
+}
+
+/// Resolve a path's parent before resolving the root. This preserves the
+/// established distinction: an absent path settles as absent, while any other
+/// resolution error fails closed. The root resolver stays lazy so an absent
+/// path does not introduce an unrelated root-resolution failure.
+fn path_containment_with_root<'a>(
+    root: &Path,
+    rel_path: &str,
+    canonical_root: impl FnOnce() -> Result<&'a Path, CaptureError>,
+) -> Containment {
+    let absolute = root.join(rel_path);
+    let Some(parent) = absolute.parent() else {
+        return Containment::Escaped;
+    };
+    let canonical_parent = match parent.canonicalize() {
+        Ok(real) => real,
+        Err(err) if absent_error(&err) => return Containment::Absent,
+        Err(_) => return Containment::Escaped,
+    };
+    let Ok(canonical_root) = canonical_root() else {
+        return Containment::Escaped;
+    };
+    // A root moved behind a symlink now resolves somewhere other than this
+    // cached location and is refused. Replacing a directory in place at the
+    // same canonical pathname remains indistinguishable by path, the same
+    // identity limitation as the previous per-read resolution.
+    contained_parent(canonical_root, rel_path, &canonical_parent)
 }
 
 /// The canonical location `rel_path` would have if NO ancestor were a
@@ -1049,21 +1661,9 @@ fn expected_absolute(real_root: &Path, rel_path: &str) -> PathBuf {
 /// under the root. Strict equality rejects a symlinked ancestor regardless of
 /// where it points (off-root exfiltration AND in-root aliasing).
 /// Unresolvable-for-any-other-reason fails CLOSED as a refusal.
-fn contained_parent(root: &Path, rel_path: &str) -> Containment {
-    let absolute = root.join(rel_path);
-    let Some(parent) = absolute.parent() else {
-        return Containment::Escaped;
-    };
-    let real_parent = match parent.canonicalize() {
-        Ok(real) => real,
-        Err(err) if absent_error(&err) => return Containment::Absent,
-        Err(_) => return Containment::Escaped,
-    };
-    let Ok(real_root) = root.canonicalize() else {
-        return Containment::Escaped;
-    };
+fn contained_parent(canonical_root: &Path, rel_path: &str, canonical_parent: &Path) -> Containment {
     let parent_rel = rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
-    if real_parent == expected_absolute(&real_root, parent_rel) {
+    if canonical_parent == expected_absolute(canonical_root, parent_rel) {
         Containment::Contained
     } else {
         Containment::Escaped
@@ -1076,11 +1676,15 @@ fn contained_parent(root: &Path, rel_path: &str) -> Containment {
 /// the pre-open check and the open. On Unix the opened descriptor's
 /// (dev, ino) must also match the re-resolved path, so a swap-back cannot
 /// hide a foreign descriptor.
-fn verify_opened_containment(root: &Path, rel_path: &str, file: &File) -> Result<(), CaptureError> {
+fn verify_opened_containment(
+    root: &Path,
+    canonical_root: &Path,
+    rel_path: &str,
+    file: &File,
+) -> Result<(), CaptureError> {
     let absolute = root.join(rel_path);
     let real = absolute.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-    let real_root = root.canonicalize().map_err(|_| ESCAPES_ROOT)?;
-    if real != expected_absolute(&real_root, rel_path) {
+    if real != expected_absolute(canonical_root, rel_path) {
         return Err(ESCAPES_ROOT);
     }
     #[cfg(unix)]
@@ -1169,6 +1773,8 @@ mod tests {
     use dohc_engine_testkit::ScratchDir;
     use proptest::prelude::*;
     use rusqlite::{Connection, OptionalExtension};
+    use std::sync::Condvar;
+    use std::time::Duration;
 
     const WORKSPACE_ID: &str = "ws-capture-sink";
     const VERSION_ID: &str = "main";
@@ -1191,6 +1797,253 @@ mod tests {
             std::fs::create_dir_all(parent).expect("create file parent");
         }
         std::fs::write(absolute, bytes).expect("write fixture");
+    }
+
+    fn durable_row_counts(db: &Path) -> Vec<(&'static str, i64)> {
+        const TABLES: &[&str] = &[
+            "documents",
+            "replication_journal",
+            "file_objects",
+            "blobs",
+            "path_aliases",
+            "snapshots",
+            "moments",
+            "materialization_jobs",
+            "ydoc_docs",
+            "ydoc_updates",
+            "collections",
+            "collection_records",
+            "collection_record_fields",
+            "collection_field_history",
+            "collection_relation_edges",
+        ];
+        let conn = Connection::open(db).expect("open durable state database");
+        TABLES
+            .iter()
+            .map(|table| {
+                let count = conn
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get(0)
+                    })
+                    .expect("count durable rows");
+                (*table, count)
+            })
+            .collect()
+    }
+
+    struct PausedRootGuard {
+        root: CapturedRoot,
+        pause_on_validation: usize,
+        validations: std::sync::atomic::AtomicUsize,
+        reached: (Mutex<bool>, Condvar),
+        released: (Mutex<bool>, Condvar),
+    }
+
+    impl PausedRootGuard {
+        fn new(root: &Path) -> Arc<Self> {
+            Self::pausing_on(root, 1)
+        }
+
+        fn pausing_on(root: &Path, pause_on_validation: usize) -> Arc<Self> {
+            Arc::new(Self {
+                root: CapturedRoot::bind(root).expect("bind paused root guard"),
+                pause_on_validation,
+                validations: std::sync::atomic::AtomicUsize::new(0),
+                reached: (Mutex::new(false), Condvar::new()),
+                released: (Mutex::new(false), Condvar::new()),
+            })
+        }
+
+        fn wait_until_reached(&self) {
+            let reached = self.reached.0.lock().expect("lock reached state");
+            let (reached, timeout) = self
+                .reached
+                .1
+                .wait_timeout_while(reached, Duration::from_secs(10), |reached| !*reached)
+                .expect("wait for actor root validation");
+            assert!(*reached, "actor did not validate the queued root guard");
+            assert!(!timeout.timed_out(), "actor root validation timed out");
+        }
+
+        fn release(&self) {
+            let mut released = self.released.0.lock().expect("lock release state");
+            *released = true;
+            self.released.1.notify_all();
+        }
+    }
+
+    impl WorkspaceRootGuard for PausedRootGuard {
+        fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+            let validation = self
+                .validations
+                .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+                + 1;
+            if validation != self.pause_on_validation {
+                return self.root.validate(root_dir);
+            }
+            {
+                let mut reached = self.reached.0.lock().expect("lock reached state");
+                *reached = true;
+                self.reached.1.notify_all();
+            }
+            let released = self.released.0.lock().expect("lock release state");
+            let (released, timeout) = self
+                .released
+                .1
+                .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                .expect("wait for root replacement");
+            if timeout.timed_out() || !*released {
+                return Err(RuntimeError::Identity {
+                    reason: "test root guard release timed out",
+                    source: None,
+                });
+            }
+            self.root.validate(root_dir)
+        }
+    }
+
+    #[test]
+    fn parallel_added_text_preparation_preserves_the_ordered_text_prefix() {
+        let scratch = ScratchDir::new().expect("scratch");
+        write_file(scratch.path(), "a.md", b"alpha");
+        write_file(scratch.path(), "b.md", b"bravo");
+        write_file(scratch.path(), "c.png", b"binary route");
+        write_file(scratch.path(), "d.md", b"discarded suffix");
+        let captured_root = CapturedRoot::bind(scratch.path()).expect("captured root");
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "b.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "c.png",
+                media_type: "image/png",
+            },
+            AddedTextCandidate {
+                path: "d.md",
+                media_type: "text/markdown",
+            },
+        ];
+
+        let PreparedTextPrefix::Ready(prepared) =
+            prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates)
+        else {
+            panic!("the leading text files should form a batch prefix");
+        };
+
+        assert_eq!(prepared.len(), 2);
+        assert_eq!(prepared[0].text, "alpha");
+        assert_eq!(prepared[0].sha256, sha256_hex(b"alpha"));
+        assert_eq!(prepared[1].text, "bravo");
+        assert_eq!(prepared[1].sha256, sha256_hex(b"bravo"));
+        assert!(matches!(
+            prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates[2..],),
+            PreparedTextPrefix::FallbackFirst
+        ));
+    }
+
+    #[test]
+    fn parallel_root_mismatch_discards_an_already_prepared_prefix() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scratch = ScratchDir::new().expect("scratch");
+        let root = scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        write_file(&root, "a.md", b"alpha");
+        write_file(&root, "b.md", b"bravo");
+        let captured_root = CapturedRoot::bind(&root).expect("captured root");
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "b.md",
+                media_type: "text/markdown",
+            },
+        ];
+        let first_prepared = AtomicBool::new(false);
+        let swapped = AtomicBool::new(false);
+
+        let prepared = prepare_added_text_prefix_parallel_with(
+            &candidates,
+            |candidate| {
+                if candidate.path == "a.md" {
+                    first_prepared.store(true, Ordering::Release);
+                    return Ok(CurrentContent::Text("alpha".to_owned()));
+                }
+                while !first_prepared.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                if !swapped.swap(true, Ordering::AcqRel) {
+                    std::fs::rename(&root, &moved_root).expect("move original capture root");
+                    std::fs::create_dir(&root).expect("recreate capture root");
+                    write_file(&root, "b.md", b"replacement workspace content");
+                }
+                read_current_with_canonical_root(
+                    &root,
+                    &captured_root,
+                    candidate.path,
+                    candidate.media_type,
+                )
+            },
+            || captured_root.still_names(&root),
+        );
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        assert!(matches!(
+            prepared,
+            PreparedTextPrefix::RootMismatch { attempted: 2 }
+        ));
+    }
+
+    #[test]
+    fn parallel_path_escape_falls_back_without_poisoning_sibling_progress() {
+        let candidates = [
+            AddedTextCandidate {
+                path: "a.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "linked/b.md",
+                media_type: "text/markdown",
+            },
+            AddedTextCandidate {
+                path: "c.md",
+                media_type: "text/markdown",
+            },
+        ];
+        let read = |candidate: AddedTextCandidate<'_>| match candidate.path {
+            "linked/b.md" => Err(ESCAPES_ROOT),
+            path => Ok(CurrentContent::Text(path.to_owned())),
+        };
+
+        let first = prepare_added_text_prefix_parallel_with(&candidates, read, || true);
+        let PreparedTextPrefix::Ready(first) = first else {
+            panic!("the good prefix must remain committable");
+        };
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].text, "a.md");
+
+        assert!(matches!(
+            prepare_added_text_prefix_parallel_with(&candidates[1..], read, || true),
+            PreparedTextPrefix::FallbackFirst
+        ));
+        let PreparedTextPrefix::Ready(last) =
+            prepare_added_text_prefix_parallel_with(&candidates[2..], read, || true)
+        else {
+            panic!("the good suffix must progress after the refused path");
+        };
+        assert_eq!(last.len(), 1);
+        assert_eq!(last[0].text, "c.md");
     }
 
     fn ingest(sink: &mut StoreCaptureSink, path: &str) -> Result<IngestOutcome, CaptureError> {
@@ -3432,6 +4285,13 @@ mod tests {
         }
     }
 
+    fn remove_dir_symlink(link: &Path) {
+        #[cfg(unix)]
+        std::fs::remove_file(link).expect("remove directory symlink");
+        #[cfg(windows)]
+        std::fs::remove_dir(link).expect("remove directory symlink");
+    }
+
     #[test]
     fn text_ingest_rereads_updates_and_dedupes_equal_content() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -3836,6 +4696,458 @@ mod tests {
     }
 
     #[test]
+    fn cached_canonical_root_refuses_a_root_symlink_swap() {
+        // The engine database lives elsewhere so Windows can rename the
+        // capture root while its actor remains open.
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        write_file(&root, "second.md", b"second");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        // The first read fixes this reconcile generation's canonical root.
+        ingest(&mut sink, "first.md").expect("seed canonical root");
+        std::fs::rename(&root, &moved_root).expect("move capture root");
+        if !try_symlink_dir(&root, &moved_root) {
+            std::fs::rename(&moved_root, &root).expect("restore capture root");
+            eprintln!("note: dir symlink unavailable on this host; root swap not exercised");
+            drop(sink);
+            supervisor.close(&db).expect("close actor");
+            return;
+        }
+
+        // Re-canonicalizing the root per file would accept the symlink's new
+        // target. Comparing the current parent with the cached location must
+        // instead fail closed without reading or capturing the target.
+        assert_eq!(ingest(&mut sink, "second.md"), Err(ESCAPES_ROOT));
+
+        remove_dir_symlink(&root);
+        std::fs::rename(&moved_root, &root).expect("restore capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(moment_count(&db, "second.md"), 0);
+    }
+
+    #[test]
+    fn captured_root_refuses_a_different_directory_at_the_same_path() {
+        // Keep the database outside the capture root so the root can move
+        // while its workspace actor remains open.
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        // The first read binds this reconcile generation to the original
+        // directory object, not merely to its canonical pathname.
+        ingest(&mut sink, "first.md").expect("seed captured root");
+        let original_root = sink.captured_root().expect("original root binding");
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("recreate capture root at the same path");
+        write_file(&root, "replacement.md", b"replacement workspace content");
+
+        let candidates = [AddedTextCandidate {
+            path: "replacement.md",
+            media_type: "text/markdown",
+        }];
+        let parallel = prepare_added_text_prefix_parallel(&root, original_root, &candidates);
+        let single = ingest(&mut sink, "replacement.md");
+        let prepared = sink.prepared_text_capture(
+            candidates[0],
+            PreparedTextContent {
+                text: "must not commit".to_owned(),
+                size: 15,
+                sha256: sha256_hex(b"must not commit"),
+            },
+        );
+        let batch = sink.commit_added_text_batch(vec![prepared]);
+        let policy_retire = sink.retire_policy_excluded("first.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            parallel,
+            PreparedTextPrefix::RootMismatch { attempted: 1 }
+        ));
+        assert_eq!(single, Err(ESCAPES_ROOT));
+        assert_eq!(batch, BatchIngestResult::Uncertain { attempted: 1 });
+        assert_eq!(policy_retire, Err(ESCAPES_ROOT));
+        assert_eq!(moment_count(&db, "replacement.md"), 0);
+        assert_eq!(
+            snapshot(&db, "first.md").expect("head retained").text,
+            "first"
+        );
+    }
+
+    #[test]
+    fn collection_reconcile_refuses_replacement_root_before_dispatch() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+        assert!(collection_record(&db, "tasks/alpha.md").is_none());
+
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/collection.yaml", b"name: Replacement\n");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        let result = sink.reconcile_collections();
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let binding_after = collection_record(&db, "tasks/alpha.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert!(binding_after.is_none(), "adoption must not reach the actor");
+    }
+
+    #[test]
+    fn queued_collection_reconcile_refuses_replacement_root_before_db_changes() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+        assert!(collection_record(&db, "tasks/alpha.md").is_none());
+        let durable_before = durable_row_counts(&db);
+
+        let guard = PausedRootGuard::new(&root);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.reconcile_collections_blocking_guarded(
+                WORKSPACE_ID.to_owned(),
+                VERSION_ID.to_owned(),
+                command_root,
+                command_leases,
+                command_self_writes,
+                10,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/collection.yaml", b"name: Replacement\n");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        guard.release();
+        let result = command.join().expect("join reconcile command");
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let binding_after = collection_record(&db, "tasks/alpha.md");
+        let durable_after = durable_row_counts(&db);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert_eq!(durable_after, durable_before);
+        assert!(
+            binding_after.is_none(),
+            "queued reconciliation must not change collection bindings"
+        );
+    }
+
+    #[test]
+    fn post_commit_root_refusal_leaves_no_self_write_suppression() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
+        write_file(&root, "tasks/alpha.md", b"original task\n");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "tasks/collection.yaml").expect("capture schema");
+        ingest(&mut sink, "tasks/alpha.md").expect("capture record");
+        seed_captured_richdoc_lineage(&sink, "tasks/alpha.md");
+
+        // Reconciliation validates once at actor entry and once before the
+        // settlement. Pause the third check, after the settlement commit but
+        // before its materialization boundary.
+        let guard = PausedRootGuard::pausing_on(&root, 3);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.reconcile_collections_blocking_guarded(
+                WORKSPACE_ID.to_owned(),
+                VERSION_ID.to_owned(),
+                command_root,
+                command_leases,
+                command_self_writes,
+                10,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "tasks/alpha.md", b"replacement task\n");
+        let replacement_before =
+            std::fs::read(root.join("tasks/alpha.md")).expect("read replacement record");
+        guard.release();
+        let result = command.join().expect("join reconcile command");
+        let replacement_after =
+            std::fs::read(root.join("tasks/alpha.md")).expect("reread replacement record");
+        let committed =
+            snapshot(&db, "tasks/alpha.md").expect("settlement committed before refusal");
+        let suppression_pending =
+            sink.self_writes
+                .has_pending(WORKSPACE_ID, "tasks/alpha.md", &committed.blob_sha256);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(replacement_after, replacement_before);
+        assert!(
+            !suppression_pending,
+            "a refused materialization must not suppress a later genuine capture"
+        );
+    }
+
+    #[test]
+    fn queued_materialized_retire_refuses_replacement_root_before_db_changes() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, "first.md", b"first");
+        let mut sink =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut sink, "first.md").expect("capture first head");
+        let durable_before = durable_row_counts(&db);
+
+        let guard = PausedRootGuard::new(&root);
+        let actor_guard: Arc<dyn WorkspaceRootGuard> = guard.clone();
+        let command_actor = actor.clone();
+        let command_leases = sink.leases.clone();
+        let command_self_writes: Arc<dyn dohc_engine_runtime::SelfWriteRecorder> =
+            Arc::new(sink.self_writes.clone());
+        let command_root = root.clone();
+        let command = std::thread::spawn(move || {
+            command_actor.capture_retire_materialized_blocking_guarded(
+                CaptureRetire {
+                    workspace_id: WORKSPACE_ID.to_owned(),
+                    version_id: VERSION_ID.to_owned(),
+                    path: "first.md".to_owned(),
+                    metadata_summary: None,
+                    metadata_correlation_id: None,
+                    now_ms: 20,
+                    request_id: None,
+                    only_if_text_head: false,
+                    only_if_capture_origin: true,
+                    allow_ydoc_origin: true,
+                },
+                command_root,
+                command_self_writes,
+                command_leases,
+                Arc::new(NoFaults),
+                actor_guard,
+            )
+        });
+
+        guard.wait_until_reached();
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("create replacement root");
+        write_file(&root, "first.md", b"replacement first");
+        let replacement_before =
+            std::fs::read(root.join("first.md")).expect("read replacement head");
+        guard.release();
+        let result = command.join().expect("join retire command");
+        let replacement_after =
+            std::fs::read(root.join("first.md")).expect("reread replacement head");
+        let retained = snapshot(&db, "first.md").expect("head retained");
+        let durable_after = durable_row_counts(&db);
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert!(matches!(
+            result,
+            Err(RuntimeError::Identity {
+                reason: "workspace root changed during capture",
+                ..
+            })
+        ));
+        assert_eq!(retained.text, "first");
+        assert_eq!(durable_after, durable_before);
+        assert_eq!(replacement_after, replacement_before);
+    }
+
+    #[test]
+    fn present_root_binding_failure_cannot_adopt_a_later_replacement() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().join("workspace");
+        let moved_root = capture_scratch.path().join("workspace-moved");
+        std::fs::create_dir(&root).expect("create capture root");
+        write_file(&root, "first.md", b"first");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let mut seed =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+        ingest(&mut seed, "first.md").expect("seed captured head");
+        drop(seed);
+
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::write(&root, b"not a directory").expect("install refused root");
+        let mut refused = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
+        std::fs::remove_file(&root).expect("remove refused root");
+        std::fs::create_dir(&root).expect("install replacement directory");
+        let retire = refused.retire_policy_excluded("first.md");
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(refused);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(retire, Err(ESCAPES_ROOT));
+        assert_eq!(
+            snapshot(&db, "first.md").expect("head retained").text,
+            "first"
+        );
+    }
+
+    #[test]
+    fn initially_absent_root_rejects_generation_and_fresh_sink_reads_policy() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().join("workspace");
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        let mut stale =
+            StoreCaptureSink::new(actor.clone(), WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        std::fs::create_dir(&root).expect("create recovered root");
+        write_file(
+            &root,
+            ".dohc/files.toml",
+            b"[[rule]]\npath = \"private/**\"\ntracked = false\n",
+        );
+        write_file(&root, "private/journal.md", b"personal");
+        write_file(&root, "public.md", b"shared");
+        assert_eq!(ingest(&mut stale, "private/journal.md"), Err(ESCAPES_ROOT));
+        drop(stale);
+
+        let mut fresh = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 20, None);
+        assert_eq!(
+            ingest(&mut fresh, "private/journal.md").expect("fresh policy snapshot"),
+            IngestOutcome::NotOwned
+        );
+        assert!(matches!(
+            ingest(&mut fresh, "public.md").expect("fresh public capture"),
+            IngestOutcome::Captured { .. }
+        ));
+
+        drop(fresh);
+        supervisor.close(&db).expect("close actor");
+        assert!(snapshot(&db, "private/journal.md").is_none());
+        assert_eq!(
+            snapshot(&db, "public.md")
+                .expect("captured public head")
+                .text,
+            "shared"
+        );
+    }
+
+    #[test]
     fn reconcile_settles_deferred_and_raced_paths_without_degrading() {
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
@@ -4052,6 +5364,41 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(secret_tip_len(&db, ".env"), None, "tip retired");
         assert_eq!(moment_count(&db, ".env"), 0, "plaintext tables untouched");
+    }
+
+    #[test]
+    fn secret_key_is_not_minted_in_a_replacement_root_after_plaintext_read() {
+        let store_scratch = ScratchDir::new().expect("store scratch");
+        let capture_scratch = ScratchDir::new().expect("capture scratch");
+        let root = capture_scratch.path().to_path_buf();
+        let moved_root = root.with_file_name(format!(
+            "{}-moved",
+            root.file_name().expect("root name").to_string_lossy()
+        ));
+        let db = store_scratch.engine_db_path().expect("engine db path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        write_file(&root, ".env", b"TOKEN=original");
+        let mut sink = StoreCaptureSink::new(actor, WORKSPACE_ID, VERSION_ID, &root, 10, None);
+
+        let content = sink
+            .read_current_secret(".env")
+            .expect("read original plaintext");
+        std::fs::rename(&root, &moved_root).expect("move original capture root");
+        std::fs::create_dir(&root).expect("recreate capture root");
+        let result = sink.ingest_secret_content(".env", true, false, content);
+        let replacement_key_exists = root.join(".dohc/engine/secret.key").exists();
+
+        std::fs::remove_dir_all(&root).expect("remove replacement capture root");
+        std::fs::rename(&moved_root, &root).expect("restore original capture root");
+        drop(sink);
+        supervisor.close(&db).expect("close actor");
+        assert_eq!(result, Err(ESCAPES_ROOT));
+        assert!(
+            !replacement_key_exists,
+            "replacement root must receive no key"
+        );
+        assert_eq!(secret_tip_len(&db, ".env"), None);
     }
 
     #[test]

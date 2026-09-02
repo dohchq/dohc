@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -12,6 +12,8 @@ import {
   type WorkspaceSettingsPatch,
   type WorkspaceSettingsResult,
 } from "../../workspaces/workspaceSettings";
+import { pushOverlay, removeOverlay } from "../guestBlockingUi";
+import { Overlay } from "../Overlay";
 import { DesktopSettings } from "./DesktopSettings";
 
 const config = {
@@ -211,6 +213,9 @@ describe("DesktopSettings", () => {
     await user.type(screen.getByTestId("settings-search"), "theme");
     expect(screen.getByTestId("settings-section-appearance")).toBeTruthy();
     await user.clear(screen.getByTestId("settings-search"));
+    await user.type(screen.getByTestId("settings-search"), "launch");
+    expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
+    await user.clear(screen.getByTestId("settings-search"));
     await user.type(screen.getByTestId("settings-search"), "nothing-here");
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
@@ -229,11 +234,50 @@ describe("DesktopSettings", () => {
   it("closes from Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />);
+    render(
+      <Overlay onClose={onClose}>
+        <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+      </Overlay>,
+    );
 
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     await user.keyboard("{Escape}");
     expect(onClose).toHaveBeenCalledOnce();
+  });
+
+  it("leaves Tab and Escape to a higher overlay", async () => {
+    const onClose = vi.fn();
+    render(
+      <>
+        <button type="button" data-testid="higher-overlay-action">
+          Go back
+        </button>
+        <Overlay onClose={onClose}>
+          <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+        </Overlay>
+      </>,
+    );
+
+    await screen.findByTestId("settings-dialog");
+    const higherOverlayAction = screen.getByTestId("higher-overlay-action");
+    higherOverlayAction.focus();
+    const higherOverlay = Symbol("higher-overlay-test");
+    pushOverlay(higherOverlay);
+    try {
+      const tab = new KeyboardEvent("keydown", {
+        key: "Tab",
+        bubbles: true,
+        cancelable: true,
+      });
+      document.dispatchEvent(tab);
+      expect(tab.defaultPrevented).toBe(false);
+      expect(document.activeElement).toBe(higherOverlayAction);
+
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(onClose).not.toHaveBeenCalled();
+    } finally {
+      removeOverlay(higherOverlay);
+    }
   });
 
   it("persists appearance changes and applies them immediately", async () => {
@@ -411,6 +455,12 @@ describe("DesktopSettings", () => {
     );
 
     const input = await screen.findByTestId("general-preferred-name-input");
+    expect((input as HTMLInputElement).value).toBe("");
+    expect(input.getAttribute("placeholder")).toBe("Enter your name");
+    expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
+      "Your agent",
+    );
+    expect(screen.queryByText("Launch behavior")).toBeNull();
     await user.type(input, "Ice");
     expect(screen.getByTestId("general-preferred-name-preview").textContent).toContain(
       "Ice's agent",
@@ -554,7 +604,9 @@ describe("DesktopSettings", () => {
     );
 
     const command = await screen.findByTestId("runner-command-input");
-    expect(command.getAttribute("placeholder")).toContain("Bash(dohc chat:*)");
+    expect(command.getAttribute("placeholder")).toBe(
+      "Enter the command that starts your agent",
+    );
     expect(screen.getByText(/unsandboxed runner can read anything/i)).toBeTruthy();
     expect(screen.getByTestId("runner-multi-device-note").textContent).toContain(
       "Enable the runner on one device per workspace",
@@ -1536,6 +1588,38 @@ describe("DesktopSettings", () => {
       }),
     ).toBeTruthy();
     expect(screen.queryByTestId("settings-workspace-engine-share-view")).toBeNull();
+  });
+
+  it("shows one scoped reset action for each settings scope", async () => {
+    bridge.getUserSettings.mockResolvedValueOnce({
+      settings: {
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+      },
+      source: "default",
+    });
+    workspaceSettingsOnDisk = {
+      ...DEFAULT_WORKSPACE_SETTINGS,
+      experimental: { workspaceEngineAlpha: false },
+    };
+
+    render(
+      <DesktopSettings
+        workspaceId="ws-1"
+        workspacePath="/x"
+        initialSection="advanced"
+        onClose={() => {}}
+      />,
+    );
+
+    const userRow = await screen.findByTestId("settings-row-reset-user");
+    const workspaceRow = screen.getByTestId("settings-row-reset-workspace");
+    expect(within(userRow).getAllByRole("button")).toHaveLength(1);
+    expect(within(userRow).getByRole("button").textContent).toBe("Reset user");
+    expect(within(workspaceRow).getAllByRole("button")).toHaveLength(1);
+    expect(within(workspaceRow).getByRole("button").textContent).toBe(
+      "Reset workspace",
+    );
   });
 
   it("persists an edited attachment folder name", async () => {

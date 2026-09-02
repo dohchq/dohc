@@ -3051,6 +3051,21 @@ CREATE TABLE collection_historical_record_owner_backfills (
 pub(crate) const COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID: &str =
     "v1-collection-historical-owners";
 
+/// Ordinal 44. Global generation-first indexes for the mutation high-water
+/// query. Moment order is global across workspaces. Ordinary materialization
+/// jobs also reserve generations after rollback removes their source moment;
+/// version-switch projections belong to a separate timestamp domain.
+const V1_GLOBAL_GENERATION_INDEXES_DDL: &str = "\
+CREATE INDEX idx_moments_global_order
+    ON moments(moment_order DESC);
+CREATE INDEX idx_materialization_jobs_mutation_generation
+    ON materialization_jobs(target_generation DESC)
+    WHERE job_id NOT GLOB 'version-switch-mat_*'
+      AND job_id NOT GLOB 'version-switch-secret-mat_*';
+";
+
+pub(crate) const GLOBAL_GENERATION_INDEXES_MIGRATION_ID: &str = "v1-global-generation-indexes";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3364,6 +3379,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_COLLECTION_HISTORICAL_OWNERS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 44,
+        id: GLOBAL_GENERATION_INDEXES_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_GLOBAL_GENERATION_INDEXES_DDL,
         sets_user_version: None,
     },
 ];
@@ -3919,6 +3941,36 @@ mod tests {
             plan.iter()
                 .all(|detail| !detail.contains("TEMP B-TREE FOR ORDER BY")),
             "record history index must serve newest-first ordering: {plan:?}"
+        );
+    }
+
+    #[test]
+    fn global_generation_indexes_match_the_high_water_domains() {
+        let dir = tempdir();
+        let path = dir.join("global-generation-indexes.db");
+        let ctx = MigrationContext::current(1_100);
+        let mut conn = open_bare(&path);
+
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
+            .expect("apply global generation indexes");
+
+        let index_sql = |name: &str| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("missing index {name}: {error}"))
+        };
+        let normalized = |sql: String| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert_eq!(
+            normalized(index_sql("idx_moments_global_order")),
+            "CREATE INDEX idx_moments_global_order ON moments(moment_order DESC)"
+        );
+        assert_eq!(
+            normalized(index_sql("idx_materialization_jobs_mutation_generation")),
+            "CREATE INDEX idx_materialization_jobs_mutation_generation ON materialization_jobs(target_generation DESC) WHERE job_id NOT GLOB 'version-switch-mat_*' AND job_id NOT GLOB 'version-switch-secret-mat_*'"
         );
     }
 

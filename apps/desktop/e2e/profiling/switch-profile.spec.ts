@@ -55,9 +55,9 @@ async function switchWorkspace(page: Page, workspaceId: string): Promise<number>
   return (await readSwitchTimeline(page)).at(-1)!.ordinal;
 }
 
-test("profiles ten A to B to A workspace switch cycles", async () => {
-  const workspaceA = await prepareFixture("large-flat", WORKSPACE_A_ID, { engine: false });
-  const workspaceB = await prepareFixture("large-deep", WORKSPACE_B_ID, { engine: false });
+test("profiles ten default-engine switch cycles after both workspaces reach readiness", async () => {
+  const workspaceA = await prepareFixture("large-flat", WORKSPACE_A_ID);
+  const workspaceB = await prepareFixture("large-deep", WORKSPACE_B_ID);
   const sandbox = await createTempWorkspace();
   let desktop: LaunchedDesktopApp | null = null;
   try {
@@ -76,8 +76,12 @@ test("profiles ten A to B to A workspace switch cycles", async () => {
     const active = await openWorkspaceFromFirstRun(page, { rootPath: workspaceA.rootPath });
     expect(active.workspaceId).toBe(WORKSPACE_A_ID);
 
-    // Open both once before measuring. The 20-entry ring then contains exactly
-    // the ten measured B/A cycles and drops these warm-up entries.
+    // This is a measured-run precondition, not part of the warm result. A
+    // freshly seeded workspace has no engine database; if either switch
+    // cannot reach every readiness phase, the failure is cold adoption and
+    // the profile must stop instead of reporting a 120-second "warm switch."
+    // Once both pass, the 20-entry ring contains exactly the measured B/A
+    // cycles and drops these preconditioning entries.
     await switchWorkspace(page, WORKSPACE_B_ID);
     await switchWorkspace(page, WORKSPACE_A_ID);
     const baselineOrdinal = (await readSwitchTimeline(page)).at(-1)?.ordinal ?? 0;

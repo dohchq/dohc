@@ -812,9 +812,27 @@ export const CHANNELS = {
   getRelayReceivedShare: "desktop:get-relay-received-share",
   revokeRelayShare: "desktop:revoke-relay-share",
   createRelayShareLink: "desktop:create-relay-share-link",
+  addRelayShareLink: "desktop:add-relay-share-link",
   listRelayShareLinks: "desktop:list-relay-share-links",
+  retuneRelayShareLink: "desktop:retune-relay-share-link",
   rotateRelayShareLink: "desktop:rotate-relay-share-link",
   revokeRelayShareLink: "desktop:revoke-relay-share-link",
+  listRelayShareDiscussion: "desktop:list-relay-share-discussion",
+  pollRelayShareDiscussionActivity:
+    "desktop:poll-relay-share-discussion-activity",
+  cancelRelayShareDiscussionActivity:
+    "desktop:cancel-relay-share-discussion-activity",
+  appendRelayShareDiscussion: "desktop:append-relay-share-discussion",
+  deleteRelayShareDiscussionMessage:
+    "desktop:delete-relay-share-discussion-message",
+  blockRelayShareDiscussionPrincipal:
+    "desktop:block-relay-share-discussion-principal",
+  unblockRelayShareDiscussionPrincipal:
+    "desktop:unblock-relay-share-discussion-principal",
+  pauseRelayShareDiscussion: "desktop:pause-relay-share-discussion",
+  resumeRelayShareDiscussion: "desktop:resume-relay-share-discussion",
+  promoteRelayShareGrant: "desktop:promote-relay-share-grant",
+  revokeRelayShareGrant: "desktop:revoke-relay-share-grant",
   shareChatChannel: "desktop:share-chat-channel",
   listChatChannelShares: "desktop:list-chat-channel-shares",
   listJoinedSharedChannels: "desktop:list-joined-shared-channels",

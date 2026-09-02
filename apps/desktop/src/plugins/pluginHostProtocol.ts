@@ -34,6 +34,8 @@ export const PLUGIN_HOST_METHODS = {
   driverEvent: "driver.event",
 } as const;
 
+export const PLUGIN_DRIVER_SESSION_ID_MAX_CHARS = 200;
+
 export interface PluginActivateParams {
   pluginId: string;
   pluginRoot: string;
@@ -86,7 +88,7 @@ export interface PluginDriverStartSessionParams {
   logDir?: string;
 }
 
-export interface PluginDriverStartSessionResult {
+export interface PluginDriverStartedSessionResult {
   sessionId: string;
   resumeCursor?: PluginJsonValue;
   /** Which optional session members this session implements. dohc's session
@@ -95,6 +97,20 @@ export interface PluginDriverStartSessionResult {
    * both and fail one at call time. */
   supports: { setModel: boolean; answerUserInput: boolean };
 }
+
+export interface PluginDriverRejectedSessionResult {
+  rejected: true;
+  message: string;
+}
+
+export type PluginDriverStartSessionResult =
+  | PluginDriverStartedSessionResult
+  | PluginDriverRejectedSessionResult;
+
+// A rejected session is already unusable. Its plugin gets one short cleanup
+// grace before main tears down the exact spawn and its brokered process tree.
+export const PLUGIN_DRIVER_REJECTED_SESSION_CLEANUP_TIMEOUT_MS = 5_000;
+export const PLUGIN_DRIVER_REJECTION_MESSAGE_MAX_CHARS = 1_000;
 
 export interface PluginDriverSessionParams {
   sessionKey: string;

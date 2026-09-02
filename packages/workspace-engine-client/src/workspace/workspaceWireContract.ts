@@ -252,7 +252,9 @@ export type WatcherStatusResult = WorkspaceJsonObject & {
   running: boolean;
   degraded: boolean;
   terminal: boolean;
+  phase: CapturePhase;
 };
+export type CapturePhase = "starting" | "importing" | "ready" | "degraded";
 export type CaptureFlushResult = WorkspaceJsonObject & {
   settled: boolean;
   running: boolean;
@@ -873,6 +875,12 @@ const WorkspaceResultSchemas = {
     running: Schema.Boolean,
     degraded: Schema.Boolean,
     terminal: Schema.Boolean,
+    phase: Schema.Union([
+      Schema.Literal("starting"),
+      Schema.Literal("importing"),
+      Schema.Literal("ready"),
+      Schema.Literal("degraded"),
+    ]),
   }),
   [WORKSPACE_METHOD.captureFlush]: CaptureFlushResultSchema,
   [WORKSPACE_METHOD.captureReconcile]: CaptureFlushResultSchema,

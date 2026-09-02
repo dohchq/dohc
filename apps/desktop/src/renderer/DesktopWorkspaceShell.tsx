@@ -37,6 +37,7 @@ import type {
   EngineMomentRecord,
   EngineStoreRefusal,
   ImportWorkspaceFilesResult,
+  ListEngineMomentsResult,
   MyShareChangeRow,
   RefreshSharedViewResult,
   RebuildEngineStoreResult,
@@ -195,6 +196,8 @@ import {
   isCollectionTabPath,
   parseCollectionTabPath,
   defaultWorkbenchState,
+  CHATS_MAX_WIDTH,
+  CHATS_MIN_WIDTH,
   CHATS_TAB_PATH,
   GRAPH_TAB_PATH,
   HISTORY_TAB_PATH,
@@ -230,6 +233,7 @@ import {
   recordRecentFile,
   remapWorkbenchPaths,
   serializeUiState,
+  siteTabPath,
   setChatsWidth,
   setFolderExpanded,
   setOpenEditorsHeight,
@@ -245,6 +249,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
+import { createFirstSiteFiles } from "./workbench/createFirstSite";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -684,6 +689,15 @@ const LazyRelayShareDialog = lazy(() =>
   import("./RelayShareDialog").then((mod) => ({ default: mod.RelayShareDialog })),
 );
 const MARKDOWN_PRELOAD_IDLE_DELAY_MS = 150;
+// A history read already spent one second in the daemon's capture-flush
+// ladder before it can answer `updating`. Four renderer retries give that
+// flush another 1.85 seconds of breathing room without leaving the panel in
+// an unbounded spinner. After this ladder, the inline Try again remains.
+const HISTORY_UPDATING_RETRY_DELAYS_MS = [100, 250, 500, 1_000] as const;
+
+function waitForHistoryRetry(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
 
 // How often an open workspace re-reads the share state only the relay knows:
 // a recipient's mounts, and a granter's waiting changes. Slow on purpose —
@@ -849,6 +863,7 @@ export function EngineMomentDiffPage({
   tabPath,
   onBeforeRestore,
   onOpenFile,
+  onPathResolved,
   registerActiveUndo,
   onRestored,
 }: {
@@ -856,6 +871,7 @@ export function EngineMomentDiffPage({
   tabPath: string;
   onBeforeRestore: () => Promise<void>;
   onOpenFile: (path: string) => void;
+  onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
   onRestored: () => void;
 }) {
@@ -892,6 +908,7 @@ export function EngineMomentDiffPage({
       .readEngineMoment({ workspaceId, momentId })
       .then((result) => {
         if (token !== liveToken.current) return;
+        if (result.moment) onPathResolved(momentId, result.moment.path);
         setState({ status: "ready", moment: result.moment });
       })
       .catch(() => {
@@ -901,7 +918,7 @@ export function EngineMomentDiffPage({
     return () => {
       liveToken.current += 1;
     };
-  }, [momentId, workspaceId]);
+  }, [momentId, onPathResolved, workspaceId]);
   useEffect(() => {
     setRestoreState({ status: "idle" });
     setConfirmRestoreOpen(false);
@@ -1287,6 +1304,8 @@ const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
   all: "Chats",
   file: "This file",
 };
+const CHATS_KEYBOARD_RESIZE_STEP = 16;
+const CHATS_KEYBOARD_RESIZE_PAGE_STEP = CHATS_KEYBOARD_RESIZE_STEP * 8;
 // Every workspace this machine owns offers both. A shared view offers the
 // file tab only: it has no workspace-wide chat listing, by design (#646).
 
@@ -1318,8 +1337,31 @@ function ChatsPanel(props: {
       <div
         data-testid="chats-panel-resize"
         role="separator"
+        tabIndex={0}
         aria-orientation="vertical"
         aria-label="Resize chats"
+        aria-valuemin={CHATS_MIN_WIDTH}
+        aria-valuemax={CHATS_MAX_WIDTH}
+        aria-valuenow={width}
+        onKeyDown={(event) => {
+          const nextWidth =
+            event.key === "Home"
+              ? CHATS_MIN_WIDTH
+              : event.key === "End"
+                ? CHATS_MAX_WIDTH
+                : event.key === "PageUp"
+                  ? clampChatsWidth(width + CHATS_KEYBOARD_RESIZE_PAGE_STEP)
+                  : event.key === "PageDown"
+                    ? clampChatsWidth(width - CHATS_KEYBOARD_RESIZE_PAGE_STEP)
+                    : event.key === "ArrowLeft"
+                      ? clampChatsWidth(width + CHATS_KEYBOARD_RESIZE_STEP)
+                      : event.key === "ArrowRight"
+                        ? clampChatsWidth(width - CHATS_KEYBOARD_RESIZE_STEP)
+                        : null;
+          if (nextWidth === null) return;
+          event.preventDefault();
+          props.onWidthChange(nextWidth);
+        }}
         onPointerDown={(event) => {
           // Left button only — a right/middle press must never start a resize.
           if (event.button !== 0) return;
@@ -1339,7 +1381,7 @@ function ChatsPanel(props: {
         onPointerUp={(event) => resize.commit(event.pointerId)}
         onPointerCancel={(event) => resize.commit(event.pointerId)}
         onLostPointerCapture={(event) => resize.commit(event.pointerId)}
-        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80"
+        className="absolute -left-1 top-0 z-10 h-full w-2 cursor-col-resize bg-transparent transition-colors hover:bg-line/80 focus-visible:bg-accent/35"
       />
       {/* Same header grammar + h-9 band as the side panel: the two
           peer chrome surfaces speak one language and their hairlines
@@ -1570,7 +1612,7 @@ export function DesktopWorkspaceShell(props: {
   const [shellError, setShellError] = useState<{
     message: string;
     retry: (() => void) | null;
-    kind?: "singleton-tab-split" | "tab-limit";
+    kind?: "singleton-tab-split" | "tab-limit" | "workspace-search";
   } | null>(null);
   const showTabLimitError = useCallback(
     (
@@ -1907,6 +1949,17 @@ export function DesktopWorkspaceShell(props: {
   const workspaceIsReady =
     workspaceReadyFor?.workspaceId === workspaceId &&
     workspaceReadyFor.selectionGeneration === workspaceSelectionGeneration;
+  const [workspaceOpenFailedFor, setWorkspaceOpenFailedFor] = useState<{
+    workspaceId: string;
+    selectionGeneration: number;
+    message: string;
+  } | null>(null);
+  const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
+  const workspaceOpenFailure =
+    workspaceOpenFailedFor?.workspaceId === workspaceId &&
+    workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration
+      ? workspaceOpenFailedFor
+      : null;
   // Set-aside recovery markers (#567): every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them (#579 review, r4). Deliberately NOT part of
@@ -2039,10 +2092,6 @@ export function DesktopWorkspaceShell(props: {
     graphRefreshKey,
   } = useMemo(() => indexFileListing(files), [files]);
 
-  // Content search (Phase E5.0). The model lives HERE, not in the Search
-  // view, so results — and the activity-bar count badge — survive switching
-  // views while the panel unmounts.
-  const search = useWorkspaceSearch(workspaceId);
   const focusedGroup = activeGroup(wb);
   const focusedTabPath = activeTabPath(wb);
   // The plugins list marks the row whose details tab the user is looking at,
@@ -2059,20 +2108,17 @@ export function DesktopWorkspaceShell(props: {
       ),
     [dirtyRevision, openTabs],
   );
-  // A plugin tab is labelled with the name its manifest declares — the plugin's
-  // own display name on its details tab, a web app's title on its app tab. The
-  // tab path carries only ids and the manifests live in main, but each page
-  // already holds the name it heads itself with, so the label costs no extra
-  // call. Reading the manifests from here instead failed the desktop e2e in 4
-  // of 6 runs: that request lands while the plugin host is still starting on
-  // demand, and the web app's own start then loses the race.
-  const [pluginTabTitles, setPluginTabTitles] = useState<{
+  // Display labels that do not belong in tab identity. Plugin pages report
+  // their manifest titles after mount; moment pages report the durable path
+  // returned with their record. Reading plugin manifests from here instead
+  // failed the desktop e2e in 4 of 6 runs because that request races startup.
+  const [knownTabTitles, setKnownTabTitles] = useState<{
     workspaceId: string;
     titles: ReadonlyMap<string, string>;
   }>({ workspaceId: "", titles: EMPTY_TAB_LABELS });
-  const rememberPluginTabTitle = useCallback(
+  const rememberTabTitle = useCallback(
     (tabPath: string, title: string) => {
-      setPluginTabTitles((previous) => {
+      setKnownTabTitles((previous) => {
         // A title learned for another workspace never labels this one's tabs.
         const known =
           previous.workspaceId === workspaceId ? previous.titles : EMPTY_TAB_LABELS;
@@ -2089,20 +2135,25 @@ export function DesktopWorkspaceShell(props: {
       instanceKey: string | null,
       title: string,
     ) =>
-      rememberPluginTabTitle(
+      rememberTabTitle(
         pluginWebAppTabPath(pluginId, webAppId, instanceKey),
         title,
       ),
-    [rememberPluginTabTitle],
+    [rememberTabTitle],
   );
   const rememberPluginDetailsTitle = useCallback(
     (pluginId: string, directoryName: string, title: string) =>
-      rememberPluginTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
-    [rememberPluginTabTitle],
+      rememberTabTitle(pluginDetailsTabPath(pluginId, directoryName), title),
+    [rememberTabTitle],
+  );
+  const rememberMomentDiffPath = useCallback(
+    (momentId: string, filePath: string) =>
+      rememberTabTitle(momentDiffTabPath(momentId), filePath),
+    [rememberTabTitle],
   );
   const tabLabels =
-    pluginTabTitles.workspaceId === workspaceId
-      ? pluginTabTitles.titles
+    knownTabTitles.workspaceId === workspaceId
+      ? knownTabTitles.titles
       : EMPTY_TAB_LABELS;
   const anyTabDirty = dirtyPaths.size > 0;
   const activeDocumentPath = isVirtualTabPath(focusedTabPath)
@@ -2588,16 +2639,48 @@ export function DesktopWorkspaceShell(props: {
     focusedTabPath,
   ]);
 
-  const reportShellError = useCallback((fallback: string, error: unknown) => {
-    const detail = error instanceof Error ? error.message.trim() : "";
-    setShellError({
-      message:
-        detail && detail !== fallback && !detail.startsWith(`${fallback} `)
-          ? `${fallback} ${detail}`
-          : detail || fallback,
-      retry: null,
-    });
+  const reportShellError = useCallback(
+    (
+      fallback: string,
+      error: unknown,
+      retry: (() => void) | null = null,
+      kind?: "workspace-search",
+    ) => {
+      const detail = error instanceof Error ? error.message.trim() : "";
+      setShellError({
+        message:
+          detail && detail !== fallback && !detail.startsWith(`${fallback} `)
+            ? `${fallback} ${detail}`
+            : detail || fallback,
+        retry,
+        ...(kind ? { kind } : {}),
+      });
+    },
+    [],
+  );
+  // Content search lives in the shell so its results survive panel switches.
+  // Invocation failures use the shell's persistent error and retry contract;
+  // they must not look like a successful search with no matches.
+  const reportSearchError = useCallback(
+    (error: unknown, retry: () => void) =>
+      reportShellError(
+        "dohc could not search this workspace.",
+        error,
+        retry,
+        "workspace-search",
+      ),
+    [reportShellError],
+  );
+  const clearSearchError = useCallback(() => {
+    setShellError((current) =>
+      current?.kind === "workspace-search" ? null : current,
+    );
   }, []);
+  const search = useWorkspaceSearch(
+    workspaceId,
+    reportSearchError,
+    clearSearchError,
+  );
   // Snapshot lanes share one banner. Keep the lane in the message so the user
   // can tell which value went stale, then show the cause and a retry control.
   //
@@ -2757,13 +2840,15 @@ export function DesktopWorkspaceShell(props: {
   // stale and asked again. "No changes yet" is an assertion about the
   // WORKSPACE, so only a read that answered may reach it (#593) — this says
   // whether the newest read answered at all.
-  const [engineHistoryReadFailed, setEngineHistoryReadFailed] = useState(false);
+  const [engineHistoryReadState, setEngineHistoryReadState] = useState<
+    "loading" | "failed" | "updating"
+  >("loading");
   // The newest history refresh ISSUED. Only it may call the surface
   // unloadable: an older read failing while a newer one is still in flight
   // has settled nothing. Kept apart from the committed-page watermark on
   // purpose — a failure must not supersede the page lane, because an older
   // read that still succeeds is the only answer anyone has (#507).
-  const newestEngineHistoryRefresh = useRef(0);
+  const newestHistoryRefresh = useRef(0);
   // Liveness token for the engine history loads (bumped on unmount): a slow
   // response for one workspace must never repaint another.
   const engineHistoryToken = useRef(0);
@@ -2890,7 +2975,7 @@ export function DesktopWorkspaceShell(props: {
       // response from committing. The snapshot lanes invalidate themselves.
       engineHistoryToken.current += 1;
       committedEngineHistoryToken.current = engineHistoryToken.current;
-      newestEngineHistoryRefresh.current = engineHistoryToken.current;
+      newestHistoryRefresh.current = engineHistoryToken.current;
       blockedEngineHistoryRefresh.current = null;
     },
     [],
@@ -2971,17 +3056,17 @@ export function DesktopWorkspaceShell(props: {
     // The engine fetch runs only when main's status agrees a recorder exists
     // (#542): after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
+    const token = ++engineHistoryToken.current;
+    newestHistoryRefresh.current = token;
     if (engineEnabled && !isShareView && !statusSaysNoRecorder(syncStatusLane.latest())) {
       // Latest-COMMITTED-wins: each request advances the token, and an answer
       // displays only if it is newer than the answer already displayed, so an
       // older response can never overwrite newer moments or move
       // latestMomentOrder backward (shared with loadMoreEngineHistory).
-      const token = ++engineHistoryToken.current;
-      newestEngineHistoryRefresh.current = token;
       // A read is on the way, so the surface does not know yet — which is a
       // different thing from knowing the last read failed. Saying so here is
       // also what makes the retry control show that it is working.
-      setEngineHistoryReadFailed(false);
+      setEngineHistoryReadState("loading");
       // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
@@ -2997,7 +3082,29 @@ export function DesktopWorkspaceShell(props: {
       // user has already acted on — a dismissed review card, most visibly.
       // Each is handed whole to the lane rule, which judges both ways it can
       // settle.
-      const pageRead = bridge().listEngineMoments({ workspaceId, limit: 200 });
+      const pageRead = (async () => {
+        for (
+          let attempt = 0;
+          attempt <= HISTORY_UPDATING_RETRY_DELAYS_MS.length;
+          attempt += 1
+        ) {
+          const response = await bridge().listEngineMoments({
+            workspaceId,
+            limit: 200,
+          });
+          if (!("status" in response)) return response;
+          if (
+            attempt === HISTORY_UPDATING_RETRY_DELAYS_MS.length ||
+            token !== newestHistoryRefresh.current
+          ) {
+            return response;
+          }
+          await waitForHistoryRetry(HISTORY_UPDATING_RETRY_DELAYS_MS[attempt]!);
+          if (token !== newestHistoryRefresh.current) return response;
+        }
+        // The loop's inclusive bound always returns on its final attempt.
+        throw new Error("History retry ladder ended without an answer.");
+      })();
       // Asking again IS this refresh: it re-reads all four, so the lane that
       // failed is read again. Same control the History surface offers for its
       // own read, and the same one the caller runs on any activity.
@@ -3031,19 +3138,25 @@ export function DesktopWorkspaceShell(props: {
             askAgain,
           ),
       );
-      let page: Awaited<typeof pageRead>;
+      let response: Awaited<typeof pageRead>;
       try {
-        page = await pageRead;
+        response = await pageRead;
       } catch (error) {
         // A failure is an answer too — about why the surface is blank, not
         // about what the timeline holds. Only the newest read may give it:
         // an older one failing while a newer is still in flight has settled
         // nothing, and after unmount the counter belongs to no read at all.
-        if (token === newestEngineHistoryRefresh.current) {
-          setEngineHistoryReadFailed(true);
-        }
+        if (token !== newestHistoryRefresh.current) return;
+        setEngineHistoryReadState("failed");
         throw error;
       }
+      if ("status" in response) {
+        if (token === newestHistoryRefresh.current) {
+          setEngineHistoryReadState("updating");
+        }
+        return "waiting" as const;
+      }
+      const page: ListEngineMomentsResult = response;
       if (token <= committedEngineHistoryToken.current) return;
       // An answer describing the version the user left is not late — it is
       // about somewhere else.
@@ -3061,6 +3174,11 @@ export function DesktopWorkspaceShell(props: {
           latestMomentOrder: page.latestMomentOrder,
           protectedTruncated: page.protectedTruncated,
         });
+        // Readiness belongs to the page that actually commits. A newer
+        // activity refresh can beat the workspace-open refresh; marking only
+        // the caller's promise then left the profiler waiting even though the
+        // current History page was already visible.
+        markCurrentSwitchPhase("history-ready");
       };
       // Blocked by a newer pagination: hold this answer instead of throwing it
       // away, and let the pagination's settlement decide (keeping the newest
@@ -3077,7 +3195,7 @@ export function DesktopWorkspaceShell(props: {
         return;
       }
       commit();
-      return;
+      return "ready" as const;
     }
     // Opted-out workspace (retirement Phase C): no history source exists —
     // only status and agent state refresh. They ride the same issue order as
@@ -3085,17 +3203,37 @@ export function DesktopWorkspaceShell(props: {
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
     // newer status (#636).
-    const token = ++engineHistoryToken.current;
-    const [status, agent] = await Promise.all([
-      bridge().getSyncStatus({ workspaceId }),
-      readAgentStatusForHistory(),
-    ]);
-    syncStatusLane.commit(token, status);
-    agentActiveLane.commit(token, agent.activeRun !== null);
+    const statusRead = bridge().getSyncStatus({ workspaceId });
+    const agentRead = readAgentStatusForHistory();
+    const askAgain = () => {
+      void refreshHistory().catch((error) =>
+        reportShellError("Could not refresh history.", error),
+      );
+    };
+    syncStatusLane.settle(
+      token,
+      statusRead,
+      (status) => status,
+      (error) =>
+        reportLaneFailure("dohc could not refresh sync status.", error, askAgain),
+    );
+    agentActiveLane.settle(
+      token,
+      agentRead,
+      (agent) => agent.activeRun !== null,
+      (error) =>
+        reportLaneFailure("dohc could not refresh agent runs.", error, askAgain),
+    );
+    const settled = await Promise.allSettled([statusRead, agentRead]);
+    if (settled.some((lane) => lane.status === "fulfilled")) {
+      markCurrentSwitchPhase("history-ready");
+    }
+    return "ready" as const;
   }, [
     agentActiveLane,
     engineEnabled,
     isShareView,
+    markCurrentSwitchPhase,
     readAgentStatusForHistory,
     reportLaneFailure,
     reportShellError,
@@ -3123,6 +3261,10 @@ export function DesktopWorkspaceShell(props: {
         limit: 200,
         beforeMomentOrder: cursor,
       });
+      // The displayed page remains the honest last answer while capture is
+      // settling. Releasing the loading button below gives the user a bounded
+      // retry; this expected progress result is never a global error.
+      if ("status" in page) return;
       // The committed-answer rule, applied to this page as well: display it
       // unless a NEWER answer already took the timeline. Superseding on issue
       // here let a newer refresh that merely FAILED throw this page away.
@@ -3269,14 +3411,11 @@ export function DesktopWorkspaceShell(props: {
   // changed `refreshHistory` and re-ran the whole workspace-open effect.
   useEffect(() => {
     if (!workspaceIsReady || engineReadForWorkspace === null) return;
-    void refreshHistory()
-      .then(() => {
-        markCurrentSwitchPhase("history-ready");
-      })
-      .catch((error) => reportShellError("Could not refresh history.", error));
+    void refreshHistory().catch((error) =>
+      reportShellError("Could not refresh history.", error),
+    );
   }, [
     engineReadForWorkspace,
-    markCurrentSwitchPhase,
     refreshHistory,
     reportShellError,
     workspaceIsReady,
@@ -3655,12 +3794,16 @@ export function DesktopWorkspaceShell(props: {
   // editor is what performs the reads — without this the panel keeps showing
   // counts the user already cleared until something remounts it.
   const [chatsReadRevision, setChatsReadRevision] = useState(0);
+  const [chatsThreadRevision, setChatsThreadRevision] = useState(0);
   const [chatsDmReadRevision, setChatsDmReadRevision] = useState(0);
   const onChatsThreadRead = useCallback(() => {
     setChatsReadRevision((current) => current + 1);
   }, []);
   const onChatsDmRead = useCallback(() => {
     setChatsDmReadRevision((current) => current + 1);
+  }, []);
+  const onChatsThreadStarted = useCallback(() => {
+    setChatsThreadRevision((current) => current + 1);
   }, []);
   // THE one write of the chat destination: the ref the panel reads, the state
   // the navigator highlights, and the cancellation that choosing a different
@@ -3820,7 +3963,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Engine history diff (flagged workspaces): one tab per moment.
   const openMomentDiffTab = useCallback(
-    (momentId: string) => {
+    (momentId: string, filePath: string) => {
       const targetGroupId = wbRef.current.activeEditorGroup;
       const requestSequence = invalidateDeferredFileOpen(targetGroupId);
       const isCurrentRequest = () =>
@@ -3834,6 +3977,7 @@ export function DesktopWorkspaceShell(props: {
           if (!current.editorGroups.some((group) => group.id === targetGroupId)) {
             return;
           }
+          rememberMomentDiffPath(momentId, filePath);
           mutateWb((state) =>
             openTab(state, momentDiffTabPath(momentId), targetGroupId),
           );
@@ -3847,6 +3991,7 @@ export function DesktopWorkspaceShell(props: {
       flushActiveDraft,
       invalidateDeferredFileOpen,
       mutateWb,
+      rememberMomentDiffPath,
       reportShellError,
       workspaceId,
     ],
@@ -4438,6 +4583,36 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
+  const createFirstSite = useCallback(async () => {
+    try {
+      const { root } = await createFirstSiteFiles({
+        workspaceId,
+        files,
+        folders,
+        mutations: bridge(),
+      });
+      try {
+        await refreshFiles();
+      } catch (error) {
+        reportShellError(
+          "The site was created, but the workspace could not refresh.",
+          error,
+        );
+        return;
+      }
+      openVirtualTab(siteTabPath(root));
+    } catch (error) {
+      reportShellError("Could not create the site.", error);
+      await refreshFiles().catch(() => undefined);
+    }
+  }, [
+    files,
+    folders,
+    openVirtualTab,
+    refreshFiles,
+    reportShellError,
+    workspaceId,
+  ]);
   // Stable identities for the memoized explorer and inspector (D2#2/#5).
   // Inline arrows here handed every shell render a fresh prop set, which
   // re-rendered every TreeRow and re-ran FileInspector for renders that
@@ -4743,41 +4918,62 @@ export function DesktopWorkspaceShell(props: {
     if (syncStatus) rendererMarks.markOnce("workspace-shell-interactive");
   }, [syncStatus]);
 
-  // Open the workspace exactly once for this renderer selection. Main admits
-  // the exact session before watcher readiness, then returns the capture
-  // decision and status once the workspace is ready.
+  // Open the workspace for this renderer selection. Main admits the exact
+  // session before watcher readiness, then returns the capture decision and
+  // status once the workspace is ready. A failed attempt runs again only when
+  // the user asks the error banner to retry it.
   useEffect(() => {
     let cancelled = false;
     // The open carries a status, so it takes its place in the same issue order
     // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
+      let status: SyncStatusResult;
       try {
-        const status = await bridge().openWorkspace({ workspaceId });
-        if (cancelled) return;
-        markCurrentSwitchPhase("session-admitted");
-        // Main awaits the capture build before it answers, so this is the
-        // moment the decision exists — and the status committed beside it is
-        // the first one that describes a decided workspace (#626). The two
-        // commit together, so "decided" never runs ahead of what it decided.
-        // The lane may refuse this status, and the decision still stands: what
-        // outranks it is a NEWER status, which describes a workspace at least
-        // as decided as this one.
-        syncStatusLane.commit(token, status);
-        setCaptureDecidedFor(workspaceId);
-        workspaceAdmission.resolve();
-        setWorkspaceReadyFor({
-          workspaceId,
-          selectionGeneration: workspaceSelectionGeneration,
-        });
+        status = await bridge().openWorkspace({ workspaceId });
+      } catch (error) {
+        if (!cancelled) {
+          const detail = error instanceof Error ? error.message.trim() : "";
+          setWorkspaceOpenFailedFor({
+            workspaceId,
+            selectionGeneration: workspaceSelectionGeneration,
+            message: detail || "dohc could not open this workspace.",
+          });
+        }
+        return;
+      }
+      if (cancelled) return;
+      markCurrentSwitchPhase("session-admitted");
+      // Main answers after the safe startup boundary: either a complete
+      // baseline or a proven large fresh import. This is the moment the
+      // decision exists, and the status committed beside it is the first one
+      // that describes that decided workspace (#626). The two commit
+      // together, so "decided" never runs ahead of what it decided.
+      // The lane may refuse this status, and the decision still stands: what
+      // outranks it is a NEWER status, which describes a workspace at least
+      // as decided as this one.
+      syncStatusLane.commit(token, status);
+      setCaptureDecidedFor(workspaceId);
+      workspaceAdmission.resolve();
+      setWorkspaceReadyFor({
+        workspaceId,
+        selectionGeneration: workspaceSelectionGeneration,
+      });
+      setWorkspaceOpenFailedFor(null);
+
+      const refreshInitialFiles = async () => {
         const paintedCachedListing = await refreshFiles({ allowCached: true });
         if (cancelled || !paintedCachedListing) return;
-        void refreshFiles().catch((error) =>
-          reportShellError("Could not refresh workspace files.", error),
-        );
-      } catch (error) {
-        if (!cancelled) reportShellError("Could not open this workspace.", error);
-      }
+        await refreshFiles();
+      };
+      const reportInitialFilesFailure = (error: unknown) => {
+        if (!cancelled) {
+          reportShellError("Could not refresh workspace files.", error, () => {
+            void refreshInitialFiles().catch(reportInitialFilesFailure);
+          });
+        }
+      };
+      void refreshInitialFiles().catch(reportInitialFilesFailure);
     })();
     return () => {
       cancelled = true;
@@ -4785,6 +4981,7 @@ export function DesktopWorkspaceShell(props: {
   }, [
     workspaceId,
     workspaceSelectionGeneration,
+    workspaceOpenAttempt,
     markCurrentSwitchPhase,
     refreshFiles,
     reportShellError,
@@ -5201,16 +5398,15 @@ export function DesktopWorkspaceShell(props: {
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
   const shareViewDamaged = !!shareView?.damaged;
-  // Whether this share grants chat WRITES (#646 PR2), as one answer the
-  // banner and the composer both read. Positive recognition only: `view`, an
-  // absent level (which is what `damaged` leaves behind), and anything else
-  // unreadable all mean no. The renderer decides nothing with this — main
-  // refuses the write either way — but a surface that guessed generously
-  // would invite a write it then has to take back.
-  const shareViewChatWritable =
-    !shareViewDamaged &&
-    (shareView?.access === "comment" || shareView?.access === "edit");
+  // The relay-derived generic chat fact selects the Comment banner's next
+  // step. It does not grant a desktop write: every received share's Chats are
+  // read-only in Phase 3 because the store cannot prove per-row delivery.
   const [shareViewEnded, setShareViewEnded] = useState(!!shareView?.ended);
+  const shareViewHasIndependentChat =
+    !shareViewDamaged &&
+    !shareViewEnded &&
+    shareView?.access === "comment" &&
+    shareView?.genericChatWritable === true;
   // Whether this share grants DOCUMENT writes (#646 PR3a), read the same way
   // and for the same reason: positive recognition only, so `view`, an absent
   // level, and a damaged grant all stay read-only. An ended share grants
@@ -5533,17 +5729,30 @@ export function DesktopWorkspaceShell(props: {
         onLoadMore={() => void loadMoreEngineHistory()}
         onOpenMoment={openMomentDiffTab}
       />
-    ) : engineHistoryReadFailed ? (
+    ) : engineHistoryReadState === "failed" ||
+      engineHistoryReadState === "updating" ? (
       // The same state its two siblings render — ChatsView and LinkedChats
       // both say a panel could not load beside a Try again — so it takes
       // their look, not the empty-state recipe next door. One line, and a
       // Next that works on this surface: the read this panel runs itself.
       <div
-        data-testid="history-load-failed"
+        data-testid={
+          engineHistoryReadState === "updating"
+            ? "history-updating"
+            : "history-load-failed"
+        }
         className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center"
       >
-        <span className="text-xs text-danger">
-          dohc could not load this workspace&apos;s history.
+        <span
+          className={
+            engineHistoryReadState === "updating"
+              ? "text-xs text-muted"
+              : "text-xs text-danger"
+          }
+        >
+          {engineHistoryReadState === "updating"
+            ? "Recent changes are still being added to History."
+            : "dohc could not load this workspace's history."}
         </span>
         <button
           type="button"
@@ -5596,6 +5805,7 @@ export function DesktopWorkspaceShell(props: {
         activeEditorGroup={wb.activeEditorGroup}
         dirtyPaths={dirtyPaths}
         recoveryPaths={recoveryPaths}
+        tabLabels={tabLabels}
         expandedFolders={wb.expandedFolders}
         pinned={wb.pinned}
         openEditorsHeight={wb.openEditorsHeight}
@@ -5657,6 +5867,7 @@ export function DesktopWorkspaceShell(props: {
     onNavCommand: onChatsNavCommand,
     onDraftsChange: onChatsDrafts,
     onThreadRead: onChatsThreadRead,
+    onThreadStarted: onChatsThreadStarted,
     onDmRead: onChatsDmRead,
     onOpenFileChat: openFileChatInPanel,
     onOpenPath: openPathWithHeading,
@@ -5683,6 +5894,7 @@ export function DesktopWorkspaceShell(props: {
     workspaces: dmWorkspaceOptions,
     selectedNav: selectedChatsNav ?? undefined,
     readRevision: chatsReadRevision,
+    threadRevision: chatsThreadRevision,
     dmReadRevision: chatsDmReadRevision,
     onOpenInTab: openChatsNavInTab,
     onOpenFileChat: openFileChatInPanel,
@@ -5717,8 +5929,8 @@ export function DesktopWorkspaceShell(props: {
       // that writes a file right after the shell appears would otherwise race
       // chokidar's ignoreInitial scan and have the write silently swallowed.
       // Waiting on this attribute is the deterministic "watcher is live" gate.
-      data-ready={syncStatus ? "true" : "false"}
-      className="app-chrome flex h-screen flex-col bg-bg text-ink"
+      data-ready={workspaceIsReady ? "true" : "false"}
+      className="app-chrome relative flex h-screen flex-col bg-bg text-ink"
     >
       <Titlebar
         workspace={props.workspace}
@@ -5808,8 +6020,10 @@ export function DesktopWorkspaceShell(props: {
                     // right: the granter's files change only when the
                     // granter accepts.
                     `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
-                  : shareViewChatWritable
-                    ? `Shared view from ${shareGranterName}. You can chat about these files, not edit them.`
+                  : shareViewHasIndependentChat
+                    ? `Shared view from ${shareGranterName}. Files and Chats are read-only here. Ask ${shareGranterName} where to continue the conversation.`
+                    : shareView.access === "comment"
+                      ? `Shared view from ${shareGranterName}. Files are read-only here. Continue commenting in the browser where you opened the link.`
                     : `Shared view from ${shareGranterName} — read-only. Ask ${shareView.granterEmail ?? "them"} for changes.`}
           </span>
           {shareExcludedPaths.length > 0 ? (
@@ -5982,7 +6196,11 @@ export function DesktopWorkspaceShell(props: {
           ) : null}
         </div>
       ) : null}
-      <div className="flex min-h-0 flex-1">
+      <div
+        data-testid="workspace-workbench"
+        inert={!workspaceIsReady ? true : undefined}
+        className="flex min-h-0 flex-1"
+      >
         <ActivityBar
           workspaceId={workspaceId}
           activeView={wb.activeView}
@@ -6067,6 +6285,8 @@ export function DesktopWorkspaceShell(props: {
                   workspaceId={workspaceId}
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
+                  onCreateFirstSite={createFirstSite}
+                  receivedShareWorkspace={shareView !== null}
                 />
               </Suspense>
             ) : wb.activeView === "history" ? (
@@ -6297,6 +6517,7 @@ export function DesktopWorkspaceShell(props: {
                   tabPath={tabPath ?? ""}
                   onBeforeRestore={flushActiveDraft}
                   onOpenFile={openFile}
+                  onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
                   onRestored={refreshAfterHistoryRestore}
                 />
@@ -6682,7 +6903,7 @@ export function DesktopWorkspaceShell(props: {
                   <LazyLinkedChatsPanel
                     workspaceId={workspaceId}
                     filePath={activeDocumentPath}
-                    {...(shareView ? { shareReadOnly: !shareViewChatWritable } : {})}
+                    {...(shareView ? { shareReadOnly: true } : {})}
                     initialThread={searchChatTarget?.thread ?? null}
                     initialFocusMessageId={searchChatTarget?.focusMessageId}
                     onInitialThreadConsumed={() => setSearchChatTarget(null)}
@@ -6700,6 +6921,40 @@ export function DesktopWorkspaceShell(props: {
           </ChatsPanel>
         ) : null}
       </div>
+      {!workspaceIsReady && workspaceOpenFailure ? (
+        <div
+          data-testid="workspace-open-failed"
+          role="alert"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-3 bg-bg px-6 text-center"
+        >
+          <div className="max-w-md space-y-1.5">
+            <p className="text-sm font-medium text-ink">Couldn’t open this workspace</p>
+            <p className="text-xs text-muted">{workspaceOpenFailure.message}</p>
+            <p className="text-xs text-muted">Choose another workspace from the title bar.</p>
+          </div>
+          <PrimaryButton
+            onClick={() => {
+              setWorkspaceOpenFailedFor(null);
+              setWorkspaceOpenAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Try again
+          </PrimaryButton>
+        </div>
+      ) : !workspaceIsReady ? (
+        <div
+          data-testid="workspace-preparing"
+          role="status"
+          aria-live="polite"
+          className="absolute inset-x-0 bottom-0 top-10 z-10 flex flex-col items-center justify-center gap-2 bg-bg px-6 text-center"
+        >
+          <RefreshCw size={16} aria-hidden className="animate-spin text-subtle" />
+          <p className="text-sm font-medium text-ink">Preparing this workspace</p>
+          <p className="text-xs text-muted">
+            dohc is checking your existing files before editing starts.
+          </p>
+        </div>
+      ) : null}
 
       <StatusBar
         workspaceId={workspaceId}

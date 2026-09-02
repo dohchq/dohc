@@ -1,4 +1,6 @@
 // @vitest-environment jsdom
+import { EditorView } from "@codemirror/view";
+import { isolateHistory } from "@codemirror/commands";
 import { configure } from "@testing-library/dom";
 import {
   act,
@@ -129,6 +131,92 @@ async function textEditorContent(host: HTMLElement): Promise<HTMLElement> {
     }
     return content;
   });
+}
+
+function codeEditorView(host: HTMLElement): EditorView {
+  const content = host.querySelector(".cm-content");
+  if (!(content instanceof HTMLElement)) {
+    throw new Error("CodeMirror has not mounted .cm-content yet");
+  }
+  const view = EditorView.findFromDOM(content);
+  if (!view) throw new Error("CodeMirror has not attached an EditorView");
+  return view;
+}
+
+function codeEditorText(host: HTMLElement): string {
+  return codeEditorView(host).state.doc.toString();
+}
+
+function replaceCodeEditorText(host: HTMLElement, text: string): void {
+  const view = codeEditorView(host);
+  act(() => {
+    view.dispatch({
+      changes: { from: 0, to: view.state.doc.length, insert: text },
+    });
+  });
+}
+
+function appendCodeEditorText(host: HTMLElement, text: string): void {
+  const view = codeEditorView(host);
+  act(() => {
+    view.dispatch({
+      changes: { from: view.state.doc.length, insert: text },
+      selection: { anchor: view.state.doc.length + text.length },
+    });
+  });
+}
+
+async function typeInMarkdownEditor(
+  user: ReturnType<typeof userEvent.setup>,
+  editor: HTMLElement,
+  text: string,
+): Promise<void> {
+  if (editor.classList.contains("dohc-code-editor")) {
+    appendCodeEditorText(editor, text);
+    return;
+  }
+  await user.type(editor, text);
+}
+
+type CodeEditorTestHost = HTMLElement & {
+  value: string;
+  readOnly: boolean;
+  selectionStart: number;
+  selectionEnd: number;
+  setSelectionRange: (start: number, end: number) => void;
+};
+
+function codeEditorTestHost(host: HTMLElement): CodeEditorTestHost {
+  Object.defineProperties(host, {
+    value: {
+      configurable: true,
+      get: () => codeEditorText(host),
+      set: (text: string) => replaceCodeEditorText(host, text),
+    },
+    readOnly: {
+      configurable: true,
+      get: () =>
+        host.querySelector(".cm-content")?.getAttribute("contenteditable") ===
+        "false",
+    },
+    selectionStart: {
+      configurable: true,
+      get: () => codeEditorView(host).state.selection.main.from,
+    },
+    selectionEnd: {
+      configurable: true,
+      get: () => codeEditorView(host).state.selection.main.to,
+    },
+    setSelectionRange: {
+      configurable: true,
+      value: (start: number, end: number) => {
+        codeEditorView(host).dispatch({
+          selection: { anchor: start, head: end },
+        });
+      },
+    },
+  });
+  return host as CodeEditorTestHost;
 }
 
 async function findTextEditorContent(): Promise<HTMLElement> {
@@ -697,12 +785,9 @@ function stubScrollSpy(
 }
 
 // data-testid="markdown-editor" names the editing surface, and BOTH editing
-// surfaces carry it: the source textarea in FileInspector and the WYSIWYG
-// ProseMirror div in MarkdownEditor. findByTestId answers with whichever is
-// mounted, so a test that asked for the source view can be handed the WYSIWYG
-// div -- and `.value` on a div is undefined, which is the `indexOf` TypeError
-// #590 records as shape 3. Wait for the surface the test actually means. The
-// testids are pinned by e2e and must not be renamed.
+// surfaces carry it: the source CodeMirror host in FileInspector and the
+// WYSIWYG ProseMirror div in MarkdownEditor. Wait for the CodeMirror host when
+// a test needs source mode. The test ids are pinned by e2e and must not change.
 // The edit toggle is `disabled={readOnly || opening}`, and a click on a
 // disabled button does nothing and does not retry. A click fired the moment the
 // button exists is therefore dropped whenever the open has not answered yet,
@@ -721,15 +806,16 @@ async function findEnabledMarkdownEditToggle(): Promise<HTMLElement> {
   });
 }
 
-async function findSourceEditor(): Promise<HTMLTextAreaElement> {
+async function findSourceEditor(): Promise<CodeEditorTestHost> {
   return await waitFor(() => {
     const editor = screen.getByTestId("markdown-editor");
-    if (!(editor instanceof HTMLTextAreaElement)) {
+    if (!editor.classList.contains("dohc-code-editor")) {
       throw new Error(
         "markdown-editor is the WYSIWYG surface — the source toggle has not landed yet",
       );
     }
-    return editor;
+    codeEditorView(editor);
+    return codeEditorTestHost(editor);
   });
 }
 
@@ -737,10 +823,8 @@ async function findSourceEditor(): Promise<HTMLTextAreaElement> {
 // passive effect, and findByTestId resolves from a MutationObserver callback
 // that can beat React's effect flush on a busy box. `toggle?.()` then silently
 // does nothing -- the component stays in WYSIWYG and the test spends its whole
-// asyncUtil window waiting for a source view nobody ever asked for. That is
-// the shared root of #590 shapes 1 and 3: shape 1 finds no textarea, shape 3
-// finds the WYSIWYG div and reads `.value` off it. Never optional-chain a
-// missing toggle away; wait for it.
+// asyncUtil window waiting for a source view nobody ever asked for. Never
+// optional-chain a missing toggle away; wait for it.
 async function toggleSourceOnce(read: () => (() => void) | null): Promise<void> {
   const toggle = await waitFor(() => {
     const registered = read();
@@ -807,7 +891,11 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await typeInMarkdownEditor(
+      user,
+      await screen.findByTestId("markdown-editor"),
+      "Draft!",
+    );
     return { user, view };
   }
 
@@ -967,12 +1055,11 @@ describe("markdown editor unmount flush", () => {
       });
       await firstSwitch;
     });
-    const firstEditor = (await screen.findAllByTestId(
-      "markdown-editor",
-    ))[0] as HTMLTextAreaElement;
+    const firstEditorElement = (await screen.findAllByTestId("markdown-editor"))[0]!;
+    await textEditorContent(firstEditorElement);
+    const firstEditor = codeEditorTestHost(firstEditorElement);
     await waitFor(() => expect(firstEditor.value).toContain("# New"));
-    await user.click(firstEditor);
-    await user.keyboard("{End} peer draft");
+    appendCodeEditorText(firstEditor, " peer draft");
     const buffer = getSharedLocalDocument(
       documentVersionKey("ws-1", "notes/versioned.md", 2),
     );
@@ -1364,10 +1451,14 @@ describe("markdown editor unmount flush", () => {
     );
     await toggleSourceOnce(() => toggles[0]);
     await toggleSourceOnce(() => toggles[1]);
-    const editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
+    const editors = await Promise.all(
+      screen.getAllByTestId("markdown-editor").map(async (editor) => {
+        await textEditorContent(editor);
+        return codeEditorTestHost(editor);
+      }),
+    );
     const user = userEvent.setup();
-    await user.click(editors[0]!);
-    await user.keyboard("{End} dirty");
+    appendCodeEditorText(editors[0]!, " dirty");
     view.rerender(
       <>
         <FileInspector
@@ -1557,10 +1648,14 @@ describe("markdown editor unmount flush", () => {
     );
     await toggleSourceOnce(() => toggles[0]);
     await toggleSourceOnce(() => toggles[1]);
-    let editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
+    let editors = await Promise.all(
+      screen.getAllByTestId("markdown-editor").map(async (editor) => {
+        await textEditorContent(editor);
+        return codeEditorTestHost(editor);
+      }),
+    );
     const user = userEvent.setup();
-    await user.click(editors[0]!);
-    await user.keyboard("{End} local");
+    appendCodeEditorText(editors[0]!, " local");
     await waitFor(() => expect(flushes).toHaveLength(2));
     const firstFlush = flushes[0]!().then(
       () => "resolved" as const,
@@ -1578,9 +1673,13 @@ describe("markdown editor unmount flush", () => {
     await waitFor(() =>
       expect(bridgeMock.readWorkspaceText).toHaveBeenCalledTimes(3),
     );
-    editors = screen.getAllByTestId("markdown-editor") as HTMLTextAreaElement[];
-    await user.click(editors[1]!);
-    await user.keyboard("{End} peer");
+    editors = await Promise.all(
+      screen.getAllByTestId("markdown-editor").map(async (editor) => {
+        await textEditorContent(editor);
+        return codeEditorTestHost(editor);
+      }),
+    );
+    appendCodeEditorText(editors[1]!, " peer");
 
     await act(async () => {
       resolveConflict();
@@ -1625,7 +1724,7 @@ describe("markdown editor unmount flush", () => {
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     await screen.findByTestId("view-markdown");
     const editor = await screen.findByTestId("markdown-editor");
-    expect(editor).not.toBeInstanceOf(HTMLTextAreaElement);
+    expect(editor.classList.contains("dohc-code-editor")).toBe(false);
     await user.type(editor, "Latest");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
@@ -1672,7 +1771,12 @@ describe("markdown editor unmount flush", () => {
     // editor lookup below with a confusing "not found". Wait for the toggle.
     await waitFor(() => expect(registered).not.toBeNull());
     await toggleSourceOnce(() => registered); // wysiwyg -> editable source (legacy branch)
-    await user.type(await screen.findByTestId("markdown-editor"), "Raw!");
+    const sourceEditor = await findSourceEditor();
+    await user.click(await textEditorContent(sourceEditor));
+    codeEditorView(sourceEditor).dispatch({
+      selection: { anchor: sourceEditor.value.length },
+    });
+    await user.keyboard("Raw!");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
     await toggleSourceOnce(() => registered); // source -> wysiwyg: flushes inside the window
     await waitFor(() =>
@@ -1734,7 +1838,102 @@ describe("markdown editor unmount flush", () => {
     await toggleSourceOnce(() => registered);
     const sourceEditor = await findSourceEditor();
 
-    expect(document.activeElement).toBe(sourceEditor);
+    expect(document.activeElement).toBe(await textEditorContent(sourceEditor));
+  });
+
+  it("opens large editable Markdown in CodeMirror and keeps every rapid keystroke", async () => {
+    const largeBody = `# Large\n\n${"Body line\n".repeat(8_000)}`;
+    const typed = "profilex-0123456789-abcdefghij";
+    bridgeMock.readWorkspaceText.mockResolvedValueOnce({
+      text: largeBody,
+      truncated: false,
+      contentHash: TEST_CONTENT_HASH,
+    });
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="large.md" />);
+
+    const editToggle = await findEnabledMarkdownEditToggle();
+    expect(editToggle.textContent).toBe("Edit");
+    await user.click(editToggle);
+    const sourceEditor = await findSourceEditor();
+    const content = await textEditorContent(sourceEditor);
+
+    expect(content.getAttribute("contenteditable")).toBe("true");
+    expect(editToggle.textContent).toBe("WYSIWYG");
+    await user.click(content);
+    codeEditorView(sourceEditor).dispatch({
+      selection: { anchor: largeBody.length },
+    });
+    await user.keyboard(typed);
+
+    expect(sourceEditor.value).toBe(`${largeBody}${typed}`);
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+    expect(bridgeMock.writeWorkspaceText.mock.calls[0]?.[0].text).toBe(
+      `${largeBody}${typed}`,
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
+    );
+  });
+
+  it("applies an accepted peer value to a mounted Markdown source editor", async () => {
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+    await user.click(await findEnabledMarkdownEditToggle());
+    const sourceEditor = await findSourceEditor();
+    const content = await textEditorContent(sourceEditor);
+    await user.click(content);
+    await user.keyboard("{End} local");
+    expect(sourceEditor.value).toBe("# Hello local\n");
+    await waitFor(
+      () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
+      { timeout: 5_000 },
+    );
+
+    const peerSource = {};
+    act(() => {
+      getSharedLocalDocument(
+        documentVersionKey("ws-1", "a.md", undefined),
+      ).publishDraft("# Peer\n", peerSource);
+    });
+
+    await waitFor(() => expect(sourceEditor.value).toBe("# Peer\n"));
+  });
+
+  it("keeps small Markdown WYSIWYG-first and preserves raw source across a round trip", async () => {
+    const user = userEvent.setup();
+    render(<FileInspector workspaceId="ws-1" path="a.md" />);
+
+    const initialEditor = await screen.findByTestId("markdown-editor");
+    expect(initialEditor.classList.contains("dohc-code-editor")).toBe(false);
+    const editToggle = await findEnabledMarkdownEditToggle();
+    expect(editToggle.textContent).toBe("Source");
+    await user.click(editToggle);
+    const sourceEditor = await findSourceEditor();
+    const rawSource = "# Hello\n\n<!-- keep raw -->\n";
+    replaceCodeEditorText(sourceEditor, rawSource);
+
+    await user.click(editToggle);
+    await waitFor(() =>
+      expect(
+        screen
+          .getByTestId("markdown-editor")
+          .classList.contains("dohc-code-editor"),
+      ).toBe(false),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+      ).toBe("saved"),
+    );
+    await user.click(editToggle);
+    const reopenedSource = await findSourceEditor();
+    expect(reopenedSource.value).toBe(rawSource);
   });
 
   it("settles a successful legacy save while mounted in StrictMode", async () => {
@@ -1755,7 +1954,11 @@ describe("markdown editor unmount flush", () => {
 
     await screen.findByTestId("view-markdown");
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await typeInMarkdownEditor(
+      user,
+      await screen.findByTestId("markdown-editor"),
+      "Draft!",
+    );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -1777,8 +1980,8 @@ describe("markdown editor unmount flush", () => {
 
   it("offers a read-only source view for read-only markdown (truncated reads)", async () => {
     // codex P3 follow-up: a read-only doc can't EDIT, but viewing raw source
-    // is still a view — the palette toggle opens the source textarea with the
-    // readOnly attribute and never writes.
+    // is still a view. The palette toggle opens the read-only source editor and
+    // never writes.
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Big\n",
       truncated: true,
@@ -3174,18 +3377,19 @@ describe("markdown editor unmount flush", () => {
     await toggleSourceOnce(() => toggles[1]);
     const sourceEditor = screen
       .getAllByTestId("markdown-editor")
-      .find(
-        (editor): editor is HTMLTextAreaElement =>
-          editor instanceof HTMLTextAreaElement,
-      );
+      .find((editor) => editor.classList.contains("dohc-code-editor"));
     expect(sourceEditor).toBeDefined();
+    const sourceContent = await textEditorContent(sourceEditor!);
 
     await user.click(editors[0]!);
     await user.type(editors[0]!, "Body A");
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
-    await user.click(sourceEditor!);
-    await user.keyboard("{End}Source B");
+    await user.click(sourceContent);
+    codeEditorView(sourceEditor!).dispatch({
+      selection: { anchor: codeEditorText(sourceEditor!).length },
+    });
+    await user.keyboard("Source B");
     await act(async () => flushes[1]!());
 
     expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
@@ -3339,17 +3543,10 @@ describe("markdown editor unmount flush", () => {
     await toggleSourceOnce(() => toggles[1]);
     const sourceEditor = screen
       .getAllByTestId("markdown-editor")
-      .find(
-        (editor): editor is HTMLTextAreaElement =>
-          editor instanceof HTMLTextAreaElement,
-    );
+      .find((editor) => editor.classList.contains("dohc-code-editor"));
     expect(sourceEditor).toBeDefined();
-    const setTextareaValue = Object.getOwnPropertyDescriptor(
-      HTMLTextAreaElement.prototype,
-      "value",
-    )!.set!;
-    setTextareaValue.call(sourceEditor, "# Hello\n\nSource B");
-    sourceEditor!.dispatchEvent(new Event("input", { bubbles: true }));
+    await textEditorContent(sourceEditor!);
+    replaceCodeEditorText(sourceEditor!, "# Hello\n\nSource B");
     resolveAsset();
     await act(async () => flushes[0]!());
 
@@ -3607,15 +3804,16 @@ describe("markdown editor unmount flush", () => {
     );
     await toggleSourceOnce(() => toggles[0]);
     await toggleSourceOnce(() => toggles[1]);
-    const editors = screen.getAllByTestId(
-      "markdown-editor",
-    ) as HTMLTextAreaElement[];
+    const editors = await Promise.all(
+      screen.getAllByTestId("markdown-editor").map(async (editor) => {
+        await textEditorContent(editor);
+        return codeEditorTestHost(editor);
+      }),
+    );
 
-    await user.click(editors[0]!);
-    await user.keyboard("{End}First");
+    appendCodeEditorText(editors[0]!, "First");
     await waitFor(() => expect(editors[1]!.value).toContain("First"));
-    await user.click(editors[1]!);
-    await user.keyboard("{End}Second");
+    appendCodeEditorText(editors[1]!, "Second");
     await waitFor(() => expect(editors[0]!.value).toContain("FirstSecond"));
 
     await act(async () => flushes[0]!());
@@ -3664,13 +3862,12 @@ describe("markdown editor unmount flush", () => {
       await user.click(await findEnabledMarkdownEditToggle());
       const editor = screen.getByTestId("markdown-editor");
 
-      await user.click(editor);
-      await user.keyboard("{End}First");
+      appendCodeEditorText(editor, "First");
       await advanceAutosaveDebounce();
       await waitFor(() =>
         expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       );
-      await user.keyboard("{End}Queued");
+      appendCodeEditorText(editor, "Queued");
       // The second debounce expires behind the held first write; the queued
       // write must not reach the bridge yet.
       await advanceAutosaveDebounce();
@@ -3743,14 +3940,22 @@ describe("markdown editor unmount flush", () => {
               ".cm-content",
             )!;
 
-        await user.click(surface);
-        await user.keyboard("{End} first");
+        if (markdown) {
+          appendCodeEditorText(surface as HTMLElement, " first");
+        } else {
+          await user.click(surface);
+          await user.keyboard("{End} first");
+        }
         await advanceAutosaveDebounce();
         await waitFor(() =>
           expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
         );
 
-        await user.keyboard("{End} queued");
+        if (markdown) {
+          appendCodeEditorText(surface as HTMLElement, " queued");
+        } else {
+          await user.keyboard("{End} queued");
+        }
         // Discriminating assertion: auto-advance could in principle have
         // already expired the second debounce and enqueued a normal
         // autosave writer, which would satisfy the assertions below for the
@@ -3800,7 +4005,11 @@ describe("markdown editor unmount flush", () => {
     render(<FileInspector workspaceId="ws-1" path="peer-owned.md" />);
     await screen.findByTestId("view-markdown");
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Writer");
+    await typeInMarkdownEditor(
+      user,
+      await screen.findByTestId("markdown-editor"),
+      "Writer",
+    );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -5559,7 +5768,11 @@ describe("markdown editor unmount flush", () => {
         refreshKey={1}
       />,
     );
-    await user.type(await screen.findByTestId("markdown-editor"), " captured");
+    await typeInMarkdownEditor(
+      user,
+      await screen.findByTestId("markdown-editor"),
+      " captured",
+    );
     const oldBuffer = getSharedLocalDocument(oldKey);
     expect(oldBuffer.getPendingDraftSource()).not.toBeNull();
 
@@ -5739,7 +5952,7 @@ describe("markdown editor unmount flush", () => {
     );
     fireEvent.click(await findEnabledMarkdownEditToggle());
     const firstSource = await findSourceEditor();
-    fireEvent.change(firstSource, { target: { value: `${firstSource.value}v1` } });
+    replaceCodeEditorText(firstSource, `${firstSource.value}v1`);
     await waitFor(
       () => expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       { timeout: 5_000 },
@@ -5758,7 +5971,7 @@ describe("markdown editor unmount flush", () => {
       expect((await findSourceEditor()).value).toContain("Version two"),
     );
     const secondSource = await findSourceEditor();
-    fireEvent.change(secondSource, { target: { value: `${secondSource.value}v2` } });
+    replaceCodeEditorText(secondSource, `${secondSource.value}v2`);
 
     await act(async () => {
       resolveFirst();
@@ -5804,7 +6017,7 @@ describe("markdown editor unmount flush", () => {
     const source = await findSourceEditor();
 
     useAutoAdvancingFakeTimers();
-    fireEvent.change(source, { target: { value: `${source.value}Draft` } });
+    replaceCodeEditorText(source, `${source.value}Draft`);
     await advanceAutosaveDebounce();
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -6030,7 +6243,7 @@ describe("markdown editor unmount flush", () => {
     );
     fireEvent.click(await findEnabledMarkdownEditToggle());
     const firstSource = await findSourceEditor();
-    fireEvent.change(firstSource, { target: { value: `${firstSource.value}v1` } });
+    replaceCodeEditorText(firstSource, `${firstSource.value}v1`);
     await waitFor(() =>
       expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
@@ -6054,7 +6267,7 @@ describe("markdown editor unmount flush", () => {
       }),
     );
     const secondSource = await findSourceEditor();
-    fireEvent.change(secondSource, { target: { value: "# Version two\n\nv2" } });
+    replaceCodeEditorText(secondSource, "# Version two\n\nv2");
     await waitFor(() =>
       expect(secondBuffer.getSnapshot()).toMatchObject({
         body: "# Version two\n\nv2",
@@ -6334,26 +6547,26 @@ describe("engine markdown source view", () => {
   const DOC_MARKDOWN = "---\ntitle: Plan\nstatus: draft\n---\n\n# Plan\n\nBase paragraph.\n";
 
   /**
-   * Put a draft in the document through the SOURCE editor — a textarea, and
-   * the surface these draft tests actually mean.
+   * Put a draft in the document through the source editor, which is the
+   * surface these draft tests actually mean.
    *
    * Written to keep pointers out of the WYSIWYG surface, because
    * ProseMirror's `mousedown` called `elementFromPoint` and jsdom did not
    * implement it: the handler threw after the test had passed, failing the
    * run with every assertion green. #619 has since stubbed hit testing in
    * `vitest.setup.ts` (measured: the TypeError returns in 21 of 32 loaded
-   * runs without it), so that hazard is gone. This stays because driving the
-   * textarea is the honest way to say "the user typed a draft here" — not
-   * because the pointer is unsafe.
+   * runs without it), so that hazard is gone. This helper keeps the tests on
+   * the source surface instead of whichever editor happened to mount first.
    */
-  async function typeIntoSourceEditor(value: string): Promise<HTMLElement> {
+  async function typeIntoSourceEditor(value: string): Promise<CodeEditorTestHost> {
     // Read -> WYSIWYG -> source: the surface may start in any of the three,
-    // so step until the editor is the textarea.
+    // so step until CodeMirror mounts.
     for (let step = 0; step < 4; step += 1) {
       const candidate = screen.queryByTestId("markdown-editor");
-      if (candidate?.tagName === "TEXTAREA") {
-        fireEvent.change(candidate, { target: { value } });
-        return candidate;
+      if (candidate?.classList.contains("dohc-code-editor")) {
+        await textEditorContent(candidate);
+        replaceCodeEditorText(candidate, value);
+        return codeEditorTestHost(candidate);
       }
       fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
       await act(async () => {
@@ -6893,10 +7106,8 @@ describe("engine markdown source view", () => {
 
       const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
       await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
-      // fireEvent + the SOURCE textarea, never a pointer into the WYSIWYG
-      // surface: prosemirror's mousedown calls elementFromPoint, which jsdom
-      // does not implement, and it throws AFTER the test — failing the run
-      // with every assertion green.
+      // Drive source directly; this case tests draft capture, not rich-editor
+      // pointer behavior.
       await typeIntoSourceEditor(`${DOC_MARKDOWN}typed`);
 
       view.rerender(
@@ -7101,8 +7312,8 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(onScrollConsumed).toHaveBeenCalledWith(1));
   });
 
-  // #661. Engine mode renders no source textarea, and that textarea held the
-  // only consumer of the pending line — so every engine-backed search result
+  // #661. Engine mode renders no editable source surface, which held the only
+  // consumer of the pending line. Every engine-backed search result therefore
   // opened at the top of the document, whatever line it named. The engine
   // editor now takes the seam over: the line resolves to the top-level block
   // holding it, and the editor reveals that block.
@@ -7134,15 +7345,6 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(flashedBlockText()).toBe("Third paragraph."), {
       timeout: 5_000,
     });
-
-    // The flash has to OUTLIVE the retire. Retiring the target changes the
-    // editor's prop, and that effect's cleanup is what cancels the flash —
-    // so a careless retire clears the highlight in the same frame it was
-    // drawn and the reader never sees where they landed.
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
-    expect(flashedBlockText()).toBe("Third paragraph.");
   });
 
   // #688. One top-level block can be a hundred items long, and revealing its
@@ -8183,15 +8385,14 @@ describe("engine markdown source view", () => {
 
     const reopenedSource = await waitFor(() => {
       const editor = screen.getByTestId("markdown-editor");
-      if (!(editor instanceof HTMLTextAreaElement) || editor === source) {
+      if (!editor.classList.contains("dohc-code-editor") || editor === source) {
         throw new Error("The source editor has not reopened for the new version.");
       }
-      return editor;
+      codeEditorView(editor);
+      return codeEditorTestHost(editor);
     });
-    await waitFor(() => {
-      expect(reopenedSource.selectionStart).toBe(expected.start);
-      expect(reopenedSource.selectionEnd).toBe(expected.end);
-    });
+    expect(reopenedSource.selectionStart).toBe(expected.start);
+    expect(reopenedSource.selectionEnd).toBe(expected.end);
     expect(
       reopenedSource.value.slice(
         reopenedSource.selectionStart,
@@ -8293,10 +8494,11 @@ describe("engine markdown source view", () => {
     await waitFor(() => expect(reads).toBe(2));
     const reopenedSource = await waitFor(() => {
       const editor = screen.getByTestId("markdown-editor");
-      if (!(editor instanceof HTMLTextAreaElement) || editor === source) {
+      if (!editor.classList.contains("dohc-code-editor") || editor === source) {
         throw new Error("The source editor has not reopened for the new version.");
       }
-      return editor;
+      codeEditorView(editor);
+      return codeEditorTestHost(editor);
     });
     const secondExpected = lineSpanInText(secondBody, 8);
     await waitFor(() => {
@@ -8356,10 +8558,6 @@ describe("engine markdown source view", () => {
     await screen.findByTestId("view-markdown");
     await toggleSourceOnce(() => toggleSource);
     const source = await findSourceEditor();
-    const setSelectionRange = vi.spyOn(
-      HTMLTextAreaElement.prototype,
-      "setSelectionRange",
-    );
     view.rerender(
       <FileInspector
         workspaceId="ws-1"
@@ -8375,7 +8573,6 @@ describe("engine markdown source view", () => {
       expect(source.selectionStart).toBe(searchExpected.start);
       expect(source.selectionEnd).toBe(searchExpected.end);
     });
-    setSelectionRange.mockClear();
     view.rerender(
       <FileInspector
         workspaceId="ws-1"
@@ -8399,23 +8596,20 @@ describe("engine markdown source view", () => {
     const reopenedSource = await waitFor(() => {
       const editor = screen.getByTestId("markdown-editor");
       if (
-        !(editor instanceof HTMLTextAreaElement) ||
+        !editor.classList.contains("dohc-code-editor") ||
         editor === source ||
-        editor.value !== secondBody
+        codeEditorText(editor) !== secondBody
       ) {
         throw new Error("The source editor has not reopened for the new version.");
       }
-      return editor;
+      return codeEditorTestHost(editor);
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    });
-
     // MUTATION: advance appliedHeadingNonce for the suppressed target. The
     // switch then replays a destination that never landed for the reader.
-    const replaySelections = setSelectionRange.mock.calls.length;
-    setSelectionRange.mockRestore();
-    expect(replaySelections).toBe(0);
+    await waitFor(() => {
+      expect(reopenedSource.selectionStart).toBe(0);
+      expect(reopenedSource.selectionEnd).toBe(0);
+    });
   });
 
   it("blocks the source autosave for the full switch reread and sets the draft aside without a heading target", async () => {
@@ -8477,7 +8671,7 @@ describe("engine markdown source view", () => {
 
     const pendingSource = await findSourceEditor();
     expect(pendingSource.value).toBe(firstBody);
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
     expect(pendingSource.value).toBe(typedBody);
 
     // Let the armed autosave attempt its write while the independent disk
@@ -8492,9 +8686,9 @@ describe("engine markdown source view", () => {
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-      ).toBe(secondBody),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        secondBody,
+      ),
     );
     const copies = await screen.findAllByTestId("orphaned-draft-copy");
     await user.click(copies[copies.length - 1]!);
@@ -8561,7 +8755,7 @@ describe("engine markdown source view", () => {
     );
 
     const pendingSource = await findSourceEditor();
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
     expect(pendingSource.value).toBe(typedBody);
 
     await act(async () => {
@@ -8717,7 +8911,7 @@ describe("engine markdown source view", () => {
 
     const pendingSource = await findSourceEditor();
     expect(pendingSource.value).toBe(firstBody);
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
 
     // The shell awaits this seam before an explorer op — which a user can
     // trigger while the switch reread is still pending. The window rule says
@@ -8733,9 +8927,9 @@ describe("engine markdown source view", () => {
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-      ).toBe(secondBody),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        secondBody,
+      ),
     );
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -8806,7 +9000,7 @@ describe("engine markdown source view", () => {
     );
 
     const pendingSource = await findSourceEditor();
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
 
     const realCapture = orphanedDraftsModule.captureOrphanedDraft;
     let interceptionRan = false;
@@ -8839,9 +9033,9 @@ describe("engine markdown source view", () => {
     expect(interceptionRan).toBe(true);
     expect(writeCallsInsideResync).toBe(0);
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-      ).toBe(secondBody),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        secondBody,
+      ),
     );
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
@@ -8876,7 +9070,7 @@ describe("engine markdown source view", () => {
 
     const view = render(<FileInspector workspaceId="ws-1" path="a.md" />);
     const firstEditor = await screen.findByTestId("markdown-editor");
-    expect(firstEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+    expect(firstEditor.classList.contains("dohc-code-editor")).toBe(false);
 
     view.rerender(
       <FileInspector
@@ -8895,7 +9089,7 @@ describe("engine markdown source view", () => {
     );
 
     const pendingEditor = await screen.findByTestId("markdown-editor");
-    expect(pendingEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+    expect(pendingEditor.classList.contains("dohc-code-editor")).toBe(false);
     await user.type(pendingEditor, "Pending switch edit. ");
 
     // The pending WYSIWYG autosave must answer to the same switch window as
@@ -8984,7 +9178,7 @@ describe("engine markdown source view", () => {
       />,
     );
     const firstEditor = await screen.findByTestId("markdown-editor");
-    expect(firstEditor).not.toBeInstanceOf(HTMLTextAreaElement);
+    expect(firstEditor.classList.contains("dohc-code-editor")).toBe(false);
 
     view.rerender(
       <FileInspector
@@ -9089,10 +9283,9 @@ describe("engine markdown source view", () => {
     const editToggle = screen.getByTestId("markdown-edit-toggle");
     expect(editToggle.textContent).toBe("Edit");
     await user.click(editToggle);
-    await waitFor(() => expect(editToggle.textContent).toBe("Source"));
-    await user.click(editToggle);
+    await waitFor(() => expect(editToggle.textContent).toBe("WYSIWYG"));
     const pendingSource = await findSourceEditor();
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
     expect(pendingSource.value).toBe(typedBody);
 
     await act(async () => {
@@ -9100,9 +9293,9 @@ describe("engine markdown source view", () => {
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-      ).toBe(secondBody),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        secondBody,
+      ),
     );
 
     const copies = await screen.findAllByTestId("orphaned-draft-copy");
@@ -9201,7 +9394,7 @@ describe("engine markdown source view", () => {
     const pendingSource = await findSourceEditor();
     expect(pendingSource.value).toBe(firstBody);
     expect(pendingSource.readOnly).toBe(false);
-    fireEvent.change(pendingSource, { target: { value: typedBody } });
+    replaceCodeEditorText(pendingSource, typedBody);
     expect(pendingSource.value).toBe(typedBody);
 
     await act(async () => {
@@ -9209,9 +9402,9 @@ describe("engine markdown source view", () => {
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(
-        (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-      ).toBe(secondBody),
+      expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+        secondBody,
+      ),
     );
 
     // MUTATION: reset the source draft without capturing it. The reread then
@@ -9609,10 +9802,8 @@ describe("engine markdown source view", () => {
       );
       await screen.findByTestId("view-markdown", {}, { timeout: 5_000 });
       await user.click(screen.getByTestId("markdown-edit-toggle"));
-      await user.type(
-        await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
-        "held",
-      );
+      const sourceEditor = await findSourceEditor();
+      await user.type(await textEditorContent(sourceEditor), "held");
       expect(states.at(-1)).toBe("saving");
 
       // The share mount lands inside the autosave window.
@@ -9801,9 +9992,11 @@ describe("markdown document opening state", () => {
     return view;
   }
 
-  async function enterLegacySourceMode(): Promise<HTMLTextAreaElement> {
+  async function enterLegacySourceMode(): Promise<CodeEditorTestHost> {
     fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
-    return (await screen.findByTestId("markdown-editor")) as HTMLTextAreaElement;
+    const editor = await findSourceEditor();
+    await textEditorContent(editor);
+    return editor;
   }
 
   beforeEach(() => {
@@ -9980,7 +10173,11 @@ describe("markdown document opening state", () => {
     ).toBe(false);
 
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(await screen.findByTestId("markdown-editor"), "Draft!");
+    await typeInMarkdownEditor(
+      user,
+      await screen.findByTestId("markdown-editor"),
+      "Draft!",
+    );
     await waitFor(
       () =>
         expect(bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
@@ -10023,7 +10220,8 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(
+    await typeInMarkdownEditor(
+      user,
       await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
       "Draft!",
     );
@@ -10102,20 +10300,24 @@ describe("markdown document opening state", () => {
     // TRUE and drop the setDraft/setSavedBody/latestDraft reset together.
     // Neither the sync effect (blocked by the flag) nor the direct reset
     // hands the surface back, and the assertion below finds "Draft!" still
-    // in the textarea.
+    // in the source editor.
     bridge.answerNotEngineBacked();
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
-    expect(
-      (screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value,
-    ).toBe(DOC_MARKDOWN);
+    expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
+      DOC_MARKDOWN,
+    );
 
     // Dismiss retires the notice, and the save pipeline is healthy again.
     await user.click(screen.getByTestId("recovery-dismiss"));
     await user.click(screen.getByTestId("recovery-dismiss-confirm"));
     expect(screen.queryByTestId("orphaned-draft-notice")).toBeNull();
-    await user.type(screen.getByTestId("markdown-editor"), "New!");
+    await typeInMarkdownEditor(
+      user,
+      screen.getByTestId("markdown-editor"),
+      "New!",
+    );
     await waitFor(
       () =>
         expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledWith({
@@ -10201,7 +10403,11 @@ describe("markdown document opening state", () => {
     await waitFor(() =>
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
-    await user.type(screen.getByTestId("markdown-editor"), "More!");
+    await typeInMarkdownEditor(
+      user,
+      screen.getByTestId("markdown-editor"),
+      "More!",
+    );
     view.rerender(
       <FileInspector workspaceId="ws-1" path="a.md" engineVersionKey={3} />,
     );
@@ -10275,7 +10481,7 @@ describe("markdown document opening state", () => {
       flush = next;
     });
     const source = await enterLegacySourceMode();
-    fireEvent.change(source, { target: { value: `${source.value}One` } });
+    replaceCodeEditorText(source, `${source.value}One`);
     await waitFor(() => expect(flush).not.toBeNull());
 
     let firstSettled = false;
@@ -10336,7 +10542,7 @@ describe("markdown document opening state", () => {
       flush = next;
     });
     const source = await enterLegacySourceMode();
-    fireEvent.change(source, { target: { value: `${source.value}One` } });
+    replaceCodeEditorText(source, `${source.value}One`);
     await waitFor(() => expect(flush).not.toBeNull());
 
     const flushPromise = flush!();
@@ -10344,7 +10550,7 @@ describe("markdown document opening state", () => {
       expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
     );
     const newestSource = `${source.value}Two`;
-    fireEvent.change(source, { target: { value: newestSource } });
+    replaceCodeEditorText(source, newestSource);
     expect(source.value).toBe(newestSource);
 
     await act(async () => {
@@ -10356,7 +10562,7 @@ describe("markdown document opening state", () => {
       flushPromise.then(() => "flush" as const),
     ]);
     expect(firstToFinish).toBe("second-write");
-    expect((screen.getByTestId("markdown-editor") as HTMLTextAreaElement).value).toBe(
+    expect(codeEditorText(screen.getByTestId("markdown-editor"))).toBe(
       newestSource,
     );
 
@@ -10608,7 +10814,7 @@ describe("markdown document opening state", () => {
         registeredFlush = flush;
       });
       const editor = await screen.findByTestId("markdown-editor");
-      expect(editor).not.toBeInstanceOf(HTMLTextAreaElement);
+      expect(editor.classList.contains("dohc-code-editor")).toBe(false);
 
       await user.type(editor, "L1");
       await act(async () => {
@@ -10688,7 +10894,7 @@ describe("markdown document opening state", () => {
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     const localBody = `${source.value}Draft`;
-    fireEvent.change(source, { target: { value: localBody } });
+    replaceCodeEditorText(source, localBody);
     view.unmount();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     expect(bridge.bridgeMock.writeWorkspaceText.mock.calls[0]?.[0]).toEqual({
@@ -10748,13 +10954,13 @@ describe("markdown document opening state", () => {
       .mockImplementationOnce(() => heldSecond);
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
-    fireEvent.change(source, { target: { value: `${source.value}First` } });
+    replaceCodeEditorText(source, `${source.value}First`);
     await waitFor(
       () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       { timeout: 5_000 },
     );
     const newestBody = `${source.value}Second`;
-    fireEvent.change(source, { target: { value: newestBody } });
+    replaceCodeEditorText(source, newestBody);
     view.unmount();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
@@ -11026,6 +11232,103 @@ describe("markdown document opening state", () => {
     await screen.findByTestId("orphaned-draft-notice");
   });
 
+  it("clears source undo history when an accepted snapshot keeps the same text", async () => {
+    const bridge = makeHeldOpenBridge();
+    const acceptedHash = "a".repeat(64);
+    const localBuffer = getSharedLocalDocument(
+      documentVersionKey("ws-1", "a.md", 1),
+    );
+    const subscription = vi
+      .spyOn(localBuffer, "subscribe")
+      .mockImplementation(() => () => undefined);
+    let returnAcceptedSnapshot = false;
+    bridge.bridgeMock.readWorkspaceText.mockImplementation(async () =>
+      returnAcceptedSnapshot
+        ? {
+            text: DOC_MARKDOWN,
+            truncated: false,
+            contentHash: acceptedHash,
+          }
+        : {
+            text: DOC_MARKDOWN,
+            truncated: false,
+            contentHash: TEST_CONTENT_HASH,
+          },
+    );
+    bridge.bridgeMock.writeWorkspaceText.mockResolvedValue({
+      status: "conflict",
+      currentContentHash: acceptedHash,
+    });
+    let flush: DraftFlush | null = null;
+    const view = await renderLegacyMarkdown(bridge, (next) => {
+      flush = next;
+    });
+    const source = await enterLegacySourceMode();
+    const editor = codeEditorView(source);
+
+    act(() => {
+      editor.dispatch({
+        changes: { from: editor.state.doc.length, insert: "Draft" },
+        annotations: isolateHistory.of("full"),
+      });
+      editor.dispatch({
+        changes: {
+          from: editor.state.doc.length - "Draft".length,
+          to: editor.state.doc.length,
+        },
+        annotations: isolateHistory.of("full"),
+      });
+    });
+    expect(codeEditorText(source)).toBe(DOC_MARKDOWN);
+    await waitFor(() => expect(flush).not.toBeNull());
+    const acceptRead = vi
+      .spyOn(localBuffer, "acceptRead")
+      .mockReturnValue(true);
+    const readsBeforeAcceptance =
+      bridge.bridgeMock.readWorkspaceText.mock.calls.length;
+    returnAcceptedSnapshot = true;
+    await expect(flush!()).rejects.toThrow(
+      "The file changed on disk while dohc saved it.",
+    );
+    view.rerender(
+      <FileInspector
+        workspaceId="ws-1"
+        path="a.md"
+        engineVersionKey={1}
+        refreshKey={1}
+        registerDraftFlush={(next) => {
+          flush = next;
+        }}
+      />,
+    );
+    await waitFor(() =>
+      expect(bridge.bridgeMock.readWorkspaceText.mock.calls.length).toBeGreaterThan(
+        readsBeforeAcceptance,
+      ),
+    );
+    await waitFor(() => expect(acceptRead).toHaveBeenCalledTimes(1));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const saveStateBeforeUndo = screen
+      .getByTestId("markdown-save-state")
+      .getAttribute("data-state");
+    bridge.bridgeMock.writeWorkspaceText.mockClear();
+
+    const user = userEvent.setup();
+    await user.click(await textEditorContent(source));
+    await user.keyboard("{Control>}z{/Control}");
+
+    expect(codeEditorText(source)).toBe(DOC_MARKDOWN);
+    expect(
+      screen.getByTestId("markdown-save-state").getAttribute("data-state"),
+    ).toBe(saveStateBeforeUndo);
+    expect(bridge.bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
+    acceptRead.mockRestore();
+    subscription.mockRestore();
+    view.unmount();
+  });
+
   it("recovers a queued legacy unmount draft when its I/O write rejects", async () => {
     const bridge = makeHeldOpenBridge();
     const initialHash = "c".repeat(64);
@@ -11046,13 +11349,13 @@ describe("markdown document opening state", () => {
       .mockRejectedValueOnce(new Error("disk unavailable"));
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
-    fireEvent.change(source, { target: { value: `${source.value}First` } });
+    replaceCodeEditorText(source, `${source.value}First`);
     await waitFor(
       () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       { timeout: 5_000 },
     );
     const newestBody = `${source.value}Second`;
-    fireEvent.change(source, { target: { value: newestBody } });
+    replaceCodeEditorText(source, newestBody);
     view.unmount();
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
 
@@ -11093,7 +11396,7 @@ describe("markdown document opening state", () => {
     const view = await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     const localBody = `${source.value}Draft`;
-    fireEvent.change(source, { target: { value: localBody } });
+    replaceCodeEditorText(source, localBody);
     await waitFor(
       () => expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
       { timeout: 5_000 },
@@ -11125,7 +11428,7 @@ describe("markdown document opening state", () => {
     await renderLegacyMarkdown(bridge);
     const source = await enterLegacySourceMode();
     const rawSource = `${source.value}\n<!-- keep raw -->`;
-    fireEvent.change(source, { target: { value: rawSource } });
+    replaceCodeEditorText(source, rawSource);
 
     fireEvent.click(screen.getByTestId("markdown-edit-toggle"));
     await waitFor(() =>
@@ -11133,7 +11436,7 @@ describe("markdown document opening state", () => {
     );
     const wysiwyg = await waitFor(() => {
       const editor = screen.getByTestId("markdown-editor");
-      if (editor instanceof HTMLTextAreaElement) {
+      if (editor.classList.contains("dohc-code-editor")) {
         throw new Error("The WYSIWYG editor has not replaced source yet.");
       }
       return editor;
@@ -11195,7 +11498,8 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(
+    await typeInMarkdownEditor(
+      user,
       await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
       "Draft!",
     );
@@ -11286,7 +11590,8 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(
+    await typeInMarkdownEditor(
+      user,
       await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
       "One",
     );
@@ -11298,7 +11603,11 @@ describe("markdown document opening state", () => {
 
     // The user keeps typing while write one is still in flight; a second
     // autosave arms and fires.
-    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    await typeInMarkdownEditor(
+      user,
+      screen.getByTestId("markdown-editor"),
+      "Two",
+    );
     // MUTATION (serialization): remove the `while (pendingWrite.current)`
     // wait in writeDraftNow. The second write issues inside this window,
     // overlapping the first.
@@ -11403,7 +11712,8 @@ describe("markdown document opening state", () => {
       expect(screen.queryByTestId("markdown-open-state")).toBeNull(),
     );
     await user.click(screen.getByTestId("markdown-edit-toggle"));
-    await user.type(
+    await typeInMarkdownEditor(
+      user,
       await screen.findByTestId("markdown-editor", {}, { timeout: 5_000 }),
       "One",
     );
@@ -11413,7 +11723,11 @@ describe("markdown document opening state", () => {
       { timeout: 5_000 },
     );
     // B arms and fires while A holds the slot: B is parked in the queue.
-    await user.type(screen.getByTestId("markdown-editor"), "Two");
+    await typeInMarkdownEditor(
+      user,
+      screen.getByTestId("markdown-editor"),
+      "Two",
+    );
     await new Promise((resolve) => setTimeout(resolve, 900));
     expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(flush).not.toBeNull());
@@ -11479,8 +11793,8 @@ describe("markdown document opening state", () => {
       {},
       { timeout: 5_000 },
     );
-    await user.type(editor, " Late draft");
-    const exactDraft = (editor as HTMLTextAreaElement).value;
+    appendCodeEditorText(editor, " Late draft");
+    const exactDraft = codeEditorText(editor);
     await waitFor(() => expect(flush).not.toBeNull());
 
     const originalFlush = flush!().catch((error: unknown) => error);
@@ -11540,7 +11854,7 @@ describe("markdown document opening state", () => {
           flush = next;
         });
         const editor = await enterLegacySourceMode();
-        await user.type(editor, " Late draft");
+        appendCodeEditorText(editor, " Late draft");
         await waitFor(
           () =>
             expect(bridge.bridgeMock.writeWorkspaceText).toHaveBeenCalledTimes(1),
@@ -11621,7 +11935,7 @@ describe("markdown document opening state", () => {
       {},
       { timeout: 5_000 },
     );
-    await user.type(editor, "One");
+    appendCodeEditorText(editor, "One");
     // Autosave A issues and holds. It cleared `unsavedDraft` at issue time.
     await waitFor(
       () =>

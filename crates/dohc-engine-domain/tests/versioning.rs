@@ -364,6 +364,13 @@ fn deduped_write_returns_original_not_later_state() {
         vt.read_text(WS, "main", "a.md").unwrap().unwrap().text,
         "second"
     );
+
+    let mut mismatch = first;
+    mismatch.text = "changed request body".to_owned();
+    let error = vt
+        .write_text(&mismatch, &NO_FAULTS)
+        .expect_err("changed request must not replay");
+    assert_eq!(error.code(), "idempotency-key-reuse-mismatch");
 }
 
 #[test]

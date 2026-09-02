@@ -96,4 +96,26 @@ describe("Overlay", () => {
     fireEvent.keyDown(document, { key: "Tab", shiftKey: true });
     expect(document.activeElement).toBe(last);
   });
+
+  it("includes editable regions and skips hidden or inherited-disabled controls", () => {
+    render(
+      <Overlay onClose={() => undefined}>
+        <fieldset disabled>
+          <button type="button">Inherited disabled action</button>
+        </fieldset>
+        <button type="button" aria-hidden="true">
+          Hidden action
+        </button>
+        <div contentEditable data-testid="editable-region" />
+        <button type="button">Last</button>
+      </Overlay>,
+    );
+    const editor = screen.getByTestId("editable-region");
+    const last = screen.getByRole("button", { name: "Last" });
+
+    last.focus();
+    fireEvent.keyDown(document, { key: "Tab" });
+
+    expect(document.activeElement).toBe(editor);
+  });
 });

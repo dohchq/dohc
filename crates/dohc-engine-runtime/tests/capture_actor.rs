@@ -1,9 +1,162 @@
+use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
+    CancellationToken, CaptureIngest, CaptureRetire, MAX_CAPTURE_INGEST_BATCH_BYTES,
+    MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard, WorkspaceSupervisor,
 };
-use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use std::path::Path;
 use std::sync::Arc;
+
+const BATCH_WORKSPACE_ID: &str = "ws-capture-batch-fault";
+
+struct ExistingRootGuard;
+
+impl WorkspaceRootGuard for ExistingRootGuard {
+    fn validate(&self, root_dir: &Path) -> Result<(), RuntimeError> {
+        root_dir
+            .is_dir()
+            .then_some(())
+            .ok_or(RuntimeError::Identity {
+                reason: "test workspace root disappeared",
+                source: None,
+            })
+    }
+}
+
+fn capture_batch_inputs() -> Vec<CaptureIngest> {
+    [
+        ("notes/a.md", "alpha"),
+        ("notes/b.md", "bravo"),
+        ("notes/c.md", "charlie"),
+    ]
+    .into_iter()
+    .map(|(path, text)| CaptureIngest {
+        workspace_id: BATCH_WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("batch-fault".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head: false,
+    })
+    .collect()
+}
+
+fn initialize_replicating_workspace(db: &Path) {
+    let mut store = EngineStore::open(db, 1).expect("open store");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(BATCH_WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("ensure main version");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO sync_identity \
+                 (workspace_id, origin_id, replication_epoch, stream_identity, created_at_ms) \
+                 VALUES (?1, 'origin-local', 'epoch-local', 'stream-local', 1)",
+                [BATCH_WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            tx.execute(
+                "INSERT INTO sync_relay_push_state (workspace_id, origin_id, pushed_seq) \
+                 VALUES (?1, 'origin-local', 0)",
+                [BATCH_WORKSPACE_ID],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed sync state");
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CaptureBatchState {
+    storage_rows: i64,
+    snapshots: Vec<(String, String)>,
+    moments: Vec<String>,
+    search: Vec<(String, String)>,
+    outbound: Vec<String>,
+}
+
+fn capture_batch_state(db: &Path) -> CaptureBatchState {
+    let store = EngineStore::open(db, 100).expect("inspect batch state");
+    store
+        .read_with(|conn| {
+            let storage_rows = conn.query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1)",
+                [BATCH_WORKSPACE_ID],
+                |row| row.get(0),
+            )?;
+            let snapshots = conn
+                .prepare(
+                    "SELECT s.path,b.text FROM snapshots s \
+                     JOIN blobs b ON b.sha256=s.blob_sha256 \
+                     WHERE s.workspace_id=?1 ORDER BY s.path",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let moments = conn
+                .prepare("SELECT path FROM moments WHERE workspace_id=?1 ORDER BY moment_order")?
+                .query_map([BATCH_WORKSPACE_ID], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let search = conn
+                .prepare(
+                    "SELECT path,text FROM engine_search_files_fts \
+                     WHERE workspace_id=?1 ORDER BY path",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            let outbound = conn
+                .prepare(
+                    "SELECT json_extract(payload_json,'$.path') FROM replication_log \
+                     WHERE workspace_id=?1 AND imported=0 AND op_kind='moment.append' \
+                     ORDER BY origin_seq",
+                )?
+                .query_map([BATCH_WORKSPACE_ID], |row| row.get(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok::<_, rusqlite::Error>(CaptureBatchState {
+                storage_rows,
+                snapshots,
+                moments,
+                search,
+                outbound,
+            })
+        })
+        .expect("query batch state")
+}
+
+fn expected_capture_batch_state() -> CaptureBatchState {
+    CaptureBatchState {
+        storage_rows: 12,
+        snapshots: vec![
+            ("notes/a.md".to_owned(), "alpha".to_owned()),
+            ("notes/b.md".to_owned(), "bravo".to_owned()),
+            ("notes/c.md".to_owned(), "charlie".to_owned()),
+        ],
+        moments: vec![
+            "notes/a.md".to_owned(),
+            "notes/b.md".to_owned(),
+            "notes/c.md".to_owned(),
+        ],
+        search: vec![
+            ("notes/a.md".to_owned(), "alpha".to_owned()),
+            ("notes/b.md".to_owned(), "bravo".to_owned()),
+            ("notes/c.md".to_owned(), "charlie".to_owned()),
+        ],
+        outbound: vec![
+            "notes/a.md".to_owned(),
+            "notes/b.md".to_owned(),
+            "notes/c.md".to_owned(),
+        ],
+    }
+}
 
 #[test]
 fn blocking_capture_variants_round_trip_through_the_actor() {
@@ -55,6 +208,555 @@ fn blocking_capture_variants_round_trip_through_the_actor() {
         .expect("blocking retire");
     assert!(retired.retired.is_some());
     supervisor.close(&db).expect("close actor");
+}
+
+#[test]
+fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates() {
+    const WORKSPACE_ID: &str = "ws-capture-batch";
+    const VERSION_ID: &str = "main";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let supervisor = WorkspaceSupervisor::new();
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+
+    let input = |path: &str, text: &str| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: VERSION_ID.to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("batch-pass".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    let inputs = vec![
+        input("notes/a.md", "alpha batch needle"),
+        input("notes/b.md", "bravo batch needle"),
+        input("notes/c.md", "charlie batch needle"),
+    ];
+    let leased_object =
+        dohc_engine_domain::derive_capture_object_id(WORKSPACE_ID, VERSION_ID, "notes/b.md");
+    let leased_key =
+        dohc_engine_collab::DocKey::new(WORKSPACE_ID, VERSION_ID, &leased_object).expect("key");
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let held = leases.acquire(&leased_key).expect("hold middle path live");
+
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let first = handle
+        .capture_ingest_batch_blocking(
+            inputs.clone(),
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("commit successful siblings");
+    assert_eq!(first.len(), 3);
+    assert!(
+        first[0]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    assert!(matches!(
+        &first[1],
+        Err(RuntimeError::Sync(
+            dohc_engine_sync::SyncError::RetryableState {
+                reason: "ydoc-session-live"
+            }
+        ))
+    ));
+    assert!(
+        first[2]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    assert_eq!(
+        first[0]
+            .as_ref()
+            .expect("first capture")
+            .moment
+            .moment_order,
+        1
+    );
+    assert_eq!(
+        first[2]
+            .as_ref()
+            .expect("third capture")
+            .moment
+            .moment_order,
+        2,
+        "the failed middle savepoint must not consume the batch order cursor"
+    );
+    supervisor.close(&db).expect("close after partial batch");
+
+    let state = |expected_paths: &[&str]| {
+        let store = EngineStore::open(&db, 100).expect("inspect batch state");
+        store
+            .read_with(|conn| {
+                let read_paths = |table: &str| -> rusqlite::Result<Vec<String>> {
+                    let mut statement = conn.prepare(&format!(
+                        "SELECT path FROM {table} WHERE workspace_id=?1 ORDER BY path"
+                    ))?;
+                    statement
+                        .query_map([WORKSPACE_ID], |row| row.get(0))?
+                        .collect()
+                };
+                let paths = read_paths("snapshots")?;
+                let moments: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?;
+                let search_paths = read_paths("engine_search_files_fts")?;
+                Ok::<_, rusqlite::Error>((paths, moments, search_paths))
+            })
+            .map(|(paths, moments, search_paths)| {
+                let expected = expected_paths
+                    .iter()
+                    .map(|path| (*path).to_owned())
+                    .collect::<Vec<_>>();
+                assert_eq!(paths, expected);
+                assert_eq!(moments, expected_paths.len() as i64);
+                assert_eq!(search_paths, expected);
+            })
+            .expect("query batch state");
+    };
+    state(&["notes/a.md", "notes/c.md"]);
+
+    drop(held);
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(
+            inputs,
+            policy,
+            leases,
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("retry whole chunk after lease release");
+    assert!(replay[0].as_ref().is_ok_and(|write| write.deduped));
+    assert!(replay[1].as_ref().is_ok_and(|write| !write.deduped));
+    assert!(replay[2].as_ref().is_ok_and(|write| write.deduped));
+    assert_eq!(
+        replay[1]
+            .as_ref()
+            .expect("retried middle capture")
+            .moment
+            .moment_order,
+        3,
+        "the leading dedupe must not consume the batch order cursor"
+    );
+    supervisor.close(&db).expect("close after replay");
+    state(&["notes/a.md", "notes/b.md", "notes/c.md"]);
+}
+
+#[test]
+fn capture_batch_rejects_a_missing_named_version_before_writing() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let mut inputs = capture_batch_inputs();
+    for input in &mut inputs {
+        input.version_id = "missing-version".to_owned();
+    }
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let error = handle
+        .capture_ingest_batch_blocking(
+            inputs,
+            Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+                scratch.path(),
+            )),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("missing named version must be rejected");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::VersionNotFound)
+    ));
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect refused batch");
+    let written: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT \
+                   (SELECT COUNT(*) FROM path_aliases WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM snapshots WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM moments WHERE workspace_id=?1) + \
+                   (SELECT COUNT(*) FROM file_objects WHERE workspace_id=?1)",
+                [BATCH_WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("count refused batch state");
+    assert_eq!(written, 0);
+}
+
+#[test]
+fn capture_batch_refuses_invalid_shapes_before_mutation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let before = capture_batch_state(&db);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let leases = dohc_engine_collab::LeaseRegistry::new();
+    let empty = handle
+        .capture_ingest_batch_blocking(
+            Vec::new(),
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("empty batch is a no-op");
+    assert!(empty.is_empty());
+
+    let template = capture_batch_inputs().remove(0);
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![template.clone(); MAX_CAPTURE_INGEST_BATCH_OPS + 1],
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("overlong batch must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds"
+        })
+    ));
+
+    let mut oversized = template.clone();
+    oversized.text = "x".repeat(MAX_CAPTURE_INGEST_BATCH_BYTES + 1);
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![oversized],
+            Arc::clone(&policy),
+            leases.clone(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("oversized batch must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch exceeds actor bounds"
+        })
+    ));
+
+    let mut mismatched = template.clone();
+    mismatched.version_id = "another-version".to_owned();
+    let error = handle
+        .capture_ingest_batch_blocking(
+            vec![template, mismatched],
+            policy,
+            leases,
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("mixed coordinates must be refused");
+    assert!(matches!(
+        error,
+        RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "capture batch coordinates do not match"
+        })
+    ));
+
+    supervisor.close(&db).expect("close actor");
+    assert_eq!(capture_batch_state(&db), before);
+}
+
+#[test]
+fn capture_batch_replaces_a_duplicate_path_without_duplicate_fts_rows() {
+    const WORKSPACE_ID: &str = "ws-capture-batch-duplicate";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let input = |text: &str, now_ms: i64| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: "notes/repeated.md".to_owned(),
+        text: text.to_owned(),
+        metadata_origin: "capture".to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("duplicate-path".to_owned()),
+        author_json: None,
+        now_ms,
+        request_id: None,
+        claim_foreign_head: false,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let results = handle
+        .capture_ingest_batch_blocking(
+            vec![
+                input("alpha-only search body", 10),
+                input("bravo-only search body", 20),
+            ],
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("capture duplicate path batch");
+    assert!(
+        results[0]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    assert!(
+        results[1]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && write.moment.before_present)
+    );
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect duplicate batch");
+    let (moments, rows, indexed): (i64, i64, String) = store
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM moments WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT COUNT(*) FROM engine_search_files_fts WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT text FROM engine_search_files_fts WHERE workspace_id=?1",
+                    [WORKSPACE_ID],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("read duplicate batch state");
+    assert_eq!((moments, rows), (2, 1));
+    assert_eq!(indexed, "bravo-only search body");
+}
+
+#[test]
+fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
+    const WORKSPACE_ID: &str = "ws-capture-batch-foreign";
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let input = |path: &str, text: &str, origin: &str, claim_foreign_head: bool| CaptureIngest {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        version_id: "main".to_owned(),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        metadata_origin: origin.to_owned(),
+        metadata_summary: Some("Reconciled offline edits".to_owned()),
+        metadata_correlation_id: Some("foreign-head".to_owned()),
+        author_json: None,
+        now_ms: 10,
+        request_id: None,
+        claim_foreign_head,
+    };
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let foreign = handle
+        .capture_ingest_with_search_policy_blocking(
+            input(
+                "notes/foreign.md",
+                "foreign authoritative body",
+                "api",
+                true,
+            ),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+        )
+        .expect("seed foreign head");
+    assert!(!foreign.moment.before_present);
+
+    let results = handle
+        .capture_ingest_batch_blocking(
+            vec![
+                input("notes/foreign.md", "stale disk body", "capture", false),
+                input("notes/new.md", "new sibling body", "capture", false),
+            ],
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("capture added batch around foreign head");
+    assert!(matches!(
+        &results[0],
+        Err(RuntimeError::Domain(
+            dohc_engine_domain::DomainError::CaptureNotOwned
+        ))
+    ));
+    assert!(
+        results[1]
+            .as_ref()
+            .is_ok_and(|write| !write.deduped && !write.moment.before_present)
+    );
+    supervisor.close(&db).expect("close actor");
+
+    let store = EngineStore::open(&db, 100).expect("inspect foreign batch");
+    let indexed = store
+        .read_with(|conn| {
+            conn.prepare(
+                "SELECT path,text FROM engine_search_files_fts \
+                 WHERE workspace_id=?1 ORDER BY path",
+            )?
+            .query_map([WORKSPACE_ID], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<(String, String)>>>()
+        })
+        .expect("read foreign batch FTS");
+    assert_eq!(
+        indexed,
+        vec![
+            (
+                "notes/foreign.md".to_owned(),
+                "foreign authoritative body".to_owned(),
+            ),
+            ("notes/new.md".to_owned(), "new sibling body".to_owned()),
+        ]
+    );
+}
+
+#[test]
+fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+
+    let error = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            faults.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("pre-persist fault reports an uncertain batch");
+    assert!(matches!(error, RuntimeError::OperationCrashed));
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after rollback");
+    assert_eq!(
+        capture_batch_state(&db),
+        CaptureBatchState {
+            storage_rows: 0,
+            snapshots: Vec::new(),
+            moments: Vec::new(),
+            search: Vec::new(),
+            outbound: Vec::new(),
+        },
+        "snapshots, history, FTS, and outbound rows roll back together"
+    );
+
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("replay rolled-back batch");
+    assert!(
+        replay
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|write| !write.deduped))
+    );
+    supervisor.close(&db).expect("close after replay");
+    assert_eq!(capture_batch_state(&db), expected_capture_batch_state());
+}
+
+#[test]
+fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    initialize_replicating_workspace(&db);
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
+        scratch.path(),
+    ));
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+
+    let error = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            Arc::clone(&policy),
+            dohc_engine_collab::LeaseRegistry::new(),
+            faults.clone(),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect_err("post-commit fault reports an uncertain batch");
+    assert!(matches!(error, RuntimeError::OperationCrashed));
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after uncertain commit");
+    assert_eq!(
+        capture_batch_state(&db),
+        expected_capture_batch_state(),
+        "the whole batch committed before the acknowledgement was lost"
+    );
+
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let replay = handle
+        .capture_ingest_batch_blocking(
+            capture_batch_inputs(),
+            policy,
+            dohc_engine_collab::LeaseRegistry::new(),
+            Arc::new(NoFaults),
+            scratch.path().to_path_buf(),
+            Arc::new(ExistingRootGuard),
+        )
+        .expect("replay uncertain batch");
+    assert!(
+        replay
+            .iter()
+            .all(|result| result.as_ref().is_ok_and(|write| write.deduped))
+    );
+    supervisor.close(&db).expect("close after replay");
+    assert_eq!(
+        capture_batch_state(&db),
+        expected_capture_batch_state(),
+        "replay must not duplicate moments, outbound rows, or FTS entries"
+    );
 }
 
 #[tokio::test]

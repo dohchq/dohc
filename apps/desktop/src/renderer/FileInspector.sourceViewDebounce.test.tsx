@@ -54,6 +54,7 @@ function engineState(doc: Y.Doc): UseEngineDoc {
     readArtifactAsset: async () => {
       throw new Error("no artifact asset");
     },
+    flushPendingLocalUpdates: async () => undefined,
   };
 }
 

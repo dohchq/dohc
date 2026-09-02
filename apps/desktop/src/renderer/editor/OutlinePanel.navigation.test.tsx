@@ -179,7 +179,7 @@ describe("MarkdownEditor heading navigation", () => {
 describe("MarkdownEditor block navigation", () => {
   const VALUE = "# Intro\n\nFirst para\n\nSecond para\n\nThird para";
 
-  function renderEditor(blockTarget: { index: number; nonce: number }) {
+  function renderEditor(blockTarget?: { index: number; nonce: number }) {
     return createElement(MarkdownEditor, {
       value: VALUE,
       onDirty: vi.fn(),
@@ -208,6 +208,14 @@ describe("MarkdownEditor block navigation", () => {
         view.container.querySelector(".dohc-outline-target-flash")?.textContent,
       ).toBe("Second para"),
     );
+
+    // Retiring a consumed target must not clear the visible landing cue. The
+    // flash owns its own lifetime; the target effect's cleanup owns only its
+    // queued frame and listeners.
+    view.rerender(renderEditor());
+    expect(
+      view.container.querySelector(".dohc-outline-target-flash")?.textContent,
+    ).toBe("Second para");
 
     view.rerender(renderEditor({ index: 3, nonce: 2 }));
     await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(2));

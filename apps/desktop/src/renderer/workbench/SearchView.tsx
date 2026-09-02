@@ -447,15 +447,18 @@ export function SearchView(props: {
             </label>
           </div>
         ) : null}
-        {model.status !== "idle" ? (
-          <div className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle">
-            {model.status === "searching" ? (
+        <div
+          role="status"
+          className="flex items-center gap-1.5 px-0.5 text-[11px] text-subtle"
+        >
+          {model.status === "idle" ? null : model.status === "searching" ||
+            model.status === "updating" ? (
               <span data-testid="search-spinner" className="flex items-center gap-1.5">
                 <span
                   aria-hidden
                   className="size-2 animate-pulse rounded-full bg-accent"
                 />
-                Searching…
+                {model.status === "updating" ? "Updating workspace…" : "Searching…"}
               </span>
             ) : (
               <span data-testid="search-summary">
@@ -464,8 +467,7 @@ export function SearchView(props: {
                   : `${model.totalMatches} result${model.totalMatches === 1 ? "" : "s"} in ${fileCount} file${fileCount === 1 ? "" : "s"}`}
               </span>
             )}
-          </div>
-        ) : null}
+        </div>
       </div>
 
       {model.limitHit ? (

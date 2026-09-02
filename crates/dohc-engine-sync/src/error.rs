@@ -303,6 +303,7 @@ impl RelayError {
             | RelayError::PayloadTooLarge
             | RelayError::PresenceCapacity
             | RelayError::QuotaExceeded
+            | RelayError::DiscussionRateLimited
             | RelayError::LinkReadRateLimited
             | RelayError::SelfShare
             | RelayError::AmbiguousSelector
@@ -410,6 +411,8 @@ pub enum RelayError {
     PresenceCapacity,
     #[error("relay quota was exceeded")]
     QuotaExceeded,
+    #[error("relay rate-limited discussion messages")]
+    DiscussionRateLimited,
     #[error("relay rate-limited link reads")]
     LinkReadRateLimited,
     #[error("self-sharing is not allowed")]

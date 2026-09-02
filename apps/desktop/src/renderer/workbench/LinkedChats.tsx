@@ -4,6 +4,7 @@ import type {
   ChatMessageRecord,
   ChatReactionRecord,
   ChatThreadRecord,
+  ListFileChatsResponse,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import {
@@ -31,7 +32,7 @@ function basename(path: string): string {
   return index >= 0 ? path.slice(index + 1) : path;
 }
 
-// The composer's replacement wherever a share refuses the write (#646 PR2).
+// The composer's replacement for every received file share.
 // Same words main throws (SharedFileReadOnlyError) and the same shape the
 // Chats view's read-only notice uses.
 function ReadOnlyNotice() {
@@ -40,7 +41,7 @@ function ReadOnlyNotice() {
       data-testid="linked-chat-readonly-note"
       className="m-0 shrink-0 border-t border-line px-3 py-2 text-[11px] text-subtle"
     >
-      This shared file is read-only for you.
+      Chats are read-only in this shared view.
     </p>
   );
 }
@@ -50,6 +51,26 @@ type ThreadsState =
   | { status: "unavailable"; message: string }
   | { status: "ready"; fileObjectId: string | null; threads: ChatThreadRecord[] };
 
+const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
+const THREAD_LOAD_RETRY_MS = 1_000;
+// Initial capture has a 120s early-import decision ceiling. Leave one retry
+// interval for the Ready/Degraded transition, with a fail-safe if that bound
+// is ever violated.
+const THREAD_LOAD_RETRY_DEADLINE_MS = 121_000;
+
+function isWorkspaceUpdatingResponse(
+  response: ListFileChatsResponse,
+): response is Extract<
+  ListFileChatsResponse,
+  { status: "refused"; code: "workspace-updating" }
+> {
+  return (
+    "status" in response &&
+    response.status === "refused" &&
+    response.code === "workspace-updating"
+  );
+}
+
 // The per-file Chats panel: thread list with a calm empty state, inline
 // create, and a thread view with a composer. Every async response is gated
 // by a liveness token before it touches state (workspace/file switches must
@@ -57,9 +78,8 @@ type ThreadsState =
 export function LinkedChatsPanel(props: {
   workspaceId: string;
   filePath: string | null;
-  // Whether this shared view refuses chat writes (#646 PR2). A shared view
-  // ALWAYS passes it; absent means a workspace this machine owns, which is
-  // writable by definition.
+  // A shared view always passes true. Absent means a workspace this machine
+  // owns, which is writable by definition.
   //
   // The decision, not the level: this panel only ever asked the level one
   // yes/no question, and a level it might not have — a damaged grant carries
@@ -79,9 +99,8 @@ export function LinkedChatsPanel(props: {
   onError: (message: string) => void;
 }) {
   const { workspaceId, filePath } = props;
-  // A file share at `view` reads the chat about its files and adds nothing to
-  // it. Main refuses every chat write with these words, and the relay refuses
-  // the push again, so hiding the composer is honesty, not authorization.
+  // Every received file share reads the chat about its files and adds nothing
+  // to it. Main refuses every chat write with these words before the store.
   const readOnly = props.shareReadOnly === true;
   const [threadsState, setThreadsState] = useState<ThreadsState>({ status: "loading" });
   const [activeThread, setActiveThread] = useState<ChatThreadRecord | null>(null);
@@ -103,20 +122,42 @@ export function LinkedChatsPanel(props: {
     if (!filePath) return;
     const token = ++liveToken.current;
     setThreadsState({ status: "loading" });
-    try {
-      const result = await bridge().listFileChats({ workspaceId, path: filePath });
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "ready",
-        fileObjectId: result.fileObjectId,
-        threads: result.threads,
-      });
-    } catch (error) {
-      if (token !== liveToken.current) return;
-      setThreadsState({
-        status: "unavailable",
-        message: ipcErrorMessage(error, "Could not load Chats for this file."),
-      });
+    let updatingStartedAtMs: number | null = null;
+    while (token === liveToken.current) {
+      try {
+        const result = await bridge().listFileChats({ workspaceId, path: filePath });
+        if (token !== liveToken.current) return;
+        if (isWorkspaceUpdatingResponse(result)) {
+          const now = performance.now();
+          updatingStartedAtMs ??= now;
+          const remainingMs =
+            updatingStartedAtMs + THREAD_LOAD_RETRY_DEADLINE_MS - now;
+          if (remainingMs <= 0) {
+            setThreadsState({
+              status: "unavailable",
+              message: WORKSPACE_UPDATING_MESSAGE,
+            });
+            return;
+          }
+          await new Promise((resolveDelay) =>
+            setTimeout(resolveDelay, Math.min(THREAD_LOAD_RETRY_MS, remainingMs)),
+          );
+          continue;
+        }
+        setThreadsState({
+          status: "ready",
+          fileObjectId: result.fileObjectId,
+          threads: result.threads,
+        });
+        return;
+      } catch (error) {
+        if (token !== liveToken.current) return;
+        setThreadsState({
+          status: "unavailable",
+          message: ipcErrorMessage(error, "Could not load Chats for this file."),
+        });
+        return;
+      }
     }
   }, [filePath, workspaceId]);
 

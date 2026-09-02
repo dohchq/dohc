@@ -6,6 +6,7 @@ import {
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
+  isMomentDiffTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
   isPluginWebAppTabPath,
@@ -16,6 +17,11 @@ import {
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
 } from "./workbenchState";
+
+export function momentDiffName(label?: string): string {
+  const name = label?.split("/").pop();
+  return name ? `Diff: ${name}` : "History change";
+}
 
 // A plugin's own names — its display name and its web apps' titles — live in
 // its manifest, which the tab path cannot carry and this strip cannot read.
@@ -44,6 +50,9 @@ function fileName(path: string, label?: string): string {
     const name = parsed?.filePath.split("/").pop() ?? "Diff";
     return `Diff: ${name}`;
   }
+  if (isMomentDiffTabPath(path)) {
+    return momentDiffName(label);
+  }
   if (isVersionCompareTabPath(path)) return "Compare with Main";
   return path.split("/").pop() ?? path;
 }
@@ -70,6 +79,9 @@ function tabTitle(path: string, label?: string): string {
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
     return parsed ? `History diff: ${parsed.filePath}` : "History diff";
+  }
+  if (isMomentDiffTabPath(path)) {
+    return label ? `History diff: ${label}` : "History change";
   }
   if (isVersionCompareTabPath(path)) return "Compare this Version with Main";
   return path;
@@ -358,9 +370,8 @@ export const EditorTabs = memo(function EditorTabs(props: {
   tabs: Array<{ path: string }>;
   activeTab: string | null;
   activeTabDirty: boolean;
-  /** Display names the tab path cannot supply, keyed by path: what a plugin
-   * and its web apps call themselves in their manifest, reported by the pages
-   * that read it. */
+  /** Display names the tab path cannot supply, keyed by path: plugin titles
+   * from manifests and moment paths from history records. */
   tabLabels?: ReadonlyMap<string, string>;
   // Paths with a set-aside draft (#567). Unlike `activeTabDirty`, this is
   // knowable for EVERY tab — the store outlives the keyed inspectors — so an

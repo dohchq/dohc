@@ -15,12 +15,13 @@ use crate::bounds::{OverCapPolicy, ScanBounds};
 use crate::diff::ScanManifest;
 use crate::error::FilesError;
 use crate::floor;
-use crate::hash::{HashInput, HashOutcome, HashPool, HashRun};
+use crate::hash::{
+    HashInput, HashOutcome, HashPool, HashRun, PostHashExpectation, PostHashProbe, mtime_ms,
+};
 use crate::media::media_type_for_path;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
 use tokio_util::sync::CancellationToken;
 
 /// One tracked file in a normalized listing.
@@ -204,6 +205,7 @@ impl Scanner {
         // against the non-reused candidates below.
         let mut reused: Vec<Option<String>> = Vec::with_capacity(candidates.files.len());
         let mut inputs: Vec<HashInput> = Vec::new();
+        let mut post_hash: Vec<PostHashExpectation> = Vec::new();
         for candidate in &candidates.files {
             let hash = prior.get(&candidate.rel).and_then(|entry| {
                 (candidate.mtime_ms != 0
@@ -216,11 +218,26 @@ impl Scanner {
                     index: inputs.len(),
                     abs: candidate.abs.clone(),
                 });
+                post_hash.push(PostHashExpectation {
+                    probe_path: self.io_faults.as_ref().map(|_| candidate.rel.clone()),
+                    size: candidate.size,
+                    mtime_ms: candidate.mtime_ms,
+                });
             }
             reused.push(hash);
         }
 
-        let outcomes = match self.pool.hash_batched(&inputs, token)? {
+        let post_hash_probe = self.io_faults.as_ref().map(|faults| {
+            let faults = Arc::clone(faults);
+            Arc::new(move |path: &str| faults.error_kind(path, ScanIoOperation::Hash))
+                as PostHashProbe
+        });
+        let outcomes = match self.pool.hash_batched_with_post_stat(
+            &inputs,
+            &post_hash,
+            post_hash_probe,
+            token,
+        )? {
             HashRun::Cancelled => return Ok(ScanOutcome::Cancelled),
             HashRun::Completed { outcomes } => outcomes,
         };
@@ -250,15 +267,12 @@ impl Scanner {
                     reason: "hash pool dropped a result",
                 });
             };
-            if let Some(kind) = self.injected(&candidate.rel, ScanIoOperation::Hash) {
-                failed.push(FailedPath {
-                    path: candidate.rel,
-                    kind,
-                });
-                continue;
-            }
             match outcome {
-                HashOutcome::Hashed { sha256, bytes } => {
+                HashOutcome::Hashed {
+                    sha256,
+                    bytes,
+                    stable_mtime_ms,
+                } => {
                     // The candidate mtime comes from the enumerate-time stat,
                     // but the hashed bytes come from a later read. A same-size
                     // write inside that gap would pair the STALE mtime with the
@@ -269,18 +283,9 @@ impl Scanner {
                     // enumerate observation — the file provably sat still
                     // across the whole stat→read→stat window. Any drift, or a
                     // failed re-stat, records 0 (no pairing) and the next scan
-                    // re-hashes. One extra stat per hashed file; reused files
-                    // never reach this arm.
-                    let mtime_ms = match std::fs::metadata(&candidate.abs) {
-                        Ok(metadata)
-                            if metadata.is_file()
-                                && metadata.len() == candidate.size
-                                && mtime_ms(&metadata) == candidate.mtime_ms =>
-                        {
-                            candidate.mtime_ms
-                        }
-                        _ => 0,
-                    };
+                    // re-hashes. The hash worker performs that path stat
+                    // immediately after the byte stream, retaining the race
+                    // fence without a serial second pass here.
                     files.push(FileEntry {
                         media_type: media_type_for_path(&candidate.rel),
                         path: candidate.rel,
@@ -288,7 +293,7 @@ impl Scanner {
                         // the absence of a concurrent truncation; trust the streamed
                         // count (what was actually hashed).
                         size: bytes,
-                        mtime_ms,
+                        mtime_ms: stable_mtime_ms,
                         sha256,
                     })
                 }
@@ -590,18 +595,4 @@ fn relative(root: &Path, path: &Path) -> String {
 
 fn display(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-/// Milliseconds since the Unix epoch for a file's mtime, or `0` when the
-/// platform cannot supply it or the time predates the epoch. A zero mtime is
-/// "no observation": it never authorizes hash reuse, so the fallback fails
-/// safe toward hashing.
-fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
-    let Ok(modified) = metadata.modified() else {
-        return 0;
-    };
-    let Ok(since_epoch) = modified.duration_since(UNIX_EPOCH) else {
-        return 0;
-    };
-    i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
 }

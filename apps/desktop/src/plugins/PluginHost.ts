@@ -347,6 +347,12 @@ export class PluginHost {
     await this.stopPluginRecord(record);
   }
 
+  async stopDriverSpawn(pluginId: string, spawnId: string): Promise<void> {
+    const record = this.plugins.get(pluginId);
+    if (!record || record.current?.spawnId !== spawnId) return;
+    await this.stopPluginRecord(record);
+  }
+
   private async stopPluginRecord(record: PluginRecord): Promise<void> {
     const spawn = record.current;
     try {

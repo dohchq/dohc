@@ -360,7 +360,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
   {
     method: WORKSPACE_METHOD.watcherStatus,
-    valid: { running: true, degraded: false, terminal: false },
+    valid: { running: true, degraded: false, terminal: false, phase: "ready" },
   },
   {
     method: WORKSPACE_METHOD.captureFlush,

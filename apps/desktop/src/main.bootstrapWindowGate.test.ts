@@ -198,6 +198,27 @@ describe("bootstrap window gate", () => {
     expect(refreshGateAt).toBeGreaterThan(acquireAt);
   });
 
+  it("waits for received-share capture before identity, relay, or scheduler work", () => {
+    const refresh = ipcHandlerSource("refreshSharedView");
+    const markerAt = refresh.indexOf("const currentShareViewWorkspace = () =>");
+    const waitAt = refresh.indexOf("await waitForReceivedShareCaptureReady({");
+    const infoAt = refresh.indexOf("await fetchShareViewInfo({");
+    const identityAt = refresh.indexOf("await recordShareViewIdentity(");
+    const schedulerAt = refresh.indexOf("withStaleSensitiveWorkspaceOperation(");
+
+    expect(markerAt).toBeGreaterThanOrEqual(0);
+    expect(waitAt).toBeGreaterThan(markerAt);
+    expect(infoAt).toBeGreaterThan(waitAt);
+    expect(identityAt).toBeGreaterThan(waitAt);
+    expect(schedulerAt).toBeGreaterThan(waitAt);
+    const wait = refresh.slice(waitAt, infoAt);
+    expect(wait).toContain("shareStore.watcherStatus?.bind(shareStore)");
+    expect(wait).toContain("assertCurrent: () => operation.assertCurrent()");
+    expect(refresh.split("workspace = currentShareViewWorkspace()").length - 1).toBe(
+      2,
+    );
+  });
+
   // A mount operation acquires physical authority before awaiting the daemon,
   // so retirement cannot replace its canonical root during startup.
   it("holds share mount authority across daemon startup", () => {

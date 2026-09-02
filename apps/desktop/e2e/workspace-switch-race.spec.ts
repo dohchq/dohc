@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import type { DohcDesktopBridge } from "../src/ipc/bridgeContract";
 import { seedThroughDaemon } from "./helpers/daemonSeed";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import {
@@ -39,6 +40,7 @@ function switcherOption(page: import("@playwright/test").Page, workspaceId: stri
 const MOMENT_FILES = 250;
 const EDITS_PER_FILE = 4; // 250 x 4 = 1,000 moments
 const CHAT_MESSAGES = 200;
+type EngineMomentsBridge = Pick<DohcDesktopBridge, "listEngineMoments">;
 
 test("switching A->B while panels load never shows A's history or chats in B", async () => {
   test.setTimeout(240_000);
@@ -144,15 +146,13 @@ test("switching A->B while panels load never shows A's history or chats in B", a
     const historyFirstContentMs = Date.now() - historyStart;
     const ipcTiming = await page.evaluate(async ({ id }) => {
       const api = (window as unknown as {
-        dohcDesktop: {
-          listEngineMoments(payload: {
-            workspaceId: string;
-            limit: number;
-          }): Promise<{ moments: unknown[]; latestMomentOrder: number }>;
-        };
+        dohcDesktop: EngineMomentsBridge;
       }).dohcDesktop;
       const start = performance.now();
       const pageResult = await api.listEngineMoments({ workspaceId: id, limit: 200 });
+      if ("status" in pageResult) {
+        throw new Error("History was still updating after its first row rendered.");
+      }
       return {
         ms: performance.now() - start,
         momentCount: pageResult.moments.length,
