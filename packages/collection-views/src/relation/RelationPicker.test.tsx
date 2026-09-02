@@ -124,7 +124,7 @@ describe("RelationPicker", () => {
     );
 
     expect(
-      await screen.findByText("The list shows only the first 5 records. Search to narrow it."),
+      await screen.findByText("The list shows only the first 5 records."),
     ).toBeDefined();
     expect(executor).toHaveBeenCalledTimes(5);
     expect(screen.getAllByRole("option")).toHaveLength(5);

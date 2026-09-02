@@ -248,11 +248,14 @@ export function CollectionPage({
     const prefix = `${collectionPath}/`;
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
-        const paths =
-          event.workspaceId === workspaceId ? event.paths : undefined;
+        // Another workspace's activity is never this collection's; a
+        // scope-free event (logout, registry change) still refreshes.
+        if (event.workspaceId !== undefined && event.workspaceId !== workspaceId) {
+          return;
+        }
         if (
-          paths?.length &&
-          !paths.some(
+          event.paths?.length &&
+          !event.paths.some(
             (path) => path === collectionPath || path.startsWith(prefix),
           )
         ) {

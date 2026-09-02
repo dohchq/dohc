@@ -275,6 +275,10 @@ describe("CollectionPage", () => {
     });
     await vi.advanceTimersByTimeAsync(1_500);
     expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
+    // Another workspace's activity, even without path detail, is not ours.
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-2" });
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
 
     bridge.emitWorkspaceActivity({
       workspaceId: "ws-1",

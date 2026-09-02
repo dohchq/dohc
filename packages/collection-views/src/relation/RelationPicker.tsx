@@ -193,7 +193,7 @@ export function RelationPicker({
       )}
       {error === null && records !== null && truncated ? (
         <span className="text-[11px] text-muted">
-          The list shows only the first {records.length} records. Search to narrow it.
+          The list shows only the first {records.length} records.
         </span>
       ) : null}
       {!field.many && error === null && records !== null && selected.length > 0 ? (
