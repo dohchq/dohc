@@ -68,7 +68,7 @@ Gate: `pnpm typecheck` and `pnpm test:desktop` pass, plus an e2e walkthrough in 
 ## Phase 3: events and the SDK
 
 - Add record.created, record.updated, and record.field.changed to the workspace event vocabulary. Payload: collection path, record id, field, previous value, next value, author, timestamp. The engine emits on apply; the desktop forwards over the same SDK channel as `files.watch`, with the same per-owner subscription cap.
-- Serve the dormant `collections.read` and `collections.list` SDK capability from the real index, path-scoped like file capabilities. Add `collections.edit` for writes through the frontmatter map, attributed as agent-authored writes with `onBehalfOf`.
+- Serve the dormant `collections.read` SDK capability from the real index, path-scoped like file capabilities; it covers list, get, query, and record reads. Add `collections.edit` for writes through the frontmatter map, attributed as agent-authored writes with `onBehalfOf`.
 - Add collection tools to `packages/mcp` beside the existing database and chat tools: query a collection, read a record, set fields, create a record. External agents get the same reach as plugins, path-scoped the same way.
 - Hand the share-links program its contract: a collection with a create-only grant policy is the ADR 0004 lane. No implementation here; the contract and a written pointer are the deliverable.
 

@@ -332,16 +332,24 @@ async fn write_output<W: AsyncWrite + Unpin>(
                 // transport: delivery is at most once and the subscriber
                 // reconciles from history. A response is different: its
                 // caller is waiting, so an unencodable one still fails loud.
-                if let (Envelope::Event(event), Err(error)) =
-                    (&envelope, encode_control(&envelope, limits))
-                {
-                    eprintln!(
-                        "engine: dropped event {} it cannot encode: {error:?}",
-                        event.name
-                    );
-                    continue;
-                }
-                write_envelope(&mut output, &envelope, limits).await?;
+                let bytes = match (encode_control(&envelope, limits), &envelope) {
+                    (Ok(bytes), _) => bytes,
+                    (Err(error), Envelope::Event(event)) => {
+                        eprintln!(
+                            "engine: dropped event {} it cannot encode: {error:?}",
+                            event.name
+                        );
+                        continue;
+                    }
+                    (Err(_), _) => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "response too large",
+                        ));
+                    }
+                };
+                output.write_all(&bytes).await?;
+                output.flush().await?;
             }
             OutputItem::Blob { response, egress } => {
                 let request_id = response.id;

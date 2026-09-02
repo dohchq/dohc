@@ -3004,7 +3004,9 @@ fn apply_ydoc_envelope_inner(
             }
         }
     }
-    Ok(merge_drained(
+    // This path drained BEFORE the primary apply, so the drained facts
+    // committed first and lead the emission order.
+    Ok(merge_drained_first(
         merge_lineage_replacements(
             map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
             drain.lineage_replacements,
@@ -3034,17 +3036,41 @@ fn collapse_lineage_replacements(
 /// Appends the facts a deferred drain committed to the envelope's own, in
 /// commit order, so the pull pass emits every record event this apply
 /// caused. A skipped primary still carries the drain's facts: those rows
-/// are committed whatever the primary did.
+/// are committed whatever the primary did. Use this where the drain ran
+/// AFTER the primary apply.
 fn merge_drained(
     outcome: ApplyOutcome<YdocApplyResult>,
     drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+) -> ApplyOutcome<YdocApplyResult> {
+    merge_drained_ordered(outcome, drained, false)
+}
+
+/// The same merge where the drain ran BEFORE the primary apply: the drained
+/// facts committed first, so they lead.
+fn merge_drained_first(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+) -> ApplyOutcome<YdocApplyResult> {
+    merge_drained_ordered(outcome, drained, true)
+}
+
+fn merge_drained_ordered(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    drained_first: bool,
 ) -> ApplyOutcome<YdocApplyResult> {
     if drained.is_empty() {
         return outcome;
     }
     match outcome {
         ApplyOutcome::Applied(mut result) => {
-            result.record_facts.extend(drained);
+            if drained_first {
+                let own = std::mem::take(&mut result.record_facts);
+                result.record_facts = drained;
+                result.record_facts.extend(own);
+            } else {
+                result.record_facts.extend(drained);
+            }
             ApplyOutcome::Applied(result)
         }
         ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
@@ -3059,11 +3085,76 @@ fn merge_drained(
             refusals,
             sharing_declined,
         } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(merge_drained(*outcome, drained)),
+            outcome: Box::new(merge_drained_ordered(*outcome, drained, drained_first)),
             refusals,
             sharing_declined,
         },
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod merge_drained_tests {
+    use super::*;
+
+    fn facts(record_id: &str) -> dohc_engine_domain::CollectionRecordApplyFacts {
+        dohc_engine_domain::CollectionRecordApplyFacts {
+            collection_path: "tasks".to_owned(),
+            record_id: record_id.to_owned(),
+            created: false,
+            author_origin_id: None,
+            recorded_at_ms: 0,
+            fields: Vec::new(),
+        }
+    }
+
+    fn applied(record_id: &str) -> ApplyOutcome<YdocApplyResult> {
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: None,
+            conflicts_opened: 0,
+            lineage_replacement: None,
+            record_facts: vec![facts(record_id)],
+        })
+    }
+
+    fn ids(outcome: ApplyOutcome<YdocApplyResult>) -> Vec<String> {
+        match outcome {
+            ApplyOutcome::Applied(result) => result
+                .record_facts
+                .into_iter()
+                .map(|facts| facts.record_id)
+                .collect(),
+            other => panic!("expected an applied outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drained_facts_keep_commit_order_on_both_paths() {
+        // Drain after the primary: the primary's facts committed first.
+        assert_eq!(
+            ids(merge_drained(
+                applied("rec_primary"),
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_primary", "rec_parked"]
+        );
+        // Drain before the primary: the parked update's facts committed first.
+        assert_eq!(
+            ids(merge_drained_first(
+                applied("rec_primary"),
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_parked", "rec_primary"]
+        );
+        // A skipped primary still carries the drain's facts.
+        assert_eq!(
+            ids(merge_drained(
+                ApplyOutcome::Skipped,
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_parked"]
+        );
     }
 }
 

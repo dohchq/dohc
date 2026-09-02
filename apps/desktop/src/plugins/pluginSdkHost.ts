@@ -267,6 +267,19 @@ export async function invokePluginSdkHost(
       // Same refusal as files.watch: a subscription outlives the call that
       // opens it, so an ended owner must not be handed one.
       if (context.signal?.aborted) throw abortError();
+      // A watch on one collection needs the read scope a read of it needs,
+      // so the port refuses before any subscription exists. A watch on "."
+      // is scoped at delivery: only collections the port lists reach it.
+      const watchPath =
+        typeof params === "object" && params !== null && "path" in params
+          ? (params as { path?: unknown }).path
+          : undefined;
+      if (typeof watchPath === "string" && watchPath !== ".") {
+        await waitForOperation(
+          context.signal,
+          invokeWorkspaceSdkHost(hostContext, "collections.get", { path: watchPath }),
+        );
+      }
       return context.subscribeRecordWatch(params);
     }
     // The renderer answers this for a panel before it reaches main, so a

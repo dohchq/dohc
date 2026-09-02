@@ -2,7 +2,7 @@ import type { WatcherEvent } from "@dohc/workspace-core";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import {
   localWorkspaceSdkDatabaseEditor,
@@ -741,6 +741,17 @@ describe("the plugin SDK host's files.watch route", () => {
       subscribeRecordWatch: (params) =>
         events.subscribeRecords({ owner, emitEvent: sink.emitEvent }, params),
       unsubscribeWorkspaceEvents: (params) => events.unsubscribe({ owner }, params),
+      // The watch checks the collection is readable first; this port says so.
+      reads: {
+        ...localWorkspaceSdkReads("C:/workspace"),
+        getCollection: async ({ collectionPath }) => ({
+          path: collectionPath,
+          status: "valid",
+          reasons: [],
+          schema: { name: null, description: null, fields: [], views: [] },
+          recordCount: 0,
+        }),
+      },
     });
 
     const capabilities = (await invokePluginSdkHost(context, "capabilities")) as {
@@ -778,6 +789,35 @@ describe("the plugin SDK host's files.watch route", () => {
         path: "collections/people",
       }),
     ).rejects.toThrow("collections.watch is unavailable for this request path");
+  });
+
+  it("refuses a collection watch the read port denies, creating no subscription", async () => {
+    const events = new PluginWorkspaceEvents();
+    const sink = collector();
+    const subscribeRecordWatch = vi.fn((params: unknown) =>
+      events.subscribeRecords(
+        { owner: processOwner("sites", "spawn-1"), emitEvent: sink.emitEvent },
+        params,
+      ),
+    );
+    const context = hostContext({
+      subscribeRecordWatch,
+      reads: {
+        ...localWorkspaceSdkReads("C:/workspace"),
+        getCollection: async () => {
+          throw new Error("This plugin cannot read collections/private.");
+        },
+      },
+    });
+
+    await expect(
+      invokePluginSdkHost(context, "collections.watch", {
+        path: "collections/private",
+      }),
+    ).rejects.toThrow(/cannot read collections\/private/);
+    expect(subscribeRecordWatch).not.toHaveBeenCalled();
+    events.handleRecordEvent(recordCreated("collections/private"));
+    expect(sink.emitted).toEqual([]);
   });
 
   it("refuses to open a record subscription for a spawn that already ended", async () => {

@@ -217,6 +217,35 @@ describe("createCollectionRecord", () => {
     expect(log.doc.getMap("frontmatter").get("status")).toBe("open");
   });
 
+  it("names the created record when seeding its fields fails", async () => {
+    const root = await workspaceRoot();
+    const { session } = fakeSession({ settleError: new Error("settle refused") });
+    const context = contextFor(root, session, {
+      withAdapter: async (work) =>
+        await work({
+          queryCollectionRecords: async ({ collectionPath }) => ({
+            collection: { path: collectionPath, status: "valid", reasons: [] },
+            records: [
+              { id: "rec_p", path: "tasks/partial.md", conflicted: false, values: [] },
+            ],
+            groups: null,
+            nextCursor: null,
+          }),
+        }),
+    });
+
+    // The file and its id exist by the time the seed fails: the error says
+    // so, so a caller reconciles instead of creating a second record.
+    await expect(
+      createCollectionRecord(context, {
+        collectionPath: "tasks",
+        name: "partial",
+        fields: { status: "open" },
+        author: AGENT,
+      }),
+    ).rejects.toThrow(/created at tasks\/partial\.md \(id rec_p\).*settle refused/);
+  });
+
   it("returns without a session when fields are absent or empty", async () => {
     const root = await workspaceRoot();
     const { session, log } = fakeSession();

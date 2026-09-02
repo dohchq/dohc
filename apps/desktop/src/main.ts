@@ -4837,12 +4837,16 @@ async function openCliWorkspace(
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
-  // The CLI's collection writes ride the same seam plugin SDK edits take.
-  const cliCollectionEditContext: CollectionRecordEditContext = {
-    capture,
-    workspaceRoot: workspace.rootPath,
-    withAdapter: (work) => withEngineAdapter(workspace, work),
-  };
+  // The CLI's collection writes ride the same seam plugin SDK edits take,
+  // resolved per write under the physical workspace's authority, so a
+  // retired-and-reattached workspace refuses instead of falling through to
+  // its successor.
+  const cliCollectionEdit = <T>(
+    work: (context: CollectionRecordEditContext) => Promise<T>,
+  ): Promise<T> =>
+    withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
+      await work(await collectionEditContextFor(operation)),
+    );
   return {
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
@@ -4893,14 +4897,10 @@ async function openCliWorkspace(
     // take.
     collections: {
       writes: {
-        setFields: (input) => {
-          assertWritableWorkspace(workspace);
-          return setCollectionRecordFields(cliCollectionEditContext, input);
-        },
-        createRecord: (input) => {
-          assertWritableWorkspace(workspace);
-          return createCollectionRecord(cliCollectionEditContext, input);
-        },
+        setFields: (input) =>
+          cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
+        createRecord: (input) =>
+          cliCollectionEdit((context) => createCollectionRecord(context, input)),
       },
       query: async (params) => {
         const result = await withEngineAdapter(

@@ -232,11 +232,21 @@ export async function createCollectionRecord(
   );
   const recordId = await waitForAdoptedRecordId(context, input.collectionPath, path);
   if (entries.length > 0) {
-    await setCollectionRecordFields(context, {
-      recordPath: path,
-      fields: Object.fromEntries(entries),
-      author: input.author,
-    });
+    try {
+      await setCollectionRecordFields(context, {
+        recordPath: path,
+        fields: Object.fromEntries(entries),
+        author: input.author,
+      });
+    } catch (error) {
+      // The record exists by now: name it, so the caller reconciles instead
+      // of creating a second one.
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `The record was created at ${path} (id ${recordId}), but its fields could not be set: ${detail}`,
+        { cause: error },
+      );
+    }
   }
   return { path, recordId };
 }
@@ -260,6 +270,7 @@ async function findAdoptedRecordId(
   return await context.withAdapter(async (adapter) => {
     let cursor: CollectionQueryParams["cursor"];
     for (;;) {
+      throwIfAborted(context.signal);
       const page: CollectionQueryResult = await adapter.queryCollectionRecords({
         collectionPath,
         limit: ADOPTION_QUERY_PAGE_LIMIT,
@@ -281,19 +292,23 @@ async function waitForAdoptedRecordId(
   recordPath: string,
 ): Promise<string> {
   const deadline = Date.now() + ADOPTION_DEADLINE_MS;
+  let lastError: unknown;
   for (;;) {
     throwIfAborted(context.signal);
     let found: string | null = null;
     try {
       found = await findAdoptedRecordId(context, collectionPath, recordPath);
-    } catch {
+    } catch (error) {
       // The engine can refuse mid-adoption (collection reloading); the next
-      // poll answers. A workspace whose engine stays broken hits the deadline.
+      // poll answers. A workspace whose engine stays broken hits the deadline
+      // with the last refusal as the cause.
+      lastError = error;
     }
     if (found !== null) return found;
     if (Date.now() >= deadline) {
       throw new Error(
         `The record file was created at ${recordPath}, but the engine did not adopt it as a collection record in time.`,
+        lastError === undefined ? undefined : { cause: lastError },
       );
     }
     await abortableDelay(ADOPTION_POLL_INTERVAL_MS, context.signal);
