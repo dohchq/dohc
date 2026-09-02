@@ -4258,7 +4258,18 @@ mod tests {
             })
             .collect();
         assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_expected);
-        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_before);
+        // Likewise the attribution migration adds three columns to
+        // `ydoc_updates`, which a pre-existing row gains as NULL.
+        let updates_expected: Vec<Vec<(String, rusqlite::types::Value)>> = updates_before
+            .into_iter()
+            .map(|mut row| {
+                for column in ["actor_kind", "on_behalf_of", "chain_depth"] {
+                    row.push((column.to_owned(), rusqlite::types::Value::Null));
+                }
+                row
+            })
+            .collect();
+        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_expected);
         assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
         assert_eq!(
             dump_table_rows(&conn, "ydoc_inactive_lineages"),
