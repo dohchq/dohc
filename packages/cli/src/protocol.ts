@@ -1,3 +1,7 @@
+import {
+  COLLECTION_SCHEMA_REASON_CODES,
+  FIELD_VALUE_REASON_CODES,
+} from "@dohc/workspace-contracts/collection";
 import { z } from "zod";
 
 export const CLI_PROTOCOL_VERSION = 2;
@@ -116,6 +120,130 @@ export const replyToChatArgsSchema = z
   })
   .strict();
 
+// Collection field values cross the CLI socket in the engine wire's JSON
+// encoding: an integer outside the safe double range rides a `$dohcInt64` /
+// `$dohcFloat64` marker object. The desktop translates with the
+// workspace-engine-client codec; this schema only bounds the JSON shape.
+export type CliCollectionWireValue =
+  | null
+  | boolean
+  | number
+  | string
+  | CliCollectionWireValue[]
+  | { [key in string]?: CliCollectionWireValue };
+
+export const collectionWireValueSchema: z.ZodType<CliCollectionWireValue> =
+  z.lazy(() =>
+    z.union([
+      z.null(),
+      z.boolean(),
+      z.number(),
+      z.string(),
+      z.array(collectionWireValueSchema),
+      z.record(z.string(), collectionWireValueSchema),
+    ]),
+  );
+
+const collectionPathArg = z.string().min(1).max(4096);
+const collectionFieldNameArg = z.string().min(1).max(200);
+// The engine mints record ids; the CLI only bounds the claim.
+const collectionRecordIdArg = z.string().min(1).max(200);
+const MAX_COLLECTION_QUERY_SORTS = 8;
+const MAX_COLLECTION_FIELD_WRITES = 64;
+
+export const collectionQueryFilterSchema = z
+  .object({
+    field: collectionFieldNameArg,
+    operator: z.enum(["equals", "contains"]),
+    value: collectionWireValueSchema,
+  })
+  .strict();
+const collectionQuerySortSchema = z
+  .object({
+    field: collectionFieldNameArg,
+    direction: z.enum(["asc", "desc"]),
+  })
+  .strict();
+const collectionMaybeValueSchema = z
+  .object({ present: z.boolean(), value: collectionWireValueSchema })
+  .strict();
+export const collectionQueryCursorSchema = z
+  .object({
+    sortValues: z.array(collectionMaybeValueSchema).max(MAX_COLLECTION_QUERY_SORTS),
+    recordPath: collectionPathArg,
+    recordId: collectionRecordIdArg,
+  })
+  .strict();
+export type CliCollectionQueryCursor = z.infer<typeof collectionQueryCursorSchema>;
+export const collectionQueryArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    filter: collectionQueryFilterSchema.optional(),
+    sort: z.array(collectionQuerySortSchema).max(MAX_COLLECTION_QUERY_SORTS).optional(),
+    groupBy: collectionFieldNameArg.optional(),
+    resolveRelations: z.boolean().optional(),
+    limit: z.number().int().positive().max(500).optional(),
+    cursor: collectionQueryCursorSchema.optional(),
+  })
+  .strict();
+export const collectionRecordArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    recordId: collectionRecordIdArg,
+    historyLimit: z.number().int().positive().max(500),
+    beforeHistoryId: z.number().int().nonnegative().optional(),
+  })
+  .strict();
+// Field writes carry PLAIN JSON values, not the marker encoding: they land in
+// the record's frontmatter Y.Doc map, which holds JSON. The engine-owned "id"
+// key is refused before the request leaves the client.
+function boundedCollectionFields(minimumFields: number) {
+  return z
+    .record(collectionFieldNameArg, collectionWireValueSchema)
+    .refine(
+      (fields) => {
+        const count = Object.keys(fields).length;
+        return count >= minimumFields && count <= MAX_COLLECTION_FIELD_WRITES;
+      },
+      {
+        message: `a field write names ${
+          minimumFields > 0 ? "1" : "0"
+        } to ${MAX_COLLECTION_FIELD_WRITES} fields`,
+      },
+    )
+    .refine((fields) => !("id" in fields), {
+      message: 'the "id" field is engine-owned',
+    });
+}
+export const collectionSetFieldsFieldsSchema = boundedCollectionFields(1);
+export const collectionCreateFieldsSchema = boundedCollectionFields(0);
+export const collectionSetFieldsArgsSchema = z
+  .object({
+    ...argsBase,
+    recordPath: collectionPathArg,
+    fields: collectionSetFieldsFieldsSchema,
+  })
+  .strict();
+export const collectionCreateRecordArgsSchema = z
+  .object({
+    ...argsBase,
+    collectionPath: collectionPathArg,
+    // One file name inside the collection folder, without the .md extension.
+    name: z
+      .string()
+      .min(1)
+      .max(200)
+      .refine(
+        (value) =>
+          !value.includes("/") && !value.includes("\\") && value.trim() === value,
+        { message: "a record name is one file name, not a path" },
+      ),
+    fields: collectionCreateFieldsSchema,
+  })
+  .strict();
+
 export const cliRequestSchema = z.discriminatedUnion("verb", [
   z.object({ ...requestBase, verb: z.literal("channels"), args: channelsArgsSchema }).strict(),
   z.object({ ...requestBase, verb: z.literal("threads"), args: threadsArgsSchema }).strict(),
@@ -144,6 +272,26 @@ export const cliRequestSchema = z.discriminatedUnion("verb", [
     ...requestBase,
     verb: z.literal("replyToChat"),
     args: replyToChatArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("collectionQuery"),
+    args: collectionQueryArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("collectionRecord"),
+    args: collectionRecordArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("collectionSetFields"),
+    args: collectionSetFieldsArgsSchema,
+  }).strict(),
+  z.object({
+    ...requestBase,
+    verb: z.literal("collectionCreateRecord"),
+    args: collectionCreateRecordArgsSchema,
   }).strict(),
 ]);
 
@@ -486,6 +634,108 @@ export const replyToChatResultSchema = z.discriminatedUnion("ok", [
   rawFailureSchema,
 ]);
 
+const collectionSchemaReasonSchema = z
+  .object({ code: z.enum(COLLECTION_SCHEMA_REASON_CODES), path: z.string() })
+  .strict();
+const rawCollectionSummarySchema = z
+  .object({
+    path: z.string().min(1),
+    status: z.enum(["valid", "degraded"]),
+    reasons: z.array(collectionSchemaReasonSchema),
+  })
+  .strict();
+const collectionValueValidationSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("valid") }).strict(),
+  z
+    .object({
+      status: z.literal("flagged"),
+      reason: z
+        .object({ code: z.enum(FIELD_VALUE_REASON_CODES), path: z.string() })
+        .strict(),
+    })
+    .strict(),
+  z.object({ status: z.literal("untyped") }).strict(),
+]);
+const rawCollectionRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    path: z.string().min(1),
+    conflicted: z.boolean(),
+    values: z.array(
+      z
+        .object({
+          field: z.string().min(1),
+          value: collectionWireValueSchema,
+          validation: collectionValueValidationSchema,
+          resolvedRelations: z.array(
+            z
+              .object({ recordId: z.string().min(1), label: z.string() })
+              .strict(),
+          ),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const collectionQueryResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      collection: rawCollectionSummarySchema,
+      records: z.array(rawCollectionRecordSchema),
+      groups: z
+        .array(
+          z
+            .object({
+              value: collectionWireValueSchema,
+              records: z.array(rawCollectionRecordSchema),
+            })
+            .strict(),
+        )
+        .nullable(),
+      nextCursor: collectionQueryCursorSchema.nullable(),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const collectionRecordResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      collection: rawCollectionSummarySchema,
+      record: rawCollectionRecordSchema,
+      history: z.array(
+        z
+          .object({
+            historyId: z.number().int().nonnegative(),
+            field: z.string().min(1),
+            previous: collectionMaybeValueSchema,
+            next: collectionMaybeValueSchema,
+            authorOriginId: z.string().min(1).nullable(),
+            recordedAtMs: z.number().int().nonnegative(),
+          })
+          .strict(),
+      ),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+export const collectionSetFieldsResultSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), recordPath: z.string().min(1) }).strict(),
+  rawFailureSchema,
+]);
+export const collectionCreateRecordResultSchema = z.discriminatedUnion("ok", [
+  z
+    .object({
+      ok: z.literal(true),
+      recordId: z.string().min(1),
+      recordPath: z.string().min(1),
+    })
+    .strict(),
+  rawFailureSchema,
+]);
+
 export const cliResultSchemas = {
   channels: channelsResultSchema,
   threads: threadsResultSchema,
@@ -503,6 +753,10 @@ export const cliResultSchemas = {
   channelsFull: channelsFullResultSchema,
   startChannelChat: startChannelChatResultSchema,
   replyToChat: replyToChatResultSchema,
+  collectionQuery: collectionQueryResultSchema,
+  collectionRecord: collectionRecordResultSchema,
+  collectionSetFields: collectionSetFieldsResultSchema,
+  collectionCreateRecord: collectionCreateRecordResultSchema,
 } as const;
 
 export type CliResultByVerb = {

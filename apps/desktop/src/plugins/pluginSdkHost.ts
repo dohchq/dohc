@@ -39,6 +39,12 @@ export interface PluginSdkHostContext {
   /** Main-supplied structured database writer. */
   editDatabase: WorkspaceSdkHostContext["editDatabase"];
   /**
+   * Main-supplied collection record writer (the desktop's one main-side
+   * collection write seam). Absent when the invocation path cannot reach an
+   * engine capture; the advertised collections.edit capability follows it.
+   */
+  editCollections?: WorkspaceSdkHostContext["editCollections"];
+  /**
    * The web apps this plugin's manifest declares, so `ui.openWebApp` can
    * refuse an id the plugin never contributed and one whose shape does not
    * match the request. The caller reads it from the registered manifest —
@@ -63,11 +69,21 @@ export interface PluginSdkHostContext {
    */
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
   /**
-   * Ends a workspace file subscription, reporting whether this registry owned
-   * the id. A false means the id belongs to the child-process broker, which
-   * serves the same `subscriptions.unsubscribe` method.
+   * Opens a collection record subscription. Absent for the same reason
+   * subscribeFileWatch is: a subscription needs a channel to push events
+   * back on.
    */
-  unsubscribeFileWatch?: (params: unknown) => boolean;
+  subscribeRecordWatch?: (
+    params: unknown,
+    readable?: ReadonlySet<string>,
+  ) => { subscriptionId: string };
+  /**
+   * Ends a workspace subscription (file watch or record watch — one registry
+   * owns both kinds), reporting whether that registry owned the id. A false
+   * means the id belongs to the child-process broker, which serves the same
+   * `subscriptions.unsubscribe` method.
+   */
+  unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
   /**
    * Performs the actual authored write. The host derives and stamps the
    * author; plugin code never supplies identity.
@@ -132,6 +148,7 @@ function pluginCapabilities(input: {
   fileWriteAvailable: boolean;
   fileWatchAvailable: boolean;
   databaseEditAvailable: boolean;
+  collectionEditAvailable: boolean;
   childProcessesAvailable: boolean;
   uiOpenAvailable: boolean;
 }) {
@@ -163,7 +180,11 @@ function pluginCapabilities(input: {
       send: childProcesses,
       terminate: childProcesses,
     },
-    collections: { read: false },
+    // Collection reads ride the same main-supplied read port as file reads,
+    // so they share its workspace authority; edits additionally need the
+    // main-side write seam and a writable workspace, like databases.edit.
+    // collections.watch, like files.watch, refuses per request path itself.
+    collections: { read: true, edit: input.collectionEditAvailable },
     provenance: { record: false },
   };
 }
@@ -185,6 +206,9 @@ export async function invokePluginSdkHost(
     author: pluginDatabaseAuthor(context.pluginId),
     reads: context.reads,
     editDatabase: context.editDatabase,
+    ...(context.editCollections
+      ? { editCollections: context.editCollections }
+      : {}),
   };
 
   switch (method) {
@@ -195,6 +219,8 @@ export async function invokePluginSdkHost(
         fileWriteAvailable: writeAvailable && context.isWritable(),
         fileWatchAvailable: context.subscribeFileWatch !== undefined,
         databaseEditAvailable: context.isWritable(),
+        collectionEditAvailable:
+          context.isWritable() && context.editCollections !== undefined,
         childProcessesAvailable: context.invokeChildProcess !== undefined,
         uiOpenAvailable: context.requestPath === "panel",
       });
@@ -203,6 +229,14 @@ export async function invokePluginSdkHost(
     case "files.list":
     case "workspace.search":
     case "databases.read":
+    case "collections.list":
+    case "collections.get":
+    case "collections.query":
+    case "collections.getRecord":
+    // The core host refuses a collection write on a read-only workspace
+    // itself (hostContext.writable), so the writes need no gate here.
+    case "collections.setFields":
+    case "collections.createRecord":
       return waitForOperation(
         context.signal,
         invokeWorkspaceSdkHost(hostContext, method, params),
@@ -226,6 +260,38 @@ export async function invokePluginSdkHost(
       // must be refused here rather than left holding one until teardown.
       if (context.signal?.aborted) throw abortError();
       return context.subscribeFileWatch(params);
+    }
+    case "collections.watch": {
+      if (!context.subscribeRecordWatch) {
+        throw new Error(
+          `collections.watch is unavailable for this request path (requestPath "${context.requestPath}"). This surface has no channel to push record events on.`,
+        );
+      }
+      // Same refusal as files.watch: a subscription outlives the call that
+      // opens it, so an ended owner must not be handed one.
+      if (context.signal?.aborted) throw abortError();
+      // A watch on one collection needs the read scope a read of it needs,
+      // so the port refuses before any subscription exists. A watch on "."
+      // takes the collections the port lists now as its delivery set.
+      const watchPath =
+        typeof params === "object" && params !== null && "path" in params
+          ? (params as { path?: unknown }).path
+          : undefined;
+      if (typeof watchPath !== "string" || watchPath === ".") {
+        const listed = (await waitForOperation(
+          context.signal,
+          invokeWorkspaceSdkHost(hostContext, "collections.list", {}),
+        )) as { collections: Array<{ path: string }> };
+        return context.subscribeRecordWatch(
+          params,
+          new Set(listed.collections.map((collection) => collection.path)),
+        );
+      }
+      await waitForOperation(
+        context.signal,
+        invokeWorkspaceSdkHost(hostContext, "collections.get", { path: watchPath }),
+      );
+      return context.subscribeRecordWatch(params);
     }
     // The renderer answers this for a panel before it reaches main, so a
     // request arriving here has no window to read a theme from.
@@ -327,12 +393,13 @@ export async function invokePluginSdkHost(
       );
     }
     default:
-      // Both subscription kinds are closed by the one SDK method, so a file
-      // subscription gets first refusal on its own id; anything else is the
-      // broker's, which answers unknown ids itself.
+      // Every subscription kind is closed by the one SDK method, so the
+      // workspace-event registry (file and record watches) gets first refusal
+      // on its own ids; anything else is the broker's, which answers unknown
+      // ids itself.
       if (
         method === "subscriptions.unsubscribe" &&
-        context.unsubscribeFileWatch?.(params) === true
+        context.unsubscribeWorkspaceEvents?.(params) === true
       ) {
         return {};
       }

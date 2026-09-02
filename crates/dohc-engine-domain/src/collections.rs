@@ -2060,8 +2060,11 @@ fn replace_index_for_record(
             }
         }
     }
+    // Latched: a record that has announced itself (any field ever indexed)
+    // stays initialized when its fields are cleared, so the next edit reads
+    // as changed, never as a second creation.
     conn.execute(
-        "UPDATE collection_records SET index_initialized=?4 \
+        "UPDATE collection_records SET index_initialized=index_initialized OR ?4 \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
         params![workspace_id, version_id, record_id, index_initialized],
     )
@@ -2095,13 +2098,13 @@ fn bound_record(
     workspace_id: &str,
     version_id: &str,
     object_id: &str,
-) -> Result<Option<(String, String)>, crate::DomainError> {
+) -> Result<Option<(String, String, bool)>, crate::DomainError> {
     conn.query_row(
-        "SELECT record_id,collection_path FROM collection_records \
+        "SELECT record_id,collection_path,index_initialized FROM collection_records \
          WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3 \
            AND record_id IS NOT NULL",
         params![workspace_id, version_id, object_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )
     .optional()
     .map_err(crate::DomainError::sql_corrupt)
@@ -2164,7 +2167,7 @@ pub fn synchronize_collection_frontmatter_index_in_tx(
     object_id: &str,
     frontmatter: &Value,
 ) -> Result<(), crate::DomainError> {
-    let Some((record_id, collection_path)) =
+    let Some((record_id, collection_path, _)) =
         bound_record(conn, workspace_id, version_id, object_id)?
     else {
         return Ok(());
@@ -2179,6 +2182,33 @@ pub fn synchronize_collection_frontmatter_index_in_tx(
         frontmatter,
         FieldProvenance::PreserveStored,
     )
+}
+
+/// One applied field difference, exactly as its history row was recorded.
+/// Values stay as the stored JSON text; the event layer decides parsing and
+/// size bounds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionFieldChangeFact {
+    pub field_name: String,
+    pub previous_json: Option<String>,
+    pub next_json: Option<String>,
+    /// The device-local `collection_field_history` rowid. A subscriber that
+    /// misses events reads history past its last seen id.
+    pub history_id: i64,
+}
+
+/// What one applied Y.Doc update did to a bound collection record. `created`
+/// is true when this apply indexed field content for a binding reconciliation
+/// inserted without any (a fresh record file carries only the engine-owned
+/// id until its first field write).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CollectionRecordApplyFacts {
+    pub collection_path: String,
+    pub record_id: String,
+    pub created: bool,
+    pub author_origin_id: Option<String>,
+    pub recorded_at_ms: i64,
+    pub fields: Vec<CollectionFieldChangeFact>,
 }
 
 fn history_value(value: Option<&Value>) -> Result<Option<String>, crate::DomainError> {
@@ -2197,33 +2227,36 @@ fn insert_field_history(
     author_origin_id: Option<&str>,
     source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
-) -> Result<(), crate::DomainError> {
+) -> Result<Option<i64>, crate::DomainError> {
     let (source_origin_id, source_origin_seq) = source_update
         .map(|(origin_id, origin_seq)| (Some(origin_id), Some(origin_seq)))
         .unwrap_or((None, None));
-    conn.execute(
-        "INSERT INTO collection_field_history \
+    let inserted = conn
+        .execute(
+            "INSERT INTO collection_field_history \
          (workspace_id,version_id,record_id,field_name,previous_value_json, \
           next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms) \
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
          ON CONFLICT(workspace_id,version_id,record_id,field_name, \
                      source_origin_id,source_origin_seq) \
          WHERE source_origin_id IS NOT NULL DO NOTHING",
-        params![
-            workspace_id,
-            version_id,
-            record_id,
-            field_name,
-            history_value(previous)?,
-            history_value(next)?,
-            author_origin_id,
-            source_origin_id,
-            source_origin_seq,
-            recorded_at_ms,
-        ],
-    )
-    .map_err(crate::DomainError::sql_persist)?;
-    Ok(())
+            params![
+                workspace_id,
+                version_id,
+                record_id,
+                field_name,
+                history_value(previous)?,
+                history_value(next)?,
+                author_origin_id,
+                source_origin_id,
+                source_origin_seq,
+                recorded_at_ms,
+            ],
+        )
+        .map_err(crate::DomainError::sql_persist)?;
+    // A conflict-skipped insert (an already-recorded source coordinate) is a
+    // replay: no new row, no new fact.
+    Ok((inserted == 1).then(|| conn.last_insert_rowid()))
 }
 
 /// Diff the applied frontmatter state, append attributed field history, and
@@ -2244,12 +2277,13 @@ pub fn index_collection_frontmatter_apply_in_tx(
     author_origin_id: Option<&str>,
     source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
-) -> Result<(), crate::DomainError> {
-    let Some((record_id, collection_path)) =
+) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
+    let Some((record_id, collection_path, index_initialized)) =
         bound_record(conn, workspace_id, version_id, object_id)?
     else {
-        return Ok(());
+        return Ok(None);
     };
+    let mut field_facts = Vec::new();
     let before = before.as_object();
     let after_object = after.as_object();
     let authored_before = authored_before.as_object();
@@ -2272,7 +2306,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         let previous = before.and_then(|values| values.get(field_name));
         let next = after_object.and_then(|values| values.get(field_name));
         if !optional_collection_values_equal(previous, next) {
-            insert_field_history(
+            let history_id = insert_field_history(
                 conn,
                 workspace_id,
                 version_id,
@@ -2284,6 +2318,14 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 source_update,
                 recorded_at_ms,
             )?;
+            if let Some(history_id) = history_id {
+                field_facts.push(CollectionFieldChangeFact {
+                    field_name: field_name.to_owned(),
+                    previous_json: history_value(previous)?,
+                    next_json: history_value(next)?,
+                    history_id,
+                });
+            }
         }
     }
     let mut authored_keys = HashSet::new();
@@ -2306,7 +2348,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         if optional_collection_values_equal(previous, applied)
             && !optional_collection_values_equal(authored_previous, authored_next)
         {
-            insert_field_history(
+            let history_id = insert_field_history(
                 conn,
                 workspace_id,
                 version_id,
@@ -2318,10 +2360,18 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 source_update,
                 recorded_at_ms,
             )?;
+            if let Some(history_id) = history_id {
+                field_facts.push(CollectionFieldChangeFact {
+                    field_name: field_name.to_owned(),
+                    previous_json: history_value(authored_previous)?,
+                    next_json: history_value(authored_next)?,
+                    history_id,
+                });
+            }
         }
     }
     if applied_frontmatter_unchanged && authored_frontmatter_unchanged {
-        return Ok(());
+        return Ok(None);
     }
     let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
     replace_index_for_record(
@@ -2332,7 +2382,23 @@ pub fn index_collection_frontmatter_apply_in_tx(
         &schema,
         after,
         FieldProvenance::PreserveStored,
-    )
+    )?;
+    // An apply whose every history insert deduped is a replay of facts this
+    // device already surfaced once.
+    if field_facts.is_empty() {
+        return Ok(None);
+    }
+    // The applied and authored loops are each field-name sorted and mutually
+    // exclusive per field; one sort restores the settled emission order.
+    field_facts.sort_by(|a, b| a.field_name.cmp(&b.field_name));
+    Ok(Some(CollectionRecordApplyFacts {
+        collection_path,
+        record_id,
+        created: !index_initialized,
+        author_origin_id: author_origin_id.map(str::to_owned),
+        recorded_at_ms,
+        fields: field_facts,
+    }))
 }
 
 fn revalidate_collection_index_in_tx(

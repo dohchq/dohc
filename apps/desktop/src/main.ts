@@ -316,6 +316,11 @@ import {
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
+import {
+  createCollectionRecord,
+  setCollectionRecordFields,
+  type CollectionRecordEditContext,
+} from "./workspaces/collectionRecordEdits";
 import { createWorkspaceFileMutationOwner } from "./workspaces/workspaceFileMutationOwner";
 import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 import { listFileChatsForIpc } from "./ipc/fileChatsIpc";
@@ -603,6 +608,7 @@ import {
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
+import { bridgeRecordEventsToPlugins } from "./workspaces/recordEventsBridge";
 import {
   broadcastWorkspaceActivity,
   workspaceActivityPayload,
@@ -698,7 +704,7 @@ import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkRead
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
-import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
+import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
@@ -1086,7 +1092,16 @@ function createPluginWorkspaceRuntimeParts(
               },
               watchParams,
             ),
-          unsubscribeFileWatch: (watchParams) =>
+          subscribeRecordWatch: (watchParams, readable) =>
+            workspaceEvents.subscribeRecords(
+              {
+                owner: { kind: "process", pluginId, spawnId },
+                emitEvent,
+              },
+              watchParams,
+              readable,
+            ),
+          unsubscribeWorkspaceEvents: (watchParams) =>
             workspaceEvents.unsubscribe(
               { owner: { kind: "process", pluginId, spawnId } },
               watchParams,
@@ -4562,6 +4577,25 @@ async function requirePluginEngineCaptureForOperation(
   return { workspace, capture };
 }
 
+// Workspace authority for one collection write: a writable workspace with a
+// running engine capture, plus the local engine adapter the adoption wait
+// reads through. Collection writes land on the physical workspace's own
+// engine (a received share view is refused as read-only before this).
+async function collectionEditContextFor(
+  operation: DesktopWorkspaceOperation,
+  editSignal?: AbortSignal,
+): Promise<CollectionRecordEditContext> {
+  const { workspace, capture } =
+    await requirePluginEngineCaptureForOperation(operation);
+  assertWritableWorkspace(workspace);
+  return {
+    capture,
+    workspaceRoot: workspace.rootPath,
+    withAdapter: (work) => withEngineAdapter(workspace, work),
+    ...(editSignal ? { signal: editSignal } : {}),
+  };
+}
+
 async function invokeWorkspacePluginSdk(input: {
   workspaceId: string;
   pluginId: string;
@@ -4571,7 +4605,11 @@ async function invokeWorkspacePluginSdk(input: {
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
-  unsubscribeFileWatch?: (params: unknown) => boolean;
+  subscribeRecordWatch?: (
+    params: unknown,
+    readable?: ReadonlySet<string>,
+  ) => { subscriptionId: string };
+  unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -4621,7 +4659,28 @@ async function invokeWorkspacePluginSdk(input: {
         signal,
         invokeChildProcess: input.invokeChildProcess,
         subscribeFileWatch: input.subscribeFileWatch,
-        unsubscribeFileWatch: input.unsubscribeFileWatch,
+        // The one main-side collection write seam. Authority mirrors
+        // writeAuthoredText: a writable workspace and a running engine
+        // capture, resolved when the write happens, never cached.
+        editCollections: {
+          setRecordFields: async ({ recordPath, fields, author, signal: editSignal }) =>
+            setCollectionRecordFields(
+              await collectionEditContextFor(operation, editSignal),
+              { recordPath, fields, author },
+            ),
+          createRecord: async ({ collectionPath, name, fields, author, signal: editSignal }) =>
+            createCollectionRecord(
+              await collectionEditContextFor(operation, editSignal),
+              {
+                collectionPath,
+                name,
+                ...(fields === undefined ? {} : { fields }),
+                author,
+              },
+            ),
+        },
+        subscribeRecordWatch: input.subscribeRecordWatch,
+        unsubscribeWorkspaceEvents: input.unsubscribeWorkspaceEvents,
         writeAuthoredText: createPluginAuthoredTextWriter({
           signal,
           requireWritableCapture: async () => {
@@ -4658,7 +4717,7 @@ async function routePluginPanelSdk(input: {
       surfaceId,
     };
     const emitEvent = workspaceEvents
-      ? createPluginPanelFileWatchEmitter({
+      ? createPluginPanelSdkEventEmitter({
           workspaceId: authority.workspaceId,
           pluginId: authority.pluginId,
           panelId: authority.panelId,
@@ -4678,7 +4737,16 @@ async function routePluginPanelSdk(input: {
           ? (watchParams) =>
               workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
           : undefined,
-      unsubscribeFileWatch: workspaceEvents
+      subscribeRecordWatch:
+        workspaceEvents && emitEvent
+          ? (watchParams, readable) =>
+              workspaceEvents.subscribeRecords(
+                { owner, emitEvent },
+                watchParams,
+                readable,
+              )
+          : undefined,
+      unsubscribeWorkspaceEvents: workspaceEvents
         ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
         : undefined,
       method: input.method,
@@ -4777,6 +4845,16 @@ async function openCliWorkspace(
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
+  // The CLI's collection writes ride the same seam plugin SDK edits take,
+  // resolved per write under the physical workspace's authority, so a
+  // retired-and-reattached workspace refuses instead of falling through to
+  // its successor.
+  const cliCollectionEdit = <T>(
+    work: (context: CollectionRecordEditContext) => Promise<T>,
+  ): Promise<T> =>
+    withPhysicalWorkspaceOperation(workspace.workspaceId, async (operation) =>
+      await work(await collectionEditContextFor(operation)),
+    );
   return {
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
@@ -4816,6 +4894,47 @@ async function openCliWorkspace(
           },
         }
       : {}),
+    // Engine-backed collection reads and writes for the CLI/MCP verbs.
+    // withEngineAdapter derives the attachment (and share-view session mode)
+    // from the registered workspace itself — the renderer collection routes'
+    // authority, reached from main's side. The plugin SDK's owned read port
+    // wraps the same call in receivedShareEngine.workspaceForRegistered; the
+    // CLI resolved this workspace by cwd above, so it already holds the
+    // registered entry that wrapper would look up. Writes go through the
+    // desktop's one collection write seam, the same path plugin SDK edits
+    // take.
+    collections: {
+      writes: {
+        setFields: (input) =>
+          cliCollectionEdit((context) => setCollectionRecordFields(context, input)),
+        createRecord: (input) =>
+          cliCollectionEdit((context) => createCollectionRecord(context, input)),
+      },
+      query: async (params) => {
+        const result = await withEngineAdapter(
+          workspace,
+          async (adapter) => await adapter.queryCollectionRecords(params),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+      getRecord: async (params) => {
+        const result = await withEngineAdapter(
+          workspace,
+          async (adapter) =>
+            await adapter.getCollectionRecord({
+              collectionPath: params.collectionPath,
+              recordId: params.recordId,
+              historyLimit: params.historyLimit,
+              ...(params.beforeHistoryId !== undefined
+                ? { beforeHistoryId: params.beforeHistoryId }
+                : {}),
+            }),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+    },
     filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
     listMoments: async ({ limit }) => {
       const page = await capture.listMoments({ limit });
@@ -5738,11 +5857,50 @@ function ownedWorkspaceReadsFor(
   workspace: RegistryEntry & { readonly attachmentId: symbol },
   databaseReader?: OwnedWorkspaceDatabaseReader,
 ) {
+  // The same engine boundary the renderer's collections.* IPC uses: a
+  // received share reads its share engine, everything else the local one.
+  const collectionAdapter = async <T>(
+    work: (adapter: VersionedLiveAdapter) => Promise<T>,
+  ): Promise<T> => {
+    const result = await withEngineAdapter(
+      receivedShareEngine.workspaceForRegistered(workspace),
+      work,
+    );
+    if (result === null) throw new Error("The workspace engine is not running.");
+    return result;
+  };
   return createOwnedWorkspaceSdkReads({
     workspace,
     files: shareViewFiles,
     ...(databaseReader ? { databaseReader } : {}),
     listFiles: () => listOwnedWorkspaceFilesFor(workspace),
+    collections: {
+      // "No collections" is the honest empty answer while the engine is off;
+      // the addressed reads below must name the missing capability instead.
+      list: async () =>
+        (await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(workspace),
+          async (adapter) => await adapter.listCollections(),
+        )) ?? { collections: [] },
+      get: ({ collectionPath }) =>
+        collectionAdapter(
+          async (adapter) => await adapter.getCollection({ collectionPath }),
+        ),
+      query: (params) =>
+        collectionAdapter(
+          async (adapter) => await adapter.queryCollectionRecords(params),
+        ),
+      getRecord: ({ collectionPath, recordId, historyLimit, beforeHistoryId }) =>
+        collectionAdapter(
+          async (adapter) =>
+            await adapter.getCollectionRecord({
+              collectionPath,
+              recordId,
+              historyLimit,
+              ...(beforeHistoryId === undefined ? {} : { beforeHistoryId }),
+            }),
+        ),
+    },
     repairProjection: (target) =>
       ensureOwnedProjectionTargetCurrent({
         rootPath: workspace.rootPath,
@@ -13298,6 +13456,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
     // signal that a moment landed, so bridge them onto the renderer's
     // workspace-activity ping or the history timeline goes permanently stale.
     bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
+    // The daemon also records collection changes autonomously: its record
+    // events are the only live signal behind a plugin's collections.watch
+    // subscription, so route each one to the owning workspace's registry.
+    bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
+      pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
+    );
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,
       relayTransportRoutes,

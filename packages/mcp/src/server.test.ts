@@ -15,6 +15,10 @@ const DOCUMENT_WRITE_TOOLS = [
   "dohc_import_data",
   "dohc_publish_site",
   "dohc_share",
+  // Collection writes change the granter's records, so they sit in the
+  // document tier: a shared view never sees them.
+  "dohc_set_record_fields",
+  "dohc_create_record",
 ];
 
 const CHAT_WRITE_TOOLS = ["dohc_start_channel_chat", "dohc_reply_to_chat"];
@@ -24,6 +28,8 @@ const READ_TOOLS = [
   "dohc_read_file",
   "dohc_search_files",
   "dohc_workspace_status",
+  "dohc_query_collection",
+  "dohc_read_record",
 ];
 
 async function connectedToolNames(ctx: ToolContext): Promise<{ names: string[]; client: Client }> {

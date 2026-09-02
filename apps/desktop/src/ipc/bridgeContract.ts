@@ -3395,23 +3395,59 @@ export function parseWorkspaceActivityEventForIpc(
   return parsed.success ? parsed.data : {};
 }
 
+// What one panel subscription event carries: a settled file change
+// (files.watch), or a collection record event (collections.watch). The
+// record shapes mirror the engine's fixed record event contract minus
+// workspaceId, which the enclosing event already carries.
+const PluginPanelFileWatchData = z
+  .object({
+    path: z.string(),
+    operation: z.enum(["update", "delete"]),
+    sha256: z.string().optional(),
+  })
+  .strict();
+
+export const PluginPanelRecordChangedData = z
+  .object({
+    collectionPath: z.string().min(1),
+    recordId: z.string().min(1),
+    author: z.string().nullable(),
+    timestamp: z.number(),
+  })
+  .strict();
+
+// previous/next are arbitrary JSON field values (an oversized one arrives
+// already replaced by the engine's truncation marker), so they revalidate
+// through the same bounded value schema every collection result uses.
+export const PluginPanelRecordFieldChangedData = z
+  .object({
+    collectionPath: z.string().min(1),
+    recordId: z.string().min(1),
+    field: z.string().min(1),
+    previous: CollectionValueSchema,
+    next: CollectionValueSchema,
+    author: z.string().nullable(),
+    timestamp: z.number(),
+    historyId: z.number(),
+  })
+  .strict();
+
 export const PluginPanelSdkEvent = z
   .object({
     workspaceId: WORKSPACE_ID,
     pluginId: PLUGIN_ID,
     panelId: PLUGIN_PANEL_ID,
     subscriptionId: z.string().min(1),
-    // Forwarded verbatim from whatever the subscribed registry emits (today,
-    // always PluginWorkspaceEvents' own "change") — not a closed set this
-    // schema owns, so a later event kind slots in without a schema change.
+    // Forwarded verbatim from whatever the subscribed registry emits
+    // (PluginWorkspaceEvents' "change" and record.* names today) — not a
+    // closed set this schema owns, so a later event kind slots in without a
+    // schema change.
     event: z.string().min(1),
-    data: z
-      .object({
-        path: z.string(),
-        operation: z.enum(["update", "delete"]),
-        sha256: z.string().optional(),
-      })
-      .strict(),
+    data: z.union([
+      PluginPanelFileWatchData,
+      PluginPanelRecordChangedData,
+      PluginPanelRecordFieldChangedData,
+    ]),
   })
   .strict();
 export type PluginPanelSdkEvent = z.infer<typeof PluginPanelSdkEvent>;

@@ -12,9 +12,10 @@ use dohc_engine_collab::ContentKind;
 #[cfg(feature = "fault-injection")]
 use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::{
-    apply_remote_update, claim_base, claim_base_at_relay, close_session, ensure_marker,
-    fresh_successor_base, load_persisted, maybe_compact, read_marker, record_base_coordinate,
-    record_local_update, record_local_update_creating_marker_guarded,
+    apply_remote_update, apply_remote_update_in_transaction_with_projection, claim_base,
+    claim_base_at_relay, close_session, ensure_marker, fresh_successor_base, load_persisted,
+    maybe_compact, read_marker, record_base_coordinate, record_local_update,
+    record_local_update_creating_marker_guarded,
     record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
     replace_lineage_with_successor, settle, BaseCoordinateRecord, BaseRelayCoordinate,
     ClaimOutcome, CloseOutcome, CollabError, CompactOutcome, DocKey, LeaseRegistry,
@@ -1646,7 +1647,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &NoFaults,
             1_200,
         )
-        .expect("Bob remote edit"),
+        .expect("Bob remote edit")
+        .outcome,
     );
     committed(
         apply_remote_update(
@@ -1661,7 +1663,8 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &NoFaults,
             1_200,
         )
-        .expect("Alice remote edit"),
+        .expect("Alice remote edit")
+        .outcome,
     );
 
     let expected = BTreeMap::from([
@@ -1734,7 +1737,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &NoFaults,
             1_200,
         )
-        .expect("Bob remote edit"),
+        .expect("Bob remote edit")
+        .outcome,
     );
     committed(
         apply_remote_update(
@@ -1749,7 +1753,8 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &NoFaults,
             1_200,
         )
-        .expect("Alice remote edit"),
+        .expect("Alice remote edit")
+        .outcome,
     );
 
     let fields_a = indexed_fields(&a.store, &key);
@@ -1818,7 +1823,8 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &NoFaults,
             1_200,
         )
-        .expect("Alice edit reaches device B"),
+        .expect("Alice edit reaches device B")
+        .outcome,
     );
 
     let peer_b = Ydoc::wire();
@@ -1850,7 +1856,8 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &NoFaults,
             1_400,
         )
-        .expect("Bob edit reaches device A"),
+        .expect("Bob edit reaches device A")
+        .outcome,
     );
 
     let expected = BTreeMap::from([
@@ -1934,7 +1941,8 @@ fn base_is_claimed_exactly_once() {
             &NoFaults,
             1_450,
         )
-        .expect("append before base-proof compaction"),
+        .expect("append before base-proof compaction")
+        .outcome,
     );
     let compacted = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_475)
@@ -2173,7 +2181,8 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             &NoFaults,
             1_100,
         )
-        .expect("extend predecessor"),
+        .expect("extend predecessor")
+        .outcome,
     );
     committed(
         store
@@ -2341,7 +2350,8 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
             &NoFaults,
             1_225,
         )
-        .expect("append to the successor"),
+        .expect("append to the successor")
+        .outcome,
     );
     let compacted = committed(
         close_session(&mut store, &key, false, None, &NoFaults, 1_250)
@@ -2707,7 +2717,9 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100).expect("apply"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100)
+            .expect("apply")
+            .outcome,
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -2718,7 +2730,9 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200).expect("apply2"),
+        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200)
+            .expect("apply2")
+            .outcome,
     );
     assert_eq!(
         again,
@@ -3419,4 +3433,147 @@ mod crash {
             );
         }
     }
+}
+
+#[test]
+fn local_collection_apply_derives_field_facts_and_the_created_transition() {
+    let (mut a, _b, key, base) =
+        two_collection_stores("collection-facts-local-a", "collection-facts-local-b");
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("peer base");
+
+    // First indexed apply on a never-indexed binding: the record reads as
+    // created, and the fact mirrors the history row it inserted.
+    let first = peer.frontmatter_set("title", "Renamed");
+    let outcome = committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &first,
+            Some("alice"),
+            &NoFaults,
+            1_100,
+        )
+        .expect("first field edit"),
+    );
+    let facts = outcome.record_facts.expect("first apply derives facts");
+    assert_eq!(facts.collection_path, "tasks");
+    assert_eq!(facts.record_id, INDEX_RECORD_ID);
+    assert!(facts.created, "a never-indexed binding reads as created");
+    assert_eq!(facts.author_origin_id.as_deref(), Some("alice"));
+    assert_eq!(facts.recorded_at_ms, 1_100);
+    assert_eq!(facts.fields.len(), 1, "one changed field, one fact");
+    assert_eq!(facts.fields[0].field_name, "title");
+    assert_eq!(
+        facts.fields[0].previous_json.as_deref(),
+        Some("\"Original\"")
+    );
+    assert_eq!(facts.fields[0].next_json.as_deref(), Some("\"Renamed\""));
+    let first_history_id = facts.fields[0].history_id;
+    assert_eq!(
+        field_history(&a.store, &key, "title").len(),
+        1,
+        "the fact mirrors exactly one history row"
+    );
+
+    // Second apply: the binding is indexed now, so the record reads as
+    // changed, and the new fact's history id advances past the first.
+    let second = peer.frontmatter_set("status", "done");
+    let outcome = committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &second,
+            Some("alice"),
+            &NoFaults,
+            1_200,
+        )
+        .expect("second field edit"),
+    );
+    let facts = outcome.record_facts.expect("second apply derives facts");
+    assert!(!facts.created, "an indexed binding reads as changed");
+    assert_eq!(facts.fields.len(), 1);
+    assert_eq!(facts.fields[0].field_name, "status");
+    assert!(
+        facts.fields[0].history_id > first_history_id,
+        "history ids advance with the device's history log"
+    );
+
+    // A byte-identical replay dedupes and derives no second fact set.
+    let replay = committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &second,
+            Some("alice"),
+            &NoFaults,
+            1_300,
+        )
+        .expect("replayed edit"),
+    );
+    assert!(replay.deduped, "replay dedupes");
+    assert!(replay.record_facts.is_none(), "a dedup derives no facts");
+}
+
+#[test]
+fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
+    let (mut a, _b, key, base) =
+        two_collection_stores("collection-facts-remote-a", "collection-facts-remote-b");
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("peer base");
+    let delta = peer.frontmatter_set("status", "done");
+    let remote = RemoteUpdate {
+        origin_id: "peer-A".to_owned(),
+        origin_seq: 1,
+        bytes: delta.clone(),
+    };
+
+    let projected = committed(
+        a.store
+            .write_with(&NoFaults, |tx| {
+                apply_remote_update_in_transaction_with_projection(tx, &key, &remote, None, 1_200)
+            })
+            .expect("remote apply"),
+    );
+    let facts = projected
+        .record_facts
+        .expect("a remote apply derives facts on the receiving device");
+    assert_eq!(facts.collection_path, "tasks");
+    assert_eq!(facts.record_id, INDEX_RECORD_ID);
+    assert!(facts.created, "a never-indexed binding reads as created");
+    assert_eq!(
+        facts.author_origin_id.as_deref(),
+        Some("peer-A"),
+        "the author is the peer origin, not the receiving device"
+    );
+    assert_eq!(facts.recorded_at_ms, 1_200);
+    assert_eq!(facts.fields.len(), 1);
+    assert_eq!(facts.fields[0].field_name, "status");
+    assert_eq!(facts.fields[0].previous_json.as_deref(), Some("\"open\""));
+    assert_eq!(facts.fields[0].next_json.as_deref(), Some("\"done\""));
+
+    // Redelivery: content-addressed dedup, no facts, no duplicate history.
+    let again = committed(
+        a.store
+            .write_with(&NoFaults, |tx| {
+                apply_remote_update_in_transaction_with_projection(tx, &key, &remote, None, 1_300)
+            })
+            .expect("redelivered apply"),
+    );
+    assert!(matches!(
+        again.outcome,
+        ReplicationApplyOutcome::Deduped { .. }
+    ));
+    assert!(
+        again.record_facts.is_none(),
+        "a replay derives no second fact set"
+    );
+    assert_eq!(
+        field_history(&a.store, &key, "status").len(),
+        1,
+        "no duplicate history row"
+    );
 }

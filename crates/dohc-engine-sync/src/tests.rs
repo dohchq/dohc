@@ -7165,7 +7165,8 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
             None,
             &NoFaults,
             1_150,
-        ),
+        )
+        .map(|applied| applied.outcome),
         Ok(TxnOutcome::Committed(
             dohc_engine_collab::ReplicationApplyOutcome::Applied { .. }
         ))
@@ -9240,6 +9241,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: Vec::new(),
         })
     );
 
@@ -9276,6 +9278,112 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         "replaying the parked row is content-deduped"
     );
     assert!(redrained.refusals.is_empty());
+}
+
+#[test]
+fn drained_parked_update_derives_its_record_facts() {
+    const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const OBJECT_ID: &str = "history-redelivery-object";
+    const PATH: &str = "tasks/history.md";
+
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "history-redelivery-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n  padding:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let claim_id = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected base claim: {other:?}"),
+    };
+
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let remote_update = remote.frontmatter_set("title", "Remote");
+
+    let mut cache = dohc_engine_collab::WriterDocCache::new();
+    for index in 0..(dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD - 1) {
+        let filler = local.frontmatter_set("padding", &format!("{index}"));
+        let outcome = dohc_engine_collab::record_local_update(
+            &mut engine,
+            &mut cache,
+            &key,
+            &filler,
+            &NoFaults,
+            1_600 + index as i64,
+        )
+        .expect("append filler update");
+        assert!(matches!(outcome, TxnOutcome::Committed(_)));
+    }
+
+    let update_sha = engine
+        .put_binary_blob(&remote_update)
+        .expect("store remote update");
+    let operation = envelope(
+        "history-redelivery-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": OBJECT_ID,
+            "path": PATH,
+            "contentKind": "richdoc",
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id,
+            "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            ..
+        }))
+    ));
+    // The base arrives and the drain applies the parked edit: its facts
+    // surface with the drain, so the pass that completes the dependency
+    // fires the parked update's record events.
+    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    assert_eq!(drained.drained, 1);
+    assert_eq!(drained.record_facts.len(), 1, "{:?}", drained.record_facts);
+    let facts = &drained.record_facts[0];
+    assert_eq!(facts.record_id, RECORD_ID);
+    assert_eq!(facts.author_origin_id.as_deref(), Some("remote-author"));
+    assert_eq!(facts.fields.len(), 1);
+    assert_eq!(facts.fields[0].field_name, "title");
 }
 
 #[test]
@@ -9425,6 +9533,14 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     let redrained =
         drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
     assert_eq!(redrained.drained, 1);
+    // The failed first drain already committed the update and its history
+    // row, so the redelivery dedupes and derives no facts: the events for
+    // this edit belong to the apply that committed it, exactly once.
+    assert!(
+        redrained.record_facts.is_empty(),
+        "a redelivered drain must not re-derive facts: {:?}",
+        redrained.record_facts
+    );
     let (history_rows, deferred_rows): (i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -11192,6 +11308,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
             lineage_replacement: None,
+            record_facts: Vec::new(),
         })
     );
     assert_eq!(
@@ -11515,6 +11632,7 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: Vec::new(),
         })
     );
     let conflicts: i64 = engine
@@ -12236,6 +12354,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     assert_eq!(
@@ -12281,6 +12400,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: Vec::new(),
         })
     );
     assert_eq!(
@@ -13317,6 +13437,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: _,
             }))
         ));
         let descendant = envelope(
@@ -13340,6 +13461,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: _,
             }))
         ));
 
@@ -13610,6 +13732,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     let deferred: i64 = engine
@@ -13764,6 +13887,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     assert_eq!(
@@ -13855,6 +13979,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     assert_eq!(
@@ -13901,6 +14026,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -14003,6 +14129,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: _,
             }))
         ));
     }
@@ -14129,6 +14256,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
     let base = envelope(
@@ -21682,6 +21810,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: _,
         }))
     ));
 

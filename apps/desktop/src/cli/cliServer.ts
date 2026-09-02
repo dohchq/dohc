@@ -6,6 +6,7 @@ import {
   type CliActor,
   type CliAuthor,
   type CliChannel,
+  type CliCollectionQueryCursor,
   type CliGrepContextMessage,
   type CliGrepMatch,
   type CliRequest,
@@ -14,7 +15,21 @@ import {
 } from "@dohc/cli/protocol";
 import { renderShowMarkdown } from "@dohc/cli/render";
 import { formatMessageHandle } from "@dohc/cli/thread-markdown";
-import { validateUserReadPath } from "@dohc/workspace-core";
+import {
+  createLocalChangeAuthor,
+  validateUserMaterializePath,
+  validateUserReadPath,
+  validateUserWritePath,
+} from "@dohc/workspace-core";
+import type {
+  CollectionGetRecordParams,
+  CollectionGetRecordResult,
+  CollectionQueryCursor,
+  CollectionQueryParams,
+  CollectionQueryResult,
+  CollectionRecord,
+} from "@dohc/workspace-contracts/collection";
+import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
@@ -27,6 +42,8 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import {
   DaemonRefusalError,
+  decodeCollectionValue,
+  encodeCollectionValue,
   MAX_GRANULAR_CHAT_QUERY_CHARS,
   type ChatUnreadFileThread,
   type GranularChatMessageSearchResponse,
@@ -145,6 +162,39 @@ export interface CliRegistryWorkspace {
   readOnly?: boolean;
 }
 
+// The desktop's one collection write seam. The shapes mirror
+// `setCollectionRecordFields` / `createCollectionRecord` in
+// `apps/desktop/src/workspaces/collectionRecordEdits.ts` exactly, so main's
+// wiring is a closure over that module's workspace-scoped edit context. The
+// author is derived HERE, main-side, from the workspace identity plus the
+// behavior-bearing actor kind; the request never supplies one. Field values
+// are plain JSON: they land in the record's frontmatter Y.Doc map. Both
+// functions throw on refusal (invalid path, engine off, "id" field, a held
+// doc session, adoption timeout).
+export interface CliCollectionWriteSeam {
+  setFields(input: {
+    recordPath: string;
+    fields: Record<string, unknown>;
+    author: ChangeAuthor;
+  }): Promise<{ path: string }>;
+  createRecord(input: {
+    collectionPath: string;
+    name: string;
+    fields?: Record<string, unknown>;
+    author: ChangeAuthor;
+  }): Promise<{ path: string; recordId: string }>;
+}
+
+// Engine-backed collection access for the CLI verbs. Reads go to the engine
+// adapter; the two writes go through the write seam. `writes` is the seam's
+// injection point: main wires it when the seam exists, and the write verbs
+// answer with a failure naming the missing capability until it does.
+export interface CliCollectionsPort {
+  query(params: CollectionQueryParams): Promise<CollectionQueryResult>;
+  getRecord(params: CollectionGetRecordParams): Promise<CollectionGetRecordResult>;
+  writes?: CliCollectionWriteSeam;
+}
+
 export interface CliWorkspaceContext extends CliRegistryWorkspace {
   store: LinkedChatStore;
   dispatchStore: AwaitableAgentDispatchStore;
@@ -168,6 +218,8 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
       afterThreadId?: string;
     }): Promise<CliUnreadFileThread[]>;
   };
+  // Absent when the workspace has no engine-backed collection access.
+  collections?: CliCollectionsPort;
 }
 
 export interface CliMainIdentity {
@@ -410,6 +462,84 @@ function rawMomentSummary(
 function mcpFailure(error: unknown, fallback: string) {
   const reason = error instanceof Error ? error.message : fallback;
   return { ok: false as const, reason };
+}
+
+function collectionsUnavailable() {
+  return {
+    ok: false as const,
+    reason: "collections are not available in this workspace",
+  };
+}
+
+function collectionWritesUnavailable() {
+  return {
+    ok: false as const,
+    reason: "collection writes are not available in this dohc build",
+  };
+}
+
+function cliPathRejected(reason: string, path: string) {
+  return { ok: false as const, reason: `path rejected (${reason}): ${path}` };
+}
+
+// Collection values enter and leave the CLI socket in the engine wire's JSON
+// encoding; the engine adapter speaks decoded CollectionValue on both sides.
+function encodedCollectionRecord(record: CollectionRecord) {
+  return {
+    id: record.id,
+    path: record.path,
+    conflicted: record.conflicted,
+    values: record.values.map((value) => ({
+      field: value.field,
+      value: encodeCollectionValue(value.value),
+      validation: value.validation,
+      resolvedRelations: value.resolvedRelations,
+    })),
+  };
+}
+
+function encodedCollectionCursor(cursor: CollectionQueryCursor) {
+  return {
+    sortValues: cursor.sortValues.map((entry) => ({
+      present: entry.present,
+      value: encodeCollectionValue(entry.value),
+    })),
+    recordPath: cursor.recordPath,
+    recordId: cursor.recordId,
+  };
+}
+
+function decodedCollectionCursor(
+  cursor: CliCollectionQueryCursor,
+): CollectionQueryCursor {
+  return {
+    sortValues: cursor.sortValues.map((entry) => ({
+      present: entry.present,
+      value: decodeCollectionValue(entry.value),
+    })),
+    recordPath: cursor.recordPath,
+    recordId: cursor.recordId,
+  };
+}
+
+// Provenance for a CLI/MCP collection write, derived main-side only. Agent
+// traffic reaches this socket through the MCP server, whose declared identity
+// is agent `dohc-mcp` acting on behalf of the local owner; a human write is
+// attributed as this device's local author under the workspace display name.
+const CLI_AGENT_AUTHOR: ChangeAuthor = {
+  kind: "agent",
+  agentId: "dohc-mcp",
+  onBehalfOf: "local",
+};
+
+async function collectionWriteAuthor(
+  actor: CliActor,
+  context: CliWorkspaceContext,
+  options: CliServerOptions,
+): Promise<ChangeAuthor> {
+  if (actor === "agent") return CLI_AGENT_AUTHOR;
+  const identity = await options.identity(context.workspaceId);
+  return createLocalChangeAuthor(identity.displayName);
 }
 
 async function loadChannels(
@@ -1767,6 +1897,172 @@ async function dispatch(
         );
       }
     }
+
+    case "collectionQuery": {
+      const collections = context.collections;
+      if (!collections) return collectionsUnavailable();
+      const validated = validateUserReadPath(request.args.collectionPath);
+      if (!validated.ok) {
+        return cliPathRejected(validated.reason, request.args.collectionPath);
+      }
+      try {
+        const args = request.args;
+        const result = await collections.query({
+          collectionPath: validated.normalized,
+          ...(args.filter !== undefined
+            ? {
+                filter: {
+                  field: args.filter.field,
+                  operator: args.filter.operator,
+                  value: decodeCollectionValue(args.filter.value),
+                },
+              }
+            : {}),
+          ...(args.sort !== undefined ? { sort: args.sort } : {}),
+          ...(args.groupBy !== undefined ? { groupBy: args.groupBy } : {}),
+          ...(args.resolveRelations !== undefined
+            ? { resolveRelations: args.resolveRelations }
+            : {}),
+          ...(args.limit !== undefined ? { limit: args.limit } : {}),
+          ...(args.cursor !== undefined
+            ? { cursor: decodedCollectionCursor(args.cursor) }
+            : {}),
+        });
+        return {
+          ok: true as const,
+          collection: result.collection,
+          records: result.records.map(encodedCollectionRecord),
+          groups:
+            result.groups === null
+              ? null
+              : result.groups.map((group) => ({
+                  value: encodeCollectionValue(group.value),
+                  records: group.records.map(encodedCollectionRecord),
+                })),
+          nextCursor:
+            result.nextCursor === null
+              ? null
+              : encodedCollectionCursor(result.nextCursor),
+        };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to query collection: ${request.args.collectionPath}`,
+        );
+      }
+    }
+
+    case "collectionRecord": {
+      const collections = context.collections;
+      if (!collections) return collectionsUnavailable();
+      const validated = validateUserReadPath(request.args.collectionPath);
+      if (!validated.ok) {
+        return cliPathRejected(validated.reason, request.args.collectionPath);
+      }
+      try {
+        const result = await collections.getRecord({
+          collectionPath: validated.normalized,
+          recordId: request.args.recordId,
+          historyLimit: request.args.historyLimit,
+          ...(request.args.beforeHistoryId !== undefined
+            ? { beforeHistoryId: request.args.beforeHistoryId }
+            : {}),
+        });
+        return {
+          ok: true as const,
+          collection: result.collection,
+          record: encodedCollectionRecord(result.record),
+          history: result.history.map((entry) => ({
+            historyId: entry.historyId,
+            field: entry.field,
+            previous: {
+              present: entry.previous.present,
+              value: encodeCollectionValue(entry.previous.value),
+            },
+            next: {
+              present: entry.next.present,
+              value: encodeCollectionValue(entry.next.value),
+            },
+            authorOriginId: entry.authorOriginId,
+            recordedAtMs: entry.recordedAtMs,
+          })),
+        };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to read record: ${request.args.recordId}`,
+        );
+      }
+    }
+
+    case "collectionSetFields": {
+      const collections = context.collections;
+      if (!collections) return collectionsUnavailable();
+      if (!collections.writes) return collectionWritesUnavailable();
+      // A write-mode check: the seam opens the record's live session, so
+      // the path must clear the same floor every other CLI write clears.
+      const validated = validateUserWritePath(request.args.recordPath);
+      if (!validated.ok) {
+        return cliPathRejected(validated.reason, request.args.recordPath);
+      }
+      try {
+        const outcome = await collections.writes.setFields({
+          recordPath: validated.normalized,
+          fields: request.args.fields,
+          author: await collectionWriteAuthor(request.args.actor, context, options),
+        });
+        return { ok: true as const, recordPath: outcome.path };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to set fields on: ${request.args.recordPath}`,
+        );
+      }
+    }
+
+    case "collectionCreateRecord": {
+      const collections = context.collections;
+      if (!collections) return collectionsUnavailable();
+      if (!collections.writes) return collectionWritesUnavailable();
+      const collectionValidated = validateUserReadPath(
+        request.args.collectionPath,
+      );
+      if (!collectionValidated.ok) {
+        return cliPathRejected(
+          collectionValidated.reason,
+          request.args.collectionPath,
+        );
+      }
+      // The record materializes as a new file, so the joined spelling must
+      // pass the stricter materialization rules before the seam sees it.
+      const recordValidated = validateUserMaterializePath(
+        `${collectionValidated.normalized}/${request.args.name}.md`,
+      );
+      if (!recordValidated.ok) {
+        return cliPathRejected(
+          recordValidated.reason,
+          `${request.args.collectionPath}/${request.args.name}.md`,
+        );
+      }
+      try {
+        const outcome = await collections.writes.createRecord({
+          collectionPath: collectionValidated.normalized,
+          name: request.args.name,
+          fields: request.args.fields,
+          author: await collectionWriteAuthor(request.args.actor, context, options),
+        });
+        return {
+          ok: true as const,
+          recordId: outcome.recordId,
+          recordPath: outcome.path,
+        };
+      } catch (error) {
+        return mcpFailure(
+          error,
+          `failed to create a record in: ${request.args.collectionPath}`,
+        );
+      }
+    }
   }
 
   const loadedChannels = await loadChannels(context);
@@ -2330,7 +2626,11 @@ async function workspaceContextForRequest(
 ): Promise<CliWorkspaceContext> {
   const workspace = await resolveCliWorkspace(request.args.cwd, options.listWorkspaces());
   if (!workspace) throw new CliCommandError("not inside a dohc workspace");
+  const collectionWriteRequest =
+    request.verb === "collectionSetFields" ||
+    request.verb === "collectionCreateRecord";
   const writeRequest =
+    collectionWriteRequest ||
     request.verb === "post" ||
     request.verb === "reply" ||
     request.verb === "react" ||
@@ -2339,7 +2639,11 @@ async function workspaceContextForRequest(
     request.verb === "replyToChat" ||
     (request.verb === "show" && !request.args.peek);
   if (workspace.readOnly && writeRequest) {
-    throw new CliCommandError("chats are not available in a read-only shared view");
+    throw new CliCommandError(
+      collectionWriteRequest
+        ? "collection writes are not available in a read-only shared view"
+        : "chats are not available in a read-only shared view",
+    );
   }
   const context = await options.openWorkspace(workspace);
   if (isChatReadVerb(request.verb)) {

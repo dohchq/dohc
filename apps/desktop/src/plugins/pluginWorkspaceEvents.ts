@@ -1,9 +1,15 @@
 import type { WatcherEvent } from "@dohc/workspace-core";
+import type { z } from "zod";
+import {
+  PluginPanelRecordChangedData,
+  PluginPanelRecordFieldChangedData,
+} from "../ipc/bridgeContract";
 import { randomUUID } from "node:crypto";
 import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
 
 /**
- * How many workspace file subscriptions one owner may hold.
+ * How many workspace subscriptions one owner may hold, across file watches
+ * and collection record subscriptions combined.
  *
  * Measured against the plugins this repo has: the codex and claude-code
  * drivers watch nothing, and the sites conversion this primitive exists for
@@ -13,19 +19,47 @@ import { isAtOrBelow, sdkWorkspacePath } from "../workspaces/workspaceSdkHost";
  * owner can starve another. An owner that needs more is a measurement to
  * redo, not a number to guess at.
  */
-export const MAX_PLUGIN_FILE_WATCHES_PER_OWNER = 16;
+export const MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER = 16;
 
 export const PLUGIN_FILE_WATCH_METHOD = "files.watch";
+
+export const PLUGIN_RECORD_WATCH_METHOD = "collections.watch";
 
 /** The one event name a file subscription emits. */
 const FILE_WATCH_EVENT = "change";
 
-/** What one subscriber receives: @dohc/sdk's DohcFileWatchEvent. */
+/** What one file subscriber receives: @dohc/sdk's DohcFileWatchEvent. */
 export interface PluginFileWatchEvent {
   path: string;
   operation: "update" | "delete";
   sha256?: string;
 }
+
+/**
+ * `record.created` and `record.updated` as one subscriber receives them:
+ * the engine payload minus workspaceId — this registry is per-workspace.
+ */
+/**
+ * `record.created` and `record.updated` as one subscriber receives them, and
+ * `record.field.changed` with its `previous`/`next` values. An oversized or
+ * too-deep value arrives already replaced by the engine's
+ * `{ "truncated": true, "bytes": number }` marker; a subscriber reads the
+ * record for the whole value. `historyId` is the device-local record-history
+ * row id. Delivery is at most once, so a subscriber that misses events reads
+ * history past its last seen id. The shapes are the panel IPC schemas: one
+ * contract, validated once at the daemon bridge.
+ */
+export type PluginRecordChangedEventData = z.infer<typeof PluginPanelRecordChangedData>;
+export type PluginRecordFieldChangedEventData = z.infer<
+  typeof PluginPanelRecordFieldChangedData
+>;
+
+export type PluginRecordEvent =
+  | {
+      name: "record.created" | "record.updated";
+      data: PluginRecordChangedEventData;
+    }
+  | { name: "record.field.changed"; data: PluginRecordFieldChangedEventData };
 
 export type PluginWorkspaceEventsOwner =
   | { kind: "process"; pluginId: string; spawnId: string }
@@ -42,10 +76,25 @@ export interface PluginWorkspaceEventsContext {
   emitEvent: (subscriptionId: string, event: string, data: unknown) => void;
 }
 
-interface WatchRecord {
-  owner: PluginWorkspaceEventsOwner;
-  /** "." for the whole workspace, otherwise a contained workspace path. */
+interface SubscriptionScope {
+  kind: "files" | "records";
+  /**
+   * "." for the whole workspace (every collection), otherwise a contained
+   * workspace path: a file prefix, or a collection folder.
+   */
   prefix: string;
+  /**
+   * For a root record watch: the collection paths the owner's read port
+   * listed at registration. Delivery stays inside this set, so a root watch
+   * reaches only what the owner could read; a collection created later
+   * needs a new watch.
+   */
+  readable?: ReadonlySet<string>;
+}
+
+interface SubscriptionRecord {
+  owner: PluginWorkspaceEventsOwner;
+  scope: SubscriptionScope;
   emitEvent: PluginWorkspaceEventsContext["emitEvent"];
 }
 
@@ -61,6 +110,16 @@ function ownerLabel(owner: PluginWorkspaceEventsOwner): string {
     : `Plugin "${owner.pluginId}" panel "${owner.panelId}"`;
 }
 
+function requireParamsObject(
+  params: unknown,
+  method: string,
+): Record<string, unknown> {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    throw new Error(`${method} parameters must be an object.`);
+  }
+  return params as Record<string, unknown>;
+}
+
 function watchPrefix(value: unknown): string {
   // "." is the whole workspace, the same way files.list treats an omitted
   // path. Every other prefix goes through the read-path containment
@@ -71,45 +130,46 @@ function watchPrefix(value: unknown): string {
 }
 
 /**
- * Serves `files.watch` for one workspace's plugins.
+ * Serves `files.watch` and `collections.watch` for one workspace's plugins.
  *
- * The source is the workspace's settled watcher batch — the same feed the
- * plugin approval pipeline reads (main.ts's onWatcherBatch). There is no
+ * The file source is the workspace's settled watcher batch — the same feed
+ * the plugin approval pipeline reads (main.ts's onWatcherBatch). There is no
  * second watcher: a subscriber sees what settled, never raw filesystem noise,
  * and never dohc's own metadata writes, which the watcher drops before a
- * batch exists.
+ * batch exists. The record source is the daemon's record events, validated
+ * and routed here by recordEventsBridge.
  *
  * Delivery is unbuffered: an event goes to the owner's transport as it
  * settles and is never held here. Each transport owns its own buffering.
  */
 export class PluginWorkspaceEvents {
-  private readonly subscriptions = new Map<string, WatchRecord>();
+  private readonly subscriptions = new Map<string, SubscriptionRecord>();
 
   subscribe(
     context: PluginWorkspaceEventsContext,
     params: unknown,
   ): { subscriptionId: string } {
-    if (!params || typeof params !== "object" || Array.isArray(params)) {
-      throw new Error(`${PLUGIN_FILE_WATCH_METHOD} parameters must be an object.`);
-    }
-    const prefix = watchPrefix((params as { path?: unknown }).path);
-    const open = this.countForOwner(context.owner);
-    if (open >= MAX_PLUGIN_FILE_WATCHES_PER_OWNER) {
-      throw new Error(
-        `${ownerLabel(context.owner)} already holds ${open} workspace file ` +
-          "subscriptions. MAX_PLUGIN_FILE_WATCHES_PER_OWNER allows at most " +
-          `${MAX_PLUGIN_FILE_WATCHES_PER_OWNER} open ${PLUGIN_FILE_WATCH_METHOD} ` +
-          "subscriptions per owner. Unsubscribe one before watching " +
-          "another, or watch a shared parent prefix instead.",
-      );
-    }
-    const subscriptionId = randomUUID();
-    this.subscriptions.set(subscriptionId, {
-      owner: context.owner,
-      prefix,
-      emitEvent: context.emitEvent,
+    const input = requireParamsObject(params, PLUGIN_FILE_WATCH_METHOD);
+    return this.register(context, {
+      kind: "files",
+      prefix: watchPrefix(input.path),
     });
-    return { subscriptionId };
+  }
+
+  subscribeRecords(
+    context: PluginWorkspaceEventsContext,
+    params: unknown,
+    readable?: ReadonlySet<string>,
+  ): { subscriptionId: string } {
+    const input = requireParamsObject(params, PLUGIN_RECORD_WATCH_METHOD);
+    // A collection path is a workspace path, so it gets the same containment
+    // a file prefix does: a traversal or absolute path is refused here.
+    const prefix = watchPrefix(input.path);
+    return this.register(context, {
+      kind: "records",
+      prefix,
+      ...(prefix === "." && readable ? { readable } : {}),
+    });
   }
 
   /**
@@ -158,8 +218,9 @@ export class PluginWorkspaceEvents {
   }
 
   /**
-   * Fans one settled batch out to the subscriptions that asked for it. The
-   * batch is read, never changed: the approval pipeline reads the same array.
+   * Fans one settled batch out to the file subscriptions that asked for it.
+   * The batch is read, never changed: the approval pipeline reads the same
+   * array.
    */
   handleWatcherEvents(events: readonly WatcherEvent[]): void {
     if (this.subscriptions.size === 0) return;
@@ -170,7 +231,8 @@ export class PluginWorkspaceEvents {
       // delivered to a plugin as one of these two.
       if (event.operation !== "update" && event.operation !== "delete") continue;
       for (const [subscriptionId, subscription] of this.subscriptions) {
-        if (!isAtOrBelow(event.path, subscription.prefix)) continue;
+        if (subscription.scope.kind !== "files") continue;
+        if (!isAtOrBelow(event.path, subscription.scope.prefix)) continue;
         const delivered: PluginFileWatchEvent = {
           path: event.path,
           operation: event.operation,
@@ -179,6 +241,54 @@ export class PluginWorkspaceEvents {
         subscription.emitEvent(subscriptionId, FILE_WATCH_EVENT, delivered);
       }
     }
+  }
+
+  /**
+   * Fans one validated record event out to the record subscriptions whose
+   * collection path contains it: the event's collectionPath equal to the
+   * subscribed path, or below it.
+   */
+  handleRecordEvent(event: PluginRecordEvent): void {
+    if (this.subscriptions.size === 0) return;
+    for (const [subscriptionId, subscription] of this.subscriptions) {
+      if (subscription.scope.kind !== "records") continue;
+      if (
+        !isAtOrBelow(event.data.collectionPath, subscription.scope.prefix)
+      ) {
+        continue;
+      }
+      if (
+        subscription.scope.readable &&
+        !subscription.scope.readable.has(event.data.collectionPath)
+      ) {
+        continue;
+      }
+      subscription.emitEvent(subscriptionId, event.name, event.data);
+    }
+  }
+
+  private register(
+    context: PluginWorkspaceEventsContext,
+    scope: SubscriptionScope,
+  ): { subscriptionId: string } {
+    const open = this.countForOwner(context.owner);
+    if (open >= MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER) {
+      throw new Error(
+        `${ownerLabel(context.owner)} already holds ${open} workspace ` +
+          "subscriptions. MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER allows " +
+          `at most ${MAX_PLUGIN_WORKSPACE_SUBSCRIPTIONS_PER_OWNER} open ` +
+          `subscriptions per owner, across ${PLUGIN_FILE_WATCH_METHOD} and ` +
+          `${PLUGIN_RECORD_WATCH_METHOD} combined. Unsubscribe one before ` +
+          "opening another, or subscribe to a shared parent prefix instead.",
+      );
+    }
+    const subscriptionId = randomUUID();
+    this.subscriptions.set(subscriptionId, {
+      owner: context.owner,
+      scope,
+      emitEvent: context.emitEvent,
+    });
+    return { subscriptionId };
   }
 
   private countForOwner(owner: PluginWorkspaceEventsOwner): number {

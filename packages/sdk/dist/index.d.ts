@@ -27,7 +27,7 @@ export type DohcCapabilityMap = {
     };
     collections: DohcCapabilityGroup & {
         read: boolean;
-        list?: boolean;
+        edit?: boolean;
     };
     provenance: DohcCapabilityGroup & {
         record: boolean;
@@ -129,6 +129,50 @@ export type DohcFileWatchEvent = {
     sha256?: string;
     [key: string]: unknown;
 };
+/** An arbitrary JSON value, as a collection record field carries it. */
+export type DohcJsonValue = null | boolean | number | string | DohcJsonValue[] | {
+    [key in string]?: DohcJsonValue;
+};
+/**
+ * A record appeared in a collection. `author` is the recorded agent or user
+ * identity when the host knows one, and null otherwise. `timestamp` is the
+ * host's record timestamp in milliseconds.
+ */
+export type DohcRecordCreatedEvent = {
+    collectionPath: string;
+    recordId: string;
+    author: string | null;
+    timestamp: number;
+};
+/** A record changed. Same shape as {@link DohcRecordCreatedEvent}. */
+export type DohcRecordUpdatedEvent = DohcRecordCreatedEvent;
+/**
+ * One field of one record changed.
+ *
+ * `previous` and `next` are the field's JSON values: an absent field value
+ * arrives as null, and a value over 8 KiB of JSON arrives replaced by
+ * `{ "truncated": true, "bytes": number }` — read the record for the whole
+ * value. Delivery is at most once (the host drops events under
+ * backpressure), so a subscriber that missed events reads record history
+ * past its last seen `historyId`.
+ */
+export type DohcRecordFieldChangedEvent = {
+    collectionPath: string;
+    recordId: string;
+    field: string;
+    previous: DohcJsonValue;
+    next: DohcJsonValue;
+    author: string | null;
+    timestamp: number;
+    /** Device-local record-history row id. */
+    historyId: number;
+};
+/**
+ * What a collections.watch listener receives as `data`. The enclosing
+ * subscription event's `event` names which one: "record.created",
+ * "record.updated", or "record.field.changed".
+ */
+export type DohcCollectionRecordEvent = DohcRecordCreatedEvent | DohcRecordUpdatedEvent | DohcRecordFieldChangedEvent;
 export type DohcSearchOptions = {
     path?: string;
     limit?: number;
@@ -201,6 +245,19 @@ export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMe
  * the same way dohc does.
  */
 export declare function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void;
+/** The documented collection query options; unknown keys never travel. */
+export type DohcCollectionQueryOptions = {
+    filter?: Record<string, unknown>;
+    sort?: Array<Record<string, unknown>>;
+    groupBy?: string;
+    resolveRelations?: boolean;
+    limit?: number;
+    cursor?: Record<string, unknown>;
+};
+export type DohcCollectionRecordOptions = {
+    historyLimit?: number;
+    beforeHistoryId?: number;
+};
 export type CreateDohcClientOptions = {
     transport?: DohcTransport;
     timeoutMs?: number;
@@ -277,10 +334,27 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
-        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        get: (name: string) => {
-            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        };
+        list: (requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
+        get: (path: string, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        query: (path: string, options?: DohcCollectionQueryOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        getRecord: (path: string, recordId: string, options?: DohcCollectionRecordOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        setFields: (recordPath: string, fields: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        createRecord: (path: string, record: {
+            name: string;
+            fields?: Record<string, unknown>;
+        }, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        /**
+         * Reports record changes at or below `collectionPath`, which is a
+         * prefix: a collection to watch on its own, or a folder to watch with
+         * every collection under it. Changes outside it never arrive. Delivery
+         * is at most once; reconcile missed events from record history using
+         * the last seen historyId.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends when its plugin stops, or when the panel that opened it closes
+         * or changes its workspace, plugin, or panel identity.
+         */
+        watch: (collectionPath: string, listener: (event: DohcSubscriptionEvent<DohcCollectionRecordEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     provenance: {
         record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;
@@ -351,10 +425,27 @@ export declare const dohc: {
         applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
-        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        get: (name: string) => {
-            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        };
+        list: (requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
+        get: (path: string, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        query: (path: string, options?: DohcCollectionQueryOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        getRecord: (path: string, recordId: string, options?: DohcCollectionRecordOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        setFields: (recordPath: string, fields: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        createRecord: (path: string, record: {
+            name: string;
+            fields?: Record<string, unknown>;
+        }, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        /**
+         * Reports record changes at or below `collectionPath`, which is a
+         * prefix: a collection to watch on its own, or a folder to watch with
+         * every collection under it. Changes outside it never arrive. Delivery
+         * is at most once; reconcile missed events from record history using
+         * the last seen historyId.
+         *
+         * Returns a function that stops the subscription. A subscription also
+         * ends when its plugin stops, or when the panel that opened it closes
+         * or changes its workspace, plugin, or panel identity.
+         */
+        watch: (collectionPath: string, listener: (event: DohcSubscriptionEvent<DohcCollectionRecordEvent>) => void, requestOptions?: DohcRequestOptions) => Promise<DohcUnsubscribe>;
     };
     provenance: {
         record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;

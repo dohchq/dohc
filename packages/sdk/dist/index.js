@@ -66,7 +66,7 @@ export class DohcSdkError extends Error {
     }
 }
 let requestCounter = 0;
-const MAX_COLLECTION_NAME_LENGTH = 200;
+const MAX_RECORD_NAME_LENGTH = 200;
 const MAX_PROVENANCE_SUMMARY_LENGTH = 5000;
 const MAX_METHOD_LENGTH = 200;
 const MAX_QUERY_LENGTH = 100_000;
@@ -520,12 +520,23 @@ function assertQuery(query, label = "Query") {
         throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `${label} must be a non-empty string of ${MAX_QUERY_LENGTH} characters or fewer with no null characters.`);
     }
 }
-function assertCollectionName(name) {
+function assertRecordName(name) {
     if (typeof name !== "string" || name.trim().length === 0) {
-        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Collection name must be a non-empty string.");
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Record name must be a non-empty string.");
     }
-    if (name.length > MAX_COLLECTION_NAME_LENGTH || hasControlCharacter(name)) {
-        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `Collection name must be ${MAX_COLLECTION_NAME_LENGTH} characters or fewer with no control characters.`);
+    if (name.length > MAX_RECORD_NAME_LENGTH ||
+        hasControlCharacter(name) ||
+        name.includes("/") ||
+        name.includes("\\")) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, `Record name must be ${MAX_RECORD_NAME_LENGTH} characters or fewer with no control characters or path separators.`);
+    }
+}
+function assertCollectionFields(fields) {
+    if (!isPlainRecord(fields)) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Fields must be an object of field names to values.");
+    }
+    if (Object.prototype.hasOwnProperty.call(fields, "id")) {
+        throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, 'The "id" field is engine-owned record identity and cannot be set.');
     }
 }
 function assertProvenanceSummary(summary) {
@@ -637,18 +648,92 @@ export function createDohcClient(options = {}) {
         }
         return result;
     };
-    const listCollection = async (name, params = {}, requestOptions) => {
-        assertRequestOptions(requestOptions);
-        assertCollectionName(name);
-        await requireCapability("collections", "read", requestOptions);
-        const result = await request("collections.list", { ...params, name }, requestOptions);
-        if (!Array.isArray(result)) {
+    const collectionResponse = (result) => {
+        if (!isPlainRecord(result)) {
             throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned an invalid collection response.");
         }
-        if (!result.every(isPlainRecord)) {
+        return result;
+    };
+    const listCollections = async (requestOptions) => {
+        assertRequestOptions(requestOptions);
+        await requireCapability("collections", "read", requestOptions);
+        const result = collectionResponse(await request("collections.list", undefined, requestOptions));
+        if (!Array.isArray(result.collections) ||
+            !result.collections.every(isPlainRecord)) {
             throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned invalid collection item shapes.");
         }
+        return result.collections;
+    };
+    const getCollection = async (path, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(path, "Collection path");
+        await requireCapability("collections", "read", requestOptions);
+        return collectionResponse(await request("collections.get", { path }, requestOptions));
+    };
+    const queryCollection = async (path, options = {}, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(path, "Collection path");
+        await requireCapability("collections", "read", requestOptions);
+        // Only the documented query keys travel, and `path` is always the
+        // validated argument — an option bag cannot replace it or smuggle
+        // workspace or caller identity (the host derives both).
+        const params = { path };
+        if (options.filter !== undefined)
+            params.filter = options.filter;
+        if (options.sort !== undefined)
+            params.sort = options.sort;
+        if (options.groupBy !== undefined)
+            params.groupBy = options.groupBy;
+        if (options.resolveRelations !== undefined) {
+            params.resolveRelations = options.resolveRelations;
+        }
+        if (options.limit !== undefined)
+            params.limit = options.limit;
+        if (options.cursor !== undefined)
+            params.cursor = options.cursor;
+        const result = collectionResponse(await request("collections.query", params, requestOptions));
+        if (!Array.isArray(result.records) || !result.records.every(isPlainRecord)) {
+            throw new DohcSdkError(DohcSdkErrorCodes.badResponse, "dohc host returned invalid collection record shapes.");
+        }
         return result;
+    };
+    const getCollectionRecord = async (path, recordId, options = {}, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(path, "Collection path");
+        if (typeof recordId !== "string" || recordId.length === 0) {
+            throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Record id must be a non-empty string.");
+        }
+        await requireCapability("collections", "read", requestOptions);
+        const params = { path, recordId };
+        if (options.historyLimit !== undefined) {
+            params.historyLimit = options.historyLimit;
+        }
+        if (options.beforeHistoryId !== undefined) {
+            params.beforeHistoryId = options.beforeHistoryId;
+        }
+        return collectionResponse(await request("collections.getRecord", params, requestOptions));
+    };
+    const setCollectionFields = async (recordPath, fields, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(recordPath, "Record path");
+        assertCollectionFields(fields);
+        await requireCapability("collections", "edit", requestOptions);
+        return collectionResponse(await request("collections.setFields", { path: recordPath, fields }, requestOptions));
+    };
+    const createCollectionRecord = async (path, record, requestOptions) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(path, "Collection path");
+        if (!isPlainRecord(record)) {
+            throw new DohcSdkError(DohcSdkErrorCodes.invalidInput, "Record must be an object with a name and optional fields.");
+        }
+        assertRecordName(record.name);
+        if (record.fields !== undefined)
+            assertCollectionFields(record.fields);
+        await requireCapability("collections", "edit", requestOptions);
+        const params = { path, name: record.name };
+        if (record.fields !== undefined)
+            params.fields = record.fields;
+        return collectionResponse(await request("collections.createRecord", params, requestOptions));
     };
     const readFileInfo = async (path, requestOptions) => {
         assertRequestOptions(requestOptions);
@@ -847,17 +932,34 @@ export function createDohcClient(options = {}) {
                 return stop;
             },
         },
+        // Authorization boundary: AGENTS.md product invariants. The SDK never
+        // accepts caller-supplied workspace id, user identity, or onBehalfOf
+        // here; the host derives all three server-side, enforces workspace and
+        // path scope, and attributes writes to the surface it granted.
         collections: {
-            list: listCollection,
-            get: (name) => ({
-                list: async (params = {}, requestOptions) => {
-                    // Authorization boundary: AGENTS.md product invariants. The SDK
-                    // never accepts caller-supplied workspace/user identity here; the
-                    // host transport decides whether collections.read is available and
-                    // enforces workspace scope server-side before returning rows.
-                    return listCollection(name, params, requestOptions);
-                },
-            }),
+            list: listCollections,
+            get: getCollection,
+            query: queryCollection,
+            getRecord: getCollectionRecord,
+            setFields: setCollectionFields,
+            createRecord: createCollectionRecord,
+            /**
+             * Reports record changes at or below `collectionPath`, which is a
+             * prefix: a collection to watch on its own, or a folder to watch with
+             * every collection under it. Changes outside it never arrive. Delivery
+             * is at most once; reconcile missed events from record history using
+             * the last seen historyId.
+             *
+             * Returns a function that stops the subscription. A subscription also
+             * ends when its plugin stops, or when the panel that opened it closes
+             * or changes its workspace, plugin, or panel identity.
+             */
+            watch: async (collectionPath, listener, requestOptions) => {
+                assertRequestOptions(requestOptions);
+                assertWorkspacePath(collectionPath, "Collection paths");
+                await requireCapability("collections", "read", requestOptions);
+                return subscribe("collections.watch", { path: collectionPath }, listener, requestOptions);
+            },
         },
         provenance: {
             record: async (value, requestOptions) => {

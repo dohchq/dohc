@@ -6,6 +6,16 @@ import {
 } from "@dohc/workspace-core";
 import { liveDocumentKindForPath } from "@dohc/workspace-contracts/live-documents";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type {
+  CollectionGetParams,
+  CollectionGetRecordParams,
+  CollectionGetRecordResult,
+  CollectionGetResult,
+  CollectionListResult,
+  CollectionQueryParams,
+  CollectionQueryResult,
+  CollectionValue,
+} from "@dohc/workspace-contracts";
 import { rgPath } from "@vscode/ripgrep";
 import { basename, join } from "node:path";
 import { realpath } from "node:fs/promises";
@@ -60,6 +70,26 @@ export interface WorkspaceSdkHostContext {
     operationId?: string;
     signal?: AbortSignal;
   }): Promise<unknown>;
+  // Host-derived collection record writer (the desktop's one main-side
+  // collection write seam). Absent means this surface has no collection
+  // write authority; the advertised collections.edit capability follows it.
+  editCollections?: WorkspaceSdkCollectionEditPort;
+}
+
+export interface WorkspaceSdkCollectionEditPort {
+  setRecordFields(input: {
+    recordPath: string;
+    fields: Record<string, unknown>;
+    author: ChangeAuthor;
+    signal?: AbortSignal;
+  }): Promise<{ path: string }>;
+  createRecord(input: {
+    collectionPath: string;
+    name: string;
+    fields?: Record<string, unknown>;
+    author: ChangeAuthor;
+    signal?: AbortSignal;
+  }): Promise<{ path: string; recordId: string }>;
 }
 
 export type SdkSearchStarter = typeof startRipgrepSearch;
@@ -72,6 +102,18 @@ export interface WorkspaceSdkReadPort {
   }>;
   prepareSearch(path?: string): Promise<WorkspaceSdkSearchView>;
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
+  // Collection reads share the port's path scope with file reads: a port
+  // scoped to a prefix filters its listing and refuses a collection or
+  // record outside it. This host validates path SHAPE only; the port owns
+  // visibility, exactly like readText.
+  listCollections(): Promise<CollectionListResult>;
+  getCollection(params: CollectionGetParams): Promise<CollectionGetResult>;
+  queryCollectionRecords(
+    params: CollectionQueryParams,
+  ): Promise<CollectionQueryResult>;
+  getCollectionRecord(
+    params: CollectionGetRecordParams,
+  ): Promise<CollectionGetRecordResult>;
 }
 
 export interface WorkspaceSdkSearchView {
@@ -147,9 +189,24 @@ function capabilities(context: WorkspaceSdkHostContext) {
     workspace: { search: true, events: false },
     databases: { read: true, edit: context.writable },
     ui: { open: true },
-    collections: { read: false, list: false },
+    collections: {
+      read: true,
+      edit: context.writable && context.editCollections !== undefined,
+    },
     provenance: { record: false },
   };
+}
+
+function requireCollectionEditPort(
+  context: WorkspaceSdkHostContext,
+): WorkspaceSdkCollectionEditPort {
+  if (!context.writable) {
+    throw new Error("This plugin has read-only workspace authority.");
+  }
+  if (!context.editCollections) {
+    throw new Error("Collection edits are unavailable in this workspace.");
+  }
+  return context.editCollections;
 }
 
 function assertRequestSurfaceActive(context: WorkspaceSdkHostContext): void {
@@ -277,6 +334,127 @@ function databaseEdits(value: unknown): DatabaseEdit[] {
   });
 }
 
+const MAX_COLLECTION_HISTORY_LIMIT = 500;
+const DEFAULT_COLLECTION_HISTORY_LIMIT = 100;
+const MAX_COLLECTION_QUERY_LIMIT = 500;
+
+function collectionValue(value: unknown, label: string): CollectionValue {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isFinite(value))
+  ) {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value.map((entry) => collectionValue(entry, label));
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as RecordValue).map(([key, entry]) => [
+        key,
+        collectionValue(entry, label),
+      ]),
+    );
+  }
+  throw new Error(`${label} must be a JSON value.`);
+}
+
+function boundedInteger(
+  value: unknown,
+  label: string,
+  min: number,
+  max: number,
+): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < min ||
+    value > max
+  ) {
+    throw new Error(`${label} must be an integer between ${min} and ${max}.`);
+  }
+  return value;
+}
+
+/** The query options a caller may shape; the collection path is validated separately. */
+function collectionQueryParams(
+  collectionPath: string,
+  input: RecordValue,
+): CollectionQueryParams {
+  const params: CollectionQueryParams = { collectionPath };
+  if (input.filter !== undefined) {
+    const filter = record(input.filter, "filter");
+    const operator = text(filter.operator, "filter operator", 20);
+    if (operator !== "equals" && operator !== "contains") {
+      throw new Error(`Unsupported filter operator: ${operator}`);
+    }
+    params.filter = {
+      field: text(filter.field, "filter field", 256),
+      operator,
+      value: collectionValue(filter.value, "filter value"),
+    };
+  }
+  if (input.sort !== undefined) {
+    if (!Array.isArray(input.sort)) {
+      throw new Error("sort must be an array of { field, direction }.");
+    }
+    params.sort = input.sort.map((entry) => {
+      const sort = record(entry, "sort entry");
+      const direction = text(sort.direction, "sort direction", 10);
+      if (direction !== "asc" && direction !== "desc") {
+        throw new Error(`Unsupported sort direction: ${direction}`);
+      }
+      return { field: text(sort.field, "sort field", 256), direction };
+    });
+  }
+  if (input.groupBy !== undefined) {
+    params.groupBy = text(input.groupBy, "groupBy", 256);
+  }
+  if (input.resolveRelations !== undefined) {
+    if (typeof input.resolveRelations !== "boolean") {
+      throw new Error("resolveRelations must be a boolean.");
+    }
+    params.resolveRelations = input.resolveRelations;
+  }
+  if (input.limit !== undefined) {
+    params.limit = boundedInteger(input.limit, "limit", 1, MAX_COLLECTION_QUERY_LIMIT);
+  }
+  if (input.cursor !== undefined) {
+    const cursor = record(input.cursor, "cursor");
+    if (!Array.isArray(cursor.sortValues)) {
+      throw new Error("cursor.sortValues must be an array.");
+    }
+    params.cursor = {
+      sortValues: cursor.sortValues.map((entry) => {
+        const sortValue = record(entry, "cursor sort value");
+        if (typeof sortValue.present !== "boolean") {
+          throw new Error("cursor sort value present must be a boolean.");
+        }
+        return {
+          present: sortValue.present,
+          value: collectionValue(sortValue.value, "cursor sort value"),
+        };
+      }),
+      recordPath: text(cursor.recordPath, "cursor recordPath", 4096),
+      recordId: text(cursor.recordId, "cursor recordId", 256),
+    };
+  }
+  return params;
+}
+
+/** A record path's collection folder, used for the pre-write scope check. */
+function collectionPathOfRecord(recordPath: string): string {
+  const separator = recordPath.lastIndexOf("/");
+  if (separator <= 0) {
+    throw new Error(
+      `Not a collection record path (records live inside a collection folder): ${recordPath}`,
+    );
+  }
+  return recordPath.slice(0, separator);
+}
+
 export async function invokeWorkspaceSdkHost(
   context: WorkspaceSdkHostContext,
   method: string,
@@ -351,6 +529,82 @@ export async function invokeWorkspaceSdkHost(
         author: context.author,
         nowMs: context.now?.() ?? Date.now(),
         ...(context.createId ? { operationId: context.createId() } : {}),
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    }
+    case "collections.list":
+      return context.reads.listCollections();
+    case "collections.get": {
+      const input = record(params);
+      const collectionPath = sdkWorkspacePath(input.path);
+      return context.reads.getCollection({ collectionPath });
+    }
+    case "collections.query": {
+      const input = record(params);
+      const collectionPath = sdkWorkspacePath(input.path);
+      return context.reads.queryCollectionRecords(
+        collectionQueryParams(collectionPath, input),
+      );
+    }
+    case "collections.getRecord": {
+      const input = record(params);
+      const collectionPath = sdkWorkspacePath(input.path);
+      return context.reads.getCollectionRecord({
+        collectionPath,
+        recordId: text(input.recordId, "recordId", 256),
+        historyLimit:
+          input.historyLimit === undefined
+            ? DEFAULT_COLLECTION_HISTORY_LIMIT
+            : boundedInteger(
+                input.historyLimit,
+                "historyLimit",
+                1,
+                MAX_COLLECTION_HISTORY_LIMIT,
+              ),
+        ...(input.beforeHistoryId === undefined
+          ? {}
+          : {
+              beforeHistoryId: boundedInteger(
+                input.beforeHistoryId,
+                "beforeHistoryId",
+                1,
+                Number.MAX_SAFE_INTEGER,
+              ),
+            }),
+      });
+    }
+    case "collections.setFields": {
+      const port = requireCollectionEditPort(context);
+      const input = record(params);
+      const recordPath = sdkWorkspacePath(input.path, "write");
+      // The port's read scope gates the write: a caller that cannot read
+      // this record's collection cannot write into it either. This also
+      // refuses a Markdown file that is not inside a collection.
+      await context.reads.getCollection({
+        collectionPath: collectionPathOfRecord(recordPath),
+      });
+      assertRequestSurfaceActive(context);
+      return port.setRecordFields({
+        recordPath,
+        fields: record(input.fields, "fields"),
+        author: context.author,
+        ...(context.signal ? { signal: context.signal } : {}),
+      });
+    }
+    case "collections.createRecord": {
+      const port = requireCollectionEditPort(context);
+      const input = record(params);
+      const collectionPath = sdkWorkspacePath(input.path, "write");
+      const name = text(input.name, "name", 200);
+      await context.reads.getCollection({ collectionPath });
+      assertRequestSurfaceActive(context);
+      return port.createRecord({
+        collectionPath,
+        name,
+        ...(input.fields === undefined
+          ? {}
+          : { fields: record(input.fields, "fields") }),
+        author: context.author,
         ...(context.signal ? { signal: context.signal } : {}),
       });
     }

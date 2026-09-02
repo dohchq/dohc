@@ -80,6 +80,17 @@ async function unusedDatabaseRead(): Promise<never> {
   throw new Error("unused");
 }
 
+async function unusedCollectionRead(): Promise<never> {
+  throw new Error("unused");
+}
+
+const unusedCollections = {
+  list: unusedCollectionRead,
+  get: unusedCollectionRead,
+  query: unusedCollectionRead,
+  getRecord: unusedCollectionRead,
+};
+
 describe("createOwnedWorkspaceSdkReadPort", () => {
   it("skips a full owner listing for an unrestricted local search", async () => {
     const listOwnedFiles = vi.fn(async () => ({ files: [] }));
@@ -89,6 +100,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       },
       listFiles: listOwnedFiles,
       readDatabase: unusedDatabaseRead,
+      collections: unusedCollections,
       hasShareState: false,
       searchSources: [],
       repairProjection: async () => {
@@ -113,6 +125,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       },
       listFiles: listOwnedFiles,
       readDatabase: unusedDatabaseRead,
+      collections: unusedCollections,
       hasShareState: true,
       searchSources: [],
       repairProjection: async () => {
@@ -163,6 +176,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           listCanonical,
         }),
       readDatabase: unusedDatabaseRead,
+      collections: unusedCollections,
       hasShareState: true,
       searchSources: mounts.map((mount) => ({
         target: shareTarget(mount.shareId),
@@ -247,6 +261,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
           listCanonical: async () => canonical,
         }),
       readDatabase: unusedDatabaseRead,
+      collections: unusedCollections,
       hasShareState: true,
       searchSources: [
         {
@@ -341,6 +356,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       },
       files: { read: readOwner },
       listFiles: () => listFiles(root),
+      collections: unusedCollections,
       repairProjection: async () => {},
     });
     const context = {
@@ -407,6 +423,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
       files: { read: vi.fn() },
       listFiles: () => listFiles(root),
+      collections: unusedCollections,
       repairProjection: async () => {},
     });
 
@@ -450,6 +467,7 @@ describe("createOwnedWorkspaceSdkReadPort", () => {
       workspace: { workspaceId: WORKSPACE_ID, rootPath: root },
       files: { read: vi.fn() },
       listFiles: () => listFiles(root),
+      collections: unusedCollections,
       repairProjection: async () => {},
     });
 

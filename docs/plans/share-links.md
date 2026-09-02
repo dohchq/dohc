@@ -97,6 +97,20 @@ Gate: restart, stale-frame, selector-drift, access-change, and restore tests pas
 
 Gate: the Phase 1 isolation attacks re-run green against the real origin model; a capability widening attempt fails closed at the approval seam; the create-only collection survives idempotency abuse — same-key replay returns the original result, conflicting-payload and concurrent retries do not duplicate, and idempotency holds across a backup restore; per-grant quotas, concurrent writes, and rejection backpressure hold under a flooding link holder — a fresh idempotency key per write must not buy unbounded appends (ADR 0004); and the owner-visible bulk undo removes a holder's appended records end to end, with provenance and idempotency state cleaned or preserved as the store defines.
 
+## The create-only collection contract
+
+The collections program owns the store for ADR 0004's app-data lane: the lane's dataset is a dohc collection under a create-only grant policy (`docs/plans/collections.md`, 'The word "collection" in ADR 0004'). Phase 5 implements the policy against this contract instead of naming a store of its own. The conformance test is `apps/desktop/e2e/collection-create-only-share.spec.ts`, with relay policy tests beside `services/sync-relay/src/linkGrants.test.ts`.
+
+- Collection path. The grant policy names one collection folder inside the share's selector. The folder's `collection.yaml` fixes the schema, and records are Markdown files with engine-minted `rec_` ids. Store, sync, export, backup, restore, and deletion ride the workspace file substrate the collection already uses; only idempotency and quota state is relay-side, and it must survive a relay backup restore.
+- Create-only. The policy permits one operation: create a record that validates against the schema fixed at approval time. Authority is the owner-approved capability intersected with the link grant, independent of the share's document access level.
+- Idempotency key. Every create names a caller-chosen idempotency key, scoped per grant and principal. Replaying a key returns the first result and creates nothing. A same-key retry with a different payload refuses without creating. Concurrent same-key retries produce at most one record.
+- Server-set fields. The relay sets the record's principal and created timestamp; the principal is the server-minted link principal. A create body that names either field refuses. Record history attributes the create to the link principal.
+- Write path. The relay accepts the create, stamps the server-set fields, and appends one moment for the record file to the owner's workspace stream; the owner's engine replays it like any synced write and mints the record id at adoption. The relay keeps the idempotency and quota state beside its grant state, restored with the relay's own backup, so a restored workspace and a restored relay agree on which creates happened.
+- Quota per grant. The relay enforces a per-grant create quota with rejection backpressure. A fresh idempotency key does not refill quota. The limit is deployment configuration, never a client claim.
+- Refusals. Update, delete, any write to `collection.yaml`, and any write outside the named collection path refuse byte-identical to a missing share. Update-own-row arrives only when a real app requires it (ADR 0004).
+
+Owner moderation keeps ADR 0004's shape: append-only record history and one owner-visible bulk undo that removes a principal's created records, with provenance and idempotency state cleaned as the store defines.
+
 ## Cross-cutting
 
 - Phase 2 documents one `share-web` instance: its public viewer domain, exact `Host` allowlist, TLS proxy, trusted-proxy client-IP rule, relay-volume backup and restore, no-cache proxy rule, log hygiene, retention, degraded behavior, and restart sign-out behavior. Horizontal scaling is unsupported in v1. Phase 4 adds WebSocket proxy timeouts. Phase 5 serves apps from a separate registrable domain and documents its `Host` allowlist, wildcard DNS, and wildcard TLS policy.

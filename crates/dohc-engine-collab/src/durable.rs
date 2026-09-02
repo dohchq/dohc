@@ -138,6 +138,11 @@ pub struct AppendOutcome {
     /// replicated lineage; false for a dedup, a local-only doc, or a remote
     /// apply (echo suppression lives in [`crate::replication`]).
     pub emit_outbound: bool,
+    /// What this append did to a bound collection record, when it changed
+    /// one: the record-event source the transaction derived alongside the
+    /// history rows. `None` for a dedup, an unbound document, or an apply
+    /// that changed no field.
+    pub record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// The outcome of a compaction attempt.
@@ -725,6 +730,7 @@ where
                     seq: -result_seq,
                     deduped: true,
                     emit_outbound: false,
+                    record_facts: None,
                 });
             }
         }
@@ -765,6 +771,7 @@ where
                     seq: existing,
                     deduped: true,
                     emit_outbound: false,
+                    record_facts: None,
                 });
             }
             return Err(CollabError::SeedOntoExistingLineage);
@@ -904,9 +911,16 @@ pub(crate) fn append_and_index_update(
     actor_origin_id: Option<&str>,
     history_source: Option<(&str, i64)>,
     now_ms: i64,
-) -> Result<(Ydoc, i64), CollabError> {
+) -> Result<
+    (
+        Ydoc,
+        i64,
+        Option<dohc_engine_domain::CollectionRecordApplyFacts>,
+    ),
+    CollabError,
+> {
     let projection = crate::validate_replay_parity_with_scratch(base, update)?;
-    let seq = append_validated_and_index_update(
+    let (seq, record_facts) = append_validated_and_index_update(
         conn,
         key,
         content_kind,
@@ -919,7 +933,7 @@ pub(crate) fn append_and_index_update(
         history_source,
         now_ms,
     )?;
-    Ok((projection, seq))
+    Ok((projection, seq, record_facts))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -935,7 +949,7 @@ pub(crate) fn append_validated_and_index_update(
     actor_origin_id: Option<&str>,
     history_source: Option<(&str, i64)>,
     now_ms: i64,
-) -> Result<i64, CollabError> {
+) -> Result<(i64, Option<dohc_engine_domain::CollectionRecordApplyFacts>), CollabError> {
     put_binary_blob_with_sha(conn, update, sha)?;
     let seq = append_row(conn, key, sha, actor_origin_id, now_ms)?;
     let is_bound_collection_record = index_frontmatter
@@ -949,6 +963,7 @@ pub(crate) fn append_validated_and_index_update(
         .map_err(|error| CollabError::Corrupt {
             reason: format!("collection record binding check failed: {error}"),
         })?;
+    let mut record_facts = None;
     if is_bound_collection_record {
         let owned_projection;
         let projection = match projection {
@@ -958,7 +973,7 @@ pub(crate) fn append_validated_and_index_update(
                 &owned_projection
             }
         };
-        index_applied_frontmatter(
+        record_facts = index_applied_frontmatter(
             conn,
             key,
             content_kind,
@@ -970,7 +985,7 @@ pub(crate) fn append_validated_and_index_update(
             now_ms,
         )?;
     }
-    Ok(seq)
+    Ok((seq, record_facts))
 }
 
 /// Build a content-readable post-update fork after the parity gate accepts.
@@ -1004,10 +1019,11 @@ fn append_local_update(
             seq: existing,
             deduped: true,
             emit_outbound: false,
+            record_facts: None,
         });
     }
     let base = load_for_replay_gate(conn, key)?;
-    let (_, seq) = append_and_index_update(
+    let (_, seq, record_facts) = append_and_index_update(
         conn,
         key,
         marker.content_kind,
@@ -1024,6 +1040,7 @@ fn append_local_update(
         deduped: false,
         emit_outbound: marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
+        record_facts,
     })
 }
 
@@ -1057,9 +1074,10 @@ fn append_local_update_cached(
             seq: existing,
             deduped: true,
             emit_outbound: false,
+            record_facts: None,
         });
     }
-    let seq = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
+    let (seq, record_facts) = match cache.base_frontier_and_scratch_for_gate(conn, key, marker)? {
         Some((base, frontier, scratch)) => {
             let validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 base,
@@ -1068,7 +1086,7 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
-            let seq = append_validated_and_index_update(
+            let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
@@ -1087,7 +1105,7 @@ fn append_local_update_cached(
                 source: GateBaseSource::Hit,
                 observed: marker.clone(),
             });
-            seq
+            (seq, record_facts)
         }
         None => {
             let base = load_for_replay_gate(conn, key)?;
@@ -1098,7 +1116,7 @@ fn append_local_update_cached(
                 &mut probe.scratch_mutated,
                 update,
             )?;
-            let seq = append_validated_and_index_update(
+            let (seq, record_facts) = append_validated_and_index_update(
                 conn,
                 key,
                 marker.content_kind,
@@ -1122,7 +1140,7 @@ fn append_local_update_cached(
                 },
                 observed: marker.clone(),
             });
-            seq
+            (seq, record_facts)
         }
     };
     Ok(AppendOutcome {
@@ -1130,6 +1148,7 @@ fn append_local_update_cached(
         deduped: false,
         emit_outbound: marker.regime == Regime::Replicated
             && marker.lineage_claim_status == LineageClaimStatus::Exact,
+        record_facts,
     })
 }
 
@@ -1172,16 +1191,24 @@ pub(crate) fn index_applied_frontmatter(
     author_origin_id: Option<&str>,
     history_source: Option<(&str, i64)>,
     recorded_at_ms: i64,
-) -> Result<(), CollabError> {
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, CollabError> {
     if content_kind != ContentKind::Richdoc {
-        return Ok(());
+        return Ok(None);
     }
     let before = before_doc.frontmatter_json();
     let after = after_doc.frontmatter_json();
-    let authored_doc = lineage_base_doc(conn, key)?;
-    let authored_before = authored_doc.frontmatter_json();
-    authored_doc.apply(update)?;
-    let authored_after = authored_doc.frontmatter_json();
+    // A local update was authored against the live head, so nothing in it
+    // can be resolved away: its authored pair IS the applied pair. Only a
+    // synced update needs the lineage reconstruction, and that base is
+    // right only for a lineage's first update (#1001).
+    let (authored_before, authored_after) = if history_source.is_none() {
+        (before.clone(), after.clone())
+    } else {
+        let authored_doc = lineage_base_doc(conn, key)?;
+        let authored_before = authored_doc.frontmatter_json();
+        authored_doc.apply(update)?;
+        (authored_before, authored_doc.frontmatter_json())
+    };
     dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
         conn,
         &key.workspace_id,

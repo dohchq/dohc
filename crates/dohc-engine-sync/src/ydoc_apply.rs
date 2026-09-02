@@ -130,6 +130,10 @@ pub struct YdocApplyResult {
     pub conflicts_opened: i64,
     /// Present only when this apply changed the active immutable lineage.
     pub lineage_replacement: Option<YdocLineageReplacement>,
+    /// What this apply did to bound collection records, in commit order: the
+    /// envelope's own facts, then any parked updates it let drain. The source
+    /// of the record events the pull pass reports for post-commit emission.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -138,6 +142,9 @@ pub struct YdocDrainResult {
     pub refusals: Vec<crate::ReplicationRefusal>,
     pub sharing_declined: Vec<crate::SharingDeclined>,
     pub lineage_replacements: Vec<YdocLineageReplacement>,
+    /// Record facts every drained update committed, in drain order: a parked
+    /// update fires the same events an ordinary pull does, post-commit.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 pub(crate) fn redelivered_materialization_changes(
@@ -636,6 +643,7 @@ fn drain_deferred_ydoc(
     let mut drained_coordinates: Vec<(String, i64)> = Vec::new();
     let mut last_coordinate: Option<(String, i64)> = None;
     let mut lineage_replacements = Vec::new();
+    let mut record_facts = Vec::new();
     let mut projection_refusal = None;
     for (origin_id, origin_seq, relay_seq, recorded_at_ms, lineage_claim_id, payload) in pending {
         if let DeferredDrainMode::Live(expected_claim_id) = mode
@@ -740,7 +748,10 @@ fn drain_deferred_ydoc(
             )
         };
         let outcome = match apply_result {
-            Ok(outcome) => outcome,
+            Ok(applied) => {
+                record_facts.extend(applied.record_facts);
+                applied.outcome
+            }
             Err(error) => {
                 match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
                     SyncError::InvalidInput { reason } => {
@@ -875,6 +886,7 @@ fn drain_deferred_ydoc(
         refusals,
         sharing_declined,
         lineage_replacements,
+        record_facts,
     })
 }
 
@@ -2265,6 +2277,7 @@ fn apply_ydoc_envelope_inner(
                 reason: Some("ydoc-session-live"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: Vec::new(),
             })
         });
     }
@@ -2467,6 +2480,7 @@ fn apply_ydoc_envelope_inner(
                         reason: Some("ydoc-base-already-won"),
                         conflicts_opened: 0,
                         lineage_replacement: None,
+                        record_facts: Vec::new(),
                     });
                 }
                 dohc_engine_collab::ClaimOutcome::Replaced {
@@ -2657,6 +2671,7 @@ fn apply_ydoc_envelope_inner(
                             winner_lineage_claim_id,
                             recovered_paths,
                         }),
+                        record_facts: Vec::new(),
                     });
                 }
             }
@@ -2680,6 +2695,7 @@ fn apply_ydoc_envelope_inner(
                     winner_lineage_claim_id,
                     recovered_paths,
                 }),
+                record_facts: Vec::new(),
             })
         });
         let outcome = match outcome {
@@ -2711,11 +2727,12 @@ fn apply_ydoc_envelope_inner(
             } else {
                 drain_deferred_ydoc_for_key(store, &key, faults)?
             };
-            return Ok(
-                merge_lineage_replacements(outcome, drain.lineage_replacements)
-                    .with_sharing_declined(drain.sharing_declined)
-                    .with_refusals(drain.refusals),
-            );
+            return Ok(merge_drained(
+                merge_lineage_replacements(outcome, drain.lineage_replacements),
+                drain.record_facts,
+            )
+            .with_sharing_declined(drain.sharing_declined)
+            .with_refusals(drain.refusals));
         }
         return Ok(outcome);
     }
@@ -2805,6 +2822,7 @@ fn apply_ydoc_envelope_inner(
                     reason: Some("ydoc-lineage-absent"),
                     conflicts_opened: 0,
                     lineage_replacement: None,
+                    record_facts: Vec::new(),
                 })
             });
         };
@@ -2823,13 +2841,16 @@ fn apply_ydoc_envelope_inner(
                     reason: Some("ydoc-lineage-lost"),
                     conflicts_opened: 0,
                     lineage_replacement: None,
+                    record_facts: Vec::new(),
                 })
             })?;
-            return Ok(
-                merge_lineage_replacements(outcome, drain.lineage_replacements)
-                    .with_sharing_declined(drain.sharing_declined)
-                    .with_refusals(drain.refusals),
-            );
+            // The drain above ran before this apply, so its facts lead.
+            return Ok(merge_drained_first(
+                merge_lineage_replacements(outcome, drain.lineage_replacements),
+                drain.record_facts,
+            )
+            .with_sharing_declined(drain.sharing_declined)
+            .with_refusals(drain.refusals));
         }
     }
     let update_path = payload.path.clone();
@@ -2839,6 +2860,7 @@ fn apply_ydoc_envelope_inner(
         bytes,
     };
     let mut sharing_declined = None;
+    let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
@@ -2864,6 +2886,7 @@ fn apply_ydoc_envelope_inner(
             .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
             let applied = projected.outcome;
             let update_kind = projected.content_kind;
+            record_facts = projected.record_facts;
             // An out-of-order cross-origin update parks durably with missing
             // dependencies; a projection taken NOW would omit the pending remote
             // content and materialize an incomplete view. Skip — the envelope
@@ -2982,9 +3005,14 @@ fn apply_ydoc_envelope_inner(
             }
         }
     }
-    Ok(merge_lineage_replacements(
-        map_applied_ydoc_outcome(outcome, sharing_declined),
-        drain.lineage_replacements,
+    // This path drained BEFORE the primary apply, so the drained facts
+    // committed first and lead the emission order.
+    Ok(merge_drained_first(
+        merge_lineage_replacements(
+            map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
+            drain.lineage_replacements,
+        ),
+        drain.record_facts,
     )
     .with_sharing_declined(drain.sharing_declined)
     .with_refusals(drain.refusals))
@@ -3004,6 +3032,165 @@ fn collapse_lineage_replacements(
         }
     }
     collapsed
+}
+
+/// Appends the facts a deferred drain committed to the envelope's own, in
+/// commit order, so the pull pass emits every record event this apply
+/// caused. A skipped primary still carries the drain's facts: those rows
+/// are committed whatever the primary did. Use this where the drain ran
+/// AFTER the primary apply.
+fn merge_drained(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+) -> ApplyOutcome<YdocApplyResult> {
+    merge_drained_ordered(outcome, drained, false)
+}
+
+/// The same merge where the drain ran BEFORE the primary apply: the drained
+/// facts committed first, so they lead.
+fn merge_drained_first(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+) -> ApplyOutcome<YdocApplyResult> {
+    merge_drained_ordered(outcome, drained, true)
+}
+
+fn merge_drained_ordered(
+    outcome: ApplyOutcome<YdocApplyResult>,
+    drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    drained_first: bool,
+) -> ApplyOutcome<YdocApplyResult> {
+    if drained.is_empty() {
+        return outcome;
+    }
+    match outcome {
+        ApplyOutcome::Applied(mut result) => {
+            if drained_first {
+                let own = std::mem::take(&mut result.record_facts);
+                result.record_facts = drained;
+                result.record_facts.extend(own);
+            } else {
+                result.record_facts.extend(drained);
+            }
+            ApplyOutcome::Applied(result)
+        }
+        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: Some("ydoc-deferred-drained"),
+            conflicts_opened: 0,
+            lineage_replacement: None,
+            record_facts: drained,
+        }),
+        // The drain committed before the primary was refused, so its facts
+        // are real; the refusal rides along as a diagnostic, the same way a
+        // drain's own refusals do.
+        ApplyOutcome::Refused(refusal) => ApplyOutcome::WithDiagnostics {
+            outcome: Box::new(ApplyOutcome::Applied(YdocApplyResult {
+                deferred: false,
+                reason: Some("ydoc-deferred-drained"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: drained,
+            })),
+            refusals: vec![refusal],
+            sharing_declined: Vec::new(),
+        },
+        ApplyOutcome::WithDiagnostics {
+            outcome,
+            refusals,
+            sharing_declined,
+        } => ApplyOutcome::WithDiagnostics {
+            outcome: Box::new(merge_drained_ordered(*outcome, drained, drained_first)),
+            refusals,
+            sharing_declined,
+        },
+        // A crash ends the pull pass before anything post-commit runs, so
+        // there is no emission to preserve facts for; the pass is retried.
+        crashed @ ApplyOutcome::Crashed { .. } => crashed,
+    }
+}
+
+#[cfg(test)]
+mod merge_drained_tests {
+    use super::*;
+
+    fn facts(record_id: &str) -> dohc_engine_domain::CollectionRecordApplyFacts {
+        dohc_engine_domain::CollectionRecordApplyFacts {
+            collection_path: "tasks".to_owned(),
+            record_id: record_id.to_owned(),
+            created: false,
+            author_origin_id: None,
+            recorded_at_ms: 0,
+            fields: Vec::new(),
+        }
+    }
+
+    fn applied(record_id: &str) -> ApplyOutcome<YdocApplyResult> {
+        ApplyOutcome::Applied(YdocApplyResult {
+            deferred: false,
+            reason: None,
+            conflicts_opened: 0,
+            lineage_replacement: None,
+            record_facts: vec![facts(record_id)],
+        })
+    }
+
+    fn ids(outcome: ApplyOutcome<YdocApplyResult>) -> Vec<String> {
+        match outcome {
+            ApplyOutcome::Applied(result) => result
+                .record_facts
+                .into_iter()
+                .map(|facts| facts.record_id)
+                .collect(),
+            other => panic!("expected an applied outcome: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn drained_facts_keep_commit_order_on_both_paths() {
+        // Drain after the primary: the primary's facts committed first.
+        assert_eq!(
+            ids(merge_drained(
+                applied("rec_primary"),
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_primary", "rec_parked"]
+        );
+        // Drain before the primary: the parked update's facts committed first.
+        assert_eq!(
+            ids(merge_drained_first(
+                applied("rec_primary"),
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_parked", "rec_primary"]
+        );
+        // A skipped primary still carries the drain's facts.
+        assert_eq!(
+            ids(merge_drained(
+                ApplyOutcome::Skipped,
+                vec![facts("rec_parked")]
+            )),
+            vec!["rec_parked"]
+        );
+        // A refused primary carries them too, with the refusal as a
+        // diagnostic the pass still reports.
+        let refusal = crate::ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            op_kind: "ydoc.update".to_owned(),
+            reason: crate::RefusalReason::InvalidInput {
+                reason: "bad update".to_owned(),
+            },
+        };
+        let merged = merge_drained(
+            ApplyOutcome::Refused(refusal.clone()),
+            vec![facts("rec_parked")],
+        );
+        let (primary, refusals, _) = merged.into_primary_and_diagnostics();
+        assert_eq!(refusals, vec![refusal]);
+        assert_eq!(ids(primary), vec!["rec_parked"]);
+    }
 }
 
 fn merge_lineage_replacements(
@@ -3029,6 +3216,7 @@ fn merge_lineage_replacements(
             reason: Some("ydoc-deferred-lineage-replaced"),
             conflicts_opened: 0,
             lineage_replacement: Some(replacement),
+            record_facts: Vec::new(),
         }),
         ApplyOutcome::WithDiagnostics {
             outcome,
@@ -3046,6 +3234,7 @@ fn merge_lineage_replacements(
 fn map_applied_ydoc_outcome(
     outcome: ApplyOutcome<ReplicationApplyOutcome>,
     sharing_declined: Option<crate::SharingDeclined>,
+    record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> ApplyOutcome<YdocApplyResult> {
     match outcome {
         ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
@@ -3053,6 +3242,7 @@ fn map_applied_ydoc_outcome(
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: record_facts.into_iter().collect(),
         })
         .with_sharing_declined(sharing_declined.into_iter().collect()),
         ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
@@ -3063,7 +3253,11 @@ fn map_applied_ydoc_outcome(
             refusals,
             sharing_declined: nested,
         } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(map_applied_ydoc_outcome(*outcome, sharing_declined)),
+            outcome: Box::new(map_applied_ydoc_outcome(
+                *outcome,
+                sharing_declined,
+                record_facts,
+            )),
             refusals,
             sharing_declined: nested,
         },

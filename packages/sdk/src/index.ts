@@ -30,7 +30,7 @@ export type DohcCapabilityMap = {
     list?: boolean;
     watch?: boolean;
   };
-  collections: DohcCapabilityGroup & { read: boolean; list?: boolean };
+  collections: DohcCapabilityGroup & { read: boolean; edit?: boolean };
   provenance: DohcCapabilityGroup & { record: boolean };
   workspace?: DohcCapabilityGroup & { search?: boolean };
   databases?: DohcCapabilityGroup & { read?: boolean; edit?: boolean };
@@ -138,6 +138,62 @@ export type DohcFileWatchEvent = {
   sha256?: string;
   [key: string]: unknown;
 };
+
+/** An arbitrary JSON value, as a collection record field carries it. */
+export type DohcJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | DohcJsonValue[]
+  | { [key in string]?: DohcJsonValue };
+
+/**
+ * A record appeared in a collection. `author` is the recorded agent or user
+ * identity when the host knows one, and null otherwise. `timestamp` is the
+ * host's record timestamp in milliseconds.
+ */
+export type DohcRecordCreatedEvent = {
+  collectionPath: string;
+  recordId: string;
+  author: string | null;
+  timestamp: number;
+};
+
+/** A record changed. Same shape as {@link DohcRecordCreatedEvent}. */
+export type DohcRecordUpdatedEvent = DohcRecordCreatedEvent;
+
+/**
+ * One field of one record changed.
+ *
+ * `previous` and `next` are the field's JSON values: an absent field value
+ * arrives as null, and a value over 8 KiB of JSON arrives replaced by
+ * `{ "truncated": true, "bytes": number }` — read the record for the whole
+ * value. Delivery is at most once (the host drops events under
+ * backpressure), so a subscriber that missed events reads record history
+ * past its last seen `historyId`.
+ */
+export type DohcRecordFieldChangedEvent = {
+  collectionPath: string;
+  recordId: string;
+  field: string;
+  previous: DohcJsonValue;
+  next: DohcJsonValue;
+  author: string | null;
+  timestamp: number;
+  /** Device-local record-history row id. */
+  historyId: number;
+};
+
+/**
+ * What a collections.watch listener receives as `data`. The enclosing
+ * subscription event's `event` names which one: "record.created",
+ * "record.updated", or "record.field.changed".
+ */
+export type DohcCollectionRecordEvent =
+  | DohcRecordCreatedEvent
+  | DohcRecordUpdatedEvent
+  | DohcRecordFieldChangedEvent;
 
 export type DohcSearchOptions = {
   path?: string;
@@ -257,6 +313,21 @@ export function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void {
   root.dataset.reduceMotion = String(theme.reduceMotion);
 }
 
+/** The documented collection query options; unknown keys never travel. */
+export type DohcCollectionQueryOptions = {
+  filter?: Record<string, unknown>;
+  sort?: Array<Record<string, unknown>>;
+  groupBy?: string;
+  resolveRelations?: boolean;
+  limit?: number;
+  cursor?: Record<string, unknown>;
+};
+
+export type DohcCollectionRecordOptions = {
+  historyLimit?: number;
+  beforeHistoryId?: number;
+};
+
 export type CreateDohcClientOptions = {
   transport?: DohcTransport;
   timeoutMs?: number;
@@ -276,7 +347,7 @@ export class DohcSdkError extends Error {
 }
 
 let requestCounter = 0;
-const MAX_COLLECTION_NAME_LENGTH = 200;
+const MAX_RECORD_NAME_LENGTH = 200;
 const MAX_PROVENANCE_SUMMARY_LENGTH = 5000;
 const MAX_METHOD_LENGTH = 200;
 const MAX_QUERY_LENGTH = 100_000;
@@ -865,17 +936,39 @@ function assertQuery(query: unknown, label = "Query"): asserts query is string {
   }
 }
 
-function assertCollectionName(name: unknown): asserts name is string {
+function assertRecordName(name: unknown): asserts name is string {
   if (typeof name !== "string" || name.trim().length === 0) {
     throw new DohcSdkError(
       DohcSdkErrorCodes.invalidInput,
-      "Collection name must be a non-empty string.",
+      "Record name must be a non-empty string.",
     );
   }
-  if (name.length > MAX_COLLECTION_NAME_LENGTH || hasControlCharacter(name)) {
+  if (
+    name.length > MAX_RECORD_NAME_LENGTH ||
+    hasControlCharacter(name) ||
+    name.includes("/") ||
+    name.includes("\\")
+  ) {
     throw new DohcSdkError(
       DohcSdkErrorCodes.invalidInput,
-      `Collection name must be ${MAX_COLLECTION_NAME_LENGTH} characters or fewer with no control characters.`,
+      `Record name must be ${MAX_RECORD_NAME_LENGTH} characters or fewer with no control characters or path separators.`,
+    );
+  }
+}
+
+function assertCollectionFields(
+  fields: unknown,
+): asserts fields is Record<string, unknown> {
+  if (!isPlainRecord(fields)) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      "Fields must be an object of field names to values.",
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(fields, "id")) {
+    throw new DohcSdkError(
+      DohcSdkErrorCodes.invalidInput,
+      'The "id" field is engine-owned record identity and cannot be set.',
     );
   }
 }
@@ -1039,28 +1132,144 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
     return result;
   };
 
-  const listCollection = async (
-    name: string,
-    params: Record<string, unknown> = {},
-    requestOptions?: DohcRequestOptions,
-  ) => {
-    assertRequestOptions(requestOptions);
-    assertCollectionName(name);
-    await requireCapability("collections", "read", requestOptions);
-    const result = await request("collections.list", { ...params, name }, requestOptions);
-    if (!Array.isArray(result)) {
+  const collectionResponse = (result: unknown): Record<string, unknown> => {
+    if (!isPlainRecord(result)) {
       throw new DohcSdkError(
         DohcSdkErrorCodes.badResponse,
         "dohc host returned an invalid collection response.",
       );
     }
-    if (!result.every(isPlainRecord)) {
+    return result;
+  };
+
+  const listCollections = async (requestOptions?: DohcRequestOptions) => {
+    assertRequestOptions(requestOptions);
+    await requireCapability("collections", "read", requestOptions);
+    const result = collectionResponse(
+      await request("collections.list", undefined, requestOptions),
+    );
+    if (
+      !Array.isArray(result.collections) ||
+      !result.collections.every(isPlainRecord)
+    ) {
       throw new DohcSdkError(
         DohcSdkErrorCodes.badResponse,
         "dohc host returned invalid collection item shapes.",
       );
     }
+    return result.collections as Array<Record<string, unknown>>;
+  };
+
+  const getCollection = async (
+    path: string,
+    requestOptions?: DohcRequestOptions,
+  ) => {
+    assertRequestOptions(requestOptions);
+    assertWorkspacePath(path, "Collection path");
+    await requireCapability("collections", "read", requestOptions);
+    return collectionResponse(
+      await request("collections.get", { path }, requestOptions),
+    );
+  };
+
+  const queryCollection = async (
+    path: string,
+    options: DohcCollectionQueryOptions = {},
+    requestOptions?: DohcRequestOptions,
+  ) => {
+    assertRequestOptions(requestOptions);
+    assertWorkspacePath(path, "Collection path");
+    await requireCapability("collections", "read", requestOptions);
+    // Only the documented query keys travel, and `path` is always the
+    // validated argument — an option bag cannot replace it or smuggle
+    // workspace or caller identity (the host derives both).
+    const params: Record<string, unknown> = { path };
+    if (options.filter !== undefined) params.filter = options.filter;
+    if (options.sort !== undefined) params.sort = options.sort;
+    if (options.groupBy !== undefined) params.groupBy = options.groupBy;
+    if (options.resolveRelations !== undefined) {
+      params.resolveRelations = options.resolveRelations;
+    }
+    if (options.limit !== undefined) params.limit = options.limit;
+    if (options.cursor !== undefined) params.cursor = options.cursor;
+    const result = collectionResponse(
+      await request("collections.query", params, requestOptions),
+    );
+    if (!Array.isArray(result.records) || !result.records.every(isPlainRecord)) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.badResponse,
+        "dohc host returned invalid collection record shapes.",
+      );
+    }
     return result;
+  };
+
+  const getCollectionRecord = async (
+    path: string,
+    recordId: string,
+    options: DohcCollectionRecordOptions = {},
+    requestOptions?: DohcRequestOptions,
+  ) => {
+    assertRequestOptions(requestOptions);
+    assertWorkspacePath(path, "Collection path");
+    if (typeof recordId !== "string" || recordId.length === 0) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.invalidInput,
+        "Record id must be a non-empty string.",
+      );
+    }
+    await requireCapability("collections", "read", requestOptions);
+    const params: Record<string, unknown> = { path, recordId };
+    if (options.historyLimit !== undefined) {
+      params.historyLimit = options.historyLimit;
+    }
+    if (options.beforeHistoryId !== undefined) {
+      params.beforeHistoryId = options.beforeHistoryId;
+    }
+    return collectionResponse(
+      await request("collections.getRecord", params, requestOptions),
+    );
+  };
+
+  const setCollectionFields = async (
+    recordPath: string,
+    fields: Record<string, unknown>,
+    requestOptions?: DohcRequestOptions,
+  ) => {
+    assertRequestOptions(requestOptions);
+    assertWorkspacePath(recordPath, "Record path");
+    assertCollectionFields(fields);
+    await requireCapability("collections", "edit", requestOptions);
+    return collectionResponse(
+      await request(
+        "collections.setFields",
+        { path: recordPath, fields },
+        requestOptions,
+      ),
+    );
+  };
+
+  const createCollectionRecord = async (
+    path: string,
+    record: { name: string; fields?: Record<string, unknown> },
+    requestOptions?: DohcRequestOptions,
+  ) => {
+    assertRequestOptions(requestOptions);
+    assertWorkspacePath(path, "Collection path");
+    if (!isPlainRecord(record)) {
+      throw new DohcSdkError(
+        DohcSdkErrorCodes.invalidInput,
+        "Record must be an object with a name and optional fields.",
+      );
+    }
+    assertRecordName(record.name);
+    if (record.fields !== undefined) assertCollectionFields(record.fields);
+    await requireCapability("collections", "edit", requestOptions);
+    const params: Record<string, unknown> = { path, name: record.name };
+    if (record.fields !== undefined) params.fields = record.fields;
+    return collectionResponse(
+      await request("collections.createRecord", params, requestOptions),
+    );
   };
 
   const readFileInfo = async (
@@ -1332,20 +1541,40 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
         return stop;
       },
     },
+    // Authorization boundary: AGENTS.md product invariants. The SDK never
+    // accepts caller-supplied workspace id, user identity, or onBehalfOf
+    // here; the host derives all three server-side, enforces workspace and
+    // path scope, and attributes writes to the surface it granted.
     collections: {
-      list: listCollection,
-      get: (name: string) => ({
-        list: async (
-          params: Record<string, unknown> = {},
-          requestOptions?: DohcRequestOptions,
-        ) => {
-          // Authorization boundary: AGENTS.md product invariants. The SDK
-          // never accepts caller-supplied workspace/user identity here; the
-          // host transport decides whether collections.read is available and
-          // enforces workspace scope server-side before returning rows.
-          return listCollection(name, params, requestOptions);
-        },
-      }),
+      list: listCollections,
+      get: getCollection,
+      query: queryCollection,
+      getRecord: getCollectionRecord,
+      setFields: setCollectionFields,
+      createRecord: createCollectionRecord,
+      /**
+       * Reports record changes at or below `collectionPath`, which is a
+       * prefix: a collection to watch on its own, or a folder to watch with
+       * every collection under it. Changes outside it never arrive. A watch
+       * on "." covers the collections this plugin could list when it
+       * subscribed; a collection created later needs a new watch. Delivery
+       * is at most once; reconcile missed events from record history using
+       * the last seen historyId.
+       *
+       * Returns a function that stops the subscription. A subscription also
+       * ends when its plugin stops, or when the panel that opened it closes
+       * or changes its workspace, plugin, or panel identity.
+       */
+      watch: async (
+        collectionPath: string,
+        listener: (event: DohcSubscriptionEvent<DohcCollectionRecordEvent>) => void,
+        requestOptions?: DohcRequestOptions,
+      ) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(collectionPath, "Collection paths");
+        await requireCapability("collections", "read", requestOptions);
+        return subscribe("collections.watch", { path: collectionPath }, listener, requestOptions);
+      },
     },
     provenance: {
       record: async (

@@ -586,6 +586,9 @@ pub enum SyncPassOutcome {
         refusals: Vec<crate::ReplicationRefusal>,
         /// Local Y.Doc bases that could not be shared during enrollment.
         sharing_declined: Vec<crate::SharingDeclined>,
+        /// Collection record changes this pass applied, in apply order, for
+        /// post-commit record-event emission.
+        record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     },
     CrashedAfterRemoteCommit,
     CrashedAfterApply {
@@ -597,6 +600,7 @@ pub enum SyncPassOutcome {
         changed_paths: Vec<crate::MomentMaterializationChange>,
         refusals: Vec<crate::ReplicationRefusal>,
         sharing_declined: Vec<crate::SharingDeclined>,
+        record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     },
 }
 
@@ -1119,6 +1123,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             pending_cursor: None,
             changed_paths: Vec::new(),
             refusals: Vec::new(),
+            record_facts: Vec::new(),
             sharing_declined,
         })
     }
@@ -1216,6 +1221,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut refusals = Vec::new();
         let mut sharing_declined = Vec::new();
         let mut changed_paths = BTreeMap::new();
+        let mut record_facts = Vec::new();
         let mut retryable = Vec::new();
         let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
@@ -1244,6 +1250,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                     &mut changed_paths,
                     &mut refusals,
                     &mut sharing_declined,
+                    &mut record_facts,
                 )?,
             }
         }
@@ -1281,6 +1288,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                             &mut changed_paths,
                             &mut refusals,
                             &mut sharing_declined,
+                            &mut record_facts,
                         )?;
                     }
                 }
@@ -1343,6 +1351,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
                 changed_paths: changed_paths.into_values().collect(),
                 refusals,
                 sharing_declined,
+                record_facts,
             });
         }
         Ok(SyncPassOutcome::Complete {
@@ -1357,6 +1366,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             changed_paths: changed_paths.into_values().collect(),
             refusals,
             sharing_declined,
+            record_facts,
         })
     }
 
@@ -4382,6 +4392,7 @@ fn accumulate_pull_outcome(
     changed_paths: &mut BTreeMap<(String, String), crate::MomentMaterializationChange>,
     refusals: &mut Vec<crate::ReplicationRefusal>,
     sharing_declined: &mut Vec<crate::SharingDeclined>,
+    record_facts: &mut Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> Result<(), RelayError> {
     let (primary, drain_refusals, drain_declines) = outcome.into_primary_and_diagnostics();
     for refusal in drain_refusals {
@@ -4395,6 +4406,7 @@ fn accumulate_pull_outcome(
             *conflicts_opened = conflicts_opened
                 .checked_add(routed.conflicts_opened)
                 .ok_or(RelayError::InvalidResponse)?;
+            record_facts.extend(routed.record_facts);
             for change in routed.materialization_changes {
                 insert_changed_path(changed_paths, change);
             }

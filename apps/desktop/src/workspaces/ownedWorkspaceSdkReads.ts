@@ -6,6 +6,7 @@ import {
 } from "./ownedWorkspaceFileReader";
 import {
   createOwnedWorkspaceSdkReadPort,
+  type OwnedWorkspaceCollectionReadSource,
   type OwnedWorkspaceSdkReadPort,
   type OwnedWorkspaceSearchSource,
 } from "./ownedWorkspaceSdkReadPort";
@@ -24,6 +25,7 @@ export function createOwnedWorkspaceSdkReads(input: {
   files: Pick<ShareViewFiles, "read">;
   databaseReader?: OwnedWorkspaceDatabaseReader;
   listFiles(): Promise<ListWorkspaceFilesResult>;
+  collections: OwnedWorkspaceCollectionReadSource;
   repairProjection(target: ShareViewFilesTarget): Promise<void>;
   onSearchSourceFailure?: (
     source: OwnedWorkspaceSearchSource,
@@ -62,6 +64,7 @@ export function createOwnedWorkspaceSdkReads(input: {
     readText: (path) => fileReader.readText(path),
     listFiles: input.listFiles,
     readDatabase: (path) => fileReader.readDatabase(path),
+    collections: input.collections,
     hasShareState: workspaceHasReceivedShareState(input.workspace),
     searchSources,
     repairProjection: input.repairProjection,

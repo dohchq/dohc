@@ -75,6 +75,23 @@ const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 /// announces these writes.
 pub const CAPTURE_MOMENT_RECORDED_EVENT: &str = "capture.momentRecorded";
 
+/// Record events fire on every device as that device's engine applies an
+/// update — local `ydoc.recordUpdate` and pulled replication alike. One
+/// applied update emits together: `record.created` first, then
+/// `record.field.changed` in field-name order, then one `record.updated`.
+/// Delivery is at most once (the emitter drops under backpressure); every
+/// `record.field.changed` carries the device's history row id so a
+/// subscriber that missed events reads history past its last seen id.
+pub const RECORD_CREATED_EVENT: &str = "record.created";
+pub const RECORD_UPDATED_EVENT: &str = "record.updated";
+pub const RECORD_FIELD_CHANGED_EVENT: &str = "record.field.changed";
+
+/// A previous/next value travels whole up to this many bytes of JSON; a
+/// larger one is replaced by `{ "truncated": true, "bytes": N }` and the
+/// subscriber reads the record for the whole value. History keeps every
+/// value whole; this bounds the event transport, not the data.
+const RECORD_EVENT_VALUE_CAP_BYTES: usize = 8 * 1024;
+
 /// An engine-initiated notification for the transport host to deliver as a
 /// wire `Event` envelope. The service assigns only the NAME and PAYLOAD;
 /// the per-session `seq`/`sessionGeneration` belong to the transport.
@@ -2509,6 +2526,18 @@ impl EngineService {
             })
         ) {
             open.request_collection_reconcile();
+        }
+        // Post-commit: every applied envelope's record changes are durable,
+        // even on a crash after apply (the cursor retries; the durable layer
+        // dedupes, so a replay derives no second fact set).
+        if let RelayOperationOutcome::Sync(
+            SyncPassOutcome::Complete { record_facts, .. }
+            | SyncPassOutcome::CrashedAfterApply { record_facts, .. },
+        ) = &outcome
+        {
+            for facts in record_facts {
+                emit_record_events(&self.events, &open.workspace_id, facts);
+            }
         }
         let pending = match &outcome {
             RelayOperationOutcome::Sync(SyncPassOutcome::Complete {
@@ -8258,6 +8287,11 @@ impl EngineService {
         }
         let lineage_claim_id = outcome.lineage_claim_id;
         let outcome = outcome.outcome;
+        // Post-commit: the append transaction already holds the history rows
+        // these facts mirror.
+        if let Some(facts) = &outcome.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         serde_json::to_value(YdocRecordUpdateResult {
             seq: outcome.seq,
             deduped: outcome.deduped,
@@ -12225,6 +12259,8 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             refusals,
             sharing_declined,
+            // Record facts ride the engine event channel, not the wire result.
+            record_facts: _,
         } => json!({
             "status": "complete",
             "pushed": pushed,
@@ -12264,6 +12300,7 @@ fn sync_outcome_json(outcome: SyncPassOutcome) -> Value {
             changed_paths,
             refusals,
             sharing_declined,
+            record_facts: _,
         } => json!({
             "status": "crashedAfterApply",
             "applied": applied,
@@ -12303,6 +12340,71 @@ fn sharing_declined_json(declines: Vec<dohc_engine_sync::SharingDeclined>) -> Ve
             })
         })
         .collect()
+}
+
+/// One event value: the stored history JSON parsed whole, or the truncated
+/// marker past the cap, or `null` for an absent side of the change.
+/// A field value nests inside Event -> payload -> value on the wire, so the
+/// value itself may use only the depth the frame limit leaves for it. A
+/// deeper value travels as the truncated marker, exactly like an oversized
+/// one: the subscriber reads the record for the whole value.
+const RECORD_EVENT_VALUE_MAX_DEPTH: usize = 16;
+
+fn record_event_value(json: Option<&str>) -> Value {
+    let Some(json) = json else {
+        return Value::Null;
+    };
+    if json.len() > RECORD_EVENT_VALUE_CAP_BYTES {
+        return json!({ "truncated": true, "bytes": json.len() });
+    }
+    let value: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+    if dohc_engine_domain::collection_value_exceeds_depth(&value, RECORD_EVENT_VALUE_MAX_DEPTH) {
+        return json!({ "truncated": true, "bytes": json.len() });
+    }
+    value
+}
+
+/// Emit one applied update's record events, post-commit, in the settled
+/// order: created, field changes in field-name order, then updated.
+fn emit_record_events(
+    events: &EngineEvents,
+    workspace_id: &str,
+    facts: &dohc_engine_domain::CollectionRecordApplyFacts,
+) {
+    let record = |payload: &mut serde_json::Map<String, Value>| {
+        payload.insert("workspaceId".to_owned(), json!(workspace_id));
+        payload.insert(
+            "collectionPath".to_owned(),
+            json!(facts.collection_path.clone()),
+        );
+        payload.insert("recordId".to_owned(), json!(facts.record_id.clone()));
+        payload.insert("author".to_owned(), json!(facts.author_origin_id.clone()));
+        payload.insert("timestamp".to_owned(), json!(facts.recorded_at_ms));
+    };
+    let record_payload = || {
+        let mut payload = serde_json::Map::new();
+        record(&mut payload);
+        Value::Object(payload)
+    };
+    if facts.created {
+        events.emit(RECORD_CREATED_EVENT, record_payload());
+    }
+    for field in &facts.fields {
+        let mut payload = serde_json::Map::new();
+        record(&mut payload);
+        payload.insert("field".to_owned(), json!(field.field_name.clone()));
+        payload.insert(
+            "previous".to_owned(),
+            record_event_value(field.previous_json.as_deref()),
+        );
+        payload.insert(
+            "next".to_owned(),
+            record_event_value(field.next_json.as_deref()),
+        );
+        payload.insert("historyId".to_owned(), json!(field.history_id));
+        events.emit(RECORD_FIELD_CHANGED_EVENT, Value::Object(payload));
+    }
+    events.emit(RECORD_UPDATED_EVENT, record_payload());
 }
 
 fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError> {
@@ -14287,6 +14389,7 @@ mod tests {
                 limit_bytes: 20,
                 observed_bytes: 21,
             }],
+            record_facts: Vec::new(),
         });
 
         assert_eq!(value["status"], "complete");
@@ -14303,6 +14406,114 @@ mod tests {
                 "observedBytes": 21,
             }]),
             "enrollment refusals must reach the workspace RPC result"
+        );
+    }
+
+    #[test]
+    fn record_events_emit_in_settled_order_and_cap_oversized_values() {
+        let events = EngineEvents::default();
+        let mut rx = events.subscribe();
+        let big = format!("\"{}\"", "x".repeat(RECORD_EVENT_VALUE_CAP_BYTES));
+        let facts = dohc_engine_domain::CollectionRecordApplyFacts {
+            collection_path: "tasks".to_owned(),
+            record_id: "rec_a".to_owned(),
+            created: true,
+            author_origin_id: Some("alice".to_owned()),
+            recorded_at_ms: 1_100,
+            fields: vec![
+                dohc_engine_domain::CollectionFieldChangeFact {
+                    field_name: "alpha".to_owned(),
+                    previous_json: None,
+                    next_json: Some(big.clone()),
+                    history_id: 7,
+                },
+                dohc_engine_domain::CollectionFieldChangeFact {
+                    field_name: "beta".to_owned(),
+                    previous_json: Some("\"open\"".to_owned()),
+                    next_json: Some("\"done\"".to_owned()),
+                    history_id: 8,
+                },
+            ],
+        };
+
+        emit_record_events(&events, "ws-1", &facts);
+
+        let mut notices = Vec::new();
+        while let Ok(notice) = rx.try_recv() {
+            notices.push(notice);
+        }
+        assert_eq!(
+            notices
+                .iter()
+                .map(|notice| notice.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                RECORD_CREATED_EVENT,
+                RECORD_FIELD_CHANGED_EVENT,
+                RECORD_FIELD_CHANGED_EVENT,
+                RECORD_UPDATED_EVENT,
+            ],
+            "created first, field changes in field-name order, then updated"
+        );
+        assert_eq!(
+            notices[0].payload,
+            json!({
+                "workspaceId": "ws-1",
+                "collectionPath": "tasks",
+                "recordId": "rec_a",
+                "author": "alice",
+                "timestamp": 1_100,
+            })
+        );
+        assert_eq!(notices[1].payload["field"], "alpha");
+        assert_eq!(
+            notices[1].payload["previous"],
+            Value::Null,
+            "an absent side travels as null"
+        );
+        assert_eq!(
+            notices[1].payload["next"],
+            json!({ "truncated": true, "bytes": big.len() }),
+            "an oversized value travels as the truncated marker"
+        );
+        assert_eq!(notices[1].payload["historyId"], 7);
+        assert_eq!(notices[2].payload["field"], "beta");
+        // A value deeper than the wire leaves room for travels as the marker
+        // too: an unencodable event must never reach the transport.
+        let deep = format!(
+            "{}1{}",
+            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH),
+            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH)
+        );
+        assert_eq!(
+            record_event_value(Some(&deep)),
+            json!({ "truncated": true, "bytes": deep.len() })
+        );
+        // The helper counts the value itself as depth 1, so the deepest
+        // value that still travels whole nests one level fewer than the cap.
+        let shallow = format!(
+            "{}1{}",
+            "[".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1),
+            "]".repeat(RECORD_EVENT_VALUE_MAX_DEPTH - 1)
+        );
+        assert_eq!(
+            record_event_value(Some(&shallow)),
+            serde_json::from_str::<Value>(&shallow).unwrap()
+        );
+        assert_eq!(notices[2].payload["previous"], "open");
+        assert_eq!(notices[2].payload["next"], "done");
+        assert_eq!(notices[2].payload["historyId"], 8);
+        assert_eq!(notices[3].payload, notices[0].payload);
+    }
+
+    #[test]
+    fn record_event_values_at_the_cap_travel_whole() {
+        let at_cap = format!("\"{}\"", "x".repeat(RECORD_EVENT_VALUE_CAP_BYTES - 2));
+        assert_eq!(at_cap.len(), RECORD_EVENT_VALUE_CAP_BYTES);
+        assert_eq!(
+            record_event_value(Some(&at_cap)),
+            Value::String("x".repeat(RECORD_EVENT_VALUE_CAP_BYTES - 2)),
+            "a value at the cap travels whole"
         );
     }
 
