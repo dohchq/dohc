@@ -1,0 +1,305 @@
+// @vitest-environment jsdom
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { RelationFieldDefinition } from "@dohc/workspace-contracts";
+import { RelationPicker } from "./RelationPicker";
+import { recordLabel } from "../recordLabel";
+import { deferred, indexedValue, makeQueryResult, makeRecord } from "../testSupport";
+import type { CollectionQueryResult } from "@dohc/workspace-contracts";
+
+afterEach(cleanup);
+
+const SINGLE: RelationFieldDefinition = {
+  name: "parent",
+  type: "relation",
+  collection: "tasks",
+  many: false,
+};
+const MANY: RelationFieldDefinition = { ...SINGLE, name: "blocks", many: true };
+
+const TARGETS = [
+  makeRecord("rec-a", [indexedValue("title", "Design")]),
+  makeRecord("rec-b", [indexedValue("title", "Build")]),
+  // No title or name: the label falls back to the filename without ".md".
+  makeRecord("rec-c", []),
+];
+
+function makeExecutor(records = TARGETS) {
+  return vi.fn(async () => makeQueryResult(records));
+}
+
+describe("recordLabel", () => {
+  it("prefers title, then name, then the filename without .md", () => {
+    expect(recordLabel(makeRecord("r", [indexedValue("title", " Design ")]))).toBe("Design");
+    expect(recordLabel(makeRecord("r", [indexedValue("name", "Build")]))).toBe("Build");
+    expect(
+      recordLabel(
+        makeRecord("r", [indexedValue("title", "   "), indexedValue("name", "Fallback")]),
+      ),
+    ).toBe("Fallback");
+    expect(recordLabel(makeRecord("rec-c", []))).toBe("rec-c");
+  });
+});
+
+describe("RelationPicker", () => {
+  it("queries the related collection once and lists its records by label", async () => {
+    const executor = makeExecutor();
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+    expect(await screen.findByText("Design")).toBeDefined();
+    expect(screen.getByText("Build")).toBeDefined();
+    expect(screen.getByText("rec-c")).toBeDefined();
+    expect(executor).toHaveBeenCalledExactlyOnceWith({
+      collectionPath: "tasks",
+      limit: 100,
+    });
+  });
+
+  it("drains every page and lets the user select a later record", async () => {
+    const cursor = {
+      sortValues: [{ present: true, value: "Design" }],
+      recordPath: "tasks/rec-a.md",
+      recordId: "rec-a",
+    };
+    const executor = vi
+      .fn()
+      .mockResolvedValueOnce(
+        makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
+      )
+      .mockResolvedValueOnce(makeQueryResult([TARGETS[1]!]));
+    const emit = vi.fn();
+    const close = vi.fn();
+
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={emit}
+        close={close}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole("option", { name: "Build" }));
+    expect(executor).toHaveBeenNthCalledWith(1, {
+      collectionPath: "tasks",
+      limit: 100,
+    });
+    expect(executor).toHaveBeenNthCalledWith(2, {
+      collectionPath: "tasks",
+      limit: 100,
+      cursor,
+    });
+    expect(emit).toHaveBeenCalledExactlyOnceWith("rec-b");
+    expect(close).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/shows only the first/)).toBeNull();
+  });
+
+  it("stops the drain at the page cap and says how many records the list shows", async () => {
+    const cursor = {
+      sortValues: [{ present: true, value: "Design" }],
+      recordPath: "tasks/rec-a.md",
+      recordId: "rec-a",
+    };
+    // Every page carries a cursor: a huge (or non-advancing) related
+    // collection must not drain forever or hold every record.
+    const executor = vi.fn(async () =>
+      makeQueryResult([TARGETS[0]!], { nextCursor: cursor }),
+    );
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+
+    expect(
+      await screen.findByText("The list shows only the first 5 records."),
+    ).toBeDefined();
+    expect(executor).toHaveBeenCalledTimes(5);
+    expect(screen.getAllByRole("option")).toHaveLength(5);
+  });
+
+  it("single: picking a record emits its id and closes", async () => {
+    const emit = vi.fn();
+    const close = vi.fn();
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={makeExecutor()}
+        emit={emit}
+        close={close}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("option", { name: "Build" }));
+    expect(emit).toHaveBeenCalledExactlyOnceWith("rec-b");
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("single: Clear emits null and closes", async () => {
+    const emit = vi.fn();
+    const close = vi.fn();
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value="rec-a"
+        executor={makeExecutor()}
+        emit={emit}
+        close={close}
+      />,
+    );
+    expect(
+      (await screen.findByRole("option", { name: "Design" })).getAttribute("aria-selected"),
+    ).toBe("true");
+    fireEvent.click(screen.getByText("Clear"));
+    expect(emit).toHaveBeenCalledExactlyOnceWith(null);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("many: toggling adds and removes ids without closing", async () => {
+    const emit = vi.fn();
+    const close = vi.fn();
+    render(
+      <RelationPicker
+        field={MANY}
+        value={["rec-a"]}
+        executor={makeExecutor()}
+        emit={emit}
+        close={close}
+      />,
+    );
+    const design = await screen.findByRole<HTMLInputElement>("checkbox", { name: "Design" });
+    expect(design.checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
+    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
+
+    // The second toggle composes with the first optimistically; the host's
+    // serialized writes have not refreshed the value prop yet.
+    fireEvent.click(design);
+    expect(emit).toHaveBeenLastCalledWith(["rec-b"]);
+    expect(close).not.toHaveBeenCalled();
+  });
+
+  it("many: rapid toggles before a prop refresh compose instead of clobbering", async () => {
+    const emit = vi.fn();
+    render(
+      <RelationPicker
+        field={MANY}
+        value={[]}
+        executor={makeExecutor()}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    fireEvent.click(await screen.findByRole("checkbox", { name: "Design" }));
+    expect(emit).toHaveBeenLastCalledWith(["rec-a"]);
+    fireEvent.click(screen.getByRole("checkbox", { name: "Build" }));
+    expect(emit).toHaveBeenLastCalledWith(["rec-a", "rec-b"]);
+  });
+
+  it("filters the fetched page as the search text changes", async () => {
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={makeExecutor()}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+    await screen.findByText("Design");
+    fireEvent.change(screen.getByLabelText("Search records"), {
+      target: { value: "des" },
+    });
+    expect(screen.getByText("Design")).toBeDefined();
+    expect(screen.queryByText("Build")).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Search records"), {
+      target: { value: "nothing" },
+    });
+    expect(screen.getByText('No records match "nothing".')).toBeDefined();
+  });
+
+  it("shows the loading line until the query settles, the empty line after", async () => {
+    const gate = deferred<CollectionQueryResult>();
+    const executor = vi.fn(() => gate.promise);
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("Loading records...")).toBeDefined();
+    gate.resolve(makeQueryResult([]));
+    expect(
+      await screen.findByText("No records in the related collection yet."),
+    ).toBeDefined();
+  });
+
+  it("clears the prior collection's records while the next query is in flight", async () => {
+    const gate = deferred<CollectionQueryResult>();
+    const executor = vi.fn((query: { collectionPath: string }) =>
+      query.collectionPath === "tasks"
+        ? Promise.resolve(makeQueryResult(TARGETS))
+        : gate.promise,
+    );
+    const emit = vi.fn();
+    const view = (field: RelationFieldDefinition) => (
+      <RelationPicker
+        field={field}
+        value={null}
+        executor={executor}
+        emit={emit}
+        close={vi.fn()}
+      />
+    );
+    const { rerender } = render(view(SINGLE));
+    await screen.findByRole("option", { name: "Design" });
+
+    rerender(view({ ...SINGLE, collection: "projects" }));
+    // No stale tasks id is selectable for the projects field.
+    expect(screen.queryByRole("option")).toBeNull();
+    expect(screen.getByText("Loading records...")).toBeDefined();
+    expect(emit).not.toHaveBeenCalled();
+
+    gate.resolve(
+      makeQueryResult([makeRecord("proj-1", [indexedValue("title", "Roadmap")])]),
+    );
+    expect(await screen.findByRole("option", { name: "Roadmap" })).toBeDefined();
+  });
+
+  it("surfaces a failed query", async () => {
+    const executor = vi.fn(async (): Promise<CollectionQueryResult> => {
+      throw new Error("engine offline");
+    });
+    render(
+      <RelationPicker
+        field={SINGLE}
+        value={null}
+        executor={executor}
+        emit={vi.fn()}
+        close={vi.fn()}
+      />,
+    );
+    expect(
+      await screen.findByText(
+        "dohc could not read the related collection's records. engine offline",
+      ),
+    ).toBeDefined();
+  });
+});

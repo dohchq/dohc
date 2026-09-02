@@ -20,6 +20,11 @@ import {
   DatabaseEditResult,
   DatabasePageResult,
   DatabaseSnapshotResult,
+  GetCollectionResult,
+  QueryCollectionRecordsPayload,
+  QueryCollectionRecordsResult,
+  CollectionRecordSchema,
+  COLLECTION_VALUE_MAX_DEPTH,
   DesktopMarksResult,
   CreateWorkspaceFilePayload,
   CreateFileChatPayload,
@@ -1678,6 +1683,189 @@ describe("workspace graph IPC contract", () => {
         graph({ ...common, path: "a.md", threadId: "thread-on-file" }),
       ).success,
     ).toBe(false);
+  });
+});
+
+describe("collection IPC contracts (Phase 2 views)", () => {
+  it("round-trips a queried record with a bigint value and a flagged validation", () => {
+    const result = QueryCollectionRecordsResult.parse({
+      collection: { path: "tasks", status: "valid", reasons: [] },
+      records: [
+        {
+          id: "rec-1",
+          path: "tasks/one.md",
+          conflicted: false,
+          values: [
+            {
+              field: "estimate",
+              value: 9223372036854775807n,
+              validation: {
+                status: "flagged",
+                reason: { code: "expected-number", path: "estimate" },
+              },
+              resolvedRelations: [{ recordId: "rec-2", label: "Other" }],
+            },
+          ],
+        },
+      ],
+      groups: null,
+      nextCursor: null,
+    });
+    expect(result.records[0]?.values[0]?.value).toBe(9223372036854775807n);
+  });
+
+  it("keeps every field kind and view definition through the details result", () => {
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "degraded",
+      reasons: [{ code: "unknown-field-type", path: "fields.mystery" }],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [
+          { name: "title", type: "text" },
+          { name: "status", type: "select", options: ["open", "done"] },
+          { name: "blocks", type: "relation", collection: "projects", many: true },
+        ],
+        views: [
+          {
+            name: "Board",
+            kind: "board",
+            groupBy: "status",
+            sort: [{ field: "title", direction: "asc" }],
+            visibleFields: ["title"],
+            dateField: null,
+          },
+        ],
+      },
+      recordCount: 3,
+    });
+    expect(details.schema.fields).toHaveLength(3);
+    expect(details.schema.views[0]?.kind).toBe("board");
+  });
+
+  it("accepts a collection schema with more than 500 fields", () => {
+    const fields = Array.from({ length: 501 }, (_, index) => ({
+      name: `field-${index}`,
+      type: "text" as const,
+    }));
+
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "valid",
+      reasons: [],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields,
+        views: [],
+      },
+      recordCount: 0,
+    });
+
+    expect(details.schema.fields).toHaveLength(501);
+  });
+
+  it("accepts more than 1,000 canonical schema reasons", () => {
+    const details = GetCollectionResult.parse({
+      path: "tasks",
+      status: "degraded",
+      reasons: Array.from({ length: 1_001 }, (_, index) => ({
+        code: "unknown-property",
+        path: `/property-${index}`,
+      })),
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [],
+        views: [],
+      },
+      recordCount: 0,
+    });
+
+    expect(details.reasons).toHaveLength(1_001);
+  });
+
+  it("rejects a query payload outside the contract's bounds", () => {
+    const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
+    expect(QueryCollectionRecordsPayload.parse(base)).toEqual(base);
+    expect(() =>
+      QueryCollectionRecordsPayload.parse({ ...base, limit: 0 }),
+    ).toThrow();
+    expect(() =>
+      QueryCollectionRecordsPayload.parse({
+        ...base,
+        filter: { field: "status", operator: "matches", value: "x" },
+      }),
+    ).toThrow();
+    expect(() =>
+      GetCollectionResult.parse({
+        path: "tasks",
+        status: "valid",
+        reasons: [],
+        schema: {
+          name: null,
+          description: null,
+          fields: [{ name: "mystery", type: "unknown-kind" }],
+          views: [],
+        },
+        recordCount: 0,
+      }),
+    ).toThrow();
+  });
+
+  it("accepts a record populated up to the shared schema field limit", () => {
+    // An agent-authored collection can legally carry more than 1,000 fields;
+    // the transport cap follows MAX_SCHEMA_COLLECTION_ITEMS, not a private
+    // bound (PR #996 round 3).
+    const values = Array.from({ length: 1_500 }, (_, index) => ({
+      field: `field_${index}`,
+      value: index,
+      validation: { status: "valid" },
+      resolvedRelations: [],
+    }));
+    const parsed = CollectionRecordSchema.safeParse({
+      id: "rec_abcdefghijklmnopqrstuvwxyz",
+      path: "tasks/wide.md",
+      conflicted: false,
+      values,
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("rejects thousands-deep nested values with a validation error, not a stack overflow", () => {
+    const base = { workspaceId: "workspace-1", collectionPath: "tasks" };
+    const nested = (depth: number): unknown => {
+      let value: unknown = "leaf";
+      for (let level = 0; level < depth; level += 1) value = [value];
+      return value;
+    };
+    const query = (value: unknown) => ({
+      ...base,
+      filter: { field: "status", operator: "equals", value },
+    });
+    const record = (value: unknown) => ({
+      id: "rec-1",
+      path: "tasks/one.md",
+      conflicted: false,
+      values: [
+        {
+          field: "status",
+          value,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    });
+
+    for (const deep of [nested(COLLECTION_VALUE_MAX_DEPTH + 1), nested(5_000)]) {
+      expect(QueryCollectionRecordsPayload.safeParse(query(deep)).success).toBe(false);
+      expect(CollectionRecordSchema.safeParse(record(deep)).success).toBe(false);
+    }
+
+    const atCap = nested(COLLECTION_VALUE_MAX_DEPTH);
+    expect(QueryCollectionRecordsPayload.safeParse(query(atCap)).success).toBe(true);
+    expect(CollectionRecordSchema.safeParse(record(atCap)).success).toBe(true);
   });
 });
 

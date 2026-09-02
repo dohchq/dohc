@@ -89,6 +89,29 @@ export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
 export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
+// A collection folder opened as its views (Phase 2 collections). Keyed by
+// the folder path, so reopening re-activates instead of duplicating.
+export const COLLECTION_TAB_PREFIX = "dohc://collection/";
+
+export function collectionTabPath(collectionPath: string): string {
+  return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
+}
+
+export function isCollectionTabPath(path: string | null): boolean {
+  return typeof path === "string" && path.startsWith(COLLECTION_TAB_PREFIX);
+}
+
+export function parseCollectionTabPath(path: string | null): string | null {
+  if (typeof path !== "string" || !isCollectionTabPath(path)) return null;
+  try {
+    const collectionPath = decodeURIComponent(
+      path.slice(COLLECTION_TAB_PREFIX.length),
+    );
+    return collectionPath.length > 0 ? collectionPath : null;
+  } catch {
+    return null;
+  }
+}
 
 export function momentDiffTabPath(momentId: string): string {
   return `${MOMENT_DIFF_TAB_PREFIX}${encodeURIComponent(momentId)}`;
@@ -338,6 +361,7 @@ export function isVirtualTabPath(path: string | null): boolean {
     isChatsTabPath(path) ||
     isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
+    isCollectionTabPath(path) ||
     isVersionCompareTabPath(path) ||
     isSiteTabPath(path) ||
     isPluginPanelTabPath(path) ||

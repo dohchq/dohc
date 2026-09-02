@@ -1,0 +1,52 @@
+/*
+ * Minimal restyle of react-big-calendar for the dohc theme: its hardcoded
+ * grays map onto the theme tokens Tailwind 4 emits as CSS variables
+ * (apps/desktop/src/renderer/styles.css). Structure and layout stay in the
+ * vendor stylesheet, imported by CalendarView before this file.
+ */
+
+.dohc-collection-calendar .rbc-calendar {
+  height: 100%;
+  font-size: 13px;
+  color: var(--color-ink);
+}
+
+.dohc-collection-calendar .rbc-month-view,
+.dohc-collection-calendar .rbc-header,
+.dohc-collection-calendar .rbc-day-bg + .rbc-day-bg,
+.dohc-collection-calendar .rbc-month-row + .rbc-month-row {
+  border-color: var(--color-line);
+}
+
+.dohc-collection-calendar .rbc-header {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-muted);
+}
+
+.dohc-collection-calendar .rbc-off-range-bg {
+  background: var(--color-panel-2);
+}
+
+.dohc-collection-calendar .rbc-today {
+  background: var(--color-panel);
+}
+
+.dohc-collection-calendar .rbc-event,
+.dohc-collection-calendar .rbc-event.rbc-selected {
+  border-radius: 4px;
+  background-color: var(--color-accent);
+  color: var(--color-bg);
+}
+
+.dohc-collection-calendar .rbc-toolbar button {
+  border-color: var(--color-line);
+  border-radius: 6px;
+  color: var(--color-muted);
+}
+
+.dohc-collection-calendar .rbc-toolbar button:hover,
+.dohc-collection-calendar .rbc-toolbar button.rbc-active {
+  background: var(--color-panel-2);
+  color: var(--color-ink);
+}

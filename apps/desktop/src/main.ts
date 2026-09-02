@@ -162,6 +162,12 @@ import {
   LaunchMarksResult,
   PluginPanelInvalidatedEvent,
   PluginWebAppFailedEvent,
+  ListCollectionsPayload,
+  ListCollectionsResult,
+  GetCollectionPayload,
+  GetCollectionResult,
+  QueryCollectionRecordsPayload,
+  QueryCollectionRecordsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
   WorkspaceIdPayload,
@@ -637,6 +643,7 @@ import {
   type EngineFeature,
   engineOffRefusal,
   releaseAndRefuseWithoutCapture,
+  workspaceEngineEnabled,
 } from "./workspaces/engineCaptureGate";
 import {
   AgentIntegrationState,
@@ -3492,28 +3499,41 @@ async function engineSearchIndexFor(
   workspace: EngineWorkspace,
 ): Promise<{ versionId: string; files: { objectId: string; path: string }[];
 } | null> {
+  return await withEngineAdapter(workspace, async (adapter) => {
+    const active = await adapter.getActiveVersion({
+      workspaceId: workspace.workspaceId,
+    });
+    if (!active) return null;
+    const files = await adapter.listTextFileMetadata({
+      workspaceId: workspace.workspaceId,
+      versionId: active.id,
+    });
+    return {
+      versionId: active.id,
+      files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
+    };
+  });
+}
+
+// One daemon round-trip per read, through the workspace-attachment authority
+// sandwich. Returns null when the daemon has no workspace sessions (engine
+// unavailable), so callers can answer with an empty result — collections.list
+// says "no collections" — while surfaces that must not guess raise a visible
+// error.
+async function withEngineAdapter<T>(
+  workspace: EngineWorkspace,
+  work: (adapter: VersionedLiveAdapter) => Promise<T>,
+): Promise<T | null> {
   const sessions = rustEngineWorkspaceSessions;
   if (!sessions) return null;
-  const read = async (engineWorkspace: EngineWorkspace) => await sessions.run(
-    engineWorkspace,
-    async (binding) => {
-      const adapter = new VersionedLiveAdapter(binding.client, binding.workspace, {
-        workspaceId: workspace.workspaceId,
-      });
-      const active = await adapter.getActiveVersion({
-        workspaceId: workspace.workspaceId,
-      });
-      if (!active) return null;
-      const files = await adapter.listTextFileMetadata({
-        workspaceId: workspace.workspaceId,
-        versionId: active.id,
-      });
-      return {
-        versionId: active.id,
-        files: files.map((file) => ({ objectId: file.objectId, path: file.path })),
-      };
-    },
-  );
+  const read = async (engineWorkspace: EngineWorkspace) =>
+    await sessions.run(engineWorkspace, async (binding) =>
+      await work(
+        new VersionedLiveAdapter(binding.client, binding.workspace, {
+          workspaceId: workspace.workspaceId,
+        }),
+      ),
+    );
   const registered = findWorkspace(workspace.workspaceId);
   if (!registered) return await read(workspace);
   if (
@@ -6484,6 +6504,65 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
   ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
 
+  // Collections (Phase 2 views): read-only engine index queries. list answers
+  // "no collections" when the daemon has no sessions, so unflagged workspaces
+  // stay quiet; get/query name the missing capability instead, because their
+  // caller is an open collection tab that must show a cause.
+  ipcMain.handle(CHANNELS.listCollections, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListCollectionsPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection listing stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listCollections(),
+        );
+        return ListCollectionsResult.parse(result ?? { collections: [] });
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.getCollection, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = GetCollectionPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection read stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) =>
+            await adapter.getCollection({ collectionPath: input.collectionPath }),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return GetCollectionResult.parse(result);
+      },
+    );
+  });
+
+  ipcMain.handle(CHANNELS.queryCollectionRecords, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = QueryCollectionRecordsPayload.parse(payload);
+    const { workspaceId: _workspaceId, ...params } = input;
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Collection query stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.queryCollectionRecords(params),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return QueryCollectionRecordsResult.parse(result);
+      },
+    );
+  });
+
   ipcMain.handle(CHANNELS.exportWorkspaceZip, async (event, payload) => {
     assertTrustedSender(event);
     const input = ExportWorkspaceZipPayload.parse(payload);
@@ -6630,10 +6709,13 @@ function registerIpcHandlers(
       event.sender,
       workspaceReference,
       inactiveMessage,
-      (operation) => {
+      async (operation) => {
         const registryEntry = operation.workspace;
         const shareView = sharedViewOf(registryEntry.workspaceId);
         const isSharedView = shareView !== null;
+        const engineEnabled = isSharedView
+          ? false
+          : await workspaceEngineEnabled(registryEntry.rootPath);
         const isMountPath =
           !isSharedView && !!input.path && isSharedWithMePath(input.path);
         const mountForPath = isMountPath
@@ -6650,6 +6732,7 @@ function registerIpcHandlers(
           shareView,
           isMountPath,
           hasMountRecord: mountForPath !== undefined,
+          engineEnabled,
           canShare:
             !isSharedView &&
             !isMountPath &&
@@ -6697,6 +6780,7 @@ function registerIpcHandlers(
         // someone else's files are not this account's to grant, and a share
         // needs a relay-side workspace to grant from.
         canShare: menuContext.canShare,
+        engineEnabled: menuContext.engineEnabled,
         shareView: menuContext.shareView,
       }).map((entry) =>
         entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),

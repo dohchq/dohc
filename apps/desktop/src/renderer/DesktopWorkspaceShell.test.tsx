@@ -40,8 +40,12 @@ import type {
   ListFileChatsResult,
   ListMyShareChangesResult,
   ListShareProposalsResult,
+  GetCollectionResult,
+  ListCollectionsPayload,
+  ListCollectionsResult,
   ListWorkspaceFilesPayload,
   ListWorkspaceFilesResult,
+  QueryCollectionRecordsResult,
   ListWorkspaceVersionsResult,
   ReadShareProposalChangesResult,
   ReadShareProposalFileContentResult,
@@ -102,10 +106,12 @@ import {
   shareUnmountProjection,
   versionCompareOffCopy,
   WORKBENCH_PERSIST_DELAY_MS,
-  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
-  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
   type Workspace,
 } from "./DesktopWorkspaceShell";
+import {
+  WORKSPACE_ACTIVITY_REFRESH_DELAY_MS,
+  WORKSPACE_ACTIVITY_REFRESH_MAX_WAIT_MS,
+} from "./workspaceActivityCoalescer";
 import type { ChatsNav } from "./workbench/ChatsView";
 import {
   CHATS_TAB_PATH,
@@ -697,6 +703,29 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
     source: "stored" as const,
   }));
   return Object.assign(bridge, {
+    // Collections (Phase 2 views): the flagged shell lists collections on
+    // ready and on activity. Typed to the contract; the collection tests
+    // swap in real rows.
+    listCollections: vi.fn(
+      async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
+        collections: [],
+      }),
+    ),
+    getCollection: vi.fn(async (): Promise<GetCollectionResult> => ({
+      path: "tasks",
+      status: "valid",
+      reasons: [],
+      schema: { name: null, description: null, fields: [], views: [] },
+      recordCount: 0,
+    })),
+    queryCollectionRecords: vi.fn(
+      async (): Promise<QueryCollectionRecordsResult> => ({
+        collection: { path: "tasks", status: "valid", reasons: [] },
+        records: [],
+        groups: null,
+        nextCursor: null,
+      }),
+    ),
     // Typed to the contract, not to this empty default: a test that drives
     // real pages must be able to swap the implementation.
     listEngineMoments: vi.fn(
@@ -2040,6 +2069,116 @@ describe("global letter shortcut ownership", () => {
     expect(screen.queryByRole("textbox", { name: "File name" })).toBeNull();
     expect(screen.getByTestId("side-panel")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md")).toBeTruthy();
+  });
+});
+
+describe("collection folders", () => {
+  beforeEach(() => {
+    // The file's module-level ResizeObserver stub is removed by the global
+    // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
+    // collection surface's lazy chunk evaluates @dnd-kit, which reads BOTH
+    // observers while its module loads, so they must exist before the click.
+    class ObserverStub {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+      takeRecords(): never[] {
+        return [];
+      }
+    }
+    vi.stubGlobal("ResizeObserver", ObserverStub);
+    vi.stubGlobal("IntersectionObserver", ObserverStub);
+  });
+
+  it("opens a collection folder as its views tab with the settled empty state", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [{ path: "tasks/one.md", kind: "file" as const }],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    renderShell(bridge);
+    const user = userEvent.setup();
+
+    // The list must carry the shell's workspace scope, and the row routes to
+    // the collection only once that list COMMITTED — the row's rendered
+    // data-collection affordance is the observable proof, so the click
+    // cannot race the commit.
+    const row = await waitFor(() => {
+      const candidate = screen
+        .getAllByTestId("tree-row")
+        .find((entry) => entry.dataset.path === "tasks");
+      expect(candidate?.dataset.collection).toBe("true");
+      return candidate as HTMLElement;
+    });
+    expect(bridge.listCollections).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+    });
+    await user.click(row);
+
+    expect(await screen.findByTestId("tab-dohc://collection/tasks")).toBeTruthy();
+    // The surface is a lazy chunk (@dohc/collection-views pulls the table,
+    // board, and calendar libraries) plus two bridge round trips; under a
+    // loaded worker that outlasts findBy's default second.
+    expect(
+      await screen.findByText("No records in this collection yet.", undefined, {
+        timeout: 15_000,
+      }),
+    ).toBeTruthy();
+    // The settled empty state is that line PLUS the New record action.
+    // Activation is CollectionPage's own boundary, pinned in its tests.
+    expect(screen.getByRole("button", { name: "New record" })).toBeTruthy();
+    expect(bridge.getCollection).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      collectionPath: "tasks",
+    });
+  });
+
+  it("offers New collection from the palette for an engine-enabled writable workspace", async () => {
+    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge);
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    expect(await within(palette).findByText("New collection")).toBeTruthy();
+  });
+
+  it("does not offer New collection when the workspace engine is disabled", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge);
+    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
+    await act(async () => {});
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("New collection")).toBeNull();
+
+    // The application menu feeds the same registry. A command that is not
+    // present must not reach the dialog even if main emits its closed id.
+    act(() => bridge.emitMenuCommand("new-collection"));
+    expect(screen.queryByLabelText("Collection name")).toBeNull();
+  });
+
+  // assertWritableWorkspace refuses createWorkspaceFile on the share's
+  // presence alone, so New collection from a shared view is a dead click —
+  // the palette must not offer what it can never do, exactly as it already
+  // withholds plugin commands there.
+  it("does not offer New collection from a read-only shared view", async () => {
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const user = userEvent.setup();
+    renderShell(bridge, SHARE_VIEW);
+
+    await user.keyboard("{Control>}k{/Control}");
+    const palette = await screen.findByTestId("command-palette");
+    // The palette renders and lists something, so the miss below is the
+    // gate working, not the palette failing to open.
+    await within(palette).findByText("New editor group right");
+    expect(within(palette).queryByText("New collection")).toBeNull();
   });
 });
 

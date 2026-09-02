@@ -9,6 +9,25 @@ import {
 import { z } from "zod";
 import { MAX_VERSIONED_BINARY_FILE_BYTES } from "@dohc/workspace-contracts/engine";
 import { DEFAULT_DRIVER_ID_MAX_LENGTH } from "@dohc/workspace-contracts/workspace-settings-values";
+import {
+  COLLECTION_SCHEMA_REASON_CODES,
+  FIELD_VALUE_REASON_CODES,
+} from "@dohc/workspace-contracts/collection";
+import { MAX_SCHEMA_COLLECTION_ITEMS } from "@dohc/workspace-contracts/collection-values";
+import type {
+  CollectionGetResult as CollectionGetResultContract,
+  CollectionListResult as CollectionListResultContract,
+  CollectionQueryCursor,
+  CollectionQueryFilter,
+  CollectionQueryResult as CollectionQueryResultContract,
+  CollectionQuerySort,
+  CollectionRecord,
+  CollectionSchema as CollectionSchemaContract,
+  CollectionSummary as CollectionSummaryContract,
+  CollectionValue,
+  FieldDefinition,
+  ViewDefinition,
+} from "@dohc/workspace-contracts/collection";
 import type {
   ArtifactAssetDescriptor,
   EngineStoreRefusal,
@@ -344,6 +363,219 @@ export const ListWorkspaceFilesResult = z.object({
   cached: z.literal(true).optional(),
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
+
+// ---- Collections (Phase 2 views) ----
+//
+// list/get/query delegate to the engine's collection index through the
+// workspace-engine client. Results are the engine's contract shapes from
+// @dohc/workspace-contracts/collection, revalidated at this boundary like
+// every other result. Values are JSON-shaped plus bigint, which Electron's
+// structured clone carries across IPC intact.
+
+// The engine rejects values deeper than MAX_COLLECTION_FIELD_VALUE_DEPTH (24,
+// crates/dohc-engine-domain); 32 adds transport headroom and matches
+// SDK_PARAMS_MAX_DEPTH and PRESENCE_STATE_MAX_DEPTH.
+export const COLLECTION_VALUE_MAX_DEPTH = 32;
+
+// Zod's recursive z.lazy union does not bound depth, so an iterative pre-check
+// (mirroring sdkParamsIssue and presenceStateWithinCap) rejects a
+// thousands-deep payload before the recursive parse can overflow the stack.
+// A cycle keeps incrementing depth on every revisit, so the cap terminates it.
+function collectionValueWithinDepth(root: unknown): boolean {
+  const stack: { value: unknown; depth: number }[] = [{ value: root, depth: 0 }];
+  while (stack.length > 0) {
+    const { value, depth } = stack.pop()!;
+    if (depth > COLLECTION_VALUE_MAX_DEPTH) return false;
+    if (typeof value !== "object" || value === null) continue;
+    const children = Array.isArray(value)
+      ? value
+      : Object.values(value as Record<string, unknown>);
+    for (const child of children) {
+      stack.push({ value: child, depth: depth + 1 });
+    }
+  }
+  return true;
+}
+
+const CollectionValueNodeSchema: z.ZodType<CollectionValue> = z.lazy(() =>
+  z.union([
+    z.null(),
+    z.boolean(),
+    z.number(),
+    z.bigint(),
+    z.string().max(100_000),
+    z.array(CollectionValueNodeSchema).max(1_000),
+    z.record(z.string().max(500), CollectionValueNodeSchema),
+  ]),
+);
+
+export const CollectionValueSchema: z.ZodType<CollectionValue> = z
+  .unknown()
+  .superRefine((value, ctx) => {
+    if (collectionValueWithinDepth(value)) return;
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `collection value nesting exceeds ${COLLECTION_VALUE_MAX_DEPTH} levels`,
+    });
+  })
+  .pipe(CollectionValueNodeSchema);
+
+const CollectionSchemaReason = z.object({
+  code: z.enum(COLLECTION_SCHEMA_REASON_CODES),
+  path: z.string().max(4096),
+});
+
+// Shared by the summary and the details result: z.ZodType-annotated schemas
+// have no .extend, so the shape is the reusable piece.
+const collectionSummaryShape = {
+  path: PATH_STRING,
+  status: z.enum(["valid", "degraded"]),
+  reasons: z.array(CollectionSchemaReason).max(MAX_SCHEMA_COLLECTION_ITEMS),
+} as const;
+
+export const CollectionSummarySchema: z.ZodType<CollectionSummaryContract> =
+  z.object(collectionSummaryShape);
+
+const COLLECTION_NAME = z.string().min(1).max(200);
+
+const ScalarFieldDefinitionSchema = z.object({
+  name: COLLECTION_NAME,
+  type: z.enum(["text", "number", "checkbox", "date", "person", "url"]),
+});
+const SelectFieldDefinitionSchema = z.object({
+  name: COLLECTION_NAME,
+  type: z.enum(["select", "multi-select"]),
+  options: z.array(z.string().max(500)).max(MAX_SCHEMA_COLLECTION_ITEMS),
+});
+const RelationFieldDefinitionSchema = z.object({
+  name: COLLECTION_NAME,
+  type: z.literal("relation"),
+  collection: PATH_STRING,
+  many: z.boolean(),
+});
+export const CollectionFieldDefinitionSchema: z.ZodType<FieldDefinition> =
+  z.union([
+    SelectFieldDefinitionSchema,
+    RelationFieldDefinitionSchema,
+    ScalarFieldDefinitionSchema,
+  ]);
+
+const CollectionQuerySortSchema: z.ZodType<CollectionQuerySort> = z.object({
+  field: COLLECTION_NAME,
+  direction: z.enum(["asc", "desc"]),
+});
+
+const CollectionViewDefinitionSchema: z.ZodType<ViewDefinition> = z.object({
+  name: COLLECTION_NAME,
+  kind: z.enum(["table", "board", "calendar"]),
+  groupBy: COLLECTION_NAME.nullable(),
+  sort: z.array(CollectionQuerySortSchema).max(20),
+  visibleFields: z.array(COLLECTION_NAME).max(MAX_SCHEMA_COLLECTION_ITEMS).nullable(),
+  dateField: COLLECTION_NAME.nullable(),
+});
+
+export const CollectionSchemaSchema: z.ZodType<CollectionSchemaContract> =
+  z.object({
+    name: z.string().max(500).nullable(),
+    description: z.string().max(5_000).nullable(),
+    fields: z.array(CollectionFieldDefinitionSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
+    views: z.array(CollectionViewDefinitionSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
+  });
+
+const CollectionFieldValueReason = z.object({
+  code: z.enum(FIELD_VALUE_REASON_CODES),
+  path: z.string().max(4096),
+});
+
+const CollectionIndexedValueValidation = z.union([
+  z.object({ status: z.literal("valid") }),
+  z.object({ status: z.literal("flagged"), reason: CollectionFieldValueReason }),
+  z.object({ status: z.literal("untyped") }),
+]);
+
+const CollectionResolvedRelation = z.object({
+  recordId: z.string().min(1).max(200),
+  label: z.string().max(2_000),
+});
+
+const CollectionIndexedValueSchema = z.object({
+  field: COLLECTION_NAME,
+  value: CollectionValueSchema,
+  validation: CollectionIndexedValueValidation,
+  // The shared schema limit bounds both: a record carries at most one value
+  // per schema field, and a relation resolves at most one label per target.
+  resolvedRelations: z.array(CollectionResolvedRelation).max(MAX_SCHEMA_COLLECTION_ITEMS),
+});
+
+export const CollectionRecordSchema: z.ZodType<CollectionRecord> = z.object({
+  id: z.string().min(1).max(200),
+  path: PATH_STRING,
+  conflicted: z.boolean(),
+  values: z.array(CollectionIndexedValueSchema).max(MAX_SCHEMA_COLLECTION_ITEMS),
+});
+
+const CollectionRecordGroupSchema = z.object({
+  value: CollectionValueSchema,
+  records: z.array(CollectionRecordSchema),
+});
+
+const CollectionQueryCursorSchema: z.ZodType<CollectionQueryCursor> = z.object({
+  sortValues: z
+    .array(z.object({ present: z.boolean(), value: CollectionValueSchema }))
+    .max(20),
+  recordPath: PATH_STRING,
+  recordId: z.string().min(1).max(200),
+});
+
+const CollectionQueryFilterSchema: z.ZodType<CollectionQueryFilter> = z.object({
+  field: COLLECTION_NAME,
+  operator: z.enum(["equals", "contains"]),
+  value: CollectionValueSchema,
+});
+
+export const ListCollectionsPayload = WorkspaceIdPayload;
+export type ListCollectionsPayload = z.infer<typeof ListCollectionsPayload>;
+
+export const ListCollectionsResult: z.ZodType<CollectionListResultContract> =
+  z.object({ collections: z.array(CollectionSummarySchema).max(10_000) });
+export type ListCollectionsResult = CollectionListResultContract;
+
+export const GetCollectionPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+});
+export type GetCollectionPayload = z.infer<typeof GetCollectionPayload>;
+
+export const GetCollectionResult: z.ZodType<CollectionGetResultContract> =
+  z.object({
+    ...collectionSummaryShape,
+    schema: CollectionSchemaSchema,
+    recordCount: z.number().int().nonnegative(),
+  });
+export type GetCollectionResult = CollectionGetResultContract;
+
+export const QueryCollectionRecordsPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  collectionPath: PATH_STRING,
+  filter: CollectionQueryFilterSchema.optional(),
+  sort: z.array(CollectionQuerySortSchema).max(20).optional(),
+  groupBy: COLLECTION_NAME.optional(),
+  resolveRelations: z.boolean().optional(),
+  limit: z.number().int().min(1).max(1_000).optional(),
+  cursor: CollectionQueryCursorSchema.optional(),
+});
+export type QueryCollectionRecordsPayload = z.infer<
+  typeof QueryCollectionRecordsPayload
+>;
+
+export const QueryCollectionRecordsResult: z.ZodType<CollectionQueryResultContract> =
+  z.object({
+    collection: CollectionSummarySchema,
+    records: z.array(CollectionRecordSchema),
+    groups: z.array(CollectionRecordGroupSchema).nullable(),
+    nextCursor: CollectionQueryCursorSchema.nullable(),
+  });
+export type QueryCollectionRecordsResult = CollectionQueryResultContract;
 
 export const CreateWorkspaceFilePayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5607,6 +5839,13 @@ export interface DohcDesktopBridge {
   archiveChatBookmark(
     payload: ArchiveChatBookmarkPayload,
   ): Promise<ArchiveChatBookmarkResult>;
+  // Collections (Phase 2 views): the engine's collection index, read-only.
+  // Writes ride the live document's frontmatter map, not a bridge method.
+  listCollections(payload: ListCollectionsPayload): Promise<ListCollectionsResult>;
+  getCollection(payload: GetCollectionPayload): Promise<GetCollectionResult>;
+  queryCollectionRecords(
+    payload: QueryCollectionRecordsPayload,
+  ): Promise<QueryCollectionRecordsResult>;
   readWorkspaceDatabase(
     payload: ReadWorkspaceDatabasePayload,
   ): Promise<DatabaseSnapshotResult>;

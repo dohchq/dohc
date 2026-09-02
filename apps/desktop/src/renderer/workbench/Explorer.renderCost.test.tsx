@@ -54,6 +54,8 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onSetFolderExpanded: vi.fn(),
     onToggleFolder: vi.fn(),
     onTogglePin: vi.fn(),
+    collectionFolders: new Set<string>(),
+    onOpenCollection: vi.fn(),
     onPathsChanged: vi.fn(),
     onImportFiles: vi.fn(),
     onRefreshShareMounts: vi.fn(),
@@ -61,6 +63,7 @@ function explorerProps(overrides: Partial<ExplorerProps> = {}): ExplorerProps {
     onShare: vi.fn(),
     onRefresh: vi.fn(),
     onNewFileDialog: vi.fn(),
+    onNewCollection: vi.fn(),
     ...overrides,
   };
 }

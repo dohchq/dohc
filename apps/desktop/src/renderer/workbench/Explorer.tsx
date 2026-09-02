@@ -43,6 +43,7 @@ import { buildTree, leafOf, type TreeNode } from "./path-tree";
 import {
   type EditorGroup,
   clampOpenEditorsHeight,
+  isCollectionTabPath,
   isGraphTabPath,
   isHistoryDiffTabPath,
   isHistoryTabPath,
@@ -53,6 +54,7 @@ import {
   isSiteTabPath,
   isVersionCompareTabPath,
   isVirtualTabPath,
+  parseCollectionTabPath,
   parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
@@ -99,6 +101,11 @@ export interface ExplorerProps {
   onSetFolderExpanded: (path: string, expanded: boolean) => void;
   onToggleFolder: (path: string) => void;
   onTogglePin: (path: string) => void;
+  // Folder paths the engine lists as collections. Clicking the row opens the
+  // collection's views; the chevron still expands the folder in place, and
+  // keyboard expand/collapse is untouched.
+  collectionFolders: ReadonlySet<string>;
+  onOpenCollection: (path: string) => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
   // A rejected initial flush aborts the batch.
@@ -122,6 +129,10 @@ export interface ExplorerProps {
   onShare: (path: string) => void;
   onRefresh: () => void;
   onNewFileDialog: () => void;
+  // "New Collection…" from the main-owned context menu: opens the shell's
+  // new-collection dialog seeded with the folder that was right-clicked
+  // ("" = root).
+  onNewCollection: (targetDir: string) => void;
 }
 
 type EditingState =
@@ -196,6 +207,9 @@ function FileKindIcon({ kind }: { kind: WorkspaceFileEntry["kind"] }) {
 
 export function editorTitle(path: string, label?: string): string {
   if (isGraphTabPath(path)) return "Graph";
+  if (isCollectionTabPath(path)) {
+    return leafOf(parseCollectionTabPath(path) ?? "Collection");
+  }
   if (isHistoryTabPath(path)) return "History";
   if (isHistoryDiffTabPath(path)) {
     const parsed = parseHistoryDiffTabPath(path);
@@ -287,12 +301,17 @@ function rangeAroundIndex(index: number, itemCount: number): VirtualRange {
 // re-renders the rows whose state changed, not the whole tree.
 const TreeRow = memo(function TreeRow(props: {
   row: VisibleRow;
+  // The engine lists this folder as a collection, so a row click opens its
+  // views. Exposed as data-collection so tests can gate on the state before
+  // clicking.
+  collection: boolean;
   selected: boolean;
   active: boolean;
   focused: boolean;
   dropPreview: RowDropPreview | null;
   registerRef: (path: string, el: HTMLButtonElement | null) => void;
   onRowClick: (path: string, event: MouseEvent) => void;
+  onRowChevronClick: (path: string, event: MouseEvent) => void;
   onRowContextMenu: (path: string, event: MouseEvent) => void;
   onRowDragStart: (path: string, event: DragEvent) => void;
   onRowDragOver: (path: string, event: DragEvent) => void;
@@ -319,6 +338,7 @@ const TreeRow = memo(function TreeRow(props: {
         data-testid="tree-row"
         data-path={row.fullPath}
         data-kind={row.isFolder ? "folder" : "file"}
+        data-collection={props.collection ? "true" : undefined}
         data-drop-state={props.dropPreview?.kind}
         aria-level={row.depth + 1}
         aria-posinset={row.positionInSet}
@@ -370,11 +390,20 @@ const TreeRow = memo(function TreeRow(props: {
         <IndentGuides depth={row.depth} />
         {row.isFolder ? (
           <>
-            <ChevronRight
-              size={12}
-              aria-hidden
-              className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
-            />
+            {/* Its own click target: on a collection folder the ROW opens the
+                views, so the chevron is what still expands in place. A span,
+                not a button — buttons cannot nest. */}
+            <span
+              data-testid="tree-row-chevron"
+              onClick={(event) => props.onRowChevronClick(row.fullPath, event)}
+              className="grid shrink-0 place-items-center"
+            >
+              <ChevronRight
+                size={12}
+                aria-hidden
+                className={`shrink-0 text-subtle transition-transform ${row.isExpanded ? "rotate-90" : ""}`}
+              />
+            </span>
             {row.isExpanded ? (
               <FolderOpen size={13} aria-hidden className="shrink-0" />
             ) : (
@@ -415,6 +444,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     onSetFolderExpanded,
     onToggleFolder,
     onOpenFile,
+    onOpenCollection,
     onTogglePin,
   } = props;
   const activeTab =
@@ -442,6 +472,10 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
   selectionRef.current = selection;
   const anchorPathRef = useRef(anchorPath);
   anchorPathRef.current = anchorPath;
+  // Same ref-mirror idiom: rows keep their memoized callbacks when the
+  // collection set refreshes.
+  const collectionFoldersRef = useRef(props.collectionFolders);
+  collectionFoldersRef.current = props.collectionFolders;
   const [dropPreview, setDropPreview] = useState<DropPreview | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
@@ -976,10 +1010,25 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         }
       }
       selectSingle(path);
-      if (isFolder) onToggleFolder(path);
-      else onOpenFile(path);
+      if (!isFolder) {
+        onOpenFile(path);
+      } else if (collectionFoldersRef.current.has(path)) {
+        // A collection folder opens its views (docs/plans/collections.md
+        // Phase 2). The chevron and arrow keys still expand it in place.
+        onOpenCollection(path);
+      } else {
+        onToggleFolder(path);
+      }
     },
-    [selectSingle, onToggleFolder, onOpenFile],
+    [selectSingle, onToggleFolder, onOpenFile, onOpenCollection],
+  );
+
+  const onRowChevronClick = useCallback(
+    (path: string, event: MouseEvent) => {
+      event.stopPropagation();
+      onToggleFolder(path);
+    },
+    [onToggleFolder],
   );
 
   // ---- context menu (native, main-owned over the closed tuple) ----
@@ -1005,6 +1054,9 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           break;
         case "new-folder":
           beginCreate("folder", targetDir);
+          break;
+        case "new-collection":
+          props.onNewCollection(targetDir);
           break;
         case "rename":
           if (path) beginRename(path, kind === "folder");
@@ -1049,6 +1101,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       props.onShare,
       props.onRefreshShareMounts,
       props.onUnmountShare,
+      props.onNewCollection,
     ],
   );
 
@@ -1279,7 +1332,11 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
           onSetFolderExpanded(action.path, false);
           break;
         case "toggle":
-          onToggleFolder(action.path);
+          if (collectionFoldersRef.current.has(action.path)) {
+            onOpenCollection(action.path);
+          } else {
+            onToggleFolder(action.path);
+          }
           break;
         case "open":
           selectSingle(action.path);
@@ -1297,6 +1354,7 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
       focusRow,
       onSetFolderExpanded,
       onToggleFolder,
+      onOpenCollection,
       selectSingle,
       onOpenFile,
     ],
@@ -1445,12 +1503,14 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
         <TreeRow
           key={item.key}
           row={row}
+          collection={row.isFolder && props.collectionFolders.has(row.fullPath)}
           selected={selection.has(row.fullPath)}
           active={activeTab === row.fullPath}
           focused={focusedPath === row.fullPath}
           dropPreview={dropPreviewForRow(row)}
           registerRef={registerRef}
           onRowClick={onRowClick}
+          onRowChevronClick={onRowChevronClick}
           onRowContextMenu={onRowContextMenu}
           onRowDragStart={onRowDragStart}
           onRowDragOver={onRowDragOver}

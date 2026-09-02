@@ -5,6 +5,7 @@
 export const MENU_COMMANDS = [
   "new-file",
   "new-folder",
+  "new-collection",
   "open-workspace",
   "import-files",
   "export-workspace",
@@ -42,6 +43,7 @@ export function isMenuCommand(value: unknown): value is MenuCommandId {
 export const EXPLORER_MENU_COMMANDS = [
   "new-file",
   "new-folder",
+  "new-collection",
   "rename",
   "delete",
   "pin",
@@ -755,6 +757,9 @@ export const CHANNELS = {
   listChatBookmarks: "desktop:list-chat-bookmarks",
   saveChatBookmark: "desktop:save-chat-bookmark",
   archiveChatBookmark: "desktop:archive-chat-bookmark",
+  listCollections: "desktop:list-collections",
+  getCollection: "desktop:get-collection",
+  queryCollectionRecords: "desktop:query-collection-records",
   readWorkspaceDatabase: "desktop:read-workspace-database",
   readWorkspaceDatabasePage: "desktop:read-workspace-database-page",
   applyDatabaseEdit: "desktop:apply-database-edit",

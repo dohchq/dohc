@@ -11,6 +11,9 @@ import {
   clampSidebarWidth,
   closeTab,
   closeEditorGroup,
+  collectionTabPath,
+  isCollectionTabPath,
+  parseCollectionTabPath,
   createEditorGroupRight,
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
@@ -584,6 +587,17 @@ describe("tabs", () => {
     expect(parseMomentDiffTabPath("dohc://moment-diff/%ZZ")).toBeNull();
     expect(parseMomentDiffTabPath("notes/today.md")).toBeNull();
     expect(parseMomentDiffTabPath(null)).toBeNull();
+  });
+
+  it("recognizes collections as virtual tabs with encoded folder paths", () => {
+    const path = collectionTabPath("projects/road trips");
+    expect(isCollectionTabPath(path)).toBe(true);
+    expect(isVirtualTabPath(path)).toBe(true);
+    expect(parseCollectionTabPath(path)).toBe("projects/road trips");
+    expect(parseCollectionTabPath("dohc://collection/")).toBeNull();
+    expect(parseCollectionTabPath("dohc://collection/%ZZ")).toBeNull();
+    expect(parseCollectionTabPath("notes/today.md")).toBeNull();
+    expect(parseCollectionTabPath(null)).toBeNull();
   });
 
   it("persists and restores the largest multibyte moment identity", () => {

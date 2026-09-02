@@ -1,5 +1,11 @@
 @import "tailwindcss";
 
+/* Tailwind's automatic detection scans this package only, so the shared
+ * collection views rendered by CollectionPage must be named as a source —
+ * without this, any utility unique to that package is silently missing
+ * from the built CSS. */
+@source "../../../../packages/collection-views/src";
+
 @custom-variant dark ([data-theme='dark'] &);
 
 /* Warm paper + graphite palette (brand bible / packages/brand, supersedes the
