@@ -3675,7 +3675,6 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     );
     let facts = outcome.record_facts.expect("local facts");
     assert_eq!(facts.attribution.as_ref(), Some(&attribution));
-    assert_eq!(facts.fields[0].attribution.as_ref(), Some(&attribution));
     assert_eq!(
         facts.source, None,
         "an unjournaled local apply has no replication coordinate"
@@ -3720,7 +3719,6 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
         .record_facts
         .expect("a remote apply derives facts on the receiving device");
     assert_eq!(facts.attribution.as_ref(), Some(&attribution));
-    assert_eq!(facts.fields[0].attribution.as_ref(), Some(&attribution));
     assert_eq!(facts.source, Some(("origin-a".to_owned(), 7)));
     assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
 

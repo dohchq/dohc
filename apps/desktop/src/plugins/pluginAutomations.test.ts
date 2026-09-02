@@ -61,6 +61,7 @@ interface Harness {
 
 function harness(input: {
   declared?: readonly PluginAutomationDeclaration[];
+  proveReadable?: PluginAutomationsOptions["proveReadable"];
   runOnPlugin?: PluginAutomationsOptions["runOnPlugin"];
 } = {}): Harness {
   const pendingClaims: AutomationClaim[] = [];
@@ -83,6 +84,7 @@ function harness(input: {
     withAdapter: (work) => work(adapter as unknown as AutomationEngineAdapter),
     declaredAutomations: () =>
       input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }],
+    proveReadable: input.proveReadable ?? (async () => undefined),
     runOnPlugin:
       input.runOnPlugin ??
       (async (pluginId, params) => {
@@ -144,7 +146,7 @@ describe("PluginAutomations", () => {
         pluginId: "hello-plugin",
         params: {
           claimId: "claim-1",
-          automationId: "triage",
+          manifestAutomationId: "triage",
           handler: "triage",
           facts: { collectionPath: "tasks", recordId: "rec_1", depth: 0 },
         },

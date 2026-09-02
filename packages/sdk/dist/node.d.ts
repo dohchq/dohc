@@ -365,7 +365,7 @@ export interface PluginActivateContext {
 export interface PluginAutomationRunFacts {
     claimId: string;
     /** The manifest's automation id (without the plugin-name prefix). */
-    automationId: string;
+    manifestAutomationId: string;
     collectionPath: string;
     recordId: string;
     /** The TRIGGERING change's chain depth. This run's writes carry depth + 1. */

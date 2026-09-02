@@ -9142,6 +9142,7 @@ fn worker_main(
                     require_empty_lineage,
                     seed_source_sha256,
                     request_id,
+                    true,
                     now_ms,
                     faults.as_ref(),
                     &token,
@@ -11460,6 +11461,7 @@ fn ydoc_record_update_on_store(
     require_empty_lineage: bool,
     seed_source_sha256: Option<String>,
     request_id: Option<String>,
+    claim_triggers: bool,
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
@@ -11588,7 +11590,11 @@ fn ydoc_record_update_on_store(
             // reaches it — so claiming here is origin-device execution by
             // construction. Same transaction as the append: a claim exists
             // exactly when the change it triggers on committed.
-            if let Some(facts) = outcome.record_facts.as_ref() {
+            // An engine-maintenance write (record id adoption, relation
+            // cleanup) carries no attribution and is not a change anyone
+            // authored: claiming on it would restart every chain at depth
+            // zero and wake nothing, so those callers pass false.
+            if let (true, Some(facts)) = (claim_triggers, outcome.record_facts.as_ref()) {
                 automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
                     tx,
                     &journal_key.workspace_id,
@@ -14356,6 +14362,7 @@ fn ensure_collection_record_id_on_store(
         false,
         None,
         None,
+        false,
         now_ms,
         faults,
         token,
@@ -14603,6 +14610,7 @@ fn cleanup_collection_relation_on_store(
             true,
             state.head_blob_sha256.clone(),
             None,
+            false,
             now_ms,
             faults,
             token,
@@ -14645,6 +14653,7 @@ fn cleanup_collection_relation_on_store(
         false,
         None,
         None,
+        false,
         now_ms,
         faults,
         token,

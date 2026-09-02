@@ -418,7 +418,7 @@ describe("PluginHost", () => {
     const writes: Array<{ path: string; text: string }> = [];
     const claimTags: Array<string | undefined> = [];
     const harness = createProcessHarness({
-      modes: { "hello-plugin": "automation" },
+      modes: { "hello-plugin": "automation-report" },
     });
     const host = trackHost({
       stateDir: await stateDir(),
@@ -457,9 +457,9 @@ describe("PluginHost", () => {
       },
     });
 
-    // The automation fixture registers no commands, so the admitted manifest
-    // declares none either.
-    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest([]));
+    // The automation fixture registers the report command the e2e reads, so
+    // the admitted manifest declares exactly that.
+    await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest(["hello.write"]));
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Plugin did not become ready.",
@@ -468,7 +468,7 @@ describe("PluginHost", () => {
     const facts = { collectionPath: "tasks", recordId: "rec_1", depth: 0 };
     await host.runAutomation("hello-plugin", {
       claimId: "claim-1",
-      automationId: "triage",
+      manifestAutomationId: "triage",
       handler: "triage",
       facts,
     });
@@ -481,7 +481,7 @@ describe("PluginHost", () => {
         path: "automation-run-report.json",
         text: `${JSON.stringify({
           claimId: "claim-1",
-          automationId: "triage",
+          manifestAutomationId: "triage",
           ...facts,
         })}\n`,
       },
@@ -494,7 +494,7 @@ describe("PluginHost", () => {
     await expect(
       host.runAutomation("hello-plugin", {
         claimId: "claim-2",
-        automationId: "other",
+        manifestAutomationId: "other",
         handler: "missing",
         facts,
       }),

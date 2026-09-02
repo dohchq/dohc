@@ -378,6 +378,32 @@ switch (mode) {
   // collection's counter record, so a change in either collection starts a
   // chain that only dohc's depth cap can stop. Each write carries the run's
   // depth in its value, so every hop writes a genuinely new value.
+  // The unit test's plugin host has no workspace engine: this mode proves
+  // the run request reaches the registered handler and that the handler's
+  // SDK requests carry the claim, without touching a collection.
+  case "automation-report": {
+    const runs = [];
+    handler = {
+      activate(ctx) {
+        ctx.commands.register("hello.write", async () => {
+          await ctx.client.files.write(
+            "automation-run-report.json",
+            `${JSON.stringify({ runs })}
+`,
+          );
+        });
+        ctx.automations.register("triage", async (facts) => {
+          runs.push(facts);
+          await ctx.client.files.write(
+            "automation-run-report.json",
+            `${JSON.stringify(facts)}
+`,
+          );
+        });
+      },
+    };
+    break;
+  }
   case "automation": {
     const runs = [];
     handler = {

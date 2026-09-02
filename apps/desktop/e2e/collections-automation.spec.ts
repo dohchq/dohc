@@ -109,7 +109,7 @@ const fixtureRoot = fileURLToPath(
 interface AutomationRunReport {
   runs: Array<{
     claimId: string;
-    automationId: string;
+    manifestAutomationId: string;
     collectionPath: string;
     recordId: string;
     depth: number;
@@ -217,6 +217,16 @@ test("a record change runs its automation on the origin device exactly once, loo
   ): AutomationRunReport["runs"] {
     if (typeof report === "string") return [];
     return report.runs.filter((run) => run.recordId === recordId);
+  }
+
+  // A zero-run assertion must fail loud on an unreadable report, or it
+  // passes vacuously while the plugin is mid-write or refusing.
+  function runsForOrThrow(
+    report: AutomationRunReport | string,
+    recordId: string,
+  ): AutomationRunReport["runs"] {
+    if (typeof report === "string") throw new Error(`run report unreadable: ${report}`);
+    return runsFor(report, recordId);
   }
 
   // The owner-visible failure surface, read through the real renderer
@@ -475,8 +485,8 @@ test("a record change runs its automation on the origin device exactly once, loo
       )
       .toBe(2);
     expect(runsFor(await readRunReport(), APOLLO_ID)).toMatchObject([
-      { automationId: "triage", depth: 0 },
-      { automationId: "triage", depth: 0 },
+      { manifestAutomationId: "triage", depth: 0 },
+      { manifestAutomationId: "triage", depth: 0 },
     ]);
     expect(await listFailures()).toEqual([]);
 
@@ -529,7 +539,7 @@ test("a record change runs its automation on the origin device exactly once, loo
         { timeout: 60_000, intervals: [2000] },
       )
       .toBe("drained");
-    expect(runsFor(await readRunReport(), ZEPHYR_ID)).toEqual([]);
+    expect(runsForOrThrow(await readRunReport(), ZEPHYR_ID)).toEqual([]);
     expect(automationRows(await recordOnB("tasks", ZEPHYR_ID))).toEqual([]);
     expect(await listFailures()).toEqual([]);
 
@@ -591,12 +601,12 @@ test("a record change runs its automation on the origin device exactly once, loo
     // Two runs each, at the depths the chain dictates, and no fifth run.
     const chainReport = await readRunReport();
     expect(runsFor(chainReport, CHAIN_A_ID)).toMatchObject([
-      { automationId: "ping", depth: 0 },
-      { automationId: "ping", depth: 2 },
+      { manifestAutomationId: "ping", depth: 0 },
+      { manifestAutomationId: "ping", depth: 2 },
     ]);
     expect(runsFor(chainReport, CHAIN_B_ID)).toMatchObject([
-      { automationId: "pong", depth: 1 },
-      { automationId: "pong", depth: 3 },
+      { manifestAutomationId: "pong", depth: 1 },
+      { manifestAutomationId: "pong", depth: 3 },
     ]);
     // Each hop's write, attributed at its own depth, on both records.
     expect(automationRows(await recordOnB("chain-b", CHAIN_B_ID))).toMatchObject([

@@ -2234,10 +2234,13 @@ impl EngineService {
                 .await?;
             }
             // The automation claim reaper (ADR 0008: a claim left by a closed
-            // device fires on next launch). Only claims idle past the reap
-            // bound transition — a handler a still-alive desktop is running
-            // across a daemon rebind keeps its claim.
-            if actor_open.created_actor {
+            // device fires on next launch). Every open runs it, not only the
+            // one that created the actor: a desktop that died mid-run and
+            // relaunched inside the idle bound would otherwise leave that
+            // claim running until some later actor creation. The idle bound
+            // protects a handler a still-alive desktop is running, whose run
+            // settles inside the shorter per-run deadline.
+            {
                 Self::read_under_ctx(
                     &cancellation,
                     "workspace.open (automation reclaim)",

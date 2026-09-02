@@ -207,7 +207,7 @@ transport.onRequest(PLUGIN_HOST_METHODS.automationRun, async (rawParams) => {
   await runInAutomationClaimContext(params.claimId, () =>
     handler({
       claimId: params.claimId,
-      automationId: params.automationId,
+      manifestAutomationId: params.manifestAutomationId,
       collectionPath: params.facts.collectionPath,
       recordId: params.facts.recordId,
       depth: params.facts.depth,

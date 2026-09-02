@@ -220,13 +220,14 @@ export interface SdkRequestParams {
 }
 
 /**
- * One claimed automation run, sent host -> plugin. `automationId` is the
- * manifest's own id and `handler` the registration name it declares — main
- * resolves both from the admitted manifest, never from the claim alone.
+ * One claimed automation run, sent host -> plugin. `manifestAutomationId` is
+ * the manifest's own id (no plugin-name prefix) and `handler` the
+ * registration name it declares — main resolves both from the admitted
+ * manifest, never from the claim alone.
  */
 export interface PluginAutomationRunParams {
   claimId: string;
-  automationId: string;
+  manifestAutomationId: string;
   handler: string;
   facts: {
     collectionPath: string;

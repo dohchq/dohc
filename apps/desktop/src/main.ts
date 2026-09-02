@@ -1080,8 +1080,25 @@ function createPluginWorkspaceRuntimeParts(
         },
         work,
       ),
-    declaredAutomations: (pluginId) =>
-      pipeline?.pluginRegistration(pluginId)?.manifest.automations ?? null,
+    declaredAutomations: (pluginId) => {
+      const currentPipeline = pipeline;
+      if (!currentPipeline || !currentPipeline.discoveryLanded) return undefined;
+      return currentPipeline.pluginRegistration(pluginId)?.manifest.automations ?? null;
+    },
+    // The read-scope proof a collections.watch makes, through the plugin's
+    // own owned read port: "." is readable by definition (delivery filters
+    // by the listed set), anything else must resolve as a collection.
+    proveReadable: async (_pluginId, collectionPath) => {
+      if (collectionPath === ".") return;
+      const registered = findWorkspace(workspace.workspaceId);
+      if (!registered) {
+        throw new Error("This workspace is not registered on this machine.");
+      }
+      await ownedWorkspaceReadsFor({
+        ...registered,
+        attachmentId: authorityBinding.attachmentId,
+      }).getCollection({ collectionPath });
+    },
     runOnPlugin: async (pluginId, params) => {
       const currentPipeline = pipeline;
       // Pipeline still wiring up: the same transient as a host refusal. The

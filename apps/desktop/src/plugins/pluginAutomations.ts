@@ -77,10 +77,19 @@ export interface PluginAutomationsOptions {
   withAdapter<T>(
     work: (adapter: AutomationEngineAdapter) => Promise<T>,
   ): Promise<T | null>;
-  /** The admitted manifest for an installed plugin, from the pipeline. */
+  /**
+   * The admitted manifest for an installed plugin, from the pipeline: null
+   * when no installed plugin has that id, undefined while the pipeline's
+   * first discovery pass has not landed (nothing is knowable yet).
+   */
   declaredAutomations(
     pluginId: string,
-  ): readonly PluginAutomationDeclaration[] | null;
+  ): readonly PluginAutomationDeclaration[] | null | undefined;
+  /**
+   * Proves the plugin may read the collection an automation declares, with
+   * the check a collections.watch on that path makes. Rejects otherwise.
+   */
+  proveReadable(pluginId: string, collectionPath: string): Promise<void>;
   /** Starts the plugin if needed and sends it the run; rejects when the handler throws. */
   runOnPlugin(
     pluginId: string,
@@ -261,6 +270,18 @@ export class PluginAutomations {
         this.registered.set(automationId, { pluginId, declaration });
         continue;
       }
+      // The same boundary a collections.watch crosses: an automation reaches
+      // only a collection its plugin may read. A refusal is the owner's to
+      // see, not a silent skip.
+      try {
+        await this.options.proveReadable(pluginId, declaration.collection);
+      } catch (error) {
+        this.options.onError(
+          `register automation "${automationId}" on "${declaration.collection}"`,
+          error,
+        );
+        continue;
+      }
       const subscribed = await this.options.withAdapter((adapter) =>
         adapter.subscribeAutomation({
           automationId,
@@ -309,12 +330,16 @@ export class PluginAutomations {
     }
   }
 
-  /** True when a discovered plugin's admitted manifest declares this id. */
-  private installedPluginDeclares(automationId: string): boolean {
+  /**
+   * True when a discovered plugin's admitted manifest declares this id,
+   * undefined while discovery has not landed.
+   */
+  private installedPluginDeclares(automationId: string): boolean | undefined {
     const slash = automationId.indexOf("/");
     if (slash <= 0) return false;
     const pluginId = automationId.slice(0, slash);
     const declared = this.options.declaredAutomations(pluginId);
+    if (declared === undefined) return undefined;
     return (
       declared?.some(
         (declaration) =>
@@ -339,7 +364,11 @@ export class PluginAutomations {
   ): Promise<"settled" | "defer"> {
     const registered = this.registered.get(claim.automationId);
     if (!registered) {
-      if (this.installedPluginDeclares(claim.automationId)) {
+      const declares = this.installedPluginDeclares(claim.automationId);
+      // Before the pipeline's first discovery pass nothing is knowable:
+      // a claim that arrives that early waits, like one for a plugin that
+      // has not registered yet.
+      if (declares === undefined || declares) {
         // Startup ordering: claimNext serves the oldest pending claim
         // workspace-wide, but `registered` fills per plugin as each one's
         // pipeline status lands. An installed declarer that has not
@@ -424,7 +453,7 @@ export class PluginAutomations {
       this.options
         .runOnPlugin(registered.pluginId, {
           claimId: claim.claimId,
-          automationId: registered.declaration.id,
+          manifestAutomationId: registered.declaration.id,
           handler: registered.declaration.handler,
           facts: {
             collectionPath: claim.collectionPath,
