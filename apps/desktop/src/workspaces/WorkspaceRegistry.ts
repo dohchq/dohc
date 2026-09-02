@@ -92,6 +92,17 @@ export function acknowledgeWorkspaceShareSkips(
   store().acknowledgeShareSkips(workspaceId, shareId, generation);
 }
 
+// The user has seen an automation's failures up to `generation`: hide the
+// notice, keep the engine's failed claim rows. See
+// registryStore.acknowledgeAutomationFailure.
+export function acknowledgeWorkspaceAutomationFailure(
+  workspaceId: string,
+  automationId: string,
+  generation: number,
+): void {
+  store().acknowledgeAutomationFailure(workspaceId, automationId, generation);
+}
+
 export function setWorkspaceShareView(
   workspaceId: string,
   shareView: ShareViewIdentity,

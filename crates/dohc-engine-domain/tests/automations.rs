@@ -4,11 +4,12 @@
 //! failed machine, and the startup reaper's requeue-or-exhaust rule.
 
 use dohc_engine_domain::{
-    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaim,
-    AutomationClaimState, AutomationSettle, AutomationTrigger, ChangeActorKind, ChangeAttribution,
-    CollectionFieldChangeFact, CollectionRecordApplyFacts, DomainError, NoFaults, TxnOutcome,
-    claim_automation_triggers_in_tx, claim_next_pending_automation, reclaim_running_automations,
-    settle_automation_claim, subscribe_automation, unsubscribe_automation,
+    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_RECLAIM_EXHAUSTED,
+    AutomationClaim, AutomationClaimState, AutomationSettle, AutomationTrigger, ChangeActorKind,
+    ChangeAttribution, CollectionFieldChangeFact, CollectionRecordApplyFacts, DomainError,
+    NoFaults, TxnOutcome, claim_automation_triggers_in_tx, claim_next_pending_automation,
+    list_automation_failures, reclaim_running_automations, settle_automation_claim,
+    subscribe_automation, unsubscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -191,7 +192,7 @@ fn a_never_synced_change_keys_on_its_history_row_id() {
 }
 
 #[test]
-fn the_writing_automation_and_the_depth_cap_claim_nothing() {
+fn the_writing_automation_never_claims_and_the_depth_cap_records_the_stop() {
     let scratch = ScratchDir::new().expect("scratch");
     let mut store = open_store(&scratch);
     subscribe_automation(&mut store, WS, "plugin:triage", "tasks", 10, &NO_FAULTS)
@@ -209,6 +210,8 @@ fn the_writing_automation_and_the_depth_cap_claim_nothing() {
         "an automation never re-triggers itself"
     );
 
+    // At the cap, the automation does not run — but the stop is recorded as
+    // a failed `chain-stopped` claim, so the owner surface sees it.
     let at_cap = facts(
         "tasks",
         Some(("origin-a", 2)),
@@ -216,9 +219,36 @@ fn the_writing_automation_and_the_depth_cap_claim_nothing() {
         Some("plugin:other"),
         Some(AUTOMATION_CHAIN_DEPTH_CAP),
     );
+    let stopped = claim_for(&mut store, WS, &at_cap, 30);
+    assert_eq!(
+        stopped.len(),
+        1,
+        "the stop is recorded, once per automation"
+    );
+    assert_eq!(stopped[0].state, AutomationClaimState::Failed);
+    assert_eq!(stopped[0].error.as_deref(), Some(AUTOMATION_CHAIN_STOPPED));
     assert!(
-        claim_for(&mut store, WS, &at_cap, 30).is_empty(),
-        "a change at the chain depth cap triggers nothing"
+        claim_next_pending_automation(&mut store, WS, 31, &NO_FAULTS)
+            .expect("claim next")
+            .is_none(),
+        "a chain-stopped row is never drained as work"
+    );
+    assert!(
+        claim_for(&mut store, WS, &at_cap, 32).is_empty(),
+        "a replayed at-cap apply dedupes on the same trigger key"
+    );
+    // The writing automation's own subscription records no stop either: it
+    // would never have been triggered at any depth.
+    let own_at_cap = facts(
+        "tasks",
+        Some(("origin-a", 4)),
+        &[4],
+        Some("plugin:triage"),
+        Some(AUTOMATION_CHAIN_DEPTH_CAP),
+    );
+    assert!(
+        claim_for(&mut store, WS, &own_at_cap, 33).is_empty(),
+        "self-skip applies to the stop report too"
     );
 
     let below_cap = facts(
@@ -231,6 +261,89 @@ fn the_writing_automation_and_the_depth_cap_claim_nothing() {
     let claims = claim_for(&mut store, WS, &below_cap, 40);
     assert_eq!(claims.len(), 1, "one below the cap still claims");
     assert_eq!(claims[0].depth, AUTOMATION_CHAIN_DEPTH_CAP - 1);
+    assert_eq!(claims[0].state, AutomationClaimState::Pending);
+}
+
+#[test]
+fn failures_list_one_row_per_automation_with_the_newest_error_and_a_counting_generation() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let mut store = open_store(&scratch);
+    subscribe_automation(&mut store, WS, "plugin:triage", "tasks", 10, &NO_FAULTS)
+        .expect("subscribe");
+
+    assert!(
+        list_automation_failures(&store, WS)
+            .expect("list failures")
+            .is_empty(),
+        "no failed claims, no rows"
+    );
+
+    // Two failures for the same automation: a settled handler error, then a
+    // chain-stopped row inserted later.
+    let first = facts("tasks", Some(("origin-a", 1)), &[1], None, None);
+    let claims = claim_for(&mut store, WS, &first, 20);
+    assert_eq!(claims.len(), 1);
+    claim_next_pending_automation(&mut store, WS, 21, &NO_FAULTS)
+        .expect("claim next")
+        .expect("one pending claim");
+    settle_automation_claim(
+        &mut store,
+        WS,
+        &claims[0].claim_id,
+        &AutomationSettle::Failed {
+            error: "handler exploded".to_owned(),
+        },
+        22,
+        &NO_FAULTS,
+    )
+    .expect("settle failed");
+    let at_cap = facts(
+        "tasks",
+        Some(("origin-a", 2)),
+        &[2],
+        Some("plugin:other"),
+        Some(AUTOMATION_CHAIN_DEPTH_CAP),
+    );
+    claim_for(&mut store, WS, &at_cap, 30);
+
+    let failures = list_automation_failures(&store, WS).expect("list failures");
+    assert_eq!(failures.len(), 1, "one row per automation");
+    assert_eq!(failures[0].automation_id, "plugin:triage");
+    assert_eq!(
+        failures[0].error, AUTOMATION_CHAIN_STOPPED,
+        "the newest failure's error wins"
+    );
+    assert_eq!(failures[0].updated_at_ms, 30);
+    assert_eq!(
+        failures[0].generation, 2,
+        "the generation counts the failed claims"
+    );
+
+    // A done claim never appears, and another workspace's failures do not
+    // leak in.
+    let done = facts("tasks", Some(("origin-a", 3)), &[3], None, None);
+    let done_claims = claim_for(&mut store, WS, &done, 40);
+    claim_next_pending_automation(&mut store, WS, 41, &NO_FAULTS)
+        .expect("claim next")
+        .expect("one pending claim");
+    settle_automation_claim(
+        &mut store,
+        WS,
+        &done_claims[0].claim_id,
+        &AutomationSettle::Done,
+        42,
+        &NO_FAULTS,
+    )
+    .expect("settle done");
+    let failures = list_automation_failures(&store, WS).expect("list failures");
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].generation, 2, "a done claim moves nothing");
+    assert!(
+        list_automation_failures(&store, "ws-other")
+            .expect("list failures")
+            .is_empty(),
+        "failures are workspace-scoped"
+    );
 }
 
 #[test]

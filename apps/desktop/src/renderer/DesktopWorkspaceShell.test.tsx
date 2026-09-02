@@ -330,6 +330,9 @@ function makeBridge(
   platform: NodeJS.Platform = "linux",
 ) {
   const activityCallbacks = new Set<(event: WorkspaceActivityEvent) => void>();
+  const automationFailuresCallbacks = new Set<
+    (event: { workspaceId: string }) => void
+  >();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
   let menuCallback: ((command: MenuCommandId) => void) | null = null;
   let pluginPanelOpenedCallback:
@@ -651,6 +654,32 @@ function makeBridge(
       sizes: { installedBytes: null, dataBytes: null },
     })),
     onPluginStatusChanged: vi.fn(() => () => undefined),
+    listAutomationFailures: vi.fn(
+      async (_payload: { workspaceId: string }) => ({
+        failures: [] as {
+          automationId: string;
+          error: string;
+          updatedAtMs: number;
+          generation: number;
+        }[],
+      }),
+    ),
+    dismissAutomationFailure: vi.fn(
+      async (_payload: {
+        workspaceId: string;
+        automationId: string;
+        generation: number;
+      }) => undefined,
+    ),
+    emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
+      for (const callback of [...automationFailuresCallbacks]) callback(event);
+    },
+    onAutomationFailuresChanged: vi.fn(
+      (listener: (event: { workspaceId: string }) => void) => {
+        automationFailuresCallbacks.add(listener);
+        return () => automationFailuresCallbacks.delete(listener);
+      },
+    ),
     startPluginWebApp: vi.fn(async () => ({
       status: "ok" as const,
       title: "T3 Code",
@@ -8957,6 +8986,96 @@ describe("share changes review", () => {
       bridge.listShareProposals,
       "MUTATION: asking main a question it refuses, and surfacing the refusal",
     ).not.toHaveBeenCalled();
+  });
+});
+
+// Automation failures (ADR 0008, Phase 4): the engine's failed claim rows
+// become one durable notice per automation until the owner acknowledges the
+// generation on screen. Modelled on the share-refusal banner above: the
+// read comes from main on open and on every failure poke, so a restart
+// re-raises anything unacknowledged.
+describe("automation failure notices", () => {
+  const FAILURE = {
+    automationId: "hello-plugin/triage",
+    error: "handler exploded",
+    updatedAtMs: 5_000,
+    generation: 1,
+  };
+  const NOTICE_ID = "notice-automation-failure-hello-plugin/triage";
+
+  it("raises the notice from the engine's failed claims and dismisses by the generation on screen", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [FAILURE] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    const notice = await screen.findByTestId(NOTICE_ID);
+    expect(notice.textContent).toContain(
+      'Automation "hello-plugin/triage" failed',
+    );
+    expect(notice.textContent).toContain("handler exploded");
+    expect(notice.textContent).toContain("Open the plugin's source");
+
+    // Dismiss sends the generation ON SCREEN — a failure recorded since
+    // this render has a higher one, so a stale click cannot hide it — and
+    // re-reads either way.
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [] });
+    await user.click(screen.getByTestId(`${NOTICE_ID}-dismiss`));
+    await waitFor(() => {
+      expect(screen.queryByTestId(NOTICE_ID)).toBeNull();
+    });
+    expect(bridge.dismissAutomationFailure).toHaveBeenCalledWith({
+      workspaceId: WORKSPACE.workspaceId,
+      automationId: "hello-plugin/triage",
+      generation: 1,
+    });
+  });
+
+  it("re-raises a dismissed notice when a newer failure arrives on the poke", async () => {
+    const user = userEvent.setup();
+    const bridge = makeBridge(Promise.resolve(null));
+    // Acknowledged: main serves nothing at open.
+    bridge.listAutomationFailures.mockResolvedValue({ failures: [] });
+    renderShell(bridge);
+
+    await user.click(await screen.findByTestId("notice-center-toggle"));
+    await screen.findByTestId("notice-center");
+    expect(screen.queryByTestId(NOTICE_ID)).toBeNull();
+
+    // A newer failure lands: the poke re-reads, and the higher generation
+    // is unacknowledged again.
+    bridge.listAutomationFailures.mockResolvedValue({
+      failures: [
+        { ...FAILURE, error: "chain-stopped", generation: 2, updatedAtMs: 9_000 },
+      ],
+    });
+    act(() => {
+      bridge.emitAutomationFailuresChanged({
+        workspaceId: WORKSPACE.workspaceId,
+      });
+    });
+    const notice = await screen.findByTestId(NOTICE_ID);
+    // The chain-stop copy must not claim the handler threw: it never ran.
+    expect(notice.textContent).toContain("An automation chain stopped");
+    expect(notice.textContent).toContain("did not run");
+    expect(notice.textContent).toContain("2 failures so far.");
+  });
+
+  it("ignores a poke for another workspace", async () => {
+    const bridge = makeBridge(Promise.resolve(null));
+    renderShell(bridge);
+    await waitFor(() => {
+      expect(bridge.onAutomationFailuresChanged).toHaveBeenCalled();
+    });
+    const reads = bridge.listAutomationFailures.mock.calls.length;
+    act(() => {
+      bridge.emitAutomationFailuresChanged({ workspaceId: "ws-elsewhere" });
+    });
+    expect(
+      bridge.listAutomationFailures.mock.calls.length,
+      "MUTATION: another workspace's failures repainting this one",
+    ).toBe(reads);
   });
 });
 

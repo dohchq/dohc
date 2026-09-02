@@ -4979,6 +4979,40 @@ export const DismissShareSkipsPayload = z.object({
 });
 export type DismissShareSkipsPayload = z.infer<typeof DismissShareSkipsPayload>;
 
+// ---- Automation failures (ADR 0008) ----
+// The engine's failed automation claims are the durable record; main serves
+// them minus what the owner acknowledged. One notice per automation: the
+// newest error and a generation (the automation's failed-claim count).
+export const ListAutomationFailuresPayload = z.object({
+  workspaceId: WORKSPACE_ID,
+});
+export type ListAutomationFailuresPayload = z.infer<
+  typeof ListAutomationFailuresPayload
+>;
+
+export interface AutomationFailureNotice {
+  automationId: string;
+  error: string;
+  updatedAtMs: number;
+  generation: number;
+}
+
+export interface ListAutomationFailuresResult {
+  failures: AutomationFailureNotice[];
+}
+
+// Acknowledging an automation's failures up to the generation on screen.
+// Deletes nothing: the engine's claim rows stay, and a failure recorded
+// after the render has a higher generation, so it speaks up again.
+export const DismissAutomationFailurePayload = z.object({
+  workspaceId: WORKSPACE_ID,
+  automationId: z.string().min(1),
+  generation: z.number().int().nonnegative(),
+});
+export type DismissAutomationFailurePayload = z.infer<
+  typeof DismissAutomationFailurePayload
+>;
+
 const RefreshSharedViewSuccessResult = z.object({
   ok: z.literal(true),
   // "ended" means the granter revoked the share: the local view stays
@@ -6050,6 +6084,15 @@ export interface DohcDesktopBridge {
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
+  // Automation failures (ADR 0008): the unacknowledged failure rows for the
+  // workspace's automations, and the acknowledgment that hides them without
+  // deleting the engine's claim rows.
+  listAutomationFailures(
+    payload: ListAutomationFailuresPayload,
+  ): Promise<ListAutomationFailuresResult>;
+  dismissAutomationFailure(
+    payload: DismissAutomationFailurePayload,
+  ): Promise<void>;
   // Share changes (#646 PR3a): the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
@@ -6241,6 +6284,13 @@ export interface DohcDesktopBridge {
   onWorkspaceActivity(listener: (event: WorkspaceActivityEvent) => void): () => void;
   onPluginStatusChanged(
     listener: (event: PluginStatusChangedEvent) => void,
+  ): () => void;
+  // Live push: an automation claim failed (settled here, or recorded by the
+  // engine at the depth cap). A poke, not the record — the subscriber
+  // re-lists through listAutomationFailures, guarded by its own workspace.
+  // Returns an unsubscribe function.
+  onAutomationFailuresChanged(
+    listener: (event: { workspaceId: string }) => void,
   ): () => void;
   // Live push: main signals a cloud session transition (login, logout,
   // account switch, or a relay proving the session dead). Account-scoped

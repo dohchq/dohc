@@ -397,6 +397,31 @@ const bridge: DohcDesktopBridge = {
   openSharedView: (payload) => ipcRenderer.invoke(CHANNELS.openSharedView, payload),
   refreshSharedView: (payload) => ipcRenderer.invoke(CHANNELS.refreshSharedView, payload),
   dismissShareSkips: (payload) => ipcRenderer.invoke(CHANNELS.dismissShareSkips, payload),
+  listAutomationFailures: (payload) =>
+    ipcRenderer.invoke(CHANNELS.listAutomationFailures, payload),
+  dismissAutomationFailure: (payload) =>
+    ipcRenderer.invoke(CHANNELS.dismissAutomationFailure, payload),
+  onAutomationFailuresChanged: (
+    listener: (event: { workspaceId: string }) => void,
+  ) => {
+    // Validate at the boundary like every main-sent event: the listener
+    // only ever sees a workspace id string; anything else is dropped.
+    const handler = (_event: unknown, payload: unknown) => {
+      if (
+        typeof payload === "object" &&
+        payload !== null &&
+        "workspaceId" in payload &&
+        typeof (payload as { workspaceId: unknown }).workspaceId === "string"
+      ) {
+        listener({
+          workspaceId: (payload as { workspaceId: string }).workspaceId,
+        });
+      }
+    };
+    ipcRenderer.on(CHANNELS.automationFailuresChanged, handler);
+    return () =>
+      ipcRenderer.removeListener(CHANNELS.automationFailuresChanged, handler);
+  },
   listShareProposals: (payload) =>
     ipcRenderer.invoke(CHANNELS.listShareProposals, payload),
   readShareProposalChanges: (payload) =>

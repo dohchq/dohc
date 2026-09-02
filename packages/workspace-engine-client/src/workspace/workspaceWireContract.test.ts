@@ -589,6 +589,30 @@ describe("automations wire schemas", () => {
     ).toEqual(failed);
   });
 
+  it("decodes the failure listing and refuses a row without a generation", () => {
+    const failure = {
+      automationId: "hello-plugin/triage",
+      error: "chain-stopped",
+      updatedAtMs: 2_000,
+      generation: 3,
+    };
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
+        failures: [failure],
+      }),
+    ).toEqual({ failures: [failure] });
+    expect(
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
+        failures: [],
+      }),
+    ).toEqual({ failures: [] });
+    expect(() =>
+      decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
+        failures: [{ automationId: "hello-plugin/triage", error: "x" }],
+      }),
+    ).toThrow(WorkspaceProtocolShapeError);
+  });
+
   it("refuses a claim with an unknown state or a malformed trigger", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsClaimNext, {

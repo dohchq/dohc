@@ -38,6 +38,7 @@ export const WORKSPACE_METHOD = {
   automationsSubscribe: "automations.subscribe",
   automationsUnsubscribe: "automations.unsubscribe",
   automationsClaimNext: "automations.claimNext",
+  automationsFailures: "automations.failures",
   automationsSettle: "automations.settle",
 } as const;
 
@@ -325,6 +326,24 @@ export type AutomationUnsubscribeResult = WorkspaceJsonObject & {
 /** Null when no pending claim remains: the drain loop's stop condition. */
 export type AutomationClaimNextResult = AutomationClaim | null;
 
+/**
+ * One automation with at least one failed claim. Mirrors AutomationFailure
+ * in crates/dohc-workspace-engine: the newest error and its time, plus a
+ * generation — the automation's failed-claim count, which only grows
+ * (failed rows are never deleted), so an acknowledgment at generation N
+ * hides the owner's notice exactly until a newer failure passes N.
+ */
+export type AutomationFailure = WorkspaceJsonObject & {
+  automationId: string;
+  error: string;
+  updatedAtMs: number;
+  generation: number;
+};
+
+export type AutomationFailuresResult = WorkspaceJsonObject & {
+  failures: AutomationFailure[];
+};
+
 export type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
     | (WorkspaceJsonObject & {
@@ -360,6 +379,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscriptionParams;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationSubscriptionParams;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextParams;
+  [WORKSPACE_METHOD.automationsFailures]: WorkspaceEmptyParams;
   [WORKSPACE_METHOD.automationsSettle]: AutomationSettleParams;
 };
 
@@ -384,6 +404,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.automationsSubscribe]: AutomationSubscribeResult;
   [WORKSPACE_METHOD.automationsUnsubscribe]: AutomationUnsubscribeResult;
   [WORKSPACE_METHOD.automationsClaimNext]: AutomationClaimNextResult;
+  [WORKSPACE_METHOD.automationsFailures]: AutomationFailuresResult;
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaim;
 };
 
@@ -987,6 +1008,18 @@ const WorkspaceResultSchemas = {
     unsubscribed: Schema.Boolean,
   }),
   [WORKSPACE_METHOD.automationsClaimNext]: Schema.NullOr(AutomationClaimSchema),
+  [WORKSPACE_METHOD.automationsFailures]: mutableStruct({
+    failures: Schema.mutable(
+      Schema.Array(
+        mutableStruct({
+          automationId: Schema.NonEmptyString,
+          error: Schema.String,
+          updatedAtMs: Schema.Int,
+          generation: Schema.Int,
+        }),
+      ),
+    ),
+  }),
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaimSchema,
 } as const;
 

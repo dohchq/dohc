@@ -126,6 +126,9 @@ import {
   OpenSharedViewResult,
   RefreshSharedViewPayload,
   DismissShareSkipsPayload,
+  ListAutomationFailuresPayload,
+  DismissAutomationFailurePayload,
+  type ListAutomationFailuresResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
   ReadShareProposalChangesPayload,
@@ -399,6 +402,7 @@ import {
   registerWorkspace,
   removeWorkspace,
   setWorkspaceRemote,
+  acknowledgeWorkspaceAutomationFailure,
   acknowledgeWorkspaceShareSkips,
   endWorkspaceShareView,
   setWorkspaceShareMounts,
@@ -413,7 +417,11 @@ import {
   type WorkspaceAuthorityOperation,
   type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
-import type { JoinedSharedChannel, RegistryEntry } from "./workspaces/registryStore";
+import {
+  unacknowledgedAutomationFailures,
+  type JoinedSharedChannel,
+  type RegistryEntry,
+} from "./workspaces/registryStore";
 import {
   readableShareLevel,
   shareViewGranterEmail,
@@ -976,6 +984,23 @@ function notifyPluginStatusChanged(
   }
 }
 
+// An automation claim failed (settled by this desktop's executor, or
+// inserted failed by the engine at the depth cap): poke the windows on that
+// workspace to re-read the failure notices. A poke, not the record — the
+// renderer re-lists through CHANNELS.listAutomationFailures, so nothing
+// here can go stale or leak across workspaces.
+function notifyAutomationFailuresChanged(workspaceId: string): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (
+      rendererWorkspaceSessions.current(win.webContents)?.workspaceId !==
+      workspaceId
+    ) {
+      continue;
+    }
+    win.webContents.send(CHANNELS.automationFailuresChanged, { workspaceId });
+  }
+}
+
 function notifyPluginPanelSdkEvent(event: unknown): void {
   const payload = PluginPanelSdkEvent.safeParse(event);
   if (!payload.success) {
@@ -1059,9 +1084,9 @@ function createPluginWorkspaceRuntimeParts(
       pipeline?.pluginRegistration(pluginId)?.manifest.automations ?? null,
     runOnPlugin: async (pluginId, params) => {
       const currentPipeline = pipeline;
-      if (!currentPipeline) {
-        throw new Error(`Plugin "${pluginId}" is not available yet.`);
-      }
+      // Pipeline still wiring up: the same transient as a host refusal. The
+      // executor defers the claim; a settle here would be terminal.
+      if (!currentPipeline) return "refused";
       const outcome = await currentPipeline.hostOwnership.runCommand(
         pluginId,
         async (commandAuthority) => {
@@ -1077,12 +1102,13 @@ function createPluginWorkspaceRuntimeParts(
           return { ok: true as const };
         },
       );
-      if (outcome.kind !== "completed") {
-        throw new Error(
-          `dohc is still working on plugin "${pluginId}", so the automation run could not start.`,
-        );
-      }
+      // A refusal is the host mid-change on that plugin (or closing) — the
+      // run never started, so the claim must not settle failed. The
+      // executor keeps it and retries when the plugin next reaches ready.
+      return outcome.kind === "completed" ? "completed" : "refused";
     },
+    onClaimFailed: () =>
+      notifyAutomationFailuresChanged(workspace.workspaceId),
     onError: (context, error) => {
       console.error(
         `[desktop] automations (${workspace.workspaceId}): ${context}:`,
@@ -9431,6 +9457,67 @@ function registerIpcHandlers(
     );
   });
 
+  // Automation failures (ADR 0008): the engine's failed claim rows — one
+  // row per automation with the newest error and a counting generation —
+  // minus what the owner has acknowledged in the registry.
+  ipcMain.handle(CHANNELS.listAutomationFailures, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = ListAutomationFailuresPayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Automation notice read stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listAutomationFailures(),
+        );
+        return {
+          failures: unacknowledgedAutomationFailures(
+            result?.failures ?? [],
+            operation.workspace.automationFailureAcks,
+          ),
+        } satisfies ListAutomationFailuresResult;
+      },
+    );
+  });
+
+  // Record that the user has seen an automation's failures. It does NOT
+  // delete the claim rows — they are the remaining evidence of what failed.
+  // Acknowledging hides the notice; a failure recorded after the render has
+  // a higher generation, so it comes back on its own. The generation is
+  // clamped to what the engine actually holds, so a claimed generation
+  // above the current one cannot pre-acknowledge failures yet to happen.
+  ipcMain.handle(CHANNELS.dismissAutomationFailure, async (event, payload) => {
+    assertTrustedSender(event);
+    const input = DismissAutomationFailurePayload.parse(payload);
+    return withRendererWorkspaceOperation(
+      event.sender,
+      input.workspaceId,
+      "Automation notice update stopped because this window changed workspaces.",
+      async (operation) => {
+        const result = await withEngineAdapter(
+          receivedShareEngine.workspaceForRegistered(operation.workspace),
+          async (adapter) => await adapter.listAutomationFailures(),
+        );
+        if (!result) {
+          throw new Error("The workspace engine is not running.");
+        }
+        const current = result.failures.find(
+          (failure) => failure.automationId === input.automationId,
+        );
+        // No failed claims for that automation: nothing to acknowledge.
+        if (!current) return;
+        operation.assertCurrent();
+        acknowledgeWorkspaceAutomationFailure(
+          input.workspaceId,
+          input.automationId,
+          Math.min(input.generation, current.generation),
+        );
+      },
+    );
+  });
+
   // ---- Share changes (#646 PR3a) ----
   //
   // Two lanes, and a workspace is only ever in one of them. The GRANTER lane
@@ -13551,9 +13638,13 @@ async function startRustEngineDaemon(): Promise<boolean> {
     );
     // The daemon also claims each local record change for its subscribed
     // automations (ADR 0008); its automation.claimed events wake the owning
-    // workspace's executor to drain the durable claim table.
-    bridgeAutomationClaimsToExecutors(rustEngineDaemon, (workspaceId) =>
-      pluginWorkspaceRuntimes.current(workspaceId)?.automations,
+    // workspace's executor to drain the durable claim table, and a claim
+    // inserted already failed (the depth cap's chain-stopped stop report)
+    // pokes the owner's failure notice instead.
+    bridgeAutomationClaimsToExecutors(
+      rustEngineDaemon,
+      (workspaceId) => pluginWorkspaceRuntimes.current(workspaceId)?.automations,
+      notifyAutomationFailuresChanged,
     );
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,

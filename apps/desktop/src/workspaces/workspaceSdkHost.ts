@@ -75,8 +75,9 @@ export interface WorkspaceSdkHostContext {
   // write authority; the advertised collections.edit capability follows it.
   editCollections?: WorkspaceSdkCollectionEditPort;
   // The wire idempotency key a collection write carries to the seam. Only an
-  // automation-run context sets it (to the run's claim id, host-derived like
-  // the author); every other write lets the session generate one per update.
+  // automation-run context sets it (to the run's claim id plus its write
+  // ordinal, host-derived like the author); every other write lets the
+  // session generate one per update.
   collectionWriteIdempotencyKey?: string;
 }
 

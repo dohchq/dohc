@@ -314,7 +314,9 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         "a deduped replay inserts no second claim"
     );
 
-    // A change already at the chain depth cap triggers nothing.
+    // A change already at the chain depth cap runs nothing: the automation
+    // gets a failed `chain-stopped` claim instead of a pending one, so the
+    // stop reaches the owner's failure surface.
     let capped = doc.frontmatter_set("status", "capped");
     let at_cap = handle
         .ydoc_record_update(
@@ -343,18 +345,29 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         at_cap.outcome.record_facts.is_some(),
         "the capped change itself commits"
     );
-    assert!(
-        at_cap.automation_claims.is_empty(),
-        "the chain stops at the depth cap"
+    assert_eq!(
+        at_cap.automation_claims.len(),
+        1,
+        "the chain stops at the depth cap, and the stop is recorded"
+    );
+    assert_eq!(
+        at_cap.automation_claims[0].state,
+        dohc_engine_domain::AutomationClaimState::Failed,
+    );
+    assert_eq!(
+        at_cap.automation_claims[0].error.as_deref(),
+        Some(dohc_engine_domain::AUTOMATION_CHAIN_STOPPED),
     );
     supervisor.close(&source_db).expect("close source actor");
 
     let source_claims = claim_rows(&source_db, WS);
     assert_eq!(
         source_claims.len(),
-        1,
-        "the origin device holds exactly one claim for the change: {source_claims:?}"
+        2,
+        "the origin device holds exactly one claim for the change plus the \
+         recorded chain stop: {source_claims:?}"
     );
+    assert_eq!(source_claims[1].1, "failed", "the stop row is terminal");
 
     // The peer applies the same ops by replication, with the same
     // subscription registered — and claims nothing: the sync apply path has

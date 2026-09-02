@@ -450,7 +450,7 @@ describe("invokePluginSdkHost", () => {
         automationId: "hello-plugin/triage",
         onBehalfOf: "local",
         depth: 1,
-              writes: 0,
+        writes: 0,
       },
       reads: {
         ...localWorkspaceSdkReads(root),
@@ -522,7 +522,7 @@ describe("invokePluginSdkHost", () => {
         fields: { status: "done" },
       }),
     ).rejects.toThrow(
-      "This automation run has already settled, so its write was not applied.",
+      "This write's automation run is no longer active, so it was not applied.",
     );
     expect(seam.setRecordFields).not.toHaveBeenCalled();
   });

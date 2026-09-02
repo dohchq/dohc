@@ -17,6 +17,18 @@ import type { PluginAutomationRunAuthority } from "./pluginSdkHost";
 // The engine bounds a settle error at 1024 characters (lane 2); stay under it.
 const MAX_SETTLE_ERROR_CHARS = 1000;
 
+// Per-run deadline. `transport.request` has no timeout, so a handler that
+// never resolves would otherwise wedge this workspace's serial drain for
+// good. Deliberately shorter than the engine reaper's idle bound
+// (AUTOMATION_CLAIM_REAP_IDLE_MS, 10 minutes): the deadline settles the
+// claim failed HERE first, so the reaper never requeues a claim whose
+// handler this desktop is still holding. The risk this accepts: if the
+// desktop dies with a run in flight, the reaper's requeue runs the handler
+// a second time — dohc bounds the handler, it does not retry it, and
+// external effects are the plugin's own (the settled block's "no retries
+// for external effects").
+export const AUTOMATION_RUN_DEADLINE_MS = 5 * 60_000;
+
 // Pipeline statuses under which a plugin can actually answer a claim: built
 // and startable ("ready"), mid-spawn ("starting"), or installed but with a
 // dead process a run's ensure-start revives ("crashed").
@@ -52,6 +64,14 @@ export interface AutomationEngineAdapter {
   }): Promise<unknown>;
 }
 
+/**
+ * How a run attempt ended. "completed" is the handler resolving. "refused"
+ * is the host declining to take the run at all (mid-change on that plugin,
+ * or closing) — transient, so the claim is deferred, never settled failed.
+ * A thrown handler REJECTS instead; that one is terminal.
+ */
+export type PluginAutomationRunOutcome = "completed" | "refused";
+
 export interface PluginAutomationsOptions {
   /** Engine adapter runner; resolves null when the engine is unavailable. */
   withAdapter<T>(
@@ -65,7 +85,13 @@ export interface PluginAutomationsOptions {
   runOnPlugin(
     pluginId: string,
     params: PluginAutomationRunParams,
-  ): Promise<void>;
+  ): Promise<PluginAutomationRunOutcome>;
+  /**
+   * A claim just settled failed on this desktop. The owner-visible failure
+   * surface re-reads `automations.failures` on it; the claim row already
+   * holds the durable truth, so the hook is a poke, not the record.
+   */
+  onClaimFailed?(automationId: string): void;
   onError(context: string, error: unknown): void;
 }
 
@@ -92,6 +118,15 @@ export class PluginAutomations {
   /** Engine subscription id -> the pair the engine holds for it. */
   private readonly registered = new Map<string, RegisteredAutomation>();
   private readonly activeRuns = new Map<string, PluginAutomationRunAuthority>();
+  /**
+   * Claims taken from `claimNext` (so running engine-side) whose run could
+   * not happen yet: the host refused (plugin mid-change) or the plugin is
+   * installed but its registration has not landed. `claimNext` never serves
+   * a running claim again, so the drain retries these itself, oldest first,
+   * on every wake. If this desktop dies holding one, the engine reaper's
+   * idle bound requeues it — that is the backstop, not the path.
+   */
+  private readonly deferred = new Map<string, AutomationClaim>();
   /** Serializes subscription reconciles so diffs cannot interleave. */
   private reconcileChain: Promise<void> = Promise.resolve();
   private draining = false;
@@ -154,6 +189,7 @@ export class PluginAutomations {
     const pairs = [...this.registered.entries()];
     this.registered.clear();
     this.activeRuns.clear();
+    this.deferred.clear();
     await this.reconcileChain.catch(() => undefined);
     for (const [automationId, entry] of pairs) {
       try {
@@ -243,14 +279,27 @@ export class PluginAutomations {
     }
     this.draining = true;
     try {
-      while (!this.disposed) {
+      // Deferred claims first, oldest first: they are older than anything
+      // claimNext can still serve, and claimNext never serves them again.
+      let stopped = false;
+      for (const claim of [...this.deferred.values()]) {
+        if (this.disposed || stopped) break;
+        const outcome = await this.execute(claim);
+        if (outcome === "settled") this.deferred.delete(claim.claimId);
+        else if (outcome === "defer-stop") stopped = true;
+      }
+      while (!this.disposed && !stopped) {
         const claim = await this.options.withAdapter((adapter) =>
           adapter.claimNextAutomation(),
         );
         // Null is both "drained" and "engine unavailable": either way the
         // next wake-up (event or reconcile) resumes.
         if (claim === null) break;
-        await this.execute(claim);
+        const outcome = await this.execute(claim);
+        if (outcome !== "settled") {
+          this.deferred.set(claim.claimId, claim);
+          if (outcome === "defer-stop") stopped = true;
+        }
       }
     } catch (error) {
       this.options.onError("drain automation claims", error);
@@ -263,17 +312,48 @@ export class PluginAutomations {
     }
   }
 
-  private async execute(claim: AutomationClaim): Promise<void> {
+  /** True when a discovered plugin's admitted manifest declares this id. */
+  private installedPluginDeclares(automationId: string): boolean {
+    const slash = automationId.indexOf("/");
+    if (slash <= 0) return false;
+    const pluginId = automationId.slice(0, slash);
+    const declared = this.options.declaredAutomations(pluginId);
+    return (
+      declared?.some(
+        (declaration) =>
+          engineAutomationId(pluginId, declaration.id) === automationId,
+      ) ?? false
+    );
+  }
+
+  /**
+   * Runs one claim the engine already holds as running. "settled" closed the
+   * claim (done or failed). "defer" leaves it running for a later drain to
+   * retry — the host refused this run. "defer-stop" additionally stops the
+   * whole drain: the claim's plugin has not registered yet, and running
+   * younger claims past it would reorder the workspace's serial drain.
+   */
+  private async execute(
+    claim: AutomationClaim,
+  ): Promise<"settled" | "defer" | "defer-stop"> {
     const registered = this.registered.get(claim.automationId);
     if (!registered) {
-      // The plugin was uninstalled or disabled between the claim and this
-      // drain; its subscription is gone, so no retry can ever find a
-      // handler. Terminal, like a throwing handler.
+      if (this.installedPluginDeclares(claim.automationId)) {
+        // Startup ordering: claimNext serves the oldest pending claim
+        // workspace-wide, but `registered` fills per plugin as each one's
+        // pipeline status lands. An installed declarer that has not
+        // registered YET is not a failure — that plugin's own reconcile
+        // re-drains this claim.
+        return "defer-stop";
+      }
+      // No installed plugin declares it: uninstalled, or the manifest
+      // dropped the automation. No retry can ever find a handler.
       await this.settle(claim.claimId, {
         state: "failed",
         error: `No installed plugin declares automation "${claim.automationId}".`,
+        automationId: claim.automationId,
       });
-      return;
+      return "settled";
     }
     this.activeRuns.set(claim.claimId, {
       claimId: claim.claimId,
@@ -284,44 +364,109 @@ export class PluginAutomations {
       depth: claim.depth + 1,
       writes: 0,
     });
+    let attempt:
+      | { kind: "completed" | "refused" | "deadline" }
+      | { kind: "threw"; error: unknown };
     try {
-      await this.options.runOnPlugin(registered.pluginId, {
-        claimId: claim.claimId,
-        automationId: registered.declaration.id,
-        handler: registered.declaration.handler,
-        facts: {
-          collectionPath: claim.collectionPath,
-          recordId: claim.recordId,
-          depth: claim.depth,
-        },
-      });
-    } catch (error) {
-      // No desktop retry: the engine reaper's attempt bound owns crash
-      // recovery, and external effects must never re-run (ADR 0008).
+      attempt = await this.runWithDeadline(registered, claim);
+    } finally {
+      // Before the settle, always: once the run is over here, a late tagged
+      // write from a still-live handler must refuse.
       this.activeRuns.delete(claim.claimId);
-      await this.settle(claim.claimId, {
-        state: "failed",
-        error: errorText(error),
-      });
-      return;
     }
-    this.activeRuns.delete(claim.claimId);
-    await this.settle(claim.claimId, { state: "done" });
+    switch (attempt.kind) {
+      case "completed":
+        await this.settle(claim.claimId, { state: "done" });
+        return "settled";
+      case "refused":
+        // Transient: the host is mid-change on that plugin (or closing).
+        // The claim stays running; the plugin's next `ready` reconcile
+        // re-drains it. The engine reaper's idle bound is the backstop.
+        return "defer";
+      case "deadline":
+        await this.settle(claim.claimId, {
+          state: "failed",
+          error: `The automation handler did not finish within ${AUTOMATION_RUN_DEADLINE_MS / 60_000} minutes.`,
+          automationId: claim.automationId,
+        });
+        return "settled";
+      case "threw":
+        // No desktop retry: the engine reaper's attempt bound owns crash
+        // recovery, and external effects must never re-run (ADR 0008).
+        await this.settle(claim.claimId, {
+          state: "failed",
+          error: errorText(attempt.error),
+          automationId: claim.automationId,
+        });
+        return "settled";
+    }
+  }
+
+  /**
+   * The run, raced against [`AUTOMATION_RUN_DEADLINE_MS`]. A handler that
+   * outlives the deadline keeps running in its process — dohc bounds the
+   * run's claim, it does not kill the plugin — but its late writes refuse
+   * (the authority is deleted before the failed settle) and its eventual
+   * outcome is discarded.
+   */
+  private runWithDeadline(
+    registered: RegisteredAutomation,
+    claim: AutomationClaim,
+  ): Promise<
+    { kind: "completed" | "refused" | "deadline" } | { kind: "threw"; error: unknown }
+  > {
+    return new Promise((resolve) => {
+      const timer = setTimeout(
+        () => resolve({ kind: "deadline" }),
+        AUTOMATION_RUN_DEADLINE_MS,
+      );
+      this.options
+        .runOnPlugin(registered.pluginId, {
+          claimId: claim.claimId,
+          automationId: registered.declaration.id,
+          handler: registered.declaration.handler,
+          facts: {
+            collectionPath: claim.collectionPath,
+            recordId: claim.recordId,
+            depth: claim.depth,
+          },
+        })
+        .then(
+          (outcome) => {
+            clearTimeout(timer);
+            resolve({ kind: outcome });
+          },
+          (error: unknown) => {
+            clearTimeout(timer);
+            resolve({ kind: "threw", error });
+          },
+        );
+    });
   }
 
   private async settle(
     claimId: string,
-    input: { state: "done" | "failed"; error?: string },
+    input:
+      | { state: "done" }
+      | { state: "failed"; error: string; automationId: string },
   ): Promise<void> {
     try {
       await this.options.withAdapter((adapter) =>
-        adapter.settleAutomationClaim({ claimId, ...input }),
+        adapter.settleAutomationClaim(
+          input.state === "failed"
+            ? { claimId, state: "failed", error: input.error }
+            : { claimId, state: "done" },
+        ),
       );
     } catch (error) {
       // A refused settle (the reaper exhausted the claim first, or the
       // engine restarted) must not stop the drain; the claim table already
       // holds the durable truth.
       this.options.onError(`settle automation claim "${claimId}"`, error);
+      return;
+    }
+    if (input.state === "failed") {
+      this.options.onClaimFailed?.(input.automationId);
     }
   }
 }

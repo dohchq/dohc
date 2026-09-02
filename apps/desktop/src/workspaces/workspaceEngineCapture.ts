@@ -395,7 +395,8 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // state without them, falling back to device attribution — the same
   // attribution every human edit carries. `options.idempotencyKey` replaces
   // the session-generated wire key for this one update (an automation run's
-  // claim id), so a re-run handler's identical write dedupes engine-side.
+  // claim id plus its write ordinal), so a re-run handler's identical write
+  // dedupes engine-side.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,

@@ -272,14 +272,14 @@ export async function invokePluginSdkHost(
     // itself (hostContext.writable), so the writes need no gate here — but a
     // write made inside an automation run takes the run's own authority: the
     // automation as author on behalf of the owner, at the chain depth main
-    // derived from the claim, keyed by the claim id so a re-run handler's
-    // identical write dedupes engine-side.
+    // derived from the claim, keyed by the claim id plus the run's write
+    // ordinal so a re-run handler's identical write dedupes engine-side.
     case "collections.setFields":
     case "collections.createRecord": {
       const run = context.automationRun;
       if (context.automationClaimId !== undefined && run === undefined) {
         throw new Error(
-          "This automation run has already settled, so its write was not applied.",
+          "This write's automation run is no longer active, so it was not applied.",
         );
       }
       const writeContext: WorkspaceSdkHostContext = run

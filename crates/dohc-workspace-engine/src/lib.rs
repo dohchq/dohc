@@ -17,9 +17,9 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_collab::{CollabError, ContentKind, DocKey, Lease, LeaseRegistry, Regime};
 use dohc_engine_domain::{
-    AgentRunRecord, AutomationClaim, AutomationSettle, AutomationTrigger, BookmarkMode,
-    BookmarkTargetKind, ChannelThreadSummary, ChatActorKind, ChatAgentReadState, ChatAttachment,
-    ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
+    AgentRunRecord, AutomationClaim, AutomationFailure, AutomationSettle, AutomationTrigger,
+    BookmarkMode, BookmarkTargetKind, ChannelThreadSummary, ChatActorKind, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
     ChatDecisionState, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
     ChatProjectionFileAccess, ChatReaction, ChatReactionState, ChatThread, ChatThreadReadState,
     CollectionFilter, CollectionPendingAdoptionCursor, CollectionQuery, CollectionQueryCursor,
@@ -93,11 +93,14 @@ pub const RECORD_CREATED_EVENT: &str = "record.created";
 pub const RECORD_UPDATED_EVENT: &str = "record.updated";
 pub const RECORD_FIELD_CHANGED_EVENT: &str = "record.field.changed";
 
-/// Emitted post-commit, once per pending automation claim a local record
-/// apply inserted (ADR 0008: only the origin device claims). A wake-up for
-/// the desktop's drain loop, not the claim transport: delivery is at most
-/// once, and the durable claim row is what `automations.claimNext` serves —
-/// a missed event costs a poll, never a claim.
+/// Emitted post-commit, once per automation claim a local record apply
+/// inserted (ADR 0008: only the origin device claims). A wake-up, not the
+/// claim transport: delivery is at most once, and the durable claim row is
+/// what `automations.claimNext` and `automations.failures` serve — a missed
+/// event costs a poll, never a claim. A pending claim wakes the desktop's
+/// drain loop; a claim inserted already failed (`chain-stopped`, the depth
+/// cap's stop report) tells the owner surface to re-read
+/// `automations.failures`.
 pub const AUTOMATION_CLAIMED_EVENT: &str = "automation.claimed";
 
 /// A previous/next value travels whole up to this many bytes of JSON; a
@@ -1814,6 +1817,7 @@ impl EngineService {
                 self.automations_claim_next(&ctx, request.workspace, request.params)
                     .await?
             }
+            "automations.failures" => self.automations_failures(&ctx, request.workspace).await?,
             "automations.settle" => {
                 self.automations_settle(&ctx, request.workspace, request.params)
                     .await?
@@ -7522,6 +7526,33 @@ impl EngineService {
             .unwrap_or(Value::Null))
     }
 
+    /// The owner-visible failure surface's read: one row per automation
+    /// with at least one failed claim (chain-stopped, handler error, or
+    /// reaper-exhausted), carrying the newest error and a generation the
+    /// desktop acknowledges against. The generation is the automation's
+    /// failed-claim count — failed rows are never deleted, so it only
+    /// grows.
+    async fn automations_failures(
+        &self,
+        ctx: &RequestContext,
+        handle: Option<WorkspaceHandle>,
+    ) -> Result<Value, WireError> {
+        let open = self.open(handle.as_ref())?;
+        let cancellation = OperationCancellation::new(ctx);
+        let failures = Self::read_under_ctx(
+            &cancellation,
+            "automations.failures",
+            open.actor.automation_failures(open.workspace_id),
+        )
+        .await?;
+        Ok(json!({
+            "failures": failures
+                .iter()
+                .map(automation_failure_json)
+                .collect::<Vec<_>>(),
+        }))
+    }
+
     async fn automations_settle(
         &self,
         ctx: &RequestContext,
@@ -8451,7 +8482,8 @@ impl EngineService {
         let automation_claims = outcome.automation_claims;
         let outcome = outcome.outcome;
         // Post-commit: the append transaction already holds the history rows
-        // these facts mirror — and the pending automation claims it inserted.
+        // these facts mirror — and the automation claims it inserted
+        // (pending, or failed `chain-stopped` at the depth cap).
         if let Some(facts) = &outcome.record_facts {
             emit_record_events(&self.events, &open.workspace_id, facts);
         }
@@ -11816,6 +11848,15 @@ fn bookmark_json(workspace_id: &str, bookmark: &ChatBookmark) -> Value {
 
 fn dispatch_claim_json(claim: &DispatchClaim) -> Value {
     json!({ "dispatch": dispatch_json(&claim.dispatch), "run": run_json(&claim.run) })
+}
+
+fn automation_failure_json(failure: &AutomationFailure) -> Value {
+    json!({
+        "automationId": failure.automation_id,
+        "error": failure.error,
+        "updatedAtMs": failure.updated_at_ms,
+        "generation": failure.generation,
+    })
 }
 
 fn automation_claim_json(claim: &AutomationClaim) -> Value {

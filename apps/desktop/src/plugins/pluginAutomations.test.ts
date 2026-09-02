@@ -1,9 +1,11 @@
 import type { AutomationClaim } from "@dohc/workspace-engine-client";
 import { describe, expect, it, vi } from "vitest";
 import {
+  AUTOMATION_RUN_DEADLINE_MS,
   PluginAutomations,
   engineAutomationId,
   type AutomationEngineAdapter,
+  type PluginAutomationRunOutcome,
   type PluginAutomationsOptions,
 } from "./pluginAutomations";
 import type { PluginAutomationRunParams } from "./pluginHostProtocol";
@@ -54,6 +56,7 @@ interface Harness {
   runs: Array<{ pluginId: string; params: PluginAutomationRunParams }>;
   errors: Array<{ context: string; error: unknown }>;
   pendingClaims: AutomationClaim[];
+  claimFailures: string[];
 }
 
 function harness(input: {
@@ -72,7 +75,11 @@ function harness(input: {
   };
   const runs: Harness["runs"] = [];
   const errors: Harness["errors"] = [];
+  const claimFailures: string[] = [];
   const automations = new PluginAutomations({
+    onClaimFailed: (automationId) => {
+      claimFailures.push(automationId);
+    },
     withAdapter: (work) => work(adapter as unknown as AutomationEngineAdapter),
     declaredAutomations: () =>
       input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }],
@@ -80,12 +87,13 @@ function harness(input: {
       input.runOnPlugin ??
       (async (pluginId, params) => {
         runs.push({ pluginId, params });
+        return "completed";
       }),
     onError: (context, error) => {
       errors.push({ context, error });
     },
   });
-  return { automations, adapter, runs, errors, pendingClaims };
+  return { automations, adapter, runs, errors, pendingClaims, claimFailures };
 }
 
 describe("PluginAutomations", () => {
@@ -168,6 +176,7 @@ describe("PluginAutomations", () => {
         expect(
           h.automations.activeRun({ claimId: "claim-1", pluginId: "other" }),
         ).toBeUndefined();
+        return "completed";
       },
     });
     h.automations.handlePipelineStatus(statusEvent());
@@ -206,6 +215,8 @@ describe("PluginAutomations", () => {
       });
     });
     expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
+    // The failure surface's poke fires after the settle committed.
+    expect(h.claimFailures).toEqual(["hello-plugin/triage"]);
   });
 
   it("settles a claim whose automation is no longer installed as failed", async () => {
@@ -221,6 +232,141 @@ describe("PluginAutomations", () => {
       });
     });
     expect(h.runs).toEqual([]);
+  });
+
+  // (a) A host refusal ("dohc is still working on plugin ...") is the run
+  // never starting, not the handler failing. Settling failed here would
+  // permanently lose every claim that lands during a rebuild.
+  it("defers a claim the host refused and runs it when the plugin next reaches ready", async () => {
+    let refuse = true;
+    const runs: string[] = [];
+    const h = harness({
+      runOnPlugin: async (pluginId, params) => {
+        if (refuse) return "refused";
+        runs.push(params.claimId);
+        return "completed";
+      },
+    });
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() =>
+      expect(h.adapter.subscribeAutomation).toHaveBeenCalled(),
+    );
+
+    h.pendingClaims.push(claimOf());
+    h.automations.notifyClaimed();
+    // The drain finished (claimNext ran past the refused claim to null)
+    // without settling anything: the claim stays running engine-side.
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation.mock.calls.length).toBeGreaterThan(1),
+    );
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+
+    // The plugin reaches ready again: the reconcile's own drain retries the
+    // deferred claim — claimNext cannot serve a running claim again.
+    refuse = false;
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() => {
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+        claimId: "claim-1",
+        state: "done",
+      });
+    });
+    expect(runs).toEqual(["claim-1"]);
+    expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
+  });
+
+  // (b) Startup ordering: claimNext is workspace-wide but `registered`
+  // fills per plugin. A claim whose INSTALLED plugin has not registered yet
+  // must not settle failed, and the drain must stop rather than run younger
+  // claims past it.
+  it("holds a claim for an installed plugin that has not registered yet, and stops the drain", async () => {
+    const h = harness();
+    // Only hello-plugin is registered; later-plugin is installed (its
+    // manifest declares triage) but its pipeline status has not landed.
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() =>
+      expect(h.adapter.subscribeAutomation).toHaveBeenCalled(),
+    );
+
+    h.pendingClaims.push(
+      claimOf({ claimId: "claim-later", automationId: "later-plugin/triage" }),
+      claimOf({ claimId: "claim-hello" }),
+    );
+    h.automations.notifyClaimed();
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
+    );
+    // Nothing settled, nothing ran, and the younger hello claim was NOT
+    // pulled past the held one.
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+    expect(h.runs).toEqual([]);
+    expect(h.pendingClaims.map((claim) => claim.claimId)).toEqual([
+      "claim-hello",
+    ]);
+
+    // later-plugin's own status lands: its reconcile registers and
+    // re-drains — the held claim first, then the younger one.
+    h.automations.handlePipelineStatus(statusEvent({ id: "later-plugin" }));
+    await vi.waitFor(() => {
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+        claimId: "claim-hello",
+        state: "done",
+      });
+    });
+    expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+      claimId: "claim-later",
+      state: "done",
+    });
+    expect(h.runs.map((run) => run.params.claimId)).toEqual([
+      "claim-later",
+      "claim-hello",
+    ]);
+  });
+
+  // (c) `transport.request` has no timeout, so a never-resolving handler
+  // would wedge the workspace-wide serial drain for good. The per-run
+  // deadline settles it failed; a late completion changes nothing.
+  it("settles a run failed when the handler outlives the deadline, once", async () => {
+    vi.useFakeTimers();
+    try {
+      let finishLateRun: () => void = () => undefined;
+      const h = harness({
+        runOnPlugin: () =>
+          new Promise<PluginAutomationRunOutcome>((resolve) => {
+            finishLateRun = () => resolve("completed");
+          }),
+      });
+      h.automations.handlePipelineStatus(statusEvent());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.adapter.subscribeAutomation).toHaveBeenCalled();
+
+      h.pendingClaims.push(claimOf());
+      h.automations.notifyClaimed();
+      await vi.advanceTimersByTimeAsync(AUTOMATION_RUN_DEADLINE_MS - 1);
+      expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+        claimId: "claim-1",
+        state: "failed",
+        error: "The automation handler did not finish within 5 minutes.",
+      });
+      // The run is over here; a late tagged write must refuse.
+      expect(
+        h.automations.activeRun({
+          claimId: "claim-1",
+          pluginId: "hello-plugin",
+        }),
+      ).toBeUndefined();
+
+      // The handler eventually resolves: the claim is already settled, so
+      // nothing settles again.
+      finishLateRun();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("removes its subscriptions on dispose and stops resolving runs", async () => {

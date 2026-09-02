@@ -40,13 +40,13 @@ pub mod secrets;
 pub mod store;
 
 pub use automations::{
-    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaim,
-    AutomationClaimState, AutomationSettle, AutomationTrigger, MAX_AUTOMATION_ERROR_BYTES,
-    claim_automation_triggers_in_tx, claim_next_pending_automation,
-    claim_next_pending_automation_in_tx, reclaim_running_automations,
-    reclaim_running_automations_in_tx, settle_automation_claim, settle_automation_claim_in_tx,
-    subscribe_automation, subscribe_automation_in_tx, unsubscribe_automation,
-    unsubscribe_automation_in_tx,
+    AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_RECLAIM_EXHAUSTED,
+    AutomationClaim, AutomationClaimState, AutomationFailure, AutomationSettle, AutomationTrigger,
+    MAX_AUTOMATION_ERROR_BYTES, claim_automation_triggers_in_tx, claim_next_pending_automation,
+    claim_next_pending_automation_in_tx, list_automation_failures, list_automation_failures_in_tx,
+    reclaim_running_automations, reclaim_running_automations_in_tx, settle_automation_claim,
+    settle_automation_claim_in_tx, subscribe_automation, subscribe_automation_in_tx,
+    unsubscribe_automation, unsubscribe_automation_in_tx,
 };
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,

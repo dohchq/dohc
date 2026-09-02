@@ -55,10 +55,10 @@ export interface SetCollectionRecordFieldsInput {
   author: ChangeAuthor;
   /**
    * The wire idempotency key for this write's one journaled update. An
-   * automation run passes its claim id, so a handler re-run after a crash
-   * cannot journal the same write twice — the engine dedupes on the
-   * request's idempotency key. Omitted, the session generates a per-update
-   * key as every other edit does.
+   * automation run passes its claim id plus its write ordinal, so a handler
+   * re-run after a crash cannot journal the same write twice — the engine
+   * dedupes on the request's idempotency key. Omitted, the session
+   * generates a per-update key as every other edit does.
    */
   idempotencyKey?: string;
 }

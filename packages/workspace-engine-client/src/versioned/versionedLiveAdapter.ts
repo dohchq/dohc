@@ -16,6 +16,7 @@ import {
   type AutomationClaim,
   type AutomationClaimNextParams,
   type AutomationClaimNextResult,
+  type AutomationFailuresResult,
   type AutomationSettleParams,
   type AutomationSubscribeResult,
   type AutomationSubscriptionParams,
@@ -1064,6 +1065,14 @@ export class VersionedLiveAdapter {
     input: AutomationSettleParams,
   ): Promise<AutomationClaim> {
     return this.workspaceRequest(WORKSPACE_METHOD.automationsSettle, input);
+  }
+
+  /**
+   * Every automation with at least one failed claim: the newest error and a
+   * generation the owner's notice acknowledges against.
+   */
+  async listAutomationFailures(): Promise<AutomationFailuresResult> {
+    return this.workspaceRequest(WORKSPACE_METHOD.automationsFailures, {});
   }
 
   async writeSecretFile(input: {

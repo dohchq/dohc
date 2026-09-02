@@ -172,6 +172,7 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
             json!({ "automationId": "plugin:x", "path": "tasks" }),
         ),
         ("automations.claimNext", json!({})),
+        ("automations.failures", json!({})),
         (
             "automations.settle",
             json!({ "claimId": "atc_x", "state": "done" }),
@@ -343,6 +344,33 @@ async fn automation_rpc_surface_is_scoped_validates_and_drains_the_ledger() {
     )
     .await;
     assert_eq!(drained, Value::Null, "nothing pending remains");
+
+    // The failure surface aggregates the failed rows — the reaper-exhausted
+    // claim and the failed settle above — into one row per automation with
+    // the newest error and a generation that counts the failed claims. The
+    // reaper ran at workspace.open with the real clock, so its failure is
+    // the newest.
+    let failures = call(
+        &transport,
+        &handle,
+        &mut id,
+        "automations.failures",
+        json!({}),
+    )
+    .await;
+    let rows = failures["failures"].as_array().expect("failures array");
+    assert_eq!(rows.len(), 1, "one row per automation: {rows:?}");
+    assert_eq!(rows[0]["automationId"], json!(AUTOMATION));
+    assert_eq!(
+        rows[0]["generation"],
+        json!(2),
+        "the generation counts the failed claims"
+    );
+    assert_eq!(
+        rows[0]["error"],
+        json!(AUTOMATION_RECLAIM_EXHAUSTED),
+        "the newest failure's error wins"
+    );
 
     // Settle-state validation refuses the malformed combinations before any
     // write.

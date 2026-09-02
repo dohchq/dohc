@@ -25,6 +25,13 @@ pub const AUTOMATION_CHAIN_DEPTH_CAP: u32 = 4;
 /// attempts left — the same reason string the chat dispatch ledger uses.
 pub const AUTOMATION_RECLAIM_EXHAUSTED: &str = "reclaim-exhausted";
 
+/// The error a claim records when a change at the chain depth cap would have
+/// triggered an automation: the chain stops, and the stop is reported to the
+/// owner through the same failed-claim path every other terminal failure
+/// takes (the settled block's "a chain stops at depth 4 and the stop is
+/// reported").
+pub const AUTOMATION_CHAIN_STOPPED: &str = "chain-stopped";
+
 /// Bound on the error text a failed settle records.
 pub const MAX_AUTOMATION_ERROR_BYTES: usize = 4096;
 
@@ -258,9 +265,11 @@ pub fn unsubscribe_automation_in_tx(
 /// the partial unique indexes and inserts nothing. Returns only the claims
 /// this call inserted.
 ///
-/// A change already at the chain depth cap claims nothing (the settled
-/// stop-at-depth rule; the surfaced stop report is the loop-guard lane's).
-/// The remote apply path never calls this — ADR 0008's origin-device rule is
+/// A change already at the chain depth cap runs nothing: instead of a
+/// pending claim, each would-have-triggered automation records a FAILED
+/// claim with [`AUTOMATION_CHAIN_STOPPED`], so the stop reaches the owner
+/// through the same failure surface a throwing handler uses. The remote
+/// apply path never calls this — ADR 0008's origin-device rule is
 /// structural, not a flag check.
 pub fn claim_automation_triggers_in_tx(
     conn: &Connection,
@@ -273,9 +282,7 @@ pub fn claim_automation_triggers_in_tx(
         .as_ref()
         .map(|attribution| attribution.depth)
         .unwrap_or(0);
-    if depth >= AUTOMATION_CHAIN_DEPTH_CAP {
-        return Ok(Vec::new());
-    }
+    let chain_stopped = depth >= AUTOMATION_CHAIN_DEPTH_CAP;
     let trigger = match &facts.source {
         Some((origin_id, origin_seq)) => AutomationTrigger::Coordinate {
             origin_id: origin_id.clone(),
@@ -327,13 +334,18 @@ pub fn claim_automation_triggers_in_tx(
             } => (Some(origin_id.as_str()), Some(*origin_seq), None),
             AutomationTrigger::History { history_id } => (None, None, Some(*history_id)),
         };
+        let (state, error) = if chain_stopped {
+            (AutomationClaimState::Failed, Some(AUTOMATION_CHAIN_STOPPED))
+        } else {
+            (AutomationClaimState::Pending, None)
+        };
         let rows = conn
             .execute(
                 "INSERT OR IGNORE INTO automation_claims \
                  (workspace_id, claim_id, automation_id, trigger_origin_id, trigger_origin_seq, \
                   trigger_history_id, record_id, collection_path, depth, state, attempts, error, \
                   created_at_ms, updated_at_ms) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 0, NULL, ?10, ?10)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?12)",
                 params![
                     workspace_id,
                     claim_id,
@@ -344,6 +356,8 @@ pub fn claim_automation_triggers_in_tx(
                     facts.record_id,
                     facts.collection_path,
                     i64::from(depth),
+                    state.as_str(),
+                    error,
                     now_ms,
                 ],
             )
@@ -356,15 +370,68 @@ pub fn claim_automation_triggers_in_tx(
                 record_id: facts.record_id.clone(),
                 collection_path: facts.collection_path.clone(),
                 depth,
-                state: AutomationClaimState::Pending,
+                state,
                 attempts: 0,
-                error: None,
+                error: error.map(str::to_owned),
                 created_at_ms: now_ms,
                 updated_at_ms: now_ms,
             });
         }
     }
     Ok(inserted)
+}
+
+/// One failed-claim summary per automation, for the owner-visible failure
+/// surface: the newest error and its time, plus a generation. The
+/// generation IS the automation's failed-claim count — failed rows are
+/// never deleted (a dismiss acknowledges, it does not destroy evidence), so
+/// the count only grows, and an acknowledgment at generation N hides the
+/// notice exactly until a newer failure raises it past N.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutomationFailure {
+    pub automation_id: String,
+    pub error: String,
+    pub updated_at_ms: i64,
+    pub generation: i64,
+}
+
+/// Every automation with at least one failed claim in this workspace,
+/// ordered by automation id.
+pub fn list_automation_failures_in_tx(
+    conn: &Connection,
+    workspace_id: &str,
+) -> Result<Vec<AutomationFailure>, DomainError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT automation_id, error, updated_at_ms, generation FROM ( \
+                 SELECT automation_id, error, updated_at_ms, \
+                        COUNT(*) OVER (PARTITION BY automation_id) AS generation, \
+                        ROW_NUMBER() OVER ( \
+                            PARTITION BY automation_id \
+                            ORDER BY updated_at_ms DESC, claim_id DESC \
+                        ) AS newest \
+                 FROM automation_claims \
+                 WHERE workspace_id = ?1 AND state = 'failed' \
+             ) WHERE newest = 1 ORDER BY automation_id",
+        )
+        .map_err(DomainError::sql_corrupt)?;
+    let failures = statement
+        .query_map(params![workspace_id], |row| {
+            let error: Option<String> = row.get(1)?;
+            Ok(AutomationFailure {
+                automation_id: row.get(0)?,
+                // A failed claim always records why; a NULL here would be
+                // corruption, surfaced as an empty reason rather than a
+                // refused listing.
+                error: error.unwrap_or_default(),
+                updated_at_ms: row.get(2)?,
+                generation: row.get(3)?,
+            })
+        })
+        .map_err(DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(DomainError::sql_corrupt)?;
+    Ok(failures)
 }
 
 /// Flip the oldest pending claim to running with `attempts + 1` and return
@@ -568,6 +635,13 @@ pub fn settle_automation_claim(
     committed(store.write_with(faults, |tx| {
         settle_automation_claim_in_tx(tx, workspace_id, claim_id, settle, now_ms)
     })?)
+}
+
+pub fn list_automation_failures(
+    store: &EngineStore,
+    workspace_id: &str,
+) -> Result<Vec<AutomationFailure>, DomainError> {
+    store.read_with(|conn| list_automation_failures_in_tx(conn, workspace_id))
 }
 
 pub fn reclaim_running_automations(

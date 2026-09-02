@@ -44,4 +44,27 @@ describe("bridgeAutomationClaimsToExecutors", () => {
 
     expect(woken).toEqual(["ws-a"]);
   });
+
+  it("routes a claim inserted failed to the failure surface, not the drain", () => {
+    const stub = daemonStub();
+    const woken: string[] = [];
+    const failed: string[] = [];
+    bridgeAutomationClaimsToExecutors(
+      stub.daemon,
+      (workspaceId) => ({ notifyClaimed: () => woken.push(workspaceId) }),
+      (workspaceId) => failed.push(workspaceId),
+    );
+
+    // The depth cap's chain-stopped row: never drainable work, so waking
+    // the executor would only spin claimNext for nothing.
+    stub.emit(
+      claimed({ workspaceId: "ws-a", claimId: "claim-1", state: "failed" }),
+    );
+    stub.emit(
+      claimed({ workspaceId: "ws-a", claimId: "claim-2", state: "pending" }),
+    );
+
+    expect(failed).toEqual(["ws-a"]);
+    expect(woken).toEqual(["ws-a"]);
+  });
 });

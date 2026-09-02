@@ -43,8 +43,8 @@ use dohc_engine_collab::{
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationSettle, BinaryHead,
-    BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationFailure, AutomationSettle,
+    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
     CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire,
     CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChangeAttribution,
     ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition,
@@ -2309,6 +2309,10 @@ enum Command {
         stale_before_ms: i64,
         now_ms: i64,
         reply: oneshot::Sender<Result<Vec<AutomationClaim>, RuntimeError>>,
+    },
+    AutomationFailures {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<AutomationFailure>, RuntimeError>>,
     },
     Relay {
         transport: DeferredRelayTransport,
@@ -6225,6 +6229,21 @@ impl ActorHandle {
                 max_attempts,
                 stale_before_ms,
                 now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_failures(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<AutomationFailure>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationFailures {
+                workspace_id,
                 reply,
             })
             .await
@@ -10456,6 +10475,14 @@ fn worker_main(
                     &NoFaults,
                 )
                 .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationFailures {
+                workspace_id,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::list_automation_failures(&store, &workspace_id)
+                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::Search {
