@@ -4776,12 +4776,32 @@ async function invokeWorkspacePluginSdk(input: {
         // writeAuthoredText: a writable workspace and a running engine
         // capture, resolved when the write happens, never cached.
         editCollections: {
-          setRecordFields: async ({ recordPath, fields, author, signal: editSignal }) =>
+          // The idempotency key is the automation run's claim-id-plus-ordinal:
+          // it must reach the seam, or a reaper re-run could write twice.
+          setRecordFields: async ({
+            recordPath,
+            fields,
+            author,
+            idempotencyKey,
+            signal: editSignal,
+          }) =>
             setCollectionRecordFields(
               await collectionEditContextFor(operation, editSignal),
-              { recordPath, fields, author },
+              {
+                recordPath,
+                fields,
+                author,
+                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+              },
             ),
-          createRecord: async ({ collectionPath, name, fields, author, signal: editSignal }) =>
+          createRecord: async ({
+            collectionPath,
+            name,
+            fields,
+            author,
+            idempotencyKey,
+            signal: editSignal,
+          }) =>
             createCollectionRecord(
               await collectionEditContextFor(operation, editSignal),
               {
@@ -4789,6 +4809,7 @@ async function invokeWorkspacePluginSdk(input: {
                 name,
                 ...(fields === undefined ? {} : { fields }),
                 author,
+                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
               },
             ),
         },

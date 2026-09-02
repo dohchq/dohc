@@ -20,6 +20,11 @@
     { "id": "preview", "title": "Hello preview", "instanced": true }
   ],
   "commands": [{ "id": "hello.write", "title": "Write hello note" }],
+  "automations": [
+    { "id": "ping", "collection": "chain-a", "handler": "ping" },
+    { "id": "pong", "collection": "chain-b", "handler": "pong" },
+    { "id": "triage", "collection": "tasks", "handler": "triage" }
+  ],
   "settings": [
     {
       "key": "greeting",

@@ -370,22 +370,46 @@ switch (mode) {
     };
     break;
   }
-  // Registers one automation handler that reports the run facts it received
-  // through a file write, so a test can prove the host's automation.run
-  // reaches the registered handler — and that the write it makes inside the
-  // run carries the claim's SDK context.
-  case "automation":
+  // Registers every automation handler the manifest declares, accumulating
+  // the run facts each one receives so the declared command can report them.
+  // "triage" sets the triggering record's Status to Reviewed — even when it
+  // already says Reviewed, so a naive loop would re-trigger it forever.
+  // "ping" (on chain-a) and "pong" (on chain-b) each write the OTHER chain
+  // collection's counter record, so a change in either collection starts a
+  // chain that only dohc's depth cap can stop. Each write carries the run's
+  // depth in its value, so every hop writes a genuinely new value.
+  case "automation": {
+    const runs = [];
     handler = {
       activate(ctx) {
-        ctx.automations.register("triage", async (facts) => {
+        ctx.commands.register("hello.write", async () => {
           await ctx.client.files.write(
             "automation-run-report.json",
-            `${JSON.stringify(facts)}\n`,
+            `${JSON.stringify({ runs })}\n`,
           );
         });
+        ctx.automations.register("triage", async (facts) => {
+          runs.push(facts);
+          const detail = await ctx.client.collections.getRecord(
+            facts.collectionPath,
+            facts.recordId,
+          );
+          await ctx.client.collections.setFields(detail.record.path, {
+            Status: "Reviewed",
+          });
+        });
+        const chainInto = (targetPath) => async (facts) => {
+          runs.push(facts);
+          await ctx.client.collections.setFields(targetPath, {
+            Step: `step-${facts.depth + 1}`,
+          });
+        };
+        ctx.automations.register("ping", chainInto("chain-b/counter.md"));
+        ctx.automations.register("pong", chainInto("chain-a/counter.md"));
       },
     };
     break;
+  }
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {
