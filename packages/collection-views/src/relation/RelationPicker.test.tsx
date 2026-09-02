@@ -99,10 +99,10 @@ describe("RelationPicker", () => {
     });
     expect(emit).toHaveBeenCalledExactlyOnceWith("rec-b");
     expect(close).toHaveBeenCalledOnce();
-    expect(screen.queryByText(/Only the first/)).toBeNull();
+    expect(screen.queryByText(/shows only the first/)).toBeNull();
   });
 
-  it("stops the drain at the page cap and says only the first records are listed", async () => {
+  it("stops the drain at the page cap and says how many records the list shows", async () => {
     const cursor = {
       sortValues: [{ present: true, value: "Design" }],
       recordPath: "tasks/rec-a.md",
@@ -124,7 +124,7 @@ describe("RelationPicker", () => {
     );
 
     expect(
-      await screen.findByText("Only the first 500 records are listed. Search to narrow the list."),
+      await screen.findByText("The list shows only the first 5 records. Search to narrow it."),
     ).toBeDefined();
     expect(executor).toHaveBeenCalledTimes(5);
     expect(screen.getAllByRole("option")).toHaveLength(5);
