@@ -252,6 +252,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
             Regime::LocalOnly,
             &update,
             None,
+            None,
             false,
             true,
             Some(REQUEST_ID),
@@ -273,6 +274,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
+            None,
             None,
             false,
             true,
@@ -298,6 +300,7 @@ fn record_update_request_identity_binds_path_before_any_mutation() {
         ContentKind::Plaintext,
         Regime::LocalOnly,
         &update,
+        None,
         None,
         false,
         true,
@@ -353,6 +356,7 @@ fn record_update_lineage_guard_refuses_stale_sessions_before_any_mutation() {
         Regime::LocalOnly,
         &update,
         Some("local-origin"),
+        None,
         Some(&"0".repeat(64)),
         true,
         false,
@@ -1617,6 +1621,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &key,
             &alice,
             Some("alice"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -1629,6 +1634,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
             &key,
             &bob,
             Some("bob"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -1643,6 +1649,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
                 origin_seq: 1,
                 bytes: bob.clone(),
             },
+            None,
             None,
             &NoFaults,
             1_200,
@@ -1659,6 +1666,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             None,
             &NoFaults,
             1_200,
@@ -1707,6 +1715,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &key,
             &alice,
             Some("alice"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -1719,6 +1728,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
             &key,
             &bob,
             Some("bob"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -1733,6 +1743,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
                 origin_seq: 1,
                 bytes: bob.clone(),
             },
+            None,
             None,
             &NoFaults,
             1_200,
@@ -1749,6 +1760,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             None,
             &NoFaults,
             1_200,
@@ -1805,6 +1817,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &key,
             &alice,
             Some("alice"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -1819,6 +1832,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
                 origin_seq: 1,
                 bytes: alice.clone(),
             },
+            None,
             None,
             &NoFaults,
             1_200,
@@ -1838,6 +1852,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
             &key,
             &bob,
             Some("bob"),
+            None,
             &NoFaults,
             1_300,
         )
@@ -1852,6 +1867,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
                 origin_seq: 1,
                 bytes: bob,
             },
+            None,
             None,
             &NoFaults,
             1_400,
@@ -1937,6 +1953,7 @@ fn base_is_claimed_exactly_once() {
                 origin_seq: 1,
                 bytes: delta,
             },
+            None,
             None,
             &NoFaults,
             1_450,
@@ -2178,6 +2195,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 bytes: delta,
             },
             None,
+            None,
             &NoFaults,
             1_100,
         )
@@ -2346,6 +2364,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
                 origin_seq: 2,
                 bytes: successor_delta,
             },
+            None,
             None,
             &NoFaults,
             1_225,
@@ -2717,7 +2736,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_100)
+        apply_remote_update(&mut ts.store, &key, &remote, None, None, &NoFaults, 1_100)
             .expect("apply")
             .outcome,
     );
@@ -2730,7 +2749,7 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, &NoFaults, 1_200)
+        apply_remote_update(&mut ts.store, &key, &remote, None, None, &NoFaults, 1_200)
             .expect("apply2")
             .outcome,
     );
@@ -3023,6 +3042,7 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         &mut remote.store,
         &remote_key,
         &remote_update,
+        None,
         None,
         &NoFaults,
         1_000,
@@ -3452,6 +3472,7 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
             &key,
             &first,
             Some("alice"),
+            None,
             &NoFaults,
             1_100,
         )
@@ -3487,6 +3508,7 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
             &key,
             &second,
             Some("alice"),
+            None,
             &NoFaults,
             1_200,
         )
@@ -3509,6 +3531,7 @@ fn local_collection_apply_derives_field_facts_and_the_created_transition() {
             &key,
             &second,
             Some("alice"),
+            None,
             &NoFaults,
             1_300,
         )
@@ -3534,7 +3557,9 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
     let projected = committed(
         a.store
             .write_with(&NoFaults, |tx| {
-                apply_remote_update_in_transaction_with_projection(tx, &key, &remote, None, 1_200)
+                apply_remote_update_in_transaction_with_projection(
+                    tx, &key, &remote, None, None, 1_200,
+                )
             })
             .expect("remote apply"),
     );
@@ -3559,7 +3584,9 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
     let again = committed(
         a.store
             .write_with(&NoFaults, |tx| {
-                apply_remote_update_in_transaction_with_projection(tx, &key, &remote, None, 1_300)
+                apply_remote_update_in_transaction_with_projection(
+                    tx, &key, &remote, None, None, 1_300,
+                )
             })
             .expect("redelivered apply"),
     );
@@ -3576,4 +3603,164 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
         1,
         "no duplicate history row"
     );
+}
+
+/// The three attribution columns of every history row for `key`'s record, in
+/// history order.
+fn history_attribution(
+    store: &EngineStore,
+    key: &DocKey,
+) -> Vec<(Option<String>, Option<String>, Option<i64>)> {
+    store
+        .read_with(|conn| -> Result<_, CollabError> {
+            let mut statement = conn
+                .prepare(
+                    "SELECT actor_kind,on_behalf_of,chain_depth FROM collection_field_history                      WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3                      ORDER BY history_id",
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            let rows = statement
+                .query_map(
+                    rusqlite::params![key.workspace_id, key.version_id, INDEX_RECORD_ID],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| CollabError::Corrupt {
+                    reason: error.to_string(),
+                })?;
+            Ok(rows)
+        })
+        .expect("history attribution")
+}
+
+#[test]
+fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
+    use dohc_engine_domain::{ChangeActorKind, ChangeAttribution};
+
+    let (mut a, mut b, key, base) =
+        two_collection_stores("collection-attribution-a", "collection-attribution-b");
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("peer base");
+    let attribution = ChangeAttribution {
+        actor_kind: ChangeActorKind::Agent,
+        on_behalf_of: Some("automation:triage".to_owned()),
+        depth: 2,
+    };
+    let expected_row = (
+        Some("agent".to_owned()),
+        Some("automation:triage".to_owned()),
+        Some(2_i64),
+    );
+
+    // Local apply: the attribution rides the returned facts (record and field
+    // level) and lands on the history row. This lineage journals nothing, so
+    // the facts carry no replication coordinate.
+    let edit = peer.frontmatter_set("title", "Renamed");
+    let outcome = committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &edit,
+            Some("alice"),
+            Some(&attribution),
+            &NoFaults,
+            1_100,
+        )
+        .expect("attributed local edit"),
+    );
+    let facts = outcome.record_facts.expect("local facts");
+    assert_eq!(facts.attribution.as_ref(), Some(&attribution));
+    assert_eq!(facts.fields[0].attribution.as_ref(), Some(&attribution));
+    assert_eq!(
+        facts.source, None,
+        "an unjournaled local apply has no replication coordinate"
+    );
+    assert_eq!(
+        history_attribution(&a.store, &key),
+        vec![expected_row.clone()]
+    );
+    let update_row: (Option<String>, Option<String>, Option<i64>) = a
+        .store
+        .read_with(|conn| -> Result<_, CollabError> {
+            conn.query_row(
+                "SELECT actor_kind,on_behalf_of,chain_depth FROM ydoc_updates                  WHERE workspace_id=?1 AND version_id=?2 AND object_id=?3                  ORDER BY seq DESC LIMIT 1",
+                rusqlite::params![key.workspace_id, key.version_id, key.object_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|error| CollabError::Corrupt {
+                reason: error.to_string(),
+            })
+        })
+        .expect("update row attribution");
+    assert_eq!(update_row, expected_row);
+
+    // Remote apply of the same bytes on the other device: the payload's
+    // attribution persists and returns identically, and the facts carry the
+    // envelope's coordinate as their source.
+    let applied = apply_remote_update(
+        &mut b.store,
+        &key,
+        &RemoteUpdate {
+            origin_id: "origin-a".to_owned(),
+            origin_seq: 7,
+            bytes: edit.clone(),
+        },
+        Some("alice"),
+        Some(&attribution),
+        &NoFaults,
+        1_200,
+    )
+    .expect("attributed remote apply");
+    let facts = applied
+        .record_facts
+        .expect("a remote apply derives facts on the receiving device");
+    assert_eq!(facts.attribution.as_ref(), Some(&attribution));
+    assert_eq!(facts.fields[0].attribution.as_ref(), Some(&attribution));
+    assert_eq!(facts.source, Some(("origin-a".to_owned(), 7)));
+    assert_eq!(history_attribution(&b.store, &key), vec![expected_row]);
+
+    // An unattributed write stays NULL on every column: absent means absent.
+    let plain = peer.frontmatter_set("status", "done");
+    let outcome = committed(
+        record_local_update_with_origin(
+            &mut a.store,
+            &mut a.cache,
+            &key,
+            &plain,
+            Some("alice"),
+            None,
+            &NoFaults,
+            1_300,
+        )
+        .expect("unattributed local edit"),
+    );
+    let facts = outcome.record_facts.expect("unattributed facts");
+    assert_eq!(facts.attribution, None);
+    assert_eq!(
+        history_attribution(&a.store, &key).last(),
+        Some(&(None, None, None))
+    );
+
+    // An out-of-bounds declared attribution is refused before any write.
+    let bad = ChangeAttribution {
+        actor_kind: ChangeActorKind::Automation,
+        on_behalf_of: Some(String::new()),
+        depth: 0,
+    };
+    record_local_update_with_origin(
+        &mut a.store,
+        &mut a.cache,
+        &key,
+        &peer.frontmatter_set("title", "Again"),
+        None,
+        Some(&bad),
+        &NoFaults,
+        1_400,
+    )
+    .expect_err("an empty onBehalfOf is refused");
 }

@@ -3066,6 +3066,23 @@ CREATE INDEX idx_materialization_jobs_mutation_generation
 
 pub(crate) const GLOBAL_GENERATION_INDEXES_MIGRATION_ID: &str = "v1-global-generation-indexes";
 
+/// Ordinal 45. Declared write attribution beside the author origin: the actor
+/// kind, the `onBehalfOf` principal, and the automation-chain depth, on both
+/// the update log and the field history it derives. All three are NULL for an
+/// unattributed write; a NULL `actor_kind` passes the CHECK by SQL semantics.
+const V1_CHANGE_ATTRIBUTION_DDL: &str = "\
+ALTER TABLE ydoc_updates ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation'));
+ALTER TABLE ydoc_updates ADD COLUMN on_behalf_of TEXT;
+ALTER TABLE ydoc_updates ADD COLUMN chain_depth INTEGER;
+ALTER TABLE collection_field_history ADD COLUMN actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation'));
+ALTER TABLE collection_field_history ADD COLUMN on_behalf_of TEXT;
+ALTER TABLE collection_field_history ADD COLUMN chain_depth INTEGER;
+";
+
+pub(crate) const CHANGE_ATTRIBUTION_MIGRATION_ID: &str = "v1-change-attribution";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3386,6 +3403,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: GLOBAL_GENERATION_INDEXES_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_GLOBAL_GENERATION_INDEXES_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 45,
+        id: CHANGE_ATTRIBUTION_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_CHANGE_ATTRIBUTION_DDL,
         sets_user_version: None,
     },
 ];

@@ -236,12 +236,20 @@ export interface CollectionHistoryValue {
   value: CollectionValue;
 }
 
+export type CollectionChangeActorKind = "human" | "agent" | "automation";
+
 export interface CollectionFieldHistoryEntry {
   historyId: number;
   field: string;
   previous: CollectionHistoryValue;
   next: CollectionHistoryValue;
   authorOriginId: string | null;
+  /** Declared actor kind, `null` for an unattributed write. */
+  actorKind: CollectionChangeActorKind | null;
+  /** The principal the actor acted for, `null` when undeclared. */
+  onBehalfOf: string | null;
+  /** Automation-chain depth, `null` for an unattributed write. */
+  depth: number | null;
   recordedAtMs: number;
 }
 

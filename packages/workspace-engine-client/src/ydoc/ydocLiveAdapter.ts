@@ -31,6 +31,7 @@ import {
   decodeYdocSettleResult,
   type YdocApplyExternalMarkdownEditParams,
   type YdocApplyExternalMarkdownEditResult,
+  type ChangeAttributionWire,
   type YdocCloseParams,
   type YdocContentKind,
   type ArtifactAssetDescriptor,
@@ -262,6 +263,8 @@ export interface OpenYdocAdapterSessionInput {
 
 export interface ApplyLocalUpdateOptions {
   actorOriginId?: string;
+  /** Declared write provenance the engine records beside the actor origin. */
+  attribution?: ChangeAttributionWire;
 }
 
 export interface YdocLocalTextEdit {
@@ -886,6 +889,7 @@ export class YdocAdapterSession {
       ...(options?.actorOriginId
         ? { actorOriginId: options.actorOriginId }
         : {}),
+      ...(options?.attribution ? { attribution: options.attribution } : {}),
       // Declared ONLY for the update `applySeedUpdate` constructs from the
       // open's seedContent, before any consumer sees the session. Recovery
       // resends and every other record stay undeclared, so the engine's

@@ -495,6 +495,9 @@ pub struct CollectionFieldHistoryEntry {
     pub previous: CollectionHistoryValue,
     pub next: CollectionHistoryValue,
     pub author_origin_id: Option<String>,
+    pub actor_kind: Option<ChangeActorKind>,
+    pub on_behalf_of: Option<String>,
+    pub depth: Option<i64>,
     pub recorded_at_ms: i64,
 }
 
@@ -2184,6 +2187,72 @@ pub fn synchronize_collection_frontmatter_index_in_tx(
     )
 }
 
+/// The kind of actor a write declared on the seam it took.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeActorKind {
+    Human,
+    Agent,
+    Automation,
+}
+
+impl ChangeActorKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ChangeActorKind::Human => "human",
+            ChangeActorKind::Agent => "agent",
+            ChangeActorKind::Automation => "automation",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "human" => Some(ChangeActorKind::Human),
+            "agent" => Some(ChangeActorKind::Agent),
+            "automation" => Some(ChangeActorKind::Automation),
+            _ => None,
+        }
+    }
+}
+
+/// Declared write provenance beside `author_origin_id`: the actor kind, the
+/// principal it acted for, and its automation-chain depth. Optional
+/// provenance, never a second authority — the storage and permission
+/// boundaries stay identical with or without it.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ChangeAttribution {
+    pub actor_kind: ChangeActorKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+    #[serde(default)]
+    pub depth: u32,
+}
+
+/// The most automation hops any declared chain may report. Bounds the wire,
+/// not the loop guard: the executor's stop-at-depth rule owns the product
+/// limit.
+pub const MAX_CHANGE_ATTRIBUTION_DEPTH: u32 = 64;
+
+impl ChangeAttribution {
+    /// Bounds every declared field. Both wire entry points (the engine's
+    /// `ydoc.recordUpdate` params and the replicated `ydoc.update` payload)
+    /// refuse an attribution that fails this, so storage only ever holds
+    /// bounded values.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(on_behalf_of) = &self.on_behalf_of
+            && (on_behalf_of.is_empty()
+                || on_behalf_of.len() > dohc_engine_storage::MAX_IDENTIFIER_BYTES)
+        {
+            return Err("attribution onBehalfOf must be non-empty and bounded");
+        }
+        if self.depth > MAX_CHANGE_ATTRIBUTION_DEPTH {
+            return Err("attribution depth exceeds the supported chain bound");
+        }
+        Ok(())
+    }
+}
+
 /// One applied field difference, exactly as its history row was recorded.
 /// Values stay as the stored JSON text; the event layer decides parsing and
 /// size bounds.
@@ -2195,6 +2264,9 @@ pub struct CollectionFieldChangeFact {
     /// The device-local `collection_field_history` rowid. A subscriber that
     /// misses events reads history past its last seen id.
     pub history_id: i64,
+    /// The attribution the history row recorded, `None` for an unattributed
+    /// write.
+    pub attribution: Option<ChangeAttribution>,
 }
 
 /// What one applied Y.Doc update did to a bound collection record. `created`
@@ -2207,6 +2279,14 @@ pub struct CollectionRecordApplyFacts {
     pub record_id: String,
     pub created: bool,
     pub author_origin_id: Option<String>,
+    pub attribution: Option<ChangeAttribution>,
+    /// The replication coordinate of the op this apply came from:
+    /// `(origin_id, origin_seq)`. A replicated apply carries the envelope's
+    /// coordinate; a local apply carries its own journaled coordinate, set by
+    /// the runtime after the outbound journal assigns it. `None` for a
+    /// never-synced lineage, whose only durable per-change key is the history
+    /// row id.
+    pub source: Option<(String, i64)>,
     pub recorded_at_ms: i64,
     pub fields: Vec<CollectionFieldChangeFact>,
 }
@@ -2225,6 +2305,7 @@ fn insert_field_history(
     previous: Option<&Value>,
     next: Option<&Value>,
     author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<Option<i64>, crate::DomainError> {
@@ -2235,8 +2316,9 @@ fn insert_field_history(
         .execute(
             "INSERT INTO collection_field_history \
          (workspace_id,version_id,record_id,field_name,previous_value_json, \
-          next_value_json,author_origin_id,source_origin_id,source_origin_seq,recorded_at_ms) \
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) \
+          next_value_json,author_origin_id,source_origin_id,source_origin_seq, \
+          actor_kind,on_behalf_of,chain_depth,recorded_at_ms) \
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13) \
          ON CONFLICT(workspace_id,version_id,record_id,field_name, \
                      source_origin_id,source_origin_seq) \
          WHERE source_origin_id IS NOT NULL DO NOTHING",
@@ -2250,6 +2332,9 @@ fn insert_field_history(
                 author_origin_id,
                 source_origin_id,
                 source_origin_seq,
+                attribution.map(|attribution| attribution.actor_kind.as_str()),
+                attribution.and_then(|attribution| attribution.on_behalf_of.as_deref()),
+                attribution.map(|attribution| i64::from(attribution.depth)),
                 recorded_at_ms,
             ],
         )
@@ -2275,6 +2360,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
     authored_before: &Value,
     authored_after: &Value,
     author_origin_id: Option<&str>,
+    attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
     recorded_at_ms: i64,
 ) -> Result<Option<CollectionRecordApplyFacts>, crate::DomainError> {
@@ -2315,6 +2401,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 previous,
                 next,
                 author_origin_id,
+                attribution,
                 source_update,
                 recorded_at_ms,
             )?;
@@ -2324,6 +2411,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                     previous_json: history_value(previous)?,
                     next_json: history_value(next)?,
                     history_id,
+                    attribution: attribution.cloned(),
                 });
             }
         }
@@ -2357,6 +2445,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                 authored_previous,
                 authored_next,
                 author_origin_id,
+                attribution,
                 source_update,
                 recorded_at_ms,
             )?;
@@ -2366,6 +2455,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
                     previous_json: history_value(authored_previous)?,
                     next_json: history_value(authored_next)?,
                     history_id,
+                    attribution: attribution.cloned(),
                 });
             }
         }
@@ -2396,6 +2486,8 @@ pub fn index_collection_frontmatter_apply_in_tx(
         record_id,
         created: !index_initialized,
         author_origin_id: author_origin_id.map(str::to_owned),
+        attribution: attribution.cloned(),
+        source: source_update.map(|(origin_id, origin_seq)| (origin_id.to_owned(), origin_seq)),
         recorded_at_ms,
         fields: field_facts,
     }))
@@ -4636,7 +4728,7 @@ pub fn get_collection_record(
         .transpose()?;
     let mut sql = String::from(
         "SELECT history_id,field_name,previous_value_json,next_value_json,author_origin_id,\
-                recorded_at_ms \
+                actor_kind,on_behalf_of,chain_depth,recorded_at_ms \
          FROM collection_field_history \
          WHERE workspace_id=?1 AND version_id=?2 AND record_id=?3",
     );
@@ -4672,7 +4764,10 @@ pub fn get_collection_record(
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
                 row.get::<_, Option<String>>(4)?,
-                row.get::<_, i64>(5)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, Option<i64>>(7)?,
+                row.get::<_, i64>(8)?,
             ))
         })
         .map_err(crate::DomainError::sql_corrupt)?
@@ -4681,13 +4776,26 @@ pub fn get_collection_record(
     let history = rows
         .into_iter()
         .map(
-            |(history_id, field, previous, next, author_origin_id, recorded_at_ms)| {
+            |(
+                history_id,
+                field,
+                previous,
+                next,
+                author_origin_id,
+                actor_kind,
+                on_behalf_of,
+                depth,
+                recorded_at_ms,
+            )| {
                 Ok(CollectionFieldHistoryEntry {
                     history_id,
                     field,
                     previous: history_value_from_json(previous)?,
                     next: history_value_from_json(next)?,
                     author_origin_id,
+                    actor_kind: actor_kind.as_deref().and_then(ChangeActorKind::parse),
+                    on_behalf_of,
+                    depth,
                     recorded_at_ms,
                 })
             },

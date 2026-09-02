@@ -4062,6 +4062,7 @@ mod collection_reconcile_scheduling_tests {
                 state.regime,
                 doc.encode_full_state(),
                 None,
+                None,
                 state.lineage_claim_id,
                 true,
                 state.head_blob_sha256,

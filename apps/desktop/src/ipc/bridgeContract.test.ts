@@ -3062,6 +3062,10 @@ describe("plugin guest SDK IPC contract", () => {
         recordId: "rec-1",
         author: null,
         timestamp: 1_756_000_000_000,
+        actorKind: null,
+        onBehalfOf: null,
+        depth: null,
+        source: null,
       },
     };
     const fieldChanged = {
@@ -3077,6 +3081,10 @@ describe("plugin guest SDK IPC contract", () => {
         author: "agent:sites",
         timestamp: 1_756_000_000_000,
         historyId: 7,
+        actorKind: "agent",
+        onBehalfOf: "automation:sites",
+        depth: 1,
+        source: { originId: "origin-a", originSeq: 12 },
       },
     };
 
@@ -3110,6 +3118,18 @@ describe("plugin guest SDK IPC contract", () => {
       parsePluginPanelSdkEventForIpc({
         ...fieldChanged,
         data: { ...fieldChanged.data, historyId: "7" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...fieldChanged,
+        data: { ...fieldChanged.data, actorKind: "robot" },
+      }),
+    ).toBeNull();
+    expect(
+      parsePluginPanelSdkEventForIpc({
+        ...fieldChanged,
+        data: { ...fieldChanged.data, source: { originId: "" , originSeq: 1 } },
       }),
     ).toBeNull();
     const withoutNext: Record<string, unknown> = { ...fieldChanged.data };

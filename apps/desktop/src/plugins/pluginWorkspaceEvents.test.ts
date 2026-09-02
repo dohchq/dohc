@@ -468,6 +468,10 @@ function recordCreated(collectionPath: string): PluginRecordEvent {
       recordId: "rec-1",
       author: null,
       timestamp: 1_756_000_000_000,
+      actorKind: null,
+      onBehalfOf: null,
+      depth: null,
+      source: null,
     },
   };
 }
@@ -517,6 +521,10 @@ describe("PluginWorkspaceEvents record subscriptions", () => {
       author: "agent:sites",
       timestamp: 1_756_000_000_000,
       historyId: 7,
+      actorKind: "agent" as const,
+      onBehalfOf: "local",
+      depth: 0,
+      source: { originId: "origin-a", originSeq: 3 },
     };
     events.handleRecordEvent({ name: "record.field.changed", data });
 

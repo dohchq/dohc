@@ -683,6 +683,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &integer_frontmatter,
                 Some("editor"),
                 None,
+                None,
                 10,
             )?;
             Ok::<_, DomainError>(tx.total_changes() - writes_before)
@@ -708,6 +709,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &integer_frontmatter,
                 &changed_frontmatter,
                 Some("editor"),
+                None,
                 None,
                 11,
             )
@@ -759,6 +761,7 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
                 &frontmatter,
                 &frontmatter,
                 Some("editor"),
+                None,
                 None,
                 10,
             )?;
@@ -845,6 +848,7 @@ fn multi_field_history_order_matches_across_independent_stores() {
                     &before,
                     &after,
                     Some("editor"),
+                    None,
                     None,
                     4,
                 )
@@ -1333,6 +1337,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &review,
                 Some("human-editor"),
                 None,
+                None,
                 10,
             )?;
             index_collection_frontmatter_apply_in_tx(
@@ -1345,6 +1350,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &review,
                 &done,
                 Some("agent-editor"),
+                None,
                 None,
                 20,
             )
@@ -1543,6 +1549,7 @@ fn deleted_record_id_stays_reserved_and_keeps_its_history() {
                 &before,
                 &after,
                 Some("alpha-editor"),
+                None,
                 None,
                 10,
             )
@@ -1817,6 +1824,7 @@ fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() 
                 &before,
                 &after,
                 Some("editor"),
+                None,
                 None,
                 4,
             )

@@ -64,8 +64,8 @@ pub use chats::{
     resolve_thread_message, thread_has_message, validate_follow_target,
 };
 pub use collections::{
-    COLLECTION_SCHEMA_FILENAME, CollectionAdoptionCandidate, CollectionDetails,
-    CollectionFieldChangeFact, CollectionFieldHistoryEntry, CollectionFieldType,
+    COLLECTION_SCHEMA_FILENAME, ChangeActorKind, ChangeAttribution, CollectionAdoptionCandidate,
+    CollectionDetails, CollectionFieldChangeFact, CollectionFieldHistoryEntry, CollectionFieldType,
     CollectionFieldValue, CollectionFilter, CollectionFilterOperator, CollectionHistoryValue,
     CollectionIndexedValue, CollectionIndexedValueValidation, CollectionPendingAdoption,
     CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,

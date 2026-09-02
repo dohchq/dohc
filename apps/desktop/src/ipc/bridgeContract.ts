@@ -3407,12 +3407,26 @@ const PluginPanelFileWatchData = z
   })
   .strict();
 
+// Declared attribution and the op's replication coordinate ride every record
+// event: `null` means unattributed (or a never-synced change for `source`),
+// so a subscriber can tell "undeclared" from "missing".
+const RecordEventAttributionFields = {
+  actorKind: z.enum(["human", "agent", "automation"]).nullable(),
+  onBehalfOf: z.string().nullable(),
+  depth: z.number().nullable(),
+  source: z
+    .object({ originId: z.string().min(1), originSeq: z.number() })
+    .strict()
+    .nullable(),
+};
+
 export const PluginPanelRecordChangedData = z
   .object({
     collectionPath: z.string().min(1),
     recordId: z.string().min(1),
     author: z.string().nullable(),
     timestamp: z.number(),
+    ...RecordEventAttributionFields,
   })
   .strict();
 
@@ -3429,6 +3443,7 @@ export const PluginPanelRecordFieldChangedData = z
     author: z.string().nullable(),
     timestamp: z.number(),
     historyId: z.number(),
+    ...RecordEventAttributionFields,
   })
   .strict();
 

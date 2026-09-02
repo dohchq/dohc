@@ -46,11 +46,11 @@ use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
     CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
     CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark,
-    ChatBookmarkTransition, ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision,
-    ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage,
-    ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection,
-    ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
+    CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatThreadProjection, ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
     CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
     CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
     CollectionSummary, CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult,
@@ -1710,6 +1710,7 @@ enum Command {
         update: Vec<u8>,
         request_id: Option<String>,
         actor_origin_id: Option<String>,
+        attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         seed_source_sha256: Option<String>,
@@ -4308,6 +4309,7 @@ impl ActorHandle {
         regime: Regime,
         update: Vec<u8>,
         actor_origin_id: Option<String>,
+        attribution: Option<ChangeAttribution>,
         expected_lineage_claim_id: Option<String>,
         require_empty_lineage: bool,
         seed_source_sha256: Option<String>,
@@ -4326,6 +4328,7 @@ impl ActorHandle {
                 update,
                 request_id,
                 actor_origin_id,
+                attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
@@ -8965,6 +8968,7 @@ fn worker_main(
                 update,
                 request_id,
                 actor_origin_id,
+                attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
@@ -8982,6 +8986,7 @@ fn worker_main(
                     regime,
                     &update,
                     actor_origin_id,
+                    attribution,
                     expected_lineage_claim_id,
                     require_empty_lineage,
                     seed_source_sha256,
@@ -10802,6 +10807,7 @@ fn seed_scene_from_artifact_on_store(
         Regime::LocalOnly,
         &seed_update,
         None,
+        None,
         true,
         true,
         Some(&request_id),
@@ -11206,6 +11212,7 @@ fn ydoc_record_update_on_store(
     regime: Regime,
     update: &[u8],
     actor_origin_id: Option<String>,
+    attribution: Option<ChangeAttribution>,
     expected_lineage_claim_id: Option<String>,
     require_empty_lineage: bool,
     seed_source_sha256: Option<String>,
@@ -11244,6 +11251,7 @@ fn ydoc_record_update_on_store(
         regime,
         update,
         actor_origin_id.as_deref(),
+        attribution.as_ref(),
         expected_lineage_claim_id.as_deref(),
         // Parent row, seed guard, marker, append, and outbound journal all
         // commit in ONE transaction — no bare-parent crash window, and a
@@ -11266,6 +11274,7 @@ fn ydoc_record_update_on_store(
                 &journal_key,
                 &journal_path,
                 actor_origin_id.as_deref(),
+                attribution.as_ref(),
                 now_ms,
             )
             .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
@@ -11284,7 +11293,7 @@ fn ydoc_record_update_on_store(
                     .ok_or_else(|| dohc_engine_collab::CollabError::Corrupt {
                         reason: "exact Y.Doc lineage has no claim id".to_owned(),
                     })?;
-                dohc_engine_sync::journal_local_op_in_tx(
+                let origin_seq = dohc_engine_sync::journal_local_op_in_tx(
                     tx,
                     &journal_key.workspace_id,
                     "ydoc.update",
@@ -11295,6 +11304,7 @@ fn ydoc_record_update_on_store(
                         update_sha,
                         &lineage_claim_id,
                         actor_origin_id.as_deref(),
+                        attribution.as_ref(),
                         false,
                     ),
                     now_ms,
@@ -11310,6 +11320,24 @@ fn ydoc_record_update_on_store(
                     // is minted by sync init, not the collab layer).
                     reason: format!("outbound ydoc.update journal append failed: {error}"),
                 })?;
+                // The op's replication coordinate exists only now, after the
+                // journal assigned it. Thread it into the facts so record
+                // events and the automation trigger key see the same
+                // coordinate every peer derives from the envelope. A
+                // base-originated or never-synced apply keeps `None`; its
+                // per-change key is the history row id.
+                if let Some(facts) = outcome.record_facts.as_mut() {
+                    let origin_id: String = tx
+                        .query_row(
+                            "SELECT origin_id FROM sync_identity WHERE workspace_id=?1",
+                            [&journal_key.workspace_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                            reason: format!("journaled ydoc.update has no sync identity: {error}"),
+                        })?;
+                    facts.source = Some((origin_id, origin_seq));
+                }
             }
             Ok(())
         },
@@ -14058,6 +14086,7 @@ fn ensure_collection_record_id_on_store(
         regime,
         &update,
         Some("engine".to_owned()),
+        None,
         lineage_claim_id,
         false,
         None,
@@ -14304,6 +14333,7 @@ fn cleanup_collection_relation_on_store(
             state.regime,
             &seed_update,
             None,
+            None,
             lineage_claim_id,
             true,
             state.head_blob_sha256.clone(),
@@ -14345,6 +14375,7 @@ fn cleanup_collection_relation_on_store(
         state.regime,
         &update,
         Some("engine".to_owned()),
+        None,
         lineage_claim_id,
         false,
         None,
@@ -15659,6 +15690,7 @@ mod doc_cache_reset_tests {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
+            None,
             None,
             true,
             false,

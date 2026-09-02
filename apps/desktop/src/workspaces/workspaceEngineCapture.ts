@@ -49,6 +49,7 @@ import {
   type EngineYdocProviderSessionOptions,
   type EngineTransport,
   type ArtifactAssetDescriptor,
+  type ChangeAttributionWire,
   type YdocContentKind,
 } from "@dohc/workspace-engine-client";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
@@ -387,14 +388,16 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // and a save-state bookkeeper that counts at hand-over instead vouches for
   // edits still sitting in the queue (#514).
   // `options.actorOriginId` is the author the engine records this update
-  // under (an agent's id from the SDK/MCP write seam). It rides the primary
-  // journal call; a dead-generation revive or recovery replay re-journals
-  // canonical state without it, falling back to device attribution — the
-  // same attribution every human edit carries.
+  // under (an agent's id from the SDK/MCP write seam), and
+  // `options.attribution` is the declared provenance recorded beside it
+  // (actor kind, `onBehalfOf`, chain depth). Both ride the primary journal
+  // call; a dead-generation revive or recovery replay re-journals canonical
+  // state without them, falling back to device attribution — the same
+  // attribution every human edit carries.
   applyLocalUpdate(
     update: Uint8Array,
     onArmed?: () => void,
-    options?: { actorOriginId?: string },
+    options?: { actorOriginId?: string; attribution?: ChangeAttributionWire },
   ): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;

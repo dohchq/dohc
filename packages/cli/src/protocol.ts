@@ -713,6 +713,9 @@ export const collectionRecordResultSchema = z.discriminatedUnion("ok", [
             previous: collectionMaybeValueSchema,
             next: collectionMaybeValueSchema,
             authorOriginId: z.string().min(1).nullable(),
+            actorKind: z.enum(["human", "agent", "automation"]).nullable(),
+            onBehalfOf: z.string().min(1).nullable(),
+            depth: z.number().int().nonnegative().nullable(),
             recordedAtMs: z.number().int().nonnegative(),
           })
           .strict(),

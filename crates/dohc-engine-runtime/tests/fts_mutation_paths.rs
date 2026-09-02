@@ -347,6 +347,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             update,
             None,
             None,
+            None,
             true,
             None,
             None,

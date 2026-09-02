@@ -1,4 +1,5 @@
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 import type {
   CollectionQueryParams,
   CollectionQueryResult,
@@ -71,6 +72,18 @@ export interface CreateCollectionRecordInput {
  */
 export function actorOriginIdFor(author: ChangeAuthor): string | undefined {
   return author.kind === "agent" ? author.agentId : undefined;
+}
+
+/**
+ * The declared attribution recorded beside the actor origin. An agent author
+ * writes as an agent for its `onBehalfOf` principal at chain depth 0 (the
+ * executor raises the depth for automation chains, lane 3); every other
+ * author through this seam is a person.
+ */
+export function attributionFor(author: ChangeAuthor): ChangeAttributionWire {
+  return author.kind === "agent"
+    ? { actorKind: "agent", onBehalfOf: author.onBehalfOf, depth: 0 }
+    : { actorKind: "human" };
 }
 
 function assertWritableFieldValue(field: string, value: unknown): void {
@@ -180,7 +193,10 @@ export async function setCollectionRecordFields(
         () => {
           armed = true;
         },
-        actorOriginId === undefined ? undefined : { actorOriginId },
+        {
+          ...(actorOriginId === undefined ? {} : { actorOriginId }),
+          attribution: attributionFor(input.author),
+        },
       );
       // settleNow queues on the same session chain as the update above, so it
       // observes the journaled edit; it throws when the settle cannot commit.

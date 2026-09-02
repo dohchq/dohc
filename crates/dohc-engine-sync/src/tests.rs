@@ -7163,6 +7163,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
                 bytes: loser_delta,
             },
             None,
+            None,
             &NoFaults,
             1_150,
         )
@@ -18284,6 +18285,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         &restored_claim,
         &restored_claim,
         None,
+        None,
         true,
     );
     let base_seq = journal_local_replication_op(
@@ -18309,6 +18311,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         dohc_engine_collab::ContentKind::Plaintext,
         &delta_sha,
         &restored_claim,
+        None,
         None,
         false,
     );
@@ -18468,6 +18471,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
             dohc_engine_collab::ContentKind::Plaintext,
             &winner_claim,
             &winner_claim,
+            None,
             None,
             true,
         ),

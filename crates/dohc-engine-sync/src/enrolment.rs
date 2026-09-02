@@ -81,7 +81,7 @@ pub(crate) fn originate_unclaimed_ydoc_bases_in_tx(
             object_id,
         };
         if let BaseOrigination::Declined(declined) =
-            originate_ydoc_base_in_tx(tx, &key, &path, None, now_ms)?
+            originate_ydoc_base_in_tx(tx, &key, &path, None, None, now_ms)?
         {
             sharing_declined.push(declined);
         }
@@ -563,6 +563,7 @@ mod tests {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             update,
+            None,
             None,
             false,
             true,
@@ -1337,6 +1338,7 @@ mod tests {
             Regime::LocalOnly,
             &update,
             None,
+            None,
             false,
             true,
             Some("request-1"),
@@ -1376,6 +1378,7 @@ mod tests {
             ContentKind::Plaintext,
             Regime::LocalOnly,
             &update,
+            None,
             None,
             false,
             true,
@@ -2337,6 +2340,7 @@ mod tests {
                     },
                     "legacy-ambiguous.md",
                     None,
+                    None,
                     2,
                 )?;
                 let missing = crate::originate_ydoc_base_in_tx(
@@ -2347,6 +2351,7 @@ mod tests {
                         object_id: "legacy-missing".to_owned(),
                     },
                     "legacy-missing.md",
+                    None,
                     None,
                     2,
                 )?;

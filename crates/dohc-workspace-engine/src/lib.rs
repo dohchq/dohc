@@ -8212,6 +8212,11 @@ impl EngineService {
         let update = base64::engine::general_purpose::STANDARD
             .decode(params.update_base64)
             .map_err(|_| wire(ErrorCode::InvalidParams, "invalid update encoding"))?;
+        if let Some(attribution) = &params.attribution
+            && let Err(reason) = attribution.validate()
+        {
+            return Err(wire(ErrorCode::InvalidParams, reason));
+        }
         let require_empty = session.lineage_absent && session.first_update_pending;
         // A declared seed on anything but the first update of a
         // lineage-absent session is a client bug: accepting it would record a
@@ -8244,6 +8249,7 @@ impl EngineService {
                         session.regime,
                         update,
                         params.actor_origin_id,
+                        params.attribution,
                         session.lineage_claim_id,
                         require_empty,
                         seed_source_sha256,
@@ -10298,6 +10304,11 @@ struct YdocRecordUpdateParams {
     update_base64: String,
     #[serde(default)]
     actor_origin_id: Option<String>,
+    /// Declared write provenance: actor kind, `onBehalfOf` principal, and
+    /// automation-chain depth. Optional; recorded beside the author origin on
+    /// the update row and every history row the apply derives.
+    #[serde(default)]
+    attribution: Option<dohc_engine_domain::ChangeAttribution>,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
     /// reach the session (#815). Only the adapter's seed path sends it; a
@@ -12380,6 +12391,28 @@ fn emit_record_events(
         payload.insert("recordId".to_owned(), json!(facts.record_id.clone()));
         payload.insert("author".to_owned(), json!(facts.author_origin_id.clone()));
         payload.insert("timestamp".to_owned(), json!(facts.recorded_at_ms));
+        // Declared attribution and the op's replication coordinate, `null`
+        // when absent: the automation executor and loop guard read these, and
+        // a subscriber must be able to tell "unattributed" from "missing".
+        let attribution = facts.attribution.as_ref();
+        payload.insert(
+            "actorKind".to_owned(),
+            json!(attribution.map(|attribution| attribution.actor_kind.as_str())),
+        );
+        payload.insert(
+            "onBehalfOf".to_owned(),
+            json!(attribution.and_then(|attribution| attribution.on_behalf_of.clone())),
+        );
+        payload.insert(
+            "depth".to_owned(),
+            json!(attribution.map(|attribution| attribution.depth)),
+        );
+        payload.insert(
+            "source".to_owned(),
+            json!(facts.source.as_ref().map(|(origin_id, origin_seq)| {
+                json!({ "originId": origin_id, "originSeq": origin_seq })
+            })),
+        );
     };
     let record_payload = || {
         let mut payload = serde_json::Map::new();
@@ -14419,6 +14452,12 @@ mod tests {
             record_id: "rec_a".to_owned(),
             created: true,
             author_origin_id: Some("alice".to_owned()),
+            attribution: Some(dohc_engine_domain::ChangeAttribution {
+                actor_kind: dohc_engine_domain::ChangeActorKind::Agent,
+                on_behalf_of: Some("automation:triage".to_owned()),
+                depth: 1,
+            }),
+            source: Some(("origin-a".to_owned(), 41)),
             recorded_at_ms: 1_100,
             fields: vec![
                 dohc_engine_domain::CollectionFieldChangeFact {
@@ -14426,12 +14465,14 @@ mod tests {
                     previous_json: None,
                     next_json: Some(big.clone()),
                     history_id: 7,
+                    attribution: None,
                 },
                 dohc_engine_domain::CollectionFieldChangeFact {
                     field_name: "beta".to_owned(),
                     previous_json: Some("\"open\"".to_owned()),
                     next_json: Some("\"done\"".to_owned()),
                     history_id: 8,
+                    attribution: None,
                 },
             ],
         };
@@ -14463,7 +14504,21 @@ mod tests {
                 "recordId": "rec_a",
                 "author": "alice",
                 "timestamp": 1_100,
+                "actorKind": "agent",
+                "onBehalfOf": "automation:triage",
+                "depth": 1,
+                "source": { "originId": "origin-a", "originSeq": 41 },
             })
+        );
+        assert_eq!(
+            notices[1].payload["actorKind"], "agent",
+            "field events carry the declared attribution too"
+        );
+        assert_eq!(notices[1].payload["onBehalfOf"], "automation:triage");
+        assert_eq!(notices[1].payload["depth"], 1);
+        assert_eq!(
+            notices[1].payload["source"],
+            json!({ "originId": "origin-a", "originSeq": 41 })
         );
         assert_eq!(notices[1].payload["field"], "alpha");
         assert_eq!(
