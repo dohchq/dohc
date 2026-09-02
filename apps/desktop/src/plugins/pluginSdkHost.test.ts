@@ -432,7 +432,7 @@ describe("invokePluginSdkHost", () => {
     expect(calls).toHaveLength(2);
   });
 
-  it("attributes an automation run's collection writes to the automation with the claim id as the key", async () => {
+  it("attributes an automation run's collection writes to the automation with the claim id plus write ordinal as the key", async () => {
     const root = await workspaceRoot();
     const calls: unknown[] = [];
     const tasksCollection = {

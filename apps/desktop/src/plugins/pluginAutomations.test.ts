@@ -279,7 +279,7 @@ describe("PluginAutomations", () => {
   // fills per plugin. A claim whose INSTALLED plugin has not registered yet
   // must not settle failed, and the drain must stop rather than run younger
   // claims past it.
-  it("holds a claim for an installed plugin that has not registered yet, and stops the drain", async () => {
+  it("holds a claim for an installed plugin that has not registered yet without stalling the others", async () => {
     const h = harness();
     // Only hello-plugin is registered; later-plugin is installed (its
     // manifest declares triage) but its pipeline status has not landed.
@@ -296,30 +296,30 @@ describe("PluginAutomations", () => {
     await vi.waitFor(() =>
       expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
     );
-    // Nothing settled, nothing ran, and the younger hello claim was NOT
-    // pulled past the held one.
-    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
-    expect(h.runs).toEqual([]);
-    expect(h.pendingClaims.map((claim) => claim.claimId)).toEqual([
-      "claim-hello",
-    ]);
-
-    // later-plugin's own status lands: its reconcile registers and
-    // re-drains — the held claim first, then the younger one.
-    h.automations.handlePipelineStatus(statusEvent({ id: "later-plugin" }));
+    // The later-plugin claim is held (never settled, never run), and the
+    // drain goes on: hello-plugin's claim runs now. A plugin that never
+    // registers this session must not stall every other automation.
     await vi.waitFor(() => {
       expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
         claimId: "claim-hello",
         state: "done",
       });
     });
-    expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
-      claimId: "claim-later",
-      state: "done",
+    expect(h.adapter.settleAutomationClaim).toHaveBeenCalledTimes(1);
+    expect(h.runs.map((run) => run.params.claimId)).toEqual(["claim-hello"]);
+
+    // later-plugin's own status lands: its reconcile registers and
+    // re-drains the held claim.
+    h.automations.handlePipelineStatus(statusEvent({ id: "later-plugin" }));
+    await vi.waitFor(() => {
+      expect(h.adapter.settleAutomationClaim).toHaveBeenCalledWith({
+        claimId: "claim-later",
+        state: "done",
+      });
     });
     expect(h.runs.map((run) => run.params.claimId)).toEqual([
-      "claim-later",
       "claim-hello",
+      "claim-later",
     ]);
   });
 

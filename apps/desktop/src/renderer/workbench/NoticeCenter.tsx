@@ -50,6 +50,15 @@ type Notice = {
 
 // Coarse relative time for the notice ledger. Recomputed on every render;
 // a 30s tick while the panel is open keeps labels honest between updates.
+// Mirrors AUTOMATION_CHAIN_DEPTH_CAP in crates/dohc-engine-domain/src/automations.rs.
+const AUTOMATION_CHAIN_DEPTH_CAP = 4;
+
+/** An error text as one sentence: the handler's message rarely ends one. */
+function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
+
 function relativeTime(thenMs: number): string {
   const elapsedMs = Math.max(0, Date.now() - thenMs);
   const deltaMinutes = Math.floor(elapsedMs / 60_000);
@@ -95,7 +104,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
     return {
       title: "An automation chain stopped",
       body:
-        `${count}dohc stops a chain of automations after 4 steps, so ` +
+        `${count}dohc stops a chain of automations after ${AUTOMATION_CHAIN_DEPTH_CAP} steps, so ` +
         `"${failure.automationId}" did not run. Open the plugin's source to ` +
         "shorten the chain.",
     };
@@ -110,7 +119,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
   }
   return {
     title: `Automation "${failure.automationId}" failed`,
-    body: `${count}${failure.error} Open the plugin's source to fix the handler.`,
+    body: `${count}${sentence(failure.error)} Open the plugin's source to fix the handler.`,
   };
 }
 

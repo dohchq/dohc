@@ -14,7 +14,7 @@ import type { PluginAutomationRunAuthority } from "./pluginSdkHost";
 // transport, so a claim inserted while the desktop was away drains on the
 // next reconcile.
 
-// The engine bounds a settle error at 1024 characters (lane 2); stay under it.
+// The engine bounds a settle error at 4096 bytes (lane 2); stay under it.
 const MAX_SETTLE_ERROR_CHARS = 1000;
 
 // Per-run deadline. `transport.request` has no timeout, so a handler that
@@ -281,14 +281,12 @@ export class PluginAutomations {
     try {
       // Deferred claims first, oldest first: they are older than anything
       // claimNext can still serve, and claimNext never serves them again.
-      let stopped = false;
       for (const claim of [...this.deferred.values()]) {
-        if (this.disposed || stopped) break;
+        if (this.disposed) break;
         const outcome = await this.execute(claim);
         if (outcome === "settled") this.deferred.delete(claim.claimId);
-        else if (outcome === "defer-stop") stopped = true;
       }
-      while (!this.disposed && !stopped) {
+      while (!this.disposed) {
         const claim = await this.options.withAdapter((adapter) =>
           adapter.claimNextAutomation(),
         );
@@ -298,7 +296,6 @@ export class PluginAutomations {
         const outcome = await this.execute(claim);
         if (outcome !== "settled") {
           this.deferred.set(claim.claimId, claim);
-          if (outcome === "defer-stop") stopped = true;
         }
       }
     } catch (error) {
@@ -329,13 +326,17 @@ export class PluginAutomations {
   /**
    * Runs one claim the engine already holds as running. "settled" closed the
    * claim (done or failed). "defer" leaves it running for a later drain to
-   * retry — the host refused this run. "defer-stop" additionally stops the
-   * whole drain: the claim's plugin has not registered yet, and running
-   * younger claims past it would reorder the workspace's serial drain.
+   * retry: the host refused this run, or the claim's plugin has not
+   * registered yet. A deferred claim never halts the drain: every claim of
+   * an unregistered automation defers alike, so order within one automation
+   * holds, and a plugin that never registers this session (its build
+   * failed at open) cannot stall every other automation in the workspace.
+   * The engine reaper's requeue-then-exhaust cycle is what surfaces such a
+   * claim to the owner.
    */
   private async execute(
     claim: AutomationClaim,
-  ): Promise<"settled" | "defer" | "defer-stop"> {
+  ): Promise<"settled" | "defer"> {
     const registered = this.registered.get(claim.automationId);
     if (!registered) {
       if (this.installedPluginDeclares(claim.automationId)) {
@@ -344,7 +345,7 @@ export class PluginAutomations {
         // pipeline status lands. An installed declarer that has not
         // registered YET is not a failure — that plugin's own reconcile
         // re-drains this claim.
-        return "defer-stop";
+        return "defer";
       }
       // No installed plugin declares it: uninstalled, or the manifest
       // dropped the automation. No retry can ever find a handler.
