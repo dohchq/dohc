@@ -2179,10 +2179,24 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     let mut store = EngineStore::open(&db, 2).expect("open replication store");
     let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
         .expect("apply remote moment");
-    assert!(
-        matches!(applied, ApplyOutcome::Applied(_)),
-        "the remote moment must fast-forward the seeded head: {applied:?}"
+    // A file-authored edit derives the same field facts a frontmatter-map
+    // edit does: the record events and history ride this apply too.
+    let ApplyOutcome::Applied(routed) = &applied else {
+        panic!("the remote moment must fast-forward the seeded head: {applied:?}");
+    };
+    let facts = routed
+        .record_facts
+        .as_ref()
+        .expect("a synced file edit derives record facts");
+    assert_eq!(facts.record_id, RECORD_ID);
+    assert_eq!(
+        facts.author_origin_id.as_deref(),
+        Some("remote-moment-editor")
     );
+    assert_eq!(facts.fields.len(), 1, "{:?}", facts.fields);
+    assert_eq!(facts.fields[0].field_name, "status");
+    assert_eq!(facts.fields[0].previous_json.as_deref(), Some("\"open\""));
+    assert_eq!(facts.fields[0].next_json.as_deref(), Some("\"remote\""));
     drop(store);
 
     // No capture flush, watcher event, or reconciliation pass runs between the
@@ -2197,6 +2211,19 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     .await;
     assert_eq!(query["records"][0]["id"], json!(RECORD_ID));
     assert_eq!(status_of(&query), json!("remote"));
+    let record = call(
+        &transport,
+        &handle,
+        4,
+        "collections.getRecord",
+        json!({ "collectionPath": "tasks", "recordId": RECORD_ID, "historyLimit": 10 }),
+    )
+    .await;
+    assert_eq!(record["history"][0]["field"], json!("status"));
+    assert_eq!(
+        record["history"][0]["authorOriginId"],
+        json!("remote-moment-editor")
+    );
 }
 
 /// A replicated write that REMOVES parseable frontmatter must clear the

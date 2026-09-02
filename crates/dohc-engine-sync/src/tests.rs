@@ -9240,6 +9240,7 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         })
     );
 
@@ -11192,6 +11193,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
             lineage_replacement: None,
+            record_facts: None,
         })
     );
     assert_eq!(
@@ -11515,6 +11517,7 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         })
     );
     let conflicts: i64 = engine
@@ -12236,6 +12239,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     assert_eq!(
@@ -12281,6 +12285,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         })
     );
     assert_eq!(
@@ -13317,6 +13322,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: None,
             }))
         ));
         let descendant = envelope(
@@ -13340,6 +13346,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: None,
             }))
         ));
 
@@ -13610,6 +13617,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     let deferred: i64 = engine
@@ -13764,6 +13772,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     assert_eq!(
@@ -13855,6 +13864,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     assert_eq!(
@@ -13901,6 +13911,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     let placeholder_timestamp: i64 = engine
@@ -14003,6 +14014,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 reason: Some("ydoc-lineage-absent"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
+                record_facts: None,
             }))
         ));
     }
@@ -14129,6 +14141,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
     let base = envelope(
@@ -21682,6 +21695,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
+            record_facts: None,
         }))
     ));
 

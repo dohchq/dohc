@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
-import { createPluginPanelFileWatchEmitter } from "./pluginPanelSdkEvent";
+import { createPluginPanelSdkEventEmitter } from "./pluginPanelSdkEvent";
 
-describe("createPluginPanelFileWatchEmitter", () => {
+describe("createPluginPanelSdkEventEmitter", () => {
   it("drops events after the exact panel stops running", () => {
     let panelRunning = true;
     const send = vi.fn();
-    const emitEvent = createPluginPanelFileWatchEmitter({
+    const emitEvent = createPluginPanelSdkEventEmitter({
       workspaceId: "ws-plugins",
       pluginId: "sites",
       panelId: "main",

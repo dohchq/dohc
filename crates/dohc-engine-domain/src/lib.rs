@@ -65,11 +65,12 @@ pub use chats::{
 };
 pub use collections::{
     COLLECTION_SCHEMA_FILENAME, CollectionAdoptionCandidate, CollectionDetails,
-    CollectionFieldHistoryEntry, CollectionFieldType, CollectionFieldValue, CollectionFilter,
-    CollectionFilterOperator, CollectionHistoryValue, CollectionIndexedValue,
-    CollectionIndexedValueValidation, CollectionPendingAdoption, CollectionPendingAdoptionCursor,
-    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryCursor,
-    CollectionQueryCursorValue, CollectionQueryResult, CollectionReconcileResult, CollectionRecord,
+    CollectionFieldChangeFact, CollectionFieldHistoryEntry, CollectionFieldType,
+    CollectionFieldValue, CollectionFilter, CollectionFilterOperator, CollectionHistoryValue,
+    CollectionIndexedValue, CollectionIndexedValueValidation, CollectionPendingAdoption,
+    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
+    CollectionQueryCursor, CollectionQueryCursorValue, CollectionQueryResult,
+    CollectionReconcileResult, CollectionRecord, CollectionRecordApplyFacts,
     CollectionRecordDetails, CollectionRecordGroup, CollectionRelationCleanupCandidate,
     CollectionResolvedRelation, CollectionSchema, CollectionSchemaParseResult,
     CollectionSchemaReason, CollectionSchemaReasonCode, CollectionSchemaStatus, CollectionSort,

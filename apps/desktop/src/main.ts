@@ -608,6 +608,7 @@ import {
   type EngineDaemonLifecycle,
 } from "@dohc/workspace-engine-client/daemon";
 import { bridgeCaptureEventsToRenderer } from "./workspaces/captureActivityBridge";
+import { bridgeRecordEventsToPlugins } from "./workspaces/recordEventsBridge";
 import {
   broadcastWorkspaceActivity,
   workspaceActivityPayload,
@@ -703,7 +704,7 @@ import { createOwnedWorkspaceSdkReads } from "./workspaces/ownedWorkspaceSdkRead
 import { createPluginUtilityTransport } from "./plugins/pluginUtilityTransport";
 import { PluginChildProcessBroker } from "./plugins/pluginChildProcessBroker";
 import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
-import { createPluginPanelFileWatchEmitter } from "./plugins/pluginPanelSdkEvent";
+import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
 import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
@@ -1091,7 +1092,15 @@ function createPluginWorkspaceRuntimeParts(
               },
               watchParams,
             ),
-          unsubscribeFileWatch: (watchParams) =>
+          subscribeRecordWatch: (watchParams) =>
+            workspaceEvents.subscribeRecords(
+              {
+                owner: { kind: "process", pluginId, spawnId },
+                emitEvent,
+              },
+              watchParams,
+            ),
+          unsubscribeWorkspaceEvents: (watchParams) =>
             workspaceEvents.unsubscribe(
               { owner: { kind: "process", pluginId, spawnId } },
               watchParams,
@@ -4595,7 +4604,8 @@ async function invokeWorkspacePluginSdk(input: {
   signal?: AbortSignal;
   invokeChildProcess?: (method: string, params?: unknown) => Promise<unknown>;
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
-  unsubscribeFileWatch?: (params: unknown) => boolean;
+  subscribeRecordWatch?: (params: unknown) => { subscriptionId: string };
+  unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
   method: string;
   params?: unknown;
 }): Promise<unknown> {
@@ -4645,7 +4655,6 @@ async function invokeWorkspacePluginSdk(input: {
         signal,
         invokeChildProcess: input.invokeChildProcess,
         subscribeFileWatch: input.subscribeFileWatch,
-        unsubscribeFileWatch: input.unsubscribeFileWatch,
         // The one main-side collection write seam. Authority mirrors
         // writeAuthoredText: a writable workspace and a running engine
         // capture, resolved when the write happens, never cached.
@@ -4666,6 +4675,8 @@ async function invokeWorkspacePluginSdk(input: {
               },
             ),
         },
+        subscribeRecordWatch: input.subscribeRecordWatch,
+        unsubscribeWorkspaceEvents: input.unsubscribeWorkspaceEvents,
         writeAuthoredText: createPluginAuthoredTextWriter({
           signal,
           requireWritableCapture: async () => {
@@ -4702,7 +4713,7 @@ async function routePluginPanelSdk(input: {
       surfaceId,
     };
     const emitEvent = workspaceEvents
-      ? createPluginPanelFileWatchEmitter({
+      ? createPluginPanelSdkEventEmitter({
           workspaceId: authority.workspaceId,
           pluginId: authority.pluginId,
           panelId: authority.panelId,
@@ -4722,7 +4733,12 @@ async function routePluginPanelSdk(input: {
           ? (watchParams) =>
               workspaceEvents.subscribe({ owner, emitEvent }, watchParams)
           : undefined,
-      unsubscribeFileWatch: workspaceEvents
+      subscribeRecordWatch:
+        workspaceEvents && emitEvent
+          ? (watchParams) =>
+              workspaceEvents.subscribeRecords({ owner, emitEvent }, watchParams)
+          : undefined,
+      unsubscribeWorkspaceEvents: workspaceEvents
         ? (watchParams) => workspaceEvents.unsubscribe({ owner }, watchParams)
         : undefined,
       method: input.method,
@@ -13428,6 +13444,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
     // signal that a moment landed, so bridge them onto the renderer's
     // workspace-activity ping or the history timeline goes permanently stale.
     bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
+    // The daemon also records collection changes autonomously: its record
+    // events are the only live signal behind a plugin's collections.watch
+    // subscription, so route each one to the owning workspace's registry.
+    bridgeRecordEventsToPlugins(rustEngineDaemon, (workspaceId) =>
+      pluginWorkspaceRuntimes.current(workspaceId)?.workspaceEvents,
+    );
     const relaySource = new RelayConfiguredDaemonClientSource(
       rustEngineDaemon,
       relayTransportRoutes,

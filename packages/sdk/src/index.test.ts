@@ -10,7 +10,10 @@ import {
   isDohcTheme,
   isDohcThemeMessage,
   type DohcCollectionQueryOptions,
+  type DohcCollectionRecordEvent,
   type DohcDatabaseEditRequest,
+  type DohcRecordFieldChangedEvent,
+  type DohcSubscriptionEvent,
   type DohcTheme,
 } from ".";
 
@@ -1535,6 +1538,166 @@ describe("@dohc/sdk", () => {
     await expect(unsupported.files.watch("notes", () => undefined)).rejects.toMatchObject({
       code: DohcSdkErrorCodes.subscriptionsUnsupported,
     });
+  });
+
+  it("uses a transport subscription for collections.watch and decodes record payloads", async () => {
+    const received: DohcSubscriptionEvent<DohcCollectionRecordEvent>[] = [];
+    const unsubscribe = vi.fn(async () => undefined);
+    const fieldChanged: DohcRecordFieldChangedEvent = {
+      collectionPath: "collections/people",
+      recordId: "rec-1",
+      field: "notes",
+      previous: null,
+      // An oversized value arrives replaced by the host's marker.
+      next: { truncated: true, bytes: 9_000 },
+      author: "agent:sites",
+      timestamp: 1_756_000_000_000,
+      historyId: 7,
+    };
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true },
+              collections: { read: true },
+              provenance: { record: true },
+            };
+          }
+          return {};
+        },
+        async subscribe<T>(
+          method: string,
+          params: unknown,
+          listener: (event: { event: string; data: T }) => void,
+        ) {
+          expect(method).toBe("collections.watch");
+          expect(params).toEqual({ collectionPath: "collections/people" });
+          listener({
+            event: "record.created",
+            data: {
+              collectionPath: "collections/people",
+              recordId: "rec-1",
+              author: null,
+              timestamp: 1_756_000_000_000,
+            } as T,
+          });
+          listener({ event: "record.field.changed", data: fieldChanged as T });
+          return unsubscribe;
+        },
+      },
+    });
+
+    const stop = await client.collections.watch(
+      "collections/people",
+      (event) => received.push(event),
+    );
+    expect(stop).toBe(unsubscribe);
+    expect(received).toEqual([
+      {
+        event: "record.created",
+        data: {
+          collectionPath: "collections/people",
+          recordId: "rec-1",
+          author: null,
+          timestamp: 1_756_000_000_000,
+        },
+      },
+      { event: "record.field.changed", data: fieldChanged },
+    ]);
+    await stop();
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses collections.watch when the host disables collections.read", async () => {
+    const subscribe = vi.fn(
+      async (): Promise<() => Promise<void>> => async () => undefined,
+    );
+    const client = createDohcClient({
+      transport: {
+        async request(method) {
+          if (method === "capabilities") {
+            return {
+              files: { read: true, write: true },
+              collections: { read: false },
+              provenance: { record: false },
+            };
+          }
+          return {};
+        },
+        subscribe,
+      },
+    });
+    await expect(
+      client.collections.watch("collections/people", () => undefined),
+    ).rejects.toMatchObject({ code: DohcSdkErrorCodes.capabilityDisabled });
+    expect(subscribe).not.toHaveBeenCalled();
+
+    await expect(
+      client.collections.watch("C:/absolute", () => undefined),
+    ).rejects.toMatchObject({ code: DohcSdkErrorCodes.invalidInput });
+  });
+
+  it("delivers collections.watch events over the postMessage transport and unsubscribes", async () => {
+    const harness = createWindowHarness();
+    const transport = createPostMessageTransport({
+      currentWindow: harness.currentWindow,
+      targetWindow: harness.targetWindow,
+      timeoutMs: 1000,
+    });
+    const events: unknown[] = [];
+    const pendingSubscription = transport.subscribe!(
+      "collections.watch",
+      { collectionPath: "collections/people" },
+      (event) => events.push(event),
+    );
+    const subscribeRequest = harness.messages[0] as { id: string };
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: subscribeRequest.id,
+      ok: true,
+      result: { subscriptionId: "sub_records" },
+    });
+    const unsubscribe = await pendingSubscription;
+
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      type: "event",
+      subscriptionId: "sub_records",
+      event: "record.updated",
+      data: {
+        collectionPath: "collections/people",
+        recordId: "rec-1",
+        author: null,
+        timestamp: 1_756_000_000_000,
+      },
+    });
+    expect(events).toEqual([
+      {
+        event: "record.updated",
+        data: {
+          collectionPath: "collections/people",
+          recordId: "rec-1",
+          author: null,
+          timestamp: 1_756_000_000_000,
+        },
+      },
+    ]);
+
+    const pendingUnsubscribe = unsubscribe();
+    const unsubscribeRequest = harness.messages.at(-1) as { id: string; method: string; params: unknown };
+    expect(unsubscribeRequest).toMatchObject({
+      method: "subscriptions.unsubscribe",
+      params: { subscriptionId: "sub_records" },
+    });
+    harness.dispatch({
+      protocol: DOHC_SDK_PROTOCOL,
+      id: unsubscribeRequest.id,
+      ok: true,
+      result: { ok: true },
+    });
+    await pendingUnsubscribe;
+    expect(harness.listeners.size).toBe(0);
   });
 });
 

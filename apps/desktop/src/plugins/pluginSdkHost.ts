@@ -69,11 +69,18 @@ export interface PluginSdkHostContext {
    */
   subscribeFileWatch?: (params: unknown) => { subscriptionId: string };
   /**
-   * Ends a workspace file subscription, reporting whether this registry owned
-   * the id. A false means the id belongs to the child-process broker, which
-   * serves the same `subscriptions.unsubscribe` method.
+   * Opens a collection record subscription. Absent for the same reason
+   * subscribeFileWatch is: a subscription needs a channel to push events
+   * back on.
    */
-  unsubscribeFileWatch?: (params: unknown) => boolean;
+  subscribeRecordWatch?: (params: unknown) => { subscriptionId: string };
+  /**
+   * Ends a workspace subscription (file watch or record watch — one registry
+   * owns both kinds), reporting whether that registry owned the id. A false
+   * means the id belongs to the child-process broker, which serves the same
+   * `subscriptions.unsubscribe` method.
+   */
+  unsubscribeWorkspaceEvents?: (params: unknown) => boolean;
   /**
    * Performs the actual authored write. The host derives and stamps the
    * author; plugin code never supplies identity.
@@ -173,6 +180,7 @@ function pluginCapabilities(input: {
     // Collection reads ride the same main-supplied read port as file reads,
     // so they share its workspace authority; edits additionally need the
     // main-side write seam and a writable workspace, like databases.edit.
+    // collections.watch, like files.watch, refuses per request path itself.
     collections: { read: true, edit: input.collectionEditAvailable },
     provenance: { record: false },
   };
@@ -255,6 +263,17 @@ export async function invokePluginSdkHost(
       // must be refused here rather than left holding one until teardown.
       if (context.signal?.aborted) throw abortError();
       return context.subscribeFileWatch(params);
+    }
+    case "collections.watch": {
+      if (!context.subscribeRecordWatch) {
+        throw new Error(
+          'collections.watch is unavailable for this request path (requestPath "panel"). A subscription needs a channel to push events on, and only a plugin\'s own process has one.',
+        );
+      }
+      // Same refusal as files.watch: a subscription outlives the call that
+      // opens it, so an ended owner must not be handed one.
+      if (context.signal?.aborted) throw abortError();
+      return context.subscribeRecordWatch(params);
     }
     // The renderer answers this for a panel before it reaches main, so a
     // request arriving here has no window to read a theme from.
@@ -356,12 +375,13 @@ export async function invokePluginSdkHost(
       );
     }
     default:
-      // Both subscription kinds are closed by the one SDK method, so a file
-      // subscription gets first refusal on its own id; anything else is the
-      // broker's, which answers unknown ids itself.
+      // Every subscription kind is closed by the one SDK method, so the
+      // workspace-event registry (file and record watches) gets first refusal
+      // on its own ids; anything else is the broker's, which answers unknown
+      // ids itself.
       if (
         method === "subscriptions.unsubscribe" &&
-        context.unsubscribeFileWatch?.(params) === true
+        context.unsubscribeWorkspaceEvents?.(params) === true
       ) {
         return {};
       }

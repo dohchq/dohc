@@ -139,6 +139,62 @@ export type DohcFileWatchEvent = {
   [key: string]: unknown;
 };
 
+/** An arbitrary JSON value, as a collection record field carries it. */
+export type DohcJsonValue =
+  | null
+  | boolean
+  | number
+  | string
+  | DohcJsonValue[]
+  | { [key in string]?: DohcJsonValue };
+
+/**
+ * A record appeared in a collection. `author` is the recorded agent or user
+ * identity when the host knows one, and null otherwise. `timestamp` is the
+ * host's record timestamp in milliseconds.
+ */
+export type DohcRecordCreatedEvent = {
+  collectionPath: string;
+  recordId: string;
+  author: string | null;
+  timestamp: number;
+};
+
+/** A record changed. Same shape as {@link DohcRecordCreatedEvent}. */
+export type DohcRecordUpdatedEvent = DohcRecordCreatedEvent;
+
+/**
+ * One field of one record changed.
+ *
+ * `previous` and `next` are the field's JSON values: an absent field value
+ * arrives as null, and a value over 8 KiB of JSON arrives replaced by
+ * `{ "truncated": true, "bytes": number }` — read the record for the whole
+ * value. Delivery is at most once (the host drops events under
+ * backpressure), so a subscriber that missed events reads record history
+ * past its last seen `historyId`.
+ */
+export type DohcRecordFieldChangedEvent = {
+  collectionPath: string;
+  recordId: string;
+  field: string;
+  previous: DohcJsonValue;
+  next: DohcJsonValue;
+  author: string | null;
+  timestamp: number;
+  /** Device-local record-history row id. */
+  historyId: number;
+};
+
+/**
+ * What a collections.watch listener receives as `data`. The enclosing
+ * subscription event's `event` names which one: "record.created",
+ * "record.updated", or "record.field.changed".
+ */
+export type DohcCollectionRecordEvent =
+  | DohcRecordCreatedEvent
+  | DohcRecordUpdatedEvent
+  | DohcRecordFieldChangedEvent;
+
 export type DohcSearchOptions = {
   path?: string;
   limit?: number;
@@ -1496,6 +1552,27 @@ export function createDohcClient(options: CreateDohcClientOptions = {}) {
       getRecord: getCollectionRecord,
       setFields: setCollectionFields,
       createRecord: createCollectionRecord,
+      /**
+       * Reports record changes at or below `collectionPath`, which is a
+       * prefix: a collection to watch on its own, or a folder to watch with
+       * every collection under it. Changes outside it never arrive. Delivery
+       * is at most once; reconcile missed events from record history using
+       * the last seen historyId.
+       *
+       * Returns a function that stops the subscription. A subscription also
+       * ends when its plugin stops, or when the panel that opened it closes
+       * or changes its workspace, plugin, or panel identity.
+       */
+      watch: async (
+        collectionPath: string,
+        listener: (event: DohcSubscriptionEvent<DohcCollectionRecordEvent>) => void,
+        requestOptions?: DohcRequestOptions,
+      ) => {
+        assertRequestOptions(requestOptions);
+        assertWorkspacePath(collectionPath, "Collection paths");
+        await requireCapability("collections", "read", requestOptions);
+        return subscribe("collections.watch", { collectionPath }, listener, requestOptions);
+      },
     },
     provenance: {
       record: async (

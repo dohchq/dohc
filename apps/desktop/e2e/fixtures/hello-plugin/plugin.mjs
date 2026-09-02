@@ -338,6 +338,38 @@ switch (mode) {
     };
     break;
   }
+  // Subscribes to a collection on activation and reports the record events
+  // that arrived, so a test can prove a record change reaches a plugin's
+  // collections.watch subscription over the real host protocol. Activation
+  // must register exactly what the manifest declares, so the one declared
+  // command reports the whole subscription: whether the watch started, and
+  // every event received so far.
+  case "watch-collection": {
+    const received = [];
+    let started = null;
+    handler = {
+      async activate(ctx) {
+        ctx.commands.register("hello.write", async () => {
+          await ctx.client.files.write(
+            "collection-watch-report.json",
+            `${JSON.stringify({ started, received })}\n`,
+          );
+        });
+        try {
+          await ctx.client.collections.watch(
+            process.env.DOHC_PLUGIN_WATCH_COLLECTION ?? "tasks",
+            (event) => {
+              received.push({ event: event.event, data: event.data });
+            },
+          );
+          started = { ok: true, message: null };
+        } catch (error) {
+          started = { ok: false, message: String(error?.message ?? error) };
+        }
+      },
+    };
+    break;
+  }
   case "grandchild-heartbeat":
     handler = {
       async activate(ctx) {
