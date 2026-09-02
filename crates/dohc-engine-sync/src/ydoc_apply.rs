@@ -2844,7 +2844,8 @@ fn apply_ydoc_envelope_inner(
                     record_facts: Vec::new(),
                 })
             })?;
-            return Ok(merge_drained(
+            // The drain above ran before this apply, so its facts lead.
+            return Ok(merge_drained_first(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
             )
