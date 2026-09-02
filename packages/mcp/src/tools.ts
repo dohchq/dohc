@@ -49,11 +49,16 @@ import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import {
   CLI_PROTOCOL_VERSION,
+  collectionCreateFieldsSchema,
+  collectionQueryCursorSchema,
+  collectionQueryFilterSchema,
+  collectionSetFieldsFieldsSchema,
   parseCliResult,
   type CliRequestWithoutToken,
   type CliResultByVerb,
   type CliVerb,
 } from "@dohc/cli/protocol";
+import type { z } from "zod";
 import { classifyEngineFilePathForRead } from "@dohc/security-contract/engine-path-floor";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { workspaceEngineSetting } from "@dohc/workspace-contracts/workspace-settings";
@@ -2795,6 +2800,135 @@ export async function replyToChat(
   args: { threadId: string; body: string },
 ) {
   return requestCli(ctx, "replyToChat", args);
+}
+
+// --- collections ------------------------------------------------------------
+//
+// Collection reads and writes cross the same desktop CLI hop as chats: the
+// desktop owns workspace authorization, identity, and the collection write
+// seam, and record history attributes agent writes. Every path argument is
+// contained here first (read mode for reads, write mode for writes — a
+// mounted share stays readable and never writable). Field values travel in
+// the engine wire's JSON encoding: an integer outside the safe double range
+// rides a `$dohcInt64` marker object.
+
+// The agent-facing shapes are validated against the CLI protocol's own
+// bounded schemas so a refusal names the broken argument instead of failing
+// as an opaque invalid request desktop-side.
+function parsedCollectionArg<Schema extends z.ZodType>(
+  schema: Schema,
+  value: unknown,
+  label: string,
+):
+  | { ok: true; value: z.infer<Schema> }
+  | { ok: false; reason: string } {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    const at = issue && issue.path.length > 0 ? ` at ${issue.path.join(".")}` : "";
+    return {
+      ok: false,
+      reason: `invalid ${label}${at}: ${issue?.message ?? "unrecognized shape"}`,
+    };
+  }
+  return { ok: true, value: parsed.data as z.infer<Schema> };
+}
+
+export async function queryCollection(
+  ctx: ToolContext,
+  args: {
+    collectionPath: string;
+    filter?: unknown;
+    sort?: Array<{ field: string; direction: "asc" | "desc" }>;
+    groupBy?: string;
+    resolveRelations?: boolean;
+    limit?: number;
+    cursor?: unknown;
+  },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const filter =
+    args.filter === undefined
+      ? undefined
+      : parsedCollectionArg(collectionQueryFilterSchema, args.filter, "filter");
+  if (filter && !filter.ok) return { ok: false as const, reason: filter.reason };
+  const cursor =
+    args.cursor === undefined
+      ? undefined
+      : parsedCollectionArg(collectionQueryCursorSchema, args.cursor, "cursor");
+  if (cursor && !cursor.ok) return { ok: false as const, reason: cursor.reason };
+  return requestCli(ctx, "collectionQuery", {
+    collectionPath: resolved.normalized,
+    ...(filter ? { filter: filter.value } : {}),
+    ...(args.sort !== undefined ? { sort: args.sort } : {}),
+    ...(args.groupBy !== undefined ? { groupBy: args.groupBy } : {}),
+    ...(args.resolveRelations !== undefined
+      ? { resolveRelations: args.resolveRelations }
+      : {}),
+    ...(args.limit !== undefined ? { limit: args.limit } : {}),
+    ...(cursor ? { cursor: cursor.value } : {}),
+  });
+}
+
+const DEFAULT_RECORD_HISTORY_LIMIT = 50;
+
+export async function readRecord(
+  ctx: ToolContext,
+  args: {
+    collectionPath: string;
+    recordId: string;
+    historyLimit?: number;
+    beforeHistoryId?: number;
+  },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "read");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  return requestCli(ctx, "collectionRecord", {
+    collectionPath: resolved.normalized,
+    recordId: args.recordId,
+    historyLimit: args.historyLimit ?? DEFAULT_RECORD_HISTORY_LIMIT,
+    ...(args.beforeHistoryId !== undefined
+      ? { beforeHistoryId: args.beforeHistoryId }
+      : {}),
+  });
+}
+
+export async function setRecordFields(
+  ctx: ToolContext,
+  args: { recordPath: string; fields: unknown },
+) {
+  const resolved = await safeResolve(ctx, args.recordPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const fields = parsedCollectionArg(
+    collectionSetFieldsFieldsSchema,
+    args.fields,
+    "fields",
+  );
+  if (!fields.ok) return { ok: false as const, reason: fields.reason };
+  return requestCli(ctx, "collectionSetFields", {
+    recordPath: resolved.normalized,
+    fields: fields.value,
+  });
+}
+
+export async function createRecord(
+  ctx: ToolContext,
+  args: { collectionPath: string; name: string; fields?: unknown },
+) {
+  const resolved = await safeResolve(ctx, args.collectionPath, "write");
+  if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
+  const fields = parsedCollectionArg(
+    collectionCreateFieldsSchema,
+    args.fields ?? {},
+    "fields",
+  );
+  if (!fields.ok) return { ok: false as const, reason: fields.reason };
+  return requestCli(ctx, "collectionCreateRecord", {
+    collectionPath: resolved.normalized,
+    name: args.name,
+    fields: fields.value,
+  });
 }
 
 export function resolveConflict(args: { base: string; local: string; remote: string }) {

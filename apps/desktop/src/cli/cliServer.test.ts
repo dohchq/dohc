@@ -37,6 +37,8 @@ import {
   resolveCliWorkspace,
   restoreCliServerRuntime,
   startCliServer,
+  type CliCollectionsPort,
+  type CliCollectionWriteSeam,
   type CliRegistryWorkspace,
   type CliServerHandle,
   type CliServerOptions,
@@ -1192,6 +1194,334 @@ describe("CLI socket server", () => {
     });
     expect(calls.writable).toBe(1);
     expect(calls.writes).toBe(0);
+  });
+
+  it("serves collection reads through the engine port and translates wire values both ways", async () => {
+    const recordId = "rec_abcdefghijklmnopqrstuvwxyz";
+    const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
+    const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
+    context.collections = {
+      async query(params) {
+        queries.push(params);
+        return {
+          collection: { path: "tasks", status: "valid", reasons: [] },
+          records: [
+            {
+              id: recordId,
+              path: "tasks/a.md",
+              conflicted: false,
+              values: [
+                {
+                  field: "estimate",
+                  value: 9007199254740993n,
+                  validation: { status: "untyped" },
+                  resolvedRelations: [],
+                },
+              ],
+            },
+          ],
+          groups: null,
+          nextCursor: null,
+        };
+      },
+      async getRecord(params) {
+        recordReads.push(params);
+        return {
+          collection: { path: "tasks", status: "valid", reasons: [] },
+          record: {
+            id: recordId,
+            path: "tasks/a.md",
+            conflicted: false,
+            values: [],
+          },
+          history: [
+            {
+              historyId: 7,
+              field: "estimate",
+              previous: { present: false, value: null },
+              next: { present: true, value: 9007199254740993n },
+              authorOriginId: "origin_agent",
+              recordedAtMs: SERVER_NOW_MS,
+            },
+          ],
+        };
+      },
+    };
+
+    // The filter value arrives marker-encoded and reaches the engine port as
+    // a real 64-bit integer; the result value leaves marker-encoded again.
+    await expect(invoke("collectionQuery", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      filter: {
+        field: "estimate",
+        operator: "equals",
+        value: { $dohcInt64: "9007199254740993" },
+      },
+      limit: 10,
+    })).resolves.toMatchObject({
+      ok: true,
+      records: [
+        {
+          id: recordId,
+          values: [
+            { field: "estimate", value: { $dohcInt64: "9007199254740993" } },
+          ],
+        },
+      ],
+    });
+    expect(queries).toEqual([
+      {
+        collectionPath: "tasks",
+        filter: {
+          field: "estimate",
+          operator: "equals",
+          value: 9007199254740993n,
+        },
+        limit: 10,
+      },
+    ]);
+
+    await expect(invoke("collectionRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      recordId,
+      historyLimit: 25,
+    })).resolves.toMatchObject({
+      ok: true,
+      history: [
+        {
+          historyId: 7,
+          previous: { present: false, value: null },
+          next: { present: true, value: { $dohcInt64: "9007199254740993" } },
+          authorOriginId: "origin_agent",
+        },
+      ],
+    });
+    expect(recordReads).toEqual([
+      { collectionPath: "tasks", recordId, historyLimit: 25 },
+    ]);
+  });
+
+  it("routes collection writes through the write seam with a server-derived author", async () => {
+    const seamCalls: Array<
+      | { kind: "setFields"; input: Parameters<CliCollectionWriteSeam["setFields"]>[0] }
+      | { kind: "createRecord"; input: Parameters<CliCollectionWriteSeam["createRecord"]>[0] }
+    > = [];
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields(input) {
+          seamCalls.push({ kind: "setFields", input });
+          return { path: input.recordPath };
+        },
+        async createRecord(input) {
+          seamCalls.push({ kind: "createRecord", input });
+          return {
+            path: `${input.collectionPath}/${input.name}.md`,
+            recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+          };
+        },
+      },
+    };
+
+    await expect(invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      recordPath: "tasks/a.md",
+      fields: { status: "done", notes: null },
+    })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+    await expect(invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      name: "write-brief",
+      fields: { status: "open" },
+    })).resolves.toEqual({
+      ok: true,
+      recordId: "rec_abcdefghijklmnopqrstuvwxyz",
+      recordPath: "tasks/write-brief.md",
+    });
+    // A human CLI write is attributed as this device's local author under the
+    // identity's display name — still derived main-side.
+    await expect(invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "human",
+      recordPath: "tasks/a.md",
+      fields: { status: "parked" },
+    })).resolves.toEqual({ ok: true, recordPath: "tasks/a.md" });
+
+    // The seam sees plain JSON fields and a main-derived author; the request
+    // can claim only the behavior-bearing actor kind.
+    expect(seamCalls).toEqual([
+      {
+        kind: "setFields",
+        input: {
+          recordPath: "tasks/a.md",
+          fields: { status: "done", notes: null },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+        },
+      },
+      {
+        kind: "createRecord",
+        input: {
+          collectionPath: "tasks",
+          name: "write-brief",
+          fields: { status: "open" },
+          author: { kind: "agent", agentId: "dohc-mcp", onBehalfOf: "local" },
+        },
+      },
+      {
+        kind: "setFields",
+        input: {
+          recordPath: "tasks/a.md",
+          fields: { status: "parked" },
+          author: { kind: "local", label: "Ice" },
+        },
+      },
+    ]);
+  });
+
+  it("answers collection verbs honestly when the port or the write seam is absent", async () => {
+    context.collections = undefined;
+    await expect(invoke("collectionQuery", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+    })).resolves.toEqual({
+      ok: false,
+      reason: "collections are not available in this workspace",
+    });
+
+    context.collections = {
+      async query() {
+        throw new Error("reads are not under test");
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+    };
+    await expect(invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+    })).resolves.toEqual({
+      ok: false,
+      reason: "collection writes are not available in this dohc build",
+    });
+    await expect(invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      name: "task",
+      fields: {},
+    })).resolves.toEqual({
+      ok: false,
+      reason: "collection writes are not available in this dohc build",
+    });
+  });
+
+  it("refuses a traversal path on a collection verb before touching the port", async () => {
+    let touched = 0;
+    context.collections = {
+      async query() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      async getRecord() {
+        touched += 1;
+        throw new Error("must not be reached");
+      },
+      writes: {
+        async setFields() {
+          touched += 1;
+          throw new Error("must not be reached");
+        },
+        async createRecord() {
+          touched += 1;
+          throw new Error("must not be reached");
+        },
+      },
+    };
+    await expect(invoke("collectionQuery", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "../outside",
+    })).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("path rejected"),
+    });
+    await expect(invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      recordPath: "../outside/a.md",
+      fields: { status: "done" },
+    })).resolves.toMatchObject({
+      ok: false,
+      reason: expect.stringContaining("path rejected"),
+    });
+    expect(touched).toBe(0);
+  });
+
+  it("refuses collection writes in a read-only shared view while keeping collection reads", async () => {
+    let seamTouched = 0;
+    context.collections = {
+      async query() {
+        return {
+          collection: { path: "tasks", status: "valid", reasons: [] },
+          records: [],
+          groups: null,
+          nextCursor: null,
+        };
+      },
+      async getRecord() {
+        throw new Error("reads are not under test");
+      },
+      writes: {
+        async setFields() {
+          seamTouched += 1;
+          throw new Error("must not be reached");
+        },
+        async createRecord() {
+          seamTouched += 1;
+          throw new Error("must not be reached");
+        },
+      },
+    };
+    registryWorkspace = { ...registryWorkspace, readOnly: true };
+    context.readOnly = true;
+
+    await expect(invoke("collectionQuery", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+    })).resolves.toMatchObject({ ok: true, records: [] });
+    await expect(invoke("collectionSetFields", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      recordPath: "tasks/a.md",
+      fields: { status: "done" },
+    })).rejects.toThrow(
+      "collection writes are not available in a read-only shared view",
+    );
+    await expect(invoke("collectionCreateRecord", {
+      cwd: workspaceRoot,
+      actor: "agent",
+      collectionPath: "tasks",
+      name: "task",
+      fields: {},
+    })).rejects.toThrow(
+      "collection writes are not available in a read-only shared view",
+    );
+    expect(seamTouched).toBe(0);
   });
 
   it("serves reads from a nested read-only workspace without escalating to its writable parent", async () => {

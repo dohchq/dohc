@@ -4860,6 +4860,38 @@ async function openCliWorkspace(
           },
         }
       : {}),
+    // Engine-backed collection reads for the CLI/MCP verbs. withEngineAdapter
+    // derives the attachment (and share-view session mode) from the registered
+    // workspace itself — the renderer collection routes' authority, reached
+    // from main's side. Writes belong to the desktop's one collection write
+    // seam; main wires `writes` here when that seam lands, and the write
+    // verbs refuse until it does.
+    collections: {
+      query: async (params) => {
+        const result = await withEngineAdapter(
+          workspace,
+          async (adapter) => await adapter.queryCollectionRecords(params),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+      getRecord: async (params) => {
+        const result = await withEngineAdapter(
+          workspace,
+          async (adapter) =>
+            await adapter.getCollectionRecord({
+              collectionPath: params.collectionPath,
+              recordId: params.recordId,
+              historyLimit: params.historyLimit,
+              ...(params.beforeHistoryId !== undefined
+                ? { beforeHistoryId: params.beforeHistoryId }
+                : {}),
+            }),
+        );
+        if (!result) throw new Error("The workspace engine is not running.");
+        return result;
+      },
+    },
     filePathForObjectId: (objectId) => capture.filePathForObjectId(objectId),
     listMoments: async ({ limit }) => {
       const page = await capture.listMoments({ limit });
