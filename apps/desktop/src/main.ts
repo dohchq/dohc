@@ -4821,6 +4821,12 @@ async function openCliWorkspace(
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
+  // The CLI's collection writes ride the same seam plugin SDK edits take.
+  const cliCollectionEditContext: CollectionRecordEditContext = {
+    capture,
+    workspaceRoot: workspace.rootPath,
+    withAdapter: (work) => withEngineAdapter(workspace, work),
+  };
   return {
     workspaceId: workspace.workspaceId,
     rootPath: workspace.rootPath,
@@ -4860,13 +4866,22 @@ async function openCliWorkspace(
           },
         }
       : {}),
-    // Engine-backed collection reads for the CLI/MCP verbs. withEngineAdapter
-    // derives the attachment (and share-view session mode) from the registered
-    // workspace itself — the renderer collection routes' authority, reached
-    // from main's side. Writes belong to the desktop's one collection write
-    // seam; main wires `writes` here when that seam lands, and the write
-    // verbs refuse until it does.
+    // Engine-backed collection reads and writes for the CLI/MCP verbs.
+    // withEngineAdapter derives the attachment (and share-view session mode)
+    // from the registered workspace itself — the renderer collection routes'
+    // authority, reached from main's side. Writes go through the desktop's
+    // one collection write seam, the same path plugin SDK edits take.
     collections: {
+      writes: {
+        setFields: (input) => {
+          assertWritableWorkspace(workspace);
+          return setCollectionRecordFields(cliCollectionEditContext, input);
+        },
+        createRecord: (input) => {
+          assertWritableWorkspace(workspace);
+          return createCollectionRecord(cliCollectionEditContext, input);
+        },
+      },
       query: async (params) => {
         const result = await withEngineAdapter(
           workspace,

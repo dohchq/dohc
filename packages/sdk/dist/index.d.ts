@@ -27,7 +27,7 @@ export type DohcCapabilityMap = {
     };
     collections: DohcCapabilityGroup & {
         read: boolean;
-        list?: boolean;
+        edit?: boolean;
     };
     provenance: DohcCapabilityGroup & {
         record: boolean;
@@ -201,6 +201,19 @@ export declare function isDohcThemeMessage(value: unknown): value is DohcThemeMe
  * the same way dohc does.
  */
 export declare function applyDohcTheme(theme: DohcTheme, root: HTMLElement): void;
+/** The documented collection query options; unknown keys never travel. */
+export type DohcCollectionQueryOptions = {
+    filter?: Record<string, unknown>;
+    sort?: Array<Record<string, unknown>>;
+    groupBy?: string;
+    resolveRelations?: boolean;
+    limit?: number;
+    cursor?: Record<string, unknown>;
+};
+export type DohcCollectionRecordOptions = {
+    historyLimit?: number;
+    beforeHistoryId?: number;
+};
 export type CreateDohcClientOptions = {
     transport?: DohcTransport;
     timeoutMs?: number;
@@ -277,10 +290,15 @@ export declare function createDohcClient(options?: CreateDohcClientOptions): {
         applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
-        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        get: (name: string) => {
-            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        };
+        list: (requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
+        get: (path: string, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        query: (path: string, options?: DohcCollectionQueryOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        getRecord: (path: string, recordId: string, options?: DohcCollectionRecordOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        setFields: (recordPath: string, fields: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        createRecord: (path: string, record: {
+            name: string;
+            fields?: Record<string, unknown>;
+        }, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
     };
     provenance: {
         record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;
@@ -351,10 +369,15 @@ export declare const dohc: {
         applyTheme: (applyOptions?: DohcApplyThemeOptions) => Promise<() => void>;
     };
     collections: {
-        list: (name: string, params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        get: (name: string) => {
-            list: (params?: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
-        };
+        list: (requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>[]>;
+        get: (path: string, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        query: (path: string, options?: DohcCollectionQueryOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        getRecord: (path: string, recordId: string, options?: DohcCollectionRecordOptions, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        setFields: (recordPath: string, fields: Record<string, unknown>, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
+        createRecord: (path: string, record: {
+            name: string;
+            fields?: Record<string, unknown>;
+        }, requestOptions?: DohcRequestOptions) => Promise<Record<string, unknown>>;
     };
     provenance: {
         record: (value: string | DohcProvenanceRecord, requestOptions?: DohcRequestOptions) => Promise<void>;

@@ -203,12 +203,9 @@ test("an agent's file-written collection opens live and answers its MCP queries"
   }
 });
 
-// The write half of the gate. Lane B's collection write seam
-// (apps/desktop/src/workspaces/collectionRecordEdits.ts) has not landed in
-// this branch: main leaves CliCollectionsPort.writes unwired, so the two
-// write verbs answer "collection writes are not available in this dohc
-// build". Un-fixme once main wires the seam into openCliWorkspace.
-test.fixme("an agent's MCP field set and record create land live with agent attribution", async () => {
+// The write half of the gate: MCP field sets and record creates ride the
+// desktop's one collection write seam, attributed to the agent.
+test("an agent's MCP field set and record create land live with agent attribution", async () => {
   test.setTimeout(240_000);
   const temp = await createTempWorkspace();
   let desktop: Desktop | null = null;
@@ -277,7 +274,7 @@ test.fixme("an agent's MCP field set and record create land live with agent attr
     expect(statusChange?.authorOriginId).toBe("dohc-mcp");
 
     // --- The agent creates a record through MCP: the engine mints its id,
-    // the open board shows the new card live, and a query returns all three.
+    // the open board shows the new card live, and a query returns both.
     const created = await agentCli(temp, "collectionCreateRecord", {
       collectionPath: "tasks",
       name: "hermes",
@@ -293,7 +290,10 @@ test.fixme("an agent's MCP field set and record create land live with agent attr
       collectionPath: "tasks",
     });
     if (!query.ok) throw new Error(`collectionQuery failed: ${query.reason}`);
-    expect(query.records).toHaveLength(3);
+    expect(query.records.map((record) => record.path).sort()).toEqual([
+      "tasks/apollo.md",
+      "tasks/hermes.md",
+    ]);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }
