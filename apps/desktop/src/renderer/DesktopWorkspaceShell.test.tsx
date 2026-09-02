@@ -29,6 +29,9 @@ configure({ asyncUtilTimeout: 5_000 });
 vi.setConfig({ testTimeout: 15_000 });
 import type {
   AgentRunStatusResult,
+  DismissAutomationFailurePayload,
+  ListAutomationFailuresPayload,
+  ListAutomationFailuresResult,
   ChatChannelRecord,
   DismissShareSkipsPayload,
   DmRecord,
@@ -655,21 +658,12 @@ function makeBridge(
     })),
     onPluginStatusChanged: vi.fn(() => () => undefined),
     listAutomationFailures: vi.fn(
-      async (_payload: { workspaceId: string }) => ({
-        failures: [] as {
-          automationId: string;
-          error: string;
-          updatedAtMs: number;
-          generation: number;
-        }[],
-      }),
+      async (
+        _payload: ListAutomationFailuresPayload,
+      ): Promise<ListAutomationFailuresResult> => ({ failures: [] }),
     ),
     dismissAutomationFailure: vi.fn(
-      async (_payload: {
-        workspaceId: string;
-        automationId: string;
-        generation: number;
-      }) => undefined,
+      async (_payload: DismissAutomationFailurePayload) => undefined,
     ),
     emitAutomationFailuresChanged: (event: { workspaceId: string }) => {
       for (const callback of [...automationFailuresCallbacks]) callback(event);

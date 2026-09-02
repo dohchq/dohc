@@ -403,6 +403,58 @@ describe("plugin workspace runtimes", () => {
     expect(harness.created[0]?.events.dispose).toHaveBeenCalledOnce();
   });
 
+  it("disposes automations after the pipeline and before workspace events", async () => {
+    const order: string[] = [];
+    const harness = createHarness({
+      create: () => {
+        const parts = makeParts();
+        parts.pipeline.dispose.mockImplementation(async () => {
+          order.push("pipeline");
+        });
+        parts.automations.dispose.mockImplementation(async () => {
+          order.push("automations");
+        });
+        parts.events.dispose.mockImplementation(() => {
+          order.push("events");
+        });
+        return parts;
+      },
+    });
+    await harness.owner.ensure(workspace());
+    await harness.owner.stop("workspace-1");
+    expect(order).toEqual(["pipeline", "automations", "events"]);
+  });
+
+  it("throws a failed automations disposal, or reports it behind a pipeline failure", async () => {
+    const automationsFailure = new Error("unsubscribe refused");
+    const alone = createHarness({
+      create: () => {
+        const parts = makeParts();
+        parts.automations.dispose.mockRejectedValue(automationsFailure);
+        return parts;
+      },
+    });
+    await alone.owner.ensure(workspace());
+    await expect(alone.owner.stop("workspace-1")).rejects.toBe(automationsFailure);
+    expect(alone.cleanupErrors).toEqual([]);
+
+    const pipelineFailure = new Error("plugin descendants are still live");
+    const behind = createHarness({
+      create: () => {
+        const parts = makeParts({
+          dispose: async () => {
+            throw pipelineFailure;
+          },
+        });
+        parts.automations.dispose.mockRejectedValue(automationsFailure);
+        return parts;
+      },
+    });
+    await behind.owner.ensure(workspace());
+    await expect(behind.owner.stop("workspace-1")).rejects.toBe(pipelineFailure);
+    expect(behind.cleanupErrors).toEqual([automationsFailure]);
+  });
+
   it("retains a failed teardown and refuses a successor runtime", async () => {
     const cleanupFailure = new Error("plugin descendants are still live");
     const harness = createHarness({

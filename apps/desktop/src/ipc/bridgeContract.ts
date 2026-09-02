@@ -4990,16 +4990,20 @@ export type ListAutomationFailuresPayload = z.infer<
   typeof ListAutomationFailuresPayload
 >;
 
-export interface AutomationFailureNotice {
-  automationId: string;
-  error: string;
-  updatedAtMs: number;
-  generation: number;
-}
+export const AutomationFailureNotice = z.object({
+  automationId: z.string().min(1),
+  error: z.string(),
+  updatedAtMs: z.number().int(),
+  generation: z.number().int().nonnegative(),
+});
+export type AutomationFailureNotice = z.infer<typeof AutomationFailureNotice>;
 
-export interface ListAutomationFailuresResult {
-  failures: AutomationFailureNotice[];
-}
+export const ListAutomationFailuresResult = z.object({
+  failures: z.array(AutomationFailureNotice),
+});
+export type ListAutomationFailuresResult = z.infer<
+  typeof ListAutomationFailuresResult
+>;
 
 // Acknowledging an automation's failures up to the generation on screen.
 // Deletes nothing: the engine's claim rows stay, and a failure recorded

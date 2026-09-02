@@ -128,7 +128,7 @@ import {
   DismissShareSkipsPayload,
   ListAutomationFailuresPayload,
   DismissAutomationFailurePayload,
-  type ListAutomationFailuresResult,
+  ListAutomationFailuresResult,
   ListShareProposalsPayload,
   ListShareProposalsResult,
   ReadShareProposalChangesPayload,
@@ -9512,12 +9512,12 @@ function registerIpcHandlers(
           receivedShareEngine.workspaceForRegistered(operation.workspace),
           async (adapter) => await adapter.listAutomationFailures(),
         );
-        return {
+        return ListAutomationFailuresResult.parse({
           failures: unacknowledgedAutomationFailures(
             result?.failures ?? [],
             operation.workspace.automationFailureAcks,
           ),
-        } satisfies ListAutomationFailuresResult;
+        });
       },
     );
   });
@@ -9554,6 +9554,7 @@ function registerIpcHandlers(
           input.automationId,
           Math.min(input.generation, current.generation),
         );
+        notifyAutomationFailuresChanged(input.workspaceId);
       },
     );
   });

@@ -4788,7 +4788,14 @@ pub fn get_collection_record(
                     previous: history_value_from_json(previous)?,
                     next: history_value_from_json(next)?,
                     author_origin_id,
-                    actor_kind: actor_kind.as_deref().and_then(ChangeActorKind::parse),
+                    actor_kind: actor_kind
+                        .as_deref()
+                        .map(|value| {
+                            ChangeActorKind::parse(value).ok_or(crate::DomainError::StateCorrupt {
+                                reason: "collection history actor kind is unknown",
+                            })
+                        })
+                        .transpose()?,
                     on_behalf_of,
                     depth,
                     recorded_at_ms,

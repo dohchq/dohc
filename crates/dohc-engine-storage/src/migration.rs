@@ -3077,11 +3077,13 @@ const V1_CHANGE_ATTRIBUTION_DDL: &str = "\
 ALTER TABLE ydoc_updates ADD COLUMN actor_kind TEXT
     CHECK (actor_kind IN ('human','agent','automation'));
 ALTER TABLE ydoc_updates ADD COLUMN on_behalf_of TEXT;
-ALTER TABLE ydoc_updates ADD COLUMN chain_depth INTEGER;
+ALTER TABLE ydoc_updates ADD COLUMN chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0);
 ALTER TABLE collection_field_history ADD COLUMN actor_kind TEXT
     CHECK (actor_kind IN ('human','agent','automation'));
 ALTER TABLE collection_field_history ADD COLUMN on_behalf_of TEXT;
-ALTER TABLE collection_field_history ADD COLUMN chain_depth INTEGER;
+ALTER TABLE collection_field_history ADD COLUMN chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0);
 ";
 
 pub(crate) const CHANGE_ATTRIBUTION_MIGRATION_ID: &str = "v1-change-attribution";
@@ -3112,9 +3114,9 @@ CREATE TABLE automation_claims (
     trigger_history_id INTEGER,
     record_id          TEXT    NOT NULL,
     collection_path    TEXT    NOT NULL,
-    depth              INTEGER NOT NULL,
+    depth              INTEGER NOT NULL CHECK (depth >= 0),
     state              TEXT    NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
-    attempts           INTEGER NOT NULL DEFAULT 0,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     error              TEXT,
     created_at_ms      INTEGER NOT NULL,
     updated_at_ms      INTEGER NOT NULL,

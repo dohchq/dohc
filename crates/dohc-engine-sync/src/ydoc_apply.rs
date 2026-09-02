@@ -2077,14 +2077,20 @@ fn apply_ydoc_envelope_inner(
             "ydoc.update lineage claim is invalid",
         );
     }
-    if !valid_actor_origin_id(payload.actor_origin_id.as_deref())
-        || !valid_attribution(payload.attribution.as_ref())
-    {
+    if !valid_actor_origin_id(payload.actor_origin_id.as_deref()) {
         return refuse_ydoc(
             store,
             envelope,
             faults,
             "ydoc.update actor origin is invalid",
+        );
+    }
+    if !valid_attribution(payload.attribution.as_ref()) {
+        return refuse_ydoc(
+            store,
+            envelope,
+            faults,
+            "ydoc.update attribution is invalid",
         );
     }
     let search_policy = search_policy_for_store(store);

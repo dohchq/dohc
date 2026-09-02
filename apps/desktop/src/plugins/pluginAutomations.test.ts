@@ -289,8 +289,9 @@ describe("PluginAutomations", () => {
     const h = harness({ discoveryPending: true });
     h.pendingClaims.push(claimOf({ claimId: "claim-early" }));
     h.automations.notifyClaimed();
+    // The drain ran past the held claim to null, so execute has decided.
     await vi.waitFor(() =>
-      expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
+      expect(h.adapter.claimNextAutomation.mock.calls.length).toBeGreaterThan(1),
     );
     // Nothing is knowable before discovery lands: the claim waits, it is
     // not failed as undeclared, and no handler ran.
