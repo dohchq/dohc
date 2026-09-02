@@ -16,6 +16,10 @@ import {
 } from "../testing/localWorkspaceSdkReads";
 import { createTestScratch } from "./testTemp";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
+import type {
+  CollectionQueryResult,
+  CollectionSummary,
+} from "@dohc/workspace-contracts";
 
 // A plugin surface acts for the user driving it.
 const USER_AUTHOR: ChangeAuthor = { kind: "user", userId: "local" };
@@ -55,6 +59,73 @@ function hostContext(
     ...overrides,
   };
 }
+
+type CollectionReadPort = Pick<
+  WorkspaceSdkReadPort,
+  | "listCollections"
+  | "getCollection"
+  | "queryCollectionRecords"
+  | "getCollectionRecord"
+>;
+
+function collectionSummary(path: string): CollectionSummary {
+  return { path, status: "valid", reasons: [] };
+}
+
+function emptyQueryResult(path: string): CollectionQueryResult {
+  return {
+    collection: collectionSummary(path),
+    records: [],
+    groups: null,
+    nextCursor: null,
+  };
+}
+
+/**
+ * A read port whose collection scope is one prefix — the same prefix scope
+ * file reads use. The host must pass every refusal through untouched.
+ */
+function collectionReadsScopedTo(prefix: string): CollectionReadPort {
+  const assertInScope = (collectionPath: string): void => {
+    if (
+      prefix !== "." &&
+      collectionPath !== prefix &&
+      !collectionPath.startsWith(`${prefix}/`)
+    ) {
+      throw new Error(`Collection not found: ${collectionPath}`);
+    }
+  };
+  return {
+    listCollections: async () => ({ collections: [collectionSummary(prefix)] }),
+    getCollection: async ({ collectionPath }) => {
+      assertInScope(collectionPath);
+      return {
+        ...collectionSummary(collectionPath),
+        schema: { name: null, description: null, fields: [], views: [] },
+        recordCount: 0,
+      };
+    },
+    queryCollectionRecords: async (params) => {
+      assertInScope(params.collectionPath);
+      return emptyQueryResult(params.collectionPath);
+    },
+    getCollectionRecord: async (params) => {
+      assertInScope(params.collectionPath);
+      return {
+        collection: collectionSummary(params.collectionPath),
+        record: {
+          id: params.recordId,
+          path: `${params.collectionPath}/one.md`,
+          conflicted: false,
+          values: [],
+        },
+        history: [],
+      };
+    },
+  };
+}
+
+const unscopedCollectionReads: CollectionReadPort = collectionReadsScopedTo(".");
 
 function seedDatabase(path: string, marker: string): void {
   const database = new DatabaseSync(path);
@@ -114,6 +185,7 @@ describe("workspace SDK host authority", () => {
         if (path !== "canonical.sqlite") throw new Error(`File not found: ${path}`);
         return { path, tables: [] };
       },
+      ...unscopedCollectionReads,
     };
     const context = hostContext(root, { reads });
 
@@ -435,5 +507,206 @@ describe("workspace SDK host authority", () => {
         },
       ),
     ).rejects.toThrow(/exactly one structured operation.*transactions/i);
+  });
+});
+
+describe("workspace SDK host collection authority", () => {
+  function collectionEditPort() {
+    const calls: Array<{ method: string; input: unknown }> = [];
+    return {
+      calls,
+      port: {
+        setRecordFields: async (input: unknown) => {
+          calls.push({ method: "setRecordFields", input });
+          return { path: (input as { recordPath: string }).recordPath };
+        },
+        createRecord: async (input: unknown) => {
+          calls.push({ method: "createRecord", input });
+          return { path: "tasks/two.md", recordId: "rec_2" };
+        },
+      },
+    };
+  }
+
+  it("serves collection reads through the read port with validated paths", async () => {
+    const root = await workspace();
+    const context = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...collectionReadsScopedTo("tasks") },
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.list"),
+    ).resolves.toEqual({ collections: [collectionSummary("tasks")] });
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.get", { path: "tasks" }),
+    ).resolves.toMatchObject({ path: "tasks", recordCount: 0 });
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.query", {
+        path: "tasks",
+        filter: { field: "status", operator: "equals", value: "open" },
+        sort: [{ field: "status", direction: "asc" }],
+        limit: 10,
+      }),
+    ).resolves.toMatchObject({ records: [] });
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.getRecord", {
+        path: "tasks",
+        recordId: "rec_1",
+      }),
+    ).resolves.toMatchObject({ record: { id: "rec_1" } });
+    // Path shape is validated before the port sees it.
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.get", { path: "../outside" }),
+    ).rejects.toThrow(/invalid read path/i);
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.query", {
+        path: "tasks",
+        filter: { field: "status", operator: "regex", value: "x" },
+      }),
+    ).rejects.toThrow(/unsupported filter operator/i);
+  });
+
+  it("keeps a scoped port's collection refusals: one collection cannot reach another", async () => {
+    const root = await workspace();
+    const context = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...collectionReadsScopedTo("tasks") },
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.get", { path: "other" }),
+    ).rejects.toThrow("Collection not found: other");
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.query", { path: "other" }),
+    ).rejects.toThrow("Collection not found: other");
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.getRecord", {
+        path: "other",
+        recordId: "rec_1",
+      }),
+    ).rejects.toThrow("Collection not found: other");
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.list"),
+    ).resolves.toEqual({ collections: [collectionSummary("tasks")] });
+  });
+
+  it("advertises collections.edit only when writable with a write seam", async () => {
+    const root = await workspace();
+    const { port } = collectionEditPort();
+    await expect(
+      invokeWorkspaceSdkHost(hostContext(root), "capabilities"),
+    ).resolves.toMatchObject({ collections: { read: true, edit: false } });
+    await expect(
+      invokeWorkspaceSdkHost(
+        hostContext(root, { editCollections: port }),
+        "capabilities",
+      ),
+    ).resolves.toMatchObject({ collections: { read: true, edit: true } });
+    await expect(
+      invokeWorkspaceSdkHost(
+        hostContext(root, { editCollections: port, writable: false }),
+        "capabilities",
+      ),
+    ).resolves.toMatchObject({ collections: { read: true, edit: false } });
+  });
+
+  it("routes collection writes through the edit port with the host-derived author", async () => {
+    const root = await workspace();
+    const { port, calls } = collectionEditPort();
+    const context = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...collectionReadsScopedTo("tasks") },
+      editCollections: port,
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.setFields", {
+        path: "tasks/one.md",
+        fields: { status: "done" },
+        author: { kind: "user", userId: "forged" },
+        onBehalfOf: "forged",
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md" });
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.createRecord", {
+        path: "tasks",
+        name: "two",
+        fields: { status: "open" },
+      }),
+    ).resolves.toEqual({ path: "tasks/two.md", recordId: "rec_2" });
+    // The author is the CONTEXT's, never the request's.
+    expect(calls).toEqual([
+      {
+        method: "setRecordFields",
+        input: {
+          recordPath: "tasks/one.md",
+          fields: { status: "done" },
+          author: USER_AUTHOR,
+        },
+      },
+      {
+        method: "createRecord",
+        input: {
+          collectionPath: "tasks",
+          name: "two",
+          fields: { status: "open" },
+          author: USER_AUTHOR,
+        },
+      },
+    ]);
+  });
+
+  it("refuses a collection write outside the port's read scope before the seam runs", async () => {
+    const root = await workspace();
+    const { port, calls } = collectionEditPort();
+    const context = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...collectionReadsScopedTo("tasks") },
+      editCollections: port,
+    });
+
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.setFields", {
+        path: "other/one.md",
+        fields: { status: "done" },
+      }),
+    ).rejects.toThrow("Collection not found: other");
+    await expect(
+      invokeWorkspaceSdkHost(context, "collections.createRecord", {
+        path: "other",
+        name: "two",
+      }),
+    ).rejects.toThrow("Collection not found: other");
+    expect(calls).toEqual([]);
+  });
+
+  it("refuses collection writes without write authority or a write seam", async () => {
+    const root = await workspace();
+    const { port, calls } = collectionEditPort();
+    const readOnly = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...unscopedCollectionReads },
+      editCollections: port,
+      writable: false,
+    });
+    await expect(
+      invokeWorkspaceSdkHost(readOnly, "collections.setFields", {
+        path: "tasks/one.md",
+        fields: { status: "done" },
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+    await expect(
+      invokeWorkspaceSdkHost(readOnly, "collections.createRecord", {
+        path: "tasks",
+        name: "two",
+      }),
+    ).rejects.toThrow(/read-only workspace authority/);
+
+    const noSeam = hostContext(root, {
+      reads: { ...localWorkspaceSdkReads(root), ...unscopedCollectionReads },
+    });
+    await expect(
+      invokeWorkspaceSdkHost(noSeam, "collections.setFields", {
+        path: "tasks/one.md",
+        fields: { status: "done" },
+      }),
+    ).rejects.toThrow(/collection edits are unavailable/i);
+    expect(calls).toEqual([]);
   });
 });

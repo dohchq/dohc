@@ -89,9 +89,32 @@ describe("invokePluginSdkHost", () => {
       // The plugin's own process has no renderer to open a tab in.
       ui: { open: false },
       childProcesses: { spawn: true, output: true, send: true, terminate: true },
-      collections: { read: false },
+      // Reads ride the main-supplied read port; edit needs the main-side
+      // write seam, absent from this context.
+      collections: { read: true, edit: false },
       provenance: { record: false },
     });
+  });
+
+  it("reports collections.edit only with the write seam and write authority", async () => {
+    const root = await workspaceRoot();
+    const seam = {
+      setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
+      createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
+    };
+
+    await expect(
+      invokePluginSdkHost(
+        { ...context(root), editCollections: seam },
+        "capabilities",
+      ),
+    ).resolves.toMatchObject({ collections: { read: true, edit: true } });
+    await expect(
+      invokePluginSdkHost(
+        { ...context(root), editCollections: seam, isWritable: () => false },
+        "capabilities",
+      ),
+    ).resolves.toMatchObject({ collections: { read: true, edit: false } });
   });
 
   it("reports databases.edit on workspace authority alone, without an engine capture", async () => {
@@ -163,6 +186,16 @@ describe("invokePluginSdkHost", () => {
         prepareSearch: async () => ({ allowPath: () => false }),
         readDatabase: async (path) => {
           throw new Error(`File not found: ${path}`);
+        },
+        listCollections: async () => ({ collections: [] }),
+        getCollection: async ({ collectionPath }) => {
+          throw new Error(`Collection not found: ${collectionPath}`);
+        },
+        queryCollectionRecords: async ({ collectionPath }) => {
+          throw new Error(`Collection not found: ${collectionPath}`);
+        },
+        getCollectionRecord: async ({ collectionPath }) => {
+          throw new Error(`Collection not found: ${collectionPath}`);
         },
       },
     };
@@ -292,8 +325,135 @@ describe("invokePluginSdkHost", () => {
     const root = await workspaceRoot();
 
     await expect(
-      invokePluginSdkHost(context(root), "collections.list", { name: "people" }),
-    ).rejects.toThrow("Unsupported dohc SDK method: collections.list");
+      invokePluginSdkHost(context(root), "provenance.record", { summary: "x" }),
+    ).rejects.toThrow("Unsupported dohc SDK method: provenance.record");
+  });
+
+  it("routes collection reads through the main-supplied read port", async () => {
+    const root = await workspaceRoot();
+    const hostContext: PluginSdkHostContext = {
+      ...context(root),
+      reads: {
+        ...localWorkspaceSdkReads(root),
+        listCollections: async () => ({
+          collections: [{ path: "tasks", status: "valid", reasons: [] }],
+        }),
+        queryCollectionRecords: async ({ collectionPath }) => {
+          if (collectionPath !== "tasks") {
+            throw new Error(`Collection not found: ${collectionPath}`);
+          }
+          return {
+            collection: { path: "tasks", status: "valid", reasons: [] },
+            records: [{ id: "rec_1", path: "tasks/one.md", conflicted: false, values: [] }],
+            groups: null,
+            nextCursor: null,
+          };
+        },
+      },
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.list"),
+    ).resolves.toMatchObject({ collections: [{ path: "tasks" }] });
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.query", { path: "tasks" }),
+    ).resolves.toMatchObject({ records: [{ id: "rec_1" }] });
+    // The port's scope refusal passes through untouched: one collection
+    // cannot reach another.
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.query", { path: "other" }),
+    ).rejects.toThrow("Collection not found: other");
+  });
+
+  it("attributes collection writes to the plugin agent, never the request", async () => {
+    const root = await workspaceRoot();
+    const calls: unknown[] = [];
+    const hostContext: PluginSdkHostContext = {
+      ...context(root),
+      reads: {
+        ...localWorkspaceSdkReads(root),
+        getCollection: async ({ collectionPath }) => {
+          if (collectionPath !== "tasks") {
+            throw new Error(`Collection not found: ${collectionPath}`);
+          }
+          return {
+            path: "tasks",
+            status: "valid",
+            reasons: [],
+            schema: { name: null, description: null, fields: [], views: [] },
+            recordCount: 0,
+          };
+        },
+      },
+      editCollections: {
+        setRecordFields: async (input) => {
+          calls.push(input);
+          return { path: input.recordPath };
+        },
+        createRecord: async (input) => {
+          calls.push(input);
+          return { path: "tasks/two.md", recordId: "rec_2" };
+        },
+      },
+    };
+
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.setFields", {
+        path: "tasks/one.md",
+        fields: { status: "done" },
+        author: { kind: "agent", agentId: "forged", onBehalfOf: "forged" },
+      }),
+    ).resolves.toEqual({ path: "tasks/one.md" });
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.createRecord", {
+        path: "tasks",
+        name: "two",
+      }),
+    ).resolves.toEqual({ path: "tasks/two.md", recordId: "rec_2" });
+    expect(calls).toEqual([
+      expect.objectContaining({
+        recordPath: "tasks/one.md",
+        fields: { status: "done" },
+        author: { kind: "agent", agentId: "plugin:hello-plugin", onBehalfOf: "local" },
+      }),
+      expect.objectContaining({
+        collectionPath: "tasks",
+        name: "two",
+        author: { kind: "agent", agentId: "plugin:hello-plugin", onBehalfOf: "local" },
+      }),
+    ]);
+    // A write outside the readable scope is refused before the seam runs.
+    await expect(
+      invokePluginSdkHost(hostContext, "collections.setFields", {
+        path: "other/one.md",
+        fields: { status: "done" },
+      }),
+    ).rejects.toThrow("Collection not found: other");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("refuses collection writes without write authority or a write seam", async () => {
+    const root = await workspaceRoot();
+    const seam = {
+      setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
+      createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
+    };
+
+    await expect(
+      invokePluginSdkHost(
+        { ...context(root), editCollections: seam, isWritable: () => false },
+        "collections.setFields",
+        { path: "tasks/one.md", fields: { status: "done" } },
+      ),
+    ).rejects.toThrow(/read-only workspace authority/);
+    expect(seam.setRecordFields).not.toHaveBeenCalled();
+
+    await expect(
+      invokePluginSdkHost(context(root), "collections.createRecord", {
+        path: "tasks",
+        name: "two",
+      }),
+    ).rejects.toThrow(/collection edits are unavailable/i);
   });
 
   it("reads a database snapshot through the site host", async () => {

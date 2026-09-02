@@ -39,6 +39,12 @@ export interface PluginSdkHostContext {
   /** Main-supplied structured database writer. */
   editDatabase: WorkspaceSdkHostContext["editDatabase"];
   /**
+   * Main-supplied collection record writer (the desktop's one main-side
+   * collection write seam). Absent when the invocation path cannot reach an
+   * engine capture; the advertised collections.edit capability follows it.
+   */
+  editCollections?: WorkspaceSdkHostContext["editCollections"];
+  /**
    * The web apps this plugin's manifest declares, so `ui.openWebApp` can
    * refuse an id the plugin never contributed and one whose shape does not
    * match the request. The caller reads it from the registered manifest —
@@ -132,6 +138,7 @@ function pluginCapabilities(input: {
   fileWriteAvailable: boolean;
   fileWatchAvailable: boolean;
   databaseEditAvailable: boolean;
+  collectionEditAvailable: boolean;
   childProcessesAvailable: boolean;
   uiOpenAvailable: boolean;
 }) {
@@ -163,7 +170,10 @@ function pluginCapabilities(input: {
       send: childProcesses,
       terminate: childProcesses,
     },
-    collections: { read: false },
+    // Collection reads ride the same main-supplied read port as file reads,
+    // so they share its workspace authority; edits additionally need the
+    // main-side write seam and a writable workspace, like databases.edit.
+    collections: { read: true, edit: input.collectionEditAvailable },
     provenance: { record: false },
   };
 }
@@ -185,6 +195,9 @@ export async function invokePluginSdkHost(
     author: pluginDatabaseAuthor(context.pluginId),
     reads: context.reads,
     editDatabase: context.editDatabase,
+    ...(context.editCollections
+      ? { editCollections: context.editCollections }
+      : {}),
   };
 
   switch (method) {
@@ -195,6 +208,8 @@ export async function invokePluginSdkHost(
         fileWriteAvailable: writeAvailable && context.isWritable(),
         fileWatchAvailable: context.subscribeFileWatch !== undefined,
         databaseEditAvailable: context.isWritable(),
+        collectionEditAvailable:
+          context.isWritable() && context.editCollections !== undefined,
         childProcessesAvailable: context.invokeChildProcess !== undefined,
         uiOpenAvailable: context.requestPath === "panel",
       });
@@ -203,10 +218,24 @@ export async function invokePluginSdkHost(
     case "files.list":
     case "workspace.search":
     case "databases.read":
+    case "collections.list":
+    case "collections.get":
+    case "collections.query":
+    case "collections.getRecord":
       return waitForOperation(
         context.signal,
         invokeWorkspaceSdkHost(hostContext, method, params),
       );
+    case "collections.setFields":
+    case "collections.createRecord": {
+      if (!context.isWritable()) {
+        throw new Error("This plugin has read-only workspace authority.");
+      }
+      return waitForOperation(
+        context.signal,
+        invokeWorkspaceSdkHost(hostContext, method, params),
+      );
+    }
     case "databases.edit": {
       if (!context.isWritable()) {
         throw new Error("This plugin has read-only workspace authority.");

@@ -386,7 +386,16 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   // queued, so that moment is later than the caller handing the update over,
   // and a save-state bookkeeper that counts at hand-over instead vouches for
   // edits still sitting in the queue (#514).
-  applyLocalUpdate(update: Uint8Array, onArmed?: () => void): void;
+  // `options.actorOriginId` is the author the engine records this update
+  // under (an agent's id from the SDK/MCP write seam). It rides the primary
+  // journal call; a dead-generation revive or recovery replay re-journals
+  // canonical state without it, falling back to device attribution — the
+  // same attribution every human edit carries.
+  applyLocalUpdate(
+    update: Uint8Array,
+    onArmed?: () => void,
+    options?: { actorOriginId?: string },
+  ): void;
   applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
@@ -2248,7 +2257,7 @@ export function createWorkspaceEngineCapture(
           ),
         );
       },
-      applyLocalUpdate(update, onArmed) {
+      applyLocalUpdate(update, onArmed, applyOptions) {
         // ONE announcement per update, at the FIRST provider call that arms a
         // settle carrying it. Three calls can be that first one — the live
         // generation's own, a dead session's revive replay, and a failed
@@ -2282,7 +2291,7 @@ export function createWorkspaceEngineCapture(
             // this call, so the update is covered from here. Announce it before
             // awaiting the journal round trip: the settle it just armed may
             // start before that round trip returns.
-            const journaled = generation.applyLocalUpdate(update);
+            const journaled = generation.applyLocalUpdate(update, applyOptions);
             armed();
             await journaled;
             Y.applyUpdate(doc, update);
@@ -4999,9 +5008,9 @@ export function createWorkspaceEngineCapture(
           // settle may vouch for, so it must fire at the moment a settle
           // carrying this update is ARMED, deeper in and later. Merging them
           // would break one or the other.
-          applyLocalUpdate: (update, onArmed) => {
+          applyLocalUpdate: (update, onArmed, applyOptions) => {
             noteUpdate();
-            return session.applyLocalUpdate(update, onArmed);
+            return session.applyLocalUpdate(update, onArmed, applyOptions);
           },
           settleNow: (opts) => session.settleNow(opts),
           applyExternalMarkdownEdit: (markdown) => {
