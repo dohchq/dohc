@@ -1046,7 +1046,6 @@ fn append_local_update(
     if let Some(actor_origin_id) = actor_origin_id {
         crate::validate_actor_origin_id(actor_origin_id)?;
     }
-    validate_attribution(attribution)?;
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
@@ -1103,7 +1102,6 @@ fn append_local_update_cached(
     if let Some(actor_origin_id) = actor_origin_id {
         crate::validate_actor_origin_id(actor_origin_id)?;
     }
-    validate_attribution(attribution)?;
     // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order. A
     // dedupe changes no durable state, so it never touches the cache.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {

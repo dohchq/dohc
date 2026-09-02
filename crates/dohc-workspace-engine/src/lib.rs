@@ -14800,14 +14800,12 @@ mod tests {
                     previous_json: None,
                     next_json: Some(big.clone()),
                     history_id: 7,
-                    attribution: None,
                 },
                 dohc_engine_domain::CollectionFieldChangeFact {
                     field_name: "beta".to_owned(),
                     previous_json: Some("\"open\"".to_owned()),
                     next_json: Some("\"done\"".to_owned()),
                     history_id: 8,
-                    attribution: None,
                 },
             ],
         };

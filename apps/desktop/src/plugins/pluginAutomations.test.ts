@@ -60,7 +60,9 @@ interface Harness {
 }
 
 function harness(input: {
-  declared?: readonly PluginAutomationDeclaration[];
+  declared?: readonly PluginAutomationDeclaration[] | undefined;
+  /** When set, the harness reports discovery as not landed. */
+  discoveryPending?: boolean;
   proveReadable?: PluginAutomationsOptions["proveReadable"];
   runOnPlugin?: PluginAutomationsOptions["runOnPlugin"];
 } = {}): Harness {
@@ -83,7 +85,9 @@ function harness(input: {
     },
     withAdapter: (work) => work(adapter as unknown as AutomationEngineAdapter),
     declaredAutomations: () =>
-      input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }],
+      input.discoveryPending
+        ? undefined
+        : (input.declared ?? [{ id: "triage", collection: "tasks", handler: "triage" }]),
     proveReadable: input.proveReadable ?? (async () => undefined),
     runOnPlugin:
       input.runOnPlugin ??
@@ -281,6 +285,32 @@ describe("PluginAutomations", () => {
   // fills per plugin. A claim whose INSTALLED plugin has not registered yet
   // must not settle failed, and the drain must stop rather than run younger
   // claims past it.
+  it("holds a claim that arrives before the plugin pipeline's first discovery pass", async () => {
+    const h = harness({ discoveryPending: true });
+    h.pendingClaims.push(claimOf({ claimId: "claim-early" }));
+    h.automations.notifyClaimed();
+    await vi.waitFor(() =>
+      expect(h.adapter.claimNextAutomation).toHaveBeenCalled(),
+    );
+    // Nothing is knowable before discovery lands: the claim waits, it is
+    // not failed as undeclared, and no handler ran.
+    expect(h.adapter.settleAutomationClaim).not.toHaveBeenCalled();
+    expect(h.runs).toEqual([]);
+  });
+
+  it("skips an automation whose collection the plugin may not read, and says so", async () => {
+    const h = harness({
+      proveReadable: async (_pluginId, collectionPath) => {
+        throw new Error(`This plugin cannot read ${collectionPath}.`);
+      },
+    });
+    h.automations.handlePipelineStatus(statusEvent());
+    await vi.waitFor(() => expect(h.errors).toHaveLength(1));
+    expect(h.adapter.subscribeAutomation).not.toHaveBeenCalled();
+    expect(h.errors[0]?.context).toContain("hello-plugin/triage");
+    expect(String((h.errors[0]?.error as Error).message)).toContain("cannot read tasks");
+  });
+
   it("holds a claim for an installed plugin that has not registered yet without stalling the others", async () => {
     const h = harness();
     // Only hello-plugin is registered; later-plugin is installed (its

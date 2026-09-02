@@ -3068,7 +3068,10 @@ pub(crate) const GLOBAL_GENERATION_INDEXES_MIGRATION_ID: &str = "v1-global-gener
 
 /// Ordinal 45. Declared write attribution beside the author origin: the actor
 /// kind, the `onBehalfOf` principal, and the automation-chain depth, on both
-/// the update log and the field history it derives. All three are NULL for an
+/// the update log and the field history it derives. The update log keeps them
+/// beside `actor_origin_id` as the journal of record for a write's provenance
+/// (capture reads provenance from `ydoc_updates`); field history is what the
+/// events and the automation claims read today. All three are NULL for an
 /// unattributed write; a NULL `actor_kind` passes the CHECK by SQL semantics.
 const V1_CHANGE_ATTRIBUTION_DDL: &str = "\
 ALTER TABLE ydoc_updates ADD COLUMN actor_kind TEXT

@@ -370,14 +370,6 @@ switch (mode) {
     };
     break;
   }
-  // Registers every automation handler the manifest declares, accumulating
-  // the run facts each one receives so the declared command can report them.
-  // "triage" sets the triggering record's Status to Reviewed — even when it
-  // already says Reviewed, so a naive loop would re-trigger it forever.
-  // "ping" (on chain-a) and "pong" (on chain-b) each write the OTHER chain
-  // collection's counter record, so a change in either collection starts a
-  // chain that only dohc's depth cap can stop. Each write carries the run's
-  // depth in its value, so every hop writes a genuinely new value.
   // The unit test's plugin host has no workspace engine: this mode proves
   // the run request reaches the registered handler and that the handler's
   // SDK requests carry the claim, without touching a collection.
@@ -404,6 +396,14 @@ switch (mode) {
     };
     break;
   }
+  // Registers every automation handler the manifest declares, accumulating
+  // the run facts each one receives so the declared command can report them.
+  // "triage" sets the triggering record's Status to Reviewed — even when it
+  // already says Reviewed, so a naive loop would re-trigger it forever.
+  // "ping" (on chain-a) and "pong" (on chain-b) each write the OTHER chain
+  // collection's counter record, so a change in either collection starts a
+  // chain that only dohc's depth cap can stop. Each write carries the run's
+  // depth in its value, so every hop writes a genuinely new value.
   case "automation": {
     const runs = [];
     handler = {

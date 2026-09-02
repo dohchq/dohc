@@ -2264,9 +2264,6 @@ pub struct CollectionFieldChangeFact {
     /// The device-local `collection_field_history` rowid. A subscriber that
     /// misses events reads history past its last seen id.
     pub history_id: i64,
-    /// The attribution the history row recorded, `None` for an unattributed
-    /// write.
-    pub attribution: Option<ChangeAttribution>,
 }
 
 /// What one applied Y.Doc update did to a bound collection record. `created`
@@ -2411,7 +2408,6 @@ pub fn index_collection_frontmatter_apply_in_tx(
                     previous_json: history_value(previous)?,
                     next_json: history_value(next)?,
                     history_id,
-                    attribution: attribution.cloned(),
                 });
             }
         }
@@ -2455,7 +2451,6 @@ pub fn index_collection_frontmatter_apply_in_tx(
                     previous_json: history_value(authored_previous)?,
                     next_json: history_value(authored_next)?,
                     history_id,
-                    attribution: attribution.cloned(),
                 });
             }
         }

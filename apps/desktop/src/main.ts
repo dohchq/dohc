@@ -1086,8 +1086,10 @@ function createPluginWorkspaceRuntimeParts(
       return currentPipeline.pluginRegistration(pluginId)?.manifest.automations ?? null;
     },
     // The read-scope proof a collections.watch makes, through the plugin's
-    // own owned read port: "." is readable by definition (delivery filters
-    // by the listed set), anything else must resolve as a collection.
+    // own owned read port. A "." subscription needs none: the port is
+    // workspace-scoped, so every collection a "." claim can name is one the
+    // plugin may read. (Unlike a "." watch, claim delivery has no listed-set
+    // filter; a narrower per-plugin read scope would need one here.)
     proveReadable: async (_pluginId, collectionPath) => {
       if (collectionPath === ".") return;
       const registered = findWorkspace(workspace.workspaceId);

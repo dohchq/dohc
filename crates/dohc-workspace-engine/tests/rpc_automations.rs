@@ -87,7 +87,6 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
             previous_json: Some("\"open\"".to_owned()),
             next_json: Some("\"done\"".to_owned()),
             history_id: origin_seq,
-            attribution: None,
         }],
     }
 }

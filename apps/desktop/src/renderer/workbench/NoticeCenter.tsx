@@ -48,10 +48,11 @@ type Notice = {
   Icon: typeof Bell;
 };
 
-// Coarse relative time for the notice ledger. Recomputed on every render;
-// a 30s tick while the panel is open keeps labels honest between updates.
-// Mirrors AUTOMATION_CHAIN_DEPTH_CAP in crates/dohc-engine-domain/src/automations.rs.
+// Mirrors of crates/dohc-engine-domain/src/automations.rs: the chain depth
+// cap and the two engine-minted failure reasons a failed claim can carry.
 const AUTOMATION_CHAIN_DEPTH_CAP = 4;
+const AUTOMATION_CHAIN_STOPPED = "chain-stopped";
+const AUTOMATION_RECLAIM_EXHAUSTED = "reclaim-exhausted";
 
 /** An error text as one sentence: the handler's message rarely ends one. */
 function sentence(text: string): string {
@@ -59,6 +60,8 @@ function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
+// Coarse relative time for the notice ledger. Recomputed on every render;
+// a 30s tick while the panel is open keeps labels honest between updates.
 function relativeTime(thenMs: number): string {
   const elapsedMs = Math.max(0, Date.now() - thenMs);
   const deltaMinutes = Math.floor(elapsedMs / 60_000);
@@ -100,7 +103,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
 } {
   const count =
     failure.generation > 1 ? `${failure.generation} failures so far. ` : "";
-  if (failure.error === "chain-stopped") {
+  if (failure.error === AUTOMATION_CHAIN_STOPPED) {
     return {
       title: "An automation chain stopped",
       body:
@@ -109,7 +112,7 @@ function automationFailureCopy(failure: AutomationFailureNotice): {
         "shorten the chain.",
     };
   }
-  if (failure.error === "reclaim-exhausted") {
+  if (failure.error === AUTOMATION_RECLAIM_EXHAUSTED) {
     return {
       title: `Automation "${failure.automationId}" did not finish`,
       body:

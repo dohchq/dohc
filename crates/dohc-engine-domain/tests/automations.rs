@@ -48,7 +48,6 @@ fn facts(
                 previous_json: None,
                 next_json: Some("\"done\"".to_owned()),
                 history_id: *history_id,
-                attribution: None,
             })
             .collect(),
     }
