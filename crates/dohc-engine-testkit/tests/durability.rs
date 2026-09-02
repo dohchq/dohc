@@ -365,9 +365,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // time-window index (ordinal 39), per-conversation chat content revisions
     // (ordinal 40), collection adoption (ordinal 41), the collection
     // index (ordinal 42), and the collection historical record-owner
-    // index (ordinal 43), global generation-first indexes (ordinal 44), and
-    // record attribution on updates and field history (ordinal 45).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 46);
+    // index (ordinal 43), global generation-first indexes (ordinal 44),
+    // record attribution on updates and field history (ordinal 45), and the
+    // automation subscription and claim tables (ordinal 46).
+    assert_eq!(store.migration_ledger_len().expect("ledger"), 47);
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

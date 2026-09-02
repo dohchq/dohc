@@ -43,29 +43,30 @@ use dohc_engine_collab::{
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
-    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
-    CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary, ChatAgentReadState,
-    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
-    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
-    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
-    ChatThreadProjection, ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
-    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
-    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
-    CollectionSummary, CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult,
-    DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret,
-    InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
-    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
-    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
-    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
-    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
-    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
-    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationSettle, BinaryHead,
+    BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire,
+    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChangeAttribution,
+    ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition,
+    ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage,
+    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
+    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
+    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
+    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
+    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
+    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
+    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
+    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
+    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
+    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
+    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
+    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -2276,6 +2277,38 @@ enum Command {
         max_attempts: i64,
         now_ms: i64,
         reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
+    },
+    AutomationSubscribe {
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    AutomationUnsubscribe {
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        reply: oneshot::Sender<Result<bool, RuntimeError>>,
+    },
+    AutomationClaimNext {
+        workspace_id: String,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<Option<AutomationClaim>, RuntimeError>>,
+    },
+    AutomationSettle {
+        workspace_id: String,
+        claim_id: String,
+        settle: AutomationSettle,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<AutomationClaim, RuntimeError>>,
+    },
+    AutomationReclaimRunning {
+        workspace_id: String,
+        max_attempts: i64,
+        stale_before_ms: i64,
+        now_ms: i64,
+        reply: oneshot::Sender<Result<Vec<AutomationClaim>, RuntimeError>>,
     },
     Relay {
         transport: DeferredRelayTransport,
@@ -6092,6 +6125,105 @@ impl ActorHandle {
             .send(Command::ChatDispatchReclaimRunning {
                 workspace_id,
                 max_attempts,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_subscribe(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+        now_ms: i64,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationSubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_unsubscribe(
+        &self,
+        workspace_id: String,
+        automation_id: String,
+        prefix: String,
+    ) -> Result<bool, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationUnsubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_claim_next(
+        &self,
+        workspace_id: String,
+        now_ms: i64,
+    ) -> Result<Option<AutomationClaim>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationClaimNext {
+                workspace_id,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_settle(
+        &self,
+        workspace_id: String,
+        claim_id: String,
+        settle: AutomationSettle,
+        now_ms: i64,
+    ) -> Result<AutomationClaim, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationSettle {
+                workspace_id,
+                claim_id,
+                settle,
+                now_ms,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_reclaim_running(
+        &self,
+        workspace_id: String,
+        max_attempts: i64,
+        stale_before_ms: i64,
+        now_ms: i64,
+    ) -> Result<Vec<AutomationClaim>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationReclaimRunning {
+                workspace_id,
+                max_attempts,
+                stale_before_ms,
                 now_ms,
                 reply,
             })
@@ -10242,6 +10374,90 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
+            Command::AutomationSubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::subscribe_automation(
+                    &mut store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationUnsubscribe {
+                workspace_id,
+                automation_id,
+                prefix,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::unsubscribe_automation(
+                    &mut store,
+                    &workspace_id,
+                    &automation_id,
+                    &prefix,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationClaimNext {
+                workspace_id,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::claim_next_pending_automation(
+                    &mut store,
+                    &workspace_id,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationSettle {
+                workspace_id,
+                claim_id,
+                settle,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::settle_automation_claim(
+                    &mut store,
+                    &workspace_id,
+                    &claim_id,
+                    &settle,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationReclaimRunning {
+                workspace_id,
+                max_attempts,
+                stale_before_ms,
+                now_ms,
+                reply,
+            } => {
+                let outcome = dohc_engine_domain::reclaim_running_automations(
+                    &mut store,
+                    &workspace_id,
+                    max_attempts,
+                    stale_before_ms,
+                    now_ms,
+                    &NoFaults,
+                )
+                .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
             Command::Search {
                 root_dir,
                 workspace_id,
@@ -11235,6 +11451,7 @@ fn ydoc_record_update_on_store(
     // after it commits, so a decline reported to the caller is one that
     // actually survived the commit.
     let mut sharing_declined: Option<SharingDeclined> = None;
+    let mut automation_claims: Vec<dohc_engine_domain::AutomationClaim> = Vec::new();
     // An exact replicated lineage journals the ydoc.update delta in the same
     // transaction as the append. This keeps blob-before-log order and TS
     // parity. Local-only lineages journal nothing; their workspace file is the
@@ -11339,6 +11556,22 @@ fn ydoc_record_update_on_store(
                     facts.source = Some((origin_id, origin_seq));
                 }
             }
+            // The origin-device automation trigger (ADR 0008). This hook runs
+            // only for ops this device journals — the sync apply path never
+            // reaches it — so claiming here is origin-device execution by
+            // construction. Same transaction as the append: a claim exists
+            // exactly when the change it triggers on committed.
+            if let Some(facts) = outcome.record_facts.as_ref() {
+                automation_claims = dohc_engine_domain::claim_automation_triggers_in_tx(
+                    tx,
+                    &journal_key.workspace_id,
+                    facts,
+                    now_ms,
+                )
+                .map_err(|error| dohc_engine_collab::CollabError::Corrupt {
+                    reason: format!("automation claim insert failed: {error}"),
+                })?;
+            }
             Ok(())
         },
     )? {
@@ -11349,6 +11582,7 @@ fn ydoc_record_update_on_store(
                 outcome,
                 sharing_declined,
                 lineage_claim_id,
+                automation_claims,
             })
         }
         TxnOutcome::Crashed { .. } => Err(RuntimeError::OperationCrashed),
@@ -11366,6 +11600,10 @@ pub struct YdocAppend {
     pub outcome: AppendOutcome,
     pub sharing_declined: Option<dohc_engine_sync::SharingDeclined>,
     pub lineage_claim_id: Option<String>,
+    /// Pending automation claims this append inserted (ADR 0008): one per
+    /// subscribed automation, committed in the append's own transaction. The
+    /// service emits `automation.claimed` for each, post-commit.
+    pub automation_claims: Vec<dohc_engine_domain::AutomationClaim>,
 }
 
 fn ydoc_settle_disk_preimage(
