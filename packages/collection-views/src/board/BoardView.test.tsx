@@ -358,6 +358,45 @@ describe("BoardView", () => {
     expect(within(column).queryByRole("listitem", { name: "Task 0" })).toBeNull();
   });
 
+  it("keeps a lifted card mounted while its column scrolls it out of view", async () => {
+    const onCellChange = vi.fn();
+    const records = Array.from({ length: 60 }, (_, index) =>
+      makeRecord(`rec-${index}`, [
+        indexedValue("title", `Task ${index}`),
+        indexedValue("status", "todo"),
+      ]),
+    );
+    render(
+      <BoardView
+        schema={makeSchema()}
+        groups={[makeGroup("todo", records), makeGroup("doing", [])]}
+        groupBy="status"
+        onCellChange={onCellChange}
+      />,
+    );
+    layOutBoard();
+    const column = screen.getAllByRole("list")[0]!;
+    const card = within(column).getByRole("listitem", { name: "Task 0" });
+    card.focus();
+    fireEvent.keyDown(card, { key: "Enter", code: "Enter" });
+    await waitForLift(card, true);
+
+    // Autoscroll or a long keyboard drag can carry the column past the
+    // lifted card's slot; the card must survive it, or the drag dies.
+    column.scrollTop = 60 * 600;
+    fireEvent.scroll(column);
+    expect(within(column).getByRole("listitem", { name: "Task 0" })).toBe(card);
+    expect(within(column).queryByRole("listitem", { name: "Task 1" })).toBeNull();
+
+    // The drag still finishes: the drop lands (in place, so no change), and
+    // with nothing lifted the far-scrolled card unmounts like any other.
+    fireEvent.keyDown(card.ownerDocument, { key: "Enter", code: "Enter" });
+    await waitFor(() => {
+      expect(within(column).queryByRole("listitem", { name: "Task 0" })).toBeNull();
+    });
+    expect(onCellChange).not.toHaveBeenCalled();
+  });
+
   it("opens the record from the card's focusable Open button", () => {
     const onOpenRecord = vi.fn();
     render(

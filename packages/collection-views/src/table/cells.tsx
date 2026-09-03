@@ -91,9 +91,9 @@ export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
   "expected-number": "This value is not a number. Edit the value to replace it.",
   "number-not-finite": "This number is not finite. Edit the value to replace it.",
   "unsupported-tag":
-    "This value uses a YAML tag dohc cannot index. Edit the value to replace it.",
+    "This value uses a YAML tag dohc cannot index. Replace the value.",
   "value-depth-exceeded":
-    "This value nests too deeply to index. Edit the value to replace it.",
+    "This value nests too deeply to index. Replace the value.",
   "expected-boolean":
     "This value is not true or false. Toggle the checkbox to replace it.",
   "expected-sequence": "This value is not a list. Edit the value to replace it.",
