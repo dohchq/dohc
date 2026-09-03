@@ -4654,6 +4654,12 @@ fn group_collection_records(
 /// needs: a collation reproducing `compare_json` over stored `value_json`
 /// text, and the filter matcher. Registration replaces any previous copy, so
 /// repeating it per query is cheap and idempotent.
+///
+/// Cost: the collation parses both JSON operands on every comparison, about
+/// n log(page) parses per query, where the old in-memory sort parsed each
+/// value once. That trades CPU for memory bounded by the page instead of
+/// the collection (#991); a 100k-record sort on string-heavy fields is the
+/// case to benchmark before relying on it.
 fn register_collection_query_sql(conn: &Connection) -> Result<(), crate::DomainError> {
     conn.create_collation("DOHC_COLLECTION_JSON", |left, right| {
         match (

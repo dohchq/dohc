@@ -464,6 +464,16 @@
           "format": "uint64",
           "minimum": 0
         },
+        "maxFrameBytes": {
+          "description": "The largest control frame the client will accept. The engine clamps it\ninto `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the\neffective value in `helloAck.limits`. Collection responses size\nthemselves to it; other families keep their own fixed bounds, and a\nsecret read can still exceed a lowered limit.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
         "protocolVersion": {
           "type": "integer",
           "format": "uint32",

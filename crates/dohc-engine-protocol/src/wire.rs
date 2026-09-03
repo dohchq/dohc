@@ -67,8 +67,10 @@ pub struct Hello {
     #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub last_session_generation: Option<u64>,
     /// The largest control frame the client will accept. The engine clamps it
-    /// into `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]`, echoes the
-    /// effective value in `helloAck.limits`, and sizes its responses to it.
+    /// into `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]` and echoes the
+    /// effective value in `helloAck.limits`. Collection responses size
+    /// themselves to it; other families keep their own fixed bounds, and a
+    /// secret read can still exceed a lowered limit.
     #[serde(default)]
     #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub max_frame_bytes: Option<u32>,
