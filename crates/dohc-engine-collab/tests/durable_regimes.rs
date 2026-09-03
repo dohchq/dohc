@@ -3605,6 +3605,74 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
     );
 }
 
+// #1001: a synced update past the first in its lineage must not replay on the
+// seq-0 base. That replay re-deletes items earlier updates already replaced
+// while their inserts stay pending, so the authored pair reads a phantom
+// `field -> absent` removal and the resolved-away branch journals it.
+#[test]
+fn a_second_synced_update_records_only_its_real_change_and_no_phantom_removal() {
+    let (mut a, _b, key, base) = two_collection_stores(
+        "collection-facts-second-synced-a",
+        "collection-facts-second-synced-b",
+    );
+    let peer = Ydoc::wire();
+    peer.apply(&base).expect("peer base");
+    let first = peer.frontmatter_set("title", "Renamed");
+    let second = peer.frontmatter_set("status", "done");
+
+    let mut apply = |origin_seq: i64, bytes: &[u8], now_ms: i64| {
+        committed(
+            a.store
+                .write_with(&NoFaults, |tx| {
+                    apply_remote_update_in_transaction_with_projection(
+                        tx,
+                        &key,
+                        &RemoteUpdate {
+                            origin_id: "peer-A".to_owned(),
+                            origin_seq,
+                            bytes: bytes.to_vec(),
+                        },
+                        None,
+                        None,
+                        now_ms,
+                    )
+                })
+                .expect("remote apply"),
+        )
+    };
+    let first_facts = apply(1, &first, 1_100)
+        .record_facts
+        .expect("first synced apply derives facts");
+    assert_eq!(first_facts.fields.len(), 1);
+    assert_eq!(first_facts.fields[0].field_name, "title");
+
+    // The second update's delete set tombstones the base `title` item the
+    // first update replaced. Only the real `status` change may surface.
+    let second_facts = apply(2, &second, 1_200)
+        .record_facts
+        .expect("second synced apply derives facts");
+    assert_eq!(
+        second_facts.fields.len(),
+        1,
+        "the second apply derives one fact, not a phantom removal beside it"
+    );
+    assert_eq!(second_facts.fields[0].field_name, "status");
+    assert_eq!(
+        second_facts.fields[0].previous_json.as_deref(),
+        Some("\"open\"")
+    );
+    assert_eq!(
+        second_facts.fields[0].next_json.as_deref(),
+        Some("\"done\"")
+    );
+    assert_eq!(
+        field_history(&a.store, &key, "title"),
+        vec![("peer-A".to_owned(), Some("\"Renamed\"".to_owned()))],
+        "no `title -> absent` history row rides the second update"
+    );
+    assert_eq!(field_history(&a.store, &key, "status").len(), 1);
+}
+
 /// The three attribution columns of every history row for `key`'s record, in
 /// history order.
 fn history_attribution(

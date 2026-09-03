@@ -1237,8 +1237,10 @@ pub(crate) fn index_applied_frontmatter(
     let after = after_doc.frontmatter_json();
     // A local update was authored against the live head, so nothing in it
     // can be resolved away: its authored pair IS the applied pair. Only a
-    // synced update needs the lineage reconstruction, and that base is
-    // right only for a lineage's first update (#1001).
+    // synced update needs the lineage reconstruction. The seq-0 base is the
+    // author's exact base only for an update authored directly against it;
+    // for a later update the replay can fabricate `-> absent` entries, which
+    // the resolved-away branch in the indexer refuses to journal (#1001).
     let (authored_before, authored_after) = if history_source.is_none() {
         (before.clone(), after.clone())
     } else {
@@ -1256,6 +1258,7 @@ pub(crate) fn index_applied_frontmatter(
         &after,
         &authored_before,
         &authored_after,
+        None,
         author_origin_id,
         attribution,
         history_source,

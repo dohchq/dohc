@@ -3483,6 +3483,15 @@ async fn apply_bound_run_with_handle(
                     true
                 }
                 Err(_) => {
+                    // The reconcile above already committed these adoptions.
+                    // An unrelated repair failure must not drop their event —
+                    // the renderer would stay stale on committed state (#988).
+                    if !adopted_paths.is_empty() {
+                        events.emit(
+                            CAPTURE_MOMENT_RECORDED_EVENT,
+                            moment_recorded_payload(workspace_id, &adopted_paths, &[]),
+                        );
+                    }
                     status.mark_degraded();
                     false
                 }
@@ -4961,6 +4970,114 @@ mod collection_reconcile_scheduling_tests {
             data_version(&observer),
             before,
             "an idle converged pass must not schedule collection writes"
+        );
+
+        files.close().await;
+        supervisor.close(&db).expect("close actor");
+    }
+
+    // #988: the collection reconcile commits its adoptions before the recovery
+    // repair runs. An unrelated repair failure in the same converged tick must
+    // not drop the committed paths from the capture event, or the renderer
+    // stays stale on state the engine already holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_recovery_repair_still_announces_committed_adoptions() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let collection_dir = scratch.path().join("tasks");
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(
+            collection_dir.join("collection.yaml"),
+            b"name: Tasks
+",
+        )
+        .expect("collection schema");
+        std::fs::write(
+            collection_dir.join("alpha.md"),
+            b"Alpha task
+",
+        )
+        .expect("collection record");
+
+        let db = scratch.engine_db_path().expect("engine database path");
+        let supervisor = WorkspaceSupervisor::new();
+        let actor = supervisor.open(&db, 1).expect("open actor").actor;
+        seed_collection_capture(
+            &actor,
+            scratch.path(),
+            &["tasks/collection.yaml", "tasks/alpha.md"],
+        );
+        seed_plain_richdoc_lineage(
+            &actor,
+            "tasks/alpha.md",
+            "Alpha task
+",
+        )
+        .await;
+
+        // An unrelated conflicted recovery whose decision carries an object id
+        // no DocKey accepts (a control byte): the repair pass fails after the
+        // collection reconcile above has committed its adoption.
+        let sha = "a".repeat(64);
+        rusqlite::Connection::open(&db)
+            .expect("open database seeder")
+            .execute_batch(&format!(
+                "INSERT INTO binary_blobs (sha256,byte_length,bytes)                  VALUES ('{sha}',1,X'00');
+                 INSERT INTO ydoc_recovery_decisions (                      workspace_id,origin_id,origin_seq,version_id,object_id,original_path,                      incoming_content_kind,incoming_update_blob_sha256,                      incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,                      recovered_path,recovery_collision_ordinal,recovery_object_id,                      recovery_moment_id,recorded_at_ms                  ) VALUES (                      '{WORKSPACE_ID}','origin-broken',0,'main','bad'||char(10)||'object',                      'doc.md','plaintext','{sha}','{sha}',1,'{sha}',                      'doc.recovered.md','0','recovery-object','recovery-moment',1                  );
+                 INSERT INTO materialization_jobs                      (job_id,target_path,content_sha256,preimage_present,                       target_generation,status,created_at_ms)                  VALUES ('sync-mat_recovery-moment','doc.recovered.md','{sha}',0,1,'conflict',1);"
+            ))
+            .expect("seed broken recovery decision");
+
+        let files = FilesActor::spawn_async(scratch.path().to_path_buf(), ScanBounds::default())
+            .await
+            .expect("files actor");
+        let files = FilesActorCloseGuard::new(files);
+        let status = Arc::new(DriverStatus::default());
+        let self_writes = SelfWriteSuppression::default();
+        let leases = LeaseRegistry::new();
+        status.request_collection_reconcile();
+        let events = EngineEvents::default();
+        let mut notices = events.subscribe();
+        let captured_root = bind_capture_root(scratch.path()).expect("bind run root");
+        let clean = apply_bound_run_with_handle(
+            ApplyRunContext {
+                root: scratch.path(),
+                actor: &actor,
+                workspace_id: WORKSPACE_ID,
+                leases: &leases,
+                status: &status,
+                self_writes: &self_writes,
+                author_json: None,
+                provenance: CaptureProvenance::default(),
+                events,
+                #[cfg(feature = "harness")]
+                apply_probe: None,
+            },
+            &files.handle(),
+            RootBoundRun {
+                captured_root,
+                run: ReconcileRun::Converged,
+            },
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(!clean, "the failed repair keeps the tick degraded");
+        assert!(
+            std::fs::read_to_string(collection_dir.join("alpha.md"))
+                .expect("read adopted record")
+                .contains("id: rec_"),
+            "the adoption committed before the repair failed"
+        );
+        let notice = notices
+            .try_recv()
+            .expect("the committed adoption paths reach the renderer despite the failed repair");
+        assert_eq!(notice.name, CAPTURE_MOMENT_RECORDED_EVENT);
+        assert_eq!(notice.payload["workspaceId"], WORKSPACE_ID);
+        assert!(
+            notice.payload["paths"]
+                .as_array()
+                .is_some_and(|paths| paths.iter().any(|path| path == "tasks/alpha.md")),
+            "the event carries the adopted path: {:?}",
+            notice.payload
         );
 
         files.close().await;

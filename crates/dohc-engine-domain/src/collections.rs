@@ -1671,6 +1671,30 @@ pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
     parse_markdown_frontmatter(markdown).map(|frontmatter| frontmatter.value)
 }
 
+/// Parse-time field provenance the coerced JSON cannot carry: an unquoted
+/// `.nan` and the quoted string `".nan"` both coerce to the string `".nan"`,
+/// so only the parse knows which top-level fields held a non-finite YAML
+/// number or an unsupported tag.
+#[derive(Debug, Default)]
+pub struct FrontmatterProvenance {
+    pub non_finite_fields: HashSet<String>,
+    pub unsupported_tag_fields: HashSet<String>,
+}
+
+pub fn markdown_frontmatter_json_with_provenance(
+    markdown: &str,
+) -> Option<(Value, FrontmatterProvenance)> {
+    parse_markdown_frontmatter(markdown).map(|frontmatter| {
+        (
+            frontmatter.value,
+            FrontmatterProvenance {
+                non_finite_fields: frontmatter.non_finite_fields,
+                unsupported_tag_fields: frontmatter.unsupported_tag_fields,
+            },
+        )
+    })
+}
+
 pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
     parse_markdown_frontmatter(markdown).map(|frontmatter| (frontmatter.value, frontmatter.body))
 }
@@ -2358,6 +2382,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
     after: &Value,
     authored_before: &Value,
     authored_after: &Value,
+    after_provenance: Option<&FrontmatterProvenance>,
     author_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
@@ -2431,8 +2456,15 @@ pub fn index_collection_frontmatter_apply_in_tx(
         let applied = after_object.and_then(|values| values.get(field_name));
         let authored_previous = authored_before.and_then(|values| values.get(field_name));
         let authored_next = authored_after.and_then(|values| values.get(field_name));
+        // A delta update carries the author's FULL delete set, so replaying it
+        // on the lineage base deletes items earlier updates already replaced
+        // and reads as a removal the author never made. Inserts come only
+        // from the author, so an authored change with a PRESENT next value is
+        // genuine; an authored `-> absent` cannot be told apart from that
+        // replay artifact and is never journaled (#1001).
         if optional_collection_values_equal(previous, applied)
             && !optional_collection_values_equal(authored_previous, authored_next)
+            && authored_next.is_some()
         {
             let history_id = insert_field_history(
                 conn,
@@ -2457,7 +2489,12 @@ pub fn index_collection_frontmatter_apply_in_tx(
             }
         }
     }
-    if applied_frontmatter_unchanged && authored_frontmatter_unchanged {
+    // Parsed provenance can change a field's validation without changing its
+    // coerced value: `estimate: .nan` and `estimate: ".nan"` both index as
+    // the string ".nan" but flag for different reasons, so a caller that
+    // supplied provenance always reindexes (#987).
+    if applied_frontmatter_unchanged && authored_frontmatter_unchanged && after_provenance.is_none()
+    {
         return Ok(None);
     }
     let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
@@ -2468,7 +2505,16 @@ pub fn index_collection_frontmatter_apply_in_tx(
         &record_id,
         &schema,
         after,
-        FieldProvenance::PreserveStored,
+        // A caller that parsed the after state from Markdown knows which
+        // fields held a non-finite number before coercion; without it, keep
+        // the stored reasons (#987).
+        match after_provenance {
+            Some(provenance) => FieldProvenance::Parsed {
+                non_finite_fields: &provenance.non_finite_fields,
+                unsupported_tag_fields: &provenance.unsupported_tag_fields,
+            },
+            None => FieldProvenance::PreserveStored,
+        },
     )?;
     // An apply whose every history insert deduped is a replay of facts this
     // device already surfaced once.
