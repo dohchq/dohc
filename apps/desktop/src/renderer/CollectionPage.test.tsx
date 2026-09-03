@@ -215,12 +215,18 @@ function renderPage(
   bridge: ReturnType<typeof makeBridge>,
   onNewRecord: (collectionPath: string) => void = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
+  view?: {
+    activeViewName?: string | null;
+    onActiveViewChange?: (viewName: string | null) => void;
+  },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
     <CollectionPage
       workspaceId="ws-1"
       collectionPath="tasks"
+      activeViewName={view?.activeViewName ?? null}
+      onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
       onNewRecord={onNewRecord}
       onOpenRecord={onOpenRecord}
     />,
@@ -353,6 +359,73 @@ describe("CollectionPage", () => {
 
     expect(await screen.findByText("Plan")).toBeDefined();
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+  });
+});
+
+const TWO_VIEW_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [{ name: "title", type: "text" }],
+  views: [
+    {
+      name: "All",
+      kind: "table",
+      groupBy: null,
+      sort: [],
+      visibleFields: null,
+      dateField: null,
+    },
+    {
+      name: "Sorted",
+      kind: "table",
+      groupBy: null,
+      sort: [{ field: "title", direction: "desc" }],
+      visibleFields: null,
+      dateField: null,
+    },
+  ],
+};
+
+describe("view persistence", () => {
+  // The open view is per-user local state the shell stores in the workbench
+  // UI state; the page only reflects and reports it.
+  it("opens the stored view instead of the schema's first", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    renderPage(bridge, undefined, undefined, { activeViewName: "Sorted" });
+
+    await waitFor(() =>
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
+    );
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      sort: [{ field: "title", direction: "desc" }],
+      resolveRelations: true,
+    });
+  });
+
+  it("falls back to the first view when the stored view is gone", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    renderPage(bridge, undefined, undefined, { activeViewName: "Gone" });
+
+    await waitFor(() =>
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
+    );
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      resolveRelations: true,
+    });
+  });
+
+  it("reports a view switch so the shell can persist it", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onActiveViewChange = vi.fn();
+    renderPage(bridge, undefined, undefined, { onActiveViewChange });
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sorted" }));
+    expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("Sorted");
   });
 });
 
@@ -649,6 +722,8 @@ describe("cell write queue", () => {
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
         onNewRecord={() => undefined}
         onOpenRecord={() => undefined}
       />,
@@ -705,6 +780,8 @@ describe("cell write queue", () => {
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
         onNewRecord={() => undefined}
         onOpenRecord={() => undefined}
       />,

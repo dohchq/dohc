@@ -49,6 +49,12 @@ export const FILE_LOCKED_REPORT_MS = 15_000;
 export interface CollectionPageProps {
   workspaceId: string;
   collectionPath: string;
+  // Which view is open is per-user local state the shell persists in the
+  // workbench UI state, keyed by collection path — closing the tab or
+  // restarting the app must not reset it. null means "no stored choice":
+  // the page falls back to the schema's first view.
+  activeViewName: string | null;
+  onActiveViewChange: (viewName: string | null) => void;
   // The shell creates the record file (untitled naming needs the file
   // listing, which the shell owns) and opens it; adoption mints the id.
   onNewRecord: (collectionPath: string) => void;
@@ -195,6 +201,8 @@ function NewRecordButton({ onClick }: { onClick: () => void }) {
 export function CollectionPage({
   workspaceId,
   collectionPath,
+  activeViewName,
+  onActiveViewChange,
   onNewRecord,
   onOpenRecord,
 }: CollectionPageProps) {
@@ -245,7 +253,6 @@ export function CollectionPage({
   const state = useCollectionStore(store);
 
   const views = details?.schema.views ?? [];
-  const [activeViewName, setActiveViewName] = useState<string | null>(null);
   const activeView: ViewDefinition | null =
     views.find((view) => view.name === activeViewName) ?? views[0] ?? null;
 
@@ -510,7 +517,7 @@ export function CollectionPage({
               <button
                 key={view.name}
                 type="button"
-                onClick={() => setActiveViewName(view.name)}
+                onClick={() => onActiveViewChange(view.name)}
                 className={`rounded-md px-2.5 py-1 text-xs transition-colors ${
                   view.name === (activeView?.name ?? "")
                     ? "bg-bg text-ink shadow-sm"
@@ -602,12 +609,12 @@ export function CollectionPage({
           schema={schema}
           apply={applySchemaChange}
           onClose={() => setViewsOpen(false)}
-          onRenamed={(from, to) =>
-            setActiveViewName((current) => (current === from ? to : current))
-          }
-          onDeleted={(name) =>
-            setActiveViewName((current) => (current === name ? null : current))
-          }
+          onRenamed={(from, to) => {
+            if (activeViewName === from) onActiveViewChange(to);
+          }}
+          onDeleted={(name) => {
+            if (activeViewName === name) onActiveViewChange(null);
+          }}
         />
       ) : null}
       {headWrite ? (
