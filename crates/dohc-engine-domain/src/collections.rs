@@ -2431,8 +2431,15 @@ pub fn index_collection_frontmatter_apply_in_tx(
         let applied = after_object.and_then(|values| values.get(field_name));
         let authored_previous = authored_before.and_then(|values| values.get(field_name));
         let authored_next = authored_after.and_then(|values| values.get(field_name));
+        // A delta update carries the author's FULL delete set, so replaying it
+        // on the lineage base deletes items earlier updates already replaced
+        // and reads as a removal the author never made. Inserts come only
+        // from the author, so an authored change with a PRESENT next value is
+        // genuine; an authored `-> absent` cannot be told apart from that
+        // replay artifact and is never journaled (#1001).
         if optional_collection_values_equal(previous, applied)
             && !optional_collection_values_equal(authored_previous, authored_next)
+            && authored_next.is_some()
         {
             let history_id = insert_field_history(
                 conn,
