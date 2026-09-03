@@ -103,7 +103,12 @@ impl<S: EngineService + 'static> Supervisor<S> {
         &self,
         request: Request,
     ) -> Result<oneshot::Receiver<RequestOutcome>, WireError> {
-        self.try_submit_with(request, Arc::from([]), |_| {})
+        self.try_submit_with(
+            request,
+            Arc::from([]),
+            crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
+            |_| {},
+        )
     }
 
     /// Submit with connection capabilities and a synchronous completion hook.
@@ -114,6 +119,7 @@ impl<S: EngineService + 'static> Supervisor<S> {
         &self,
         request: Request,
         capabilities: Arc<[String]>,
+        max_frame_bytes: u32,
         before_cancel_release: F,
     ) -> Result<oneshot::Receiver<RequestOutcome>, WireError>
     where
@@ -165,6 +171,7 @@ impl<S: EngineService + 'static> Supervisor<S> {
                 &cancel,
                 deadline,
                 capabilities,
+                max_frame_bytes,
             )
             .await;
             before_cancel_release(&outcome);
@@ -190,6 +197,7 @@ impl<S: EngineService + 'static> Supervisor<S> {
 
 /// Wait for an execution slot, then run. A queued request resolves its own
 /// cancellation or deadline instead of waiting behind in-flight handlers.
+#[allow(clippy::too_many_arguments)]
 async fn acquire_and_run(
     semaphore: Arc<Semaphore>,
     service: &impl EngineService,
@@ -197,6 +205,7 @@ async fn acquire_and_run(
     cancel: &CancelSignal,
     deadline: Instant,
     capabilities: Arc<[String]>,
+    max_frame_bytes: u32,
 ) -> RequestOutcome {
     let _permit = tokio::select! {
         biased;
@@ -214,7 +223,15 @@ async fn acquire_and_run(
             Err(_) => return Err(WireError::new(ErrorCode::Internal, "supervisor is shut down")),
         },
     };
-    run_job(service, request, cancel, deadline, capabilities).await
+    run_job(
+        service,
+        request,
+        cancel,
+        deadline,
+        capabilities,
+        max_frame_bytes,
+    )
+    .await
 }
 
 async fn run_job(
@@ -223,6 +240,7 @@ async fn run_job(
     cancel: &CancelSignal,
     deadline: Instant,
     capabilities: Arc<[String]>,
+    max_frame_bytes: u32,
 ) -> RequestOutcome {
     if cancel.is_cancelled() {
         return Err(WireError::new(
@@ -234,6 +252,7 @@ async fn run_job(
         cancel: cancel.clone(),
         deadline: Some(deadline.into_std()),
         capabilities,
+        max_frame_bytes,
     };
     tokio::select! {
         () = cancel.cancelled() => Err(WireError::new(ErrorCode::Cancelled, "request cancelled")),
@@ -425,6 +444,7 @@ mod tests {
             .try_submit_with(
                 request(77),
                 Arc::from(["blobs".to_owned()]),
+                crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
                 move |outcome| {
                     let egress = outcome
                         .as_ref()

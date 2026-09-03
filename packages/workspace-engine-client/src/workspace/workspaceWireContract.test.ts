@@ -189,6 +189,7 @@ describe("workspace wire schemas", () => {
               reasons: [{ code, path: "/fields" }],
             },
           ],
+          nextCursor: null,
         }),
       ).not.toThrow();
     }
@@ -325,6 +326,7 @@ describe("workspace wire schemas", () => {
             recordedAtMs: 1,
           },
         ],
+        nextBeforeHistoryId: null,
       },
     );
     expect(fetched.record.values[0]?.value).toBe(decoded);
@@ -359,6 +361,7 @@ describe("workspace wire schemas", () => {
         collections: [
           { path: "projects", status: "valid", reasons: [] },
         ],
+        nextCursor: null,
       }).collections,
     ).toHaveLength(1);
     expect(

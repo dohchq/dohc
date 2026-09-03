@@ -120,6 +120,7 @@ function collectionReadsScopedTo(prefix: string): CollectionReadPort {
           values: [],
         },
         history: [],
+        nextBeforeHistoryId: null,
       };
     },
   };

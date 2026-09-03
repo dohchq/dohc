@@ -138,6 +138,12 @@ export interface CollectionSummary {
   path: string;
   status: CollectionStatus;
   reasons: CollectionSchemaReason[];
+  /**
+   * How many degradation reasons a byte-bounded `collections.list` page
+   * dropped from `reasons`. Absent when the list is complete; the full list
+   * stays readable through `collections.get`.
+   */
+  omittedReasons?: number;
 }
 
 export interface CollectionDetails extends CollectionSummary {
@@ -257,4 +263,9 @@ export interface CollectionGetRecordResult {
   collection: CollectionSummary;
   record: CollectionRecord;
   history: CollectionFieldHistoryEntry[];
+  /**
+   * Exclusive continuation cursor: pass as `beforeHistoryId` to read the next
+   * newest-first history page. `null` when this page reached the oldest entry.
+   */
+  nextBeforeHistoryId: number | null;
 }

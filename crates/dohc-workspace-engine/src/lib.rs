@@ -400,18 +400,108 @@ fn collection_query_response_value(
     Ok(response)
 }
 
-fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
-    let response = collection_response_value(response)?;
+/// Approximate serialized-bytes budget for one `collections.getRecord`
+/// history page — the same measured discipline as every other list family.
+/// Rows carry full previous and next field values, so a row count alone can
+/// never bound the frame.
+const COLLECTION_HISTORY_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// Cuts an encoded `collections.getRecord` response's history page to the
+/// byte budget and repoints `nextBeforeHistoryId` at the cut, so a caller
+/// keeps paging instead of hitting a frame refusal. A single over-budget row
+/// still ships (progress guarantee) and rides blob egress when oversized.
+fn bound_collection_history_page(response: &mut Value) {
+    let Some(history) = response.get_mut("history").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let included = byte_budget_cut_serialized(history, COLLECTION_HISTORY_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(history.len());
+    if included == history.len() {
+        return;
+    }
+    history.truncate(included);
+    let next_before_history_id = history
+        .last()
+        .map_or(Value::Null, |row| row["historyId"].clone());
+    response["nextBeforeHistoryId"] = next_before_history_id;
+}
+
+/// Approximate serialized-bytes budget for one `collections.list` page.
+const COLLECTIONS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// The most one summary's serialized degradation-reason list may occupy in a
+/// `collections.list` page. The reason COUNT is capped at the wire collection
+/// limit, but 16,384 reasons with long paths can still pass the frame; the
+/// full list stays readable through `collections.get`, which rides blob
+/// egress.
+const COLLECTION_SUMMARY_REASONS_BYTE_BUDGET: usize = 64 * 1024;
+
+/// Bounds an encoded `collections.list` page by serialized bytes: each
+/// summary's reason list truncates to its budget with an `omittedReasons`
+/// count, then the page cuts to its budget and `nextCursor` repoints at the
+/// cut so a caller keeps paging instead of hitting a frame refusal.
+fn bound_collections_list_page(response: &mut Value) {
+    let Some(collections) = response
+        .get_mut("collections")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for summary in collections.iter_mut() {
+        let Some(reasons) = summary.get_mut("reasons").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let included = byte_budget_cut_serialized(reasons, COLLECTION_SUMMARY_REASONS_BYTE_BUDGET);
+        if included < reasons.len() {
+            let omitted = reasons.len() - included;
+            reasons.truncate(included);
+            summary["omittedReasons"] = json!(omitted);
+        }
+    }
+    let included = byte_budget_cut_serialized(collections, COLLECTIONS_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(collections.len());
+    if included < collections.len() {
+        collections.truncate(included);
+        let next_cursor = collections
+            .last()
+            .map_or(Value::Null, |summary| summary["path"].clone());
+        response["nextCursor"] = next_cursor;
+    }
+}
+
+/// This request's in-band collection response cap: the negotiated client
+/// frame minus envelope headroom, never above the engine default cap. The
+/// hello clamp keeps the negotiated frame at 1 MiB or more, so the cap always
+/// clears the single-row hard cap and page byte budgets.
+fn collection_in_band_cap(ctx: &RequestContext) -> usize {
+    (ctx.max_frame_bytes as usize)
+        .saturating_sub(64 * 1024)
+        .min(COLLECTION_RESPONSE_HARD_CAP_BYTES)
+}
+
+fn in_band_collection_response(response: Value, cap: usize) -> Result<Value, WireError> {
     let encoded_len = serde_json::to_vec(&response)
         .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
         .len();
-    if encoded_len > COLLECTION_RESPONSE_HARD_CAP_BYTES {
+    if encoded_len > cap {
         return Err(wire(
             ErrorCode::LimitExceeded,
             "collection-response-exceeds-wire-limit",
         ));
     }
     Ok(response)
+}
+
+fn collection_response_json(
+    response: impl Serialize,
+    ctx: &RequestContext,
+) -> Result<Value, WireError> {
+    in_band_collection_response(
+        collection_response_value(response)?,
+        collection_in_band_cap(ctx),
+    )
 }
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
@@ -1099,9 +1189,10 @@ impl EngineService {
         operation: &str,
         response: Value,
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let cap = collection_in_band_cap(ctx);
         let bytes = serde_json::to_vec(&response)
             .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
-        if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
+        if bytes.len() <= cap {
             return Ok((response, None));
         }
         if !ctx.has_capability("blobs") {
@@ -1122,7 +1213,7 @@ impl EngineService {
                 "collectionJson": Value::Null,
                 "blobSha256": sha256,
                 "byteLength": byte_length,
-                "inbandLimitBytes": COLLECTION_RESPONSE_HARD_CAP_BYTES,
+                "inbandLimitBytes": cap,
             }),
             Some(BlobEgress {
                 stream_id: request_id,
@@ -4107,23 +4198,33 @@ impl EngineService {
         })
     }
 
-    /// Returns every collection in the workspace's active version, ordered by path.
+    /// Returns one path-ordered page of the workspace's active-version
+    /// collections with an exclusive continuation cursor.
     async fn collections_list(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: CollectionsListParams = parse(params)?;
+        let params: CollectionsListParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-list-limit-out-of-range",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let collections = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "collections.list",
-            open.actor.collections_list(open.workspace_id),
+            open.actor
+                .collections_list(open.workspace_id, params.limit, params.cursor),
         )
         .await?;
-        collection_response_json(json!({ "collections": collections }))
+        let mut response = collection_response_value(page)?;
+        bound_collections_list_page(&mut response);
+        in_band_collection_response(response, collection_in_band_cap(ctx))
     }
 
     /// Returns active-version collection bindings waiting for the shared
@@ -4153,7 +4254,7 @@ impl EngineService {
             ),
         )
         .await?;
-        collection_response_json(page)
+        collection_response_json(page, ctx)
     }
 
     async fn collections_get(
@@ -4264,12 +4365,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        let mut response = collection_response_value(result)?;
+        bound_collection_history_page(&mut response);
         self.collection_response_with_blob(
             ctx,
             &cancellation,
             request_id,
             "collections.getRecord",
-            collection_response_value(result)?,
+            response,
         )
         .await
     }
@@ -10731,8 +10834,13 @@ struct SearchEnsureIndexParams {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CollectionsListParams {}
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsListParams {
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

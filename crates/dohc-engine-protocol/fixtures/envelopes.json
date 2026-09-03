@@ -2,7 +2,7 @@
   "description": "Deterministic wire fixtures for the dohc engine protocol, readable by both the Rust and TypeScript test suites. canonicalJson is the sorted-key, no-whitespace JSON encoding produced by examples/update_fixtures.rs; regenerate with: cargo run --example update_fixtures",
   "entries": [
     {
-      "canonicalJson": "{\"authToken\":\"fixture-parent-token\",\"capabilities\":[\"core\",\"blobs\",\"testkit\"],\"lastSessionGeneration\":null,\"protocolVersion\":2,\"type\":\"hello\"}",
+      "canonicalJson": "{\"authToken\":\"fixture-parent-token\",\"capabilities\":[\"core\",\"blobs\",\"testkit\"],\"lastSessionGeneration\":null,\"maxFrameBytes\":null,\"protocolVersion\":2,\"type\":\"hello\"}",
       "envelope": {
         "authToken": "fixture-parent-token",
         "capabilities": [
@@ -11,6 +11,7 @@
           "testkit"
         ],
         "lastSessionGeneration": null,
+        "maxFrameBytes": null,
         "protocolVersion": 2,
         "type": "hello"
       },

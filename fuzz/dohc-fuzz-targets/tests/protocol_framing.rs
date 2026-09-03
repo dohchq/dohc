@@ -33,6 +33,7 @@ fn valid_hello_frame() -> Vec<u8> {
             auth_token: "fuzz-seed-token".to_owned(),
             capabilities: vec!["shadow-r13".to_owned()],
             last_session_generation: None,
+            max_frame_bytes: None,
         }),
         &limits,
     )

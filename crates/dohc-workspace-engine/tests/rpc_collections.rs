@@ -2930,3 +2930,465 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
+    const SEEDED_HISTORY: usize = 32;
+    const VALUE_BYTES: usize = 32 * 1024;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_collection_state(&scratch);
+
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let tx = connection.transaction().expect("begin history seed");
+    let next_value = serde_json::to_string(&"x".repeat(VALUE_BYTES)).expect("history value");
+    for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
+        tx.execute(
+            "INSERT INTO collection_field_history \
+             (workspace_id,version_id,record_id,field_name,previous_value_json,\
+              next_value_json,author_origin_id,recorded_at_ms) \
+             VALUES (?1,'main',?2,'Raw',NULL,?3,'origin',?4)",
+            rusqlite::params![WORKSPACE_ID, RECORD_ID, next_value, recorded_at_ms],
+        )
+        .expect("seed history row");
+    }
+    tx.commit().expect("commit history seed");
+    drop(connection);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let first = call(
+        &transport,
+        &handle,
+        100,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "broken",
+            "recordId": RECORD_ID,
+            "historyLimit": 500,
+        }),
+    )
+    .await;
+    let first_page = first["history"].as_array().expect("first history page");
+    assert!(
+        first_page.len() < SEEDED_HISTORY,
+        "the byte budget must cut a page whose {SEEDED_HISTORY} rows exceed it, got {}",
+        first_page.len()
+    );
+    assert!(!first_page.is_empty(), "a cut page still makes progress");
+    let serialized = serde_json::to_string(&first["history"]).expect("serialize history page");
+    assert!(
+        serialized.len() <= 512 * 1024,
+        "a cut history page must stay well under the frame: {} bytes",
+        serialized.len()
+    );
+    assert_eq!(
+        first["nextBeforeHistoryId"],
+        first_page.last().expect("last row")["historyId"],
+        "the cursor must point at the cut"
+    );
+
+    let mut history = first_page.clone();
+    let mut before_history_id = first["nextBeforeHistoryId"].clone();
+    for request_id in 101..110 {
+        if before_history_id.is_null() {
+            break;
+        }
+        let page = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "broken",
+                "recordId": RECORD_ID,
+                "historyLimit": 500,
+                "beforeHistoryId": before_history_id,
+            }),
+        )
+        .await;
+        history.extend(
+            page["history"]
+                .as_array()
+                .expect("history page")
+                .iter()
+                .cloned(),
+        );
+        before_history_id = page["nextBeforeHistoryId"].clone();
+    }
+
+    assert!(before_history_id.is_null(), "paging must terminate");
+    assert_eq!(
+        history.len(),
+        SEEDED_HISTORY,
+        "byte-cut pages must cover every seeded row without loss"
+    );
+    assert!(
+        history.windows(2).all(|entries| {
+            let left = entries[0]["historyId"].as_i64().expect("left id");
+            let right = entries[1]["historyId"].as_i64().expect("right id");
+            left > right
+        }),
+        "pages must stay newest-first without duplicates"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_pages_with_the_exclusive_cursor() {
+    const COLLECTIONS: [&str; 3] = ["alpha", "beta", "gamma"];
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let schema = format!("name: {name}\n");
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                99,
+                "collections.list",
+                Some(handle.clone()),
+                json!({ "limit": 501 }),
+            ),
+        )
+        .await
+        .expect_err("an over-limit collections.list must be refused");
+    assert_eq!(refused.message, "collection-list-limit-out-of-range");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    for request_id in 100..105 {
+        let mut params = json!({ "limit": 1 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let collections = page["collections"].as_array().expect("collections page");
+        assert!(
+            collections.len() <= 1,
+            "the requested page bound must be honored"
+        );
+        paths.extend(
+            collections
+                .iter()
+                .map(|summary| summary["path"].as_str().expect("path").to_owned()),
+        );
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert_eq!(paths, COLLECTIONS);
+    assert!(cursor.is_null(), "the final page must terminate the cursor");
+
+    let unpaged = call(&transport, &handle, 110, "collections.list", json!({})).await;
+    assert_eq!(
+        unpaged["collections"]
+            .as_array()
+            .expect("collections")
+            .len(),
+        COLLECTIONS.len(),
+        "the default limit returns every collection in one page"
+    );
+    assert_eq!(unpaged["nextCursor"], Value::Null);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
+    const COLLECTIONS: [&str; 6] = ["alpha", "beta", "delta", "epsilon", "gamma", "zeta"];
+    const REASONS_PER_COLLECTION: usize = 700;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    // A pathological but honestly parsed degradation: each unknown root key
+    // yields one UnknownProperty reason with a long path, so the reason COUNT
+    // cap alone cannot bound the serialized reasons - the #990 shape.
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let mut schema = format!(
+            "name: {name}
+"
+        );
+        for reason in 0..REASONS_PER_COLLECTION {
+            let _ = writeln!(schema, "unknown{}{reason}: x", "p".repeat(120));
+        }
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let stored_reasons = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT degradation_reasons_json FROM collections                  WHERE workspace_id=?1 AND version_id='main' AND collection_path='alpha'",
+                rusqlite::params![WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("stored reasons");
+    assert!(
+        stored_reasons.len() > 80 * 1024,
+        "the fixture must exceed the per-summary reason budget: {} bytes",
+        stored_reasons.len()
+    );
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    let mut saw_page_cut = false;
+    for request_id in 100..110 {
+        let mut params = json!({ "limit": 500 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let serialized = serde_json::to_string(&page).expect("serialize list page");
+        assert!(
+            serialized.len() <= 512 * 1024,
+            "a byte-bounded page must stay well under the frame: {} bytes",
+            serialized.len()
+        );
+        let collections = page["collections"].as_array().expect("collections page");
+        saw_page_cut |= !collections.is_empty() && collections.len() < COLLECTIONS.len();
+        for summary in collections {
+            let kept = summary["reasons"].as_array().expect("reasons").len();
+            let omitted = summary["omittedReasons"]
+                .as_u64()
+                .expect("omitted reason count") as usize;
+            assert!(
+                kept > 0,
+                "a truncated reason list keeps a diagnostic prefix"
+            );
+            assert_eq!(
+                kept + omitted,
+                REASONS_PER_COLLECTION,
+                "the omitted count must complete the stored reason list"
+            );
+            paths.push(summary["path"].as_str().expect("path").to_owned());
+        }
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert!(
+        saw_page_cut,
+        "the fixture must force a byte cut below the row limit"
+    );
+    assert!(cursor.is_null(), "paging must terminate");
+    assert_eq!(
+        paths, COLLECTIONS,
+        "byte-cut pages must cover every collection in order"
+    );
+
+    // The full stored reason list stays readable through collections.get.
+    let details = call(
+        &transport,
+        &handle,
+        120,
+        "collections.get",
+        json!({ "collectionPath": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        details["reasons"].as_array().expect("full reasons").len(),
+        REASONS_PER_COLLECTION
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default() {
+    const LARGE_FIELD_BYTES: usize = 2 * 1024 * 1024;
+    const NEGOTIATED: u32 = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  notes:\n    type: text\n";
+    let large_value = "x".repeat(LARGE_FIELD_BYTES);
+    let record = format!("---\nid: {RECORD_ID}\nnotes: {large_value}\n---\n");
+    seed_text(&mut store, "negotiated/collection.yaml", schema, 2);
+    seed_text(&mut store, "negotiated/record.md", &record, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile negotiated collection");
+    drop(store);
+    let collection_dir = scratch.path().join("negotiated");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let params = json!({ "collectionPath": "negotiated", "limit": 1 });
+
+    // At the daemon default the 2 MiB record travels in band.
+    let in_band = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            10,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("default-limit query");
+    assert!(in_band.blob_egress.is_none());
+
+    // At a negotiated 1 MiB frame the same response must ride blob egress
+    // sized to the NEGOTIATED cap, not the daemon default.
+    let negotiated_cap = NEGOTIATED as usize - 64 * 1024;
+    let over = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded()
+            .with_capability("blobs")
+            .with_max_frame_bytes(NEGOTIATED),
+        request(
+            11,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("negotiated-limit query with blobs");
+    let egress = over.blob_egress.expect("negotiated blob egress");
+    assert!(egress.bytes.len() > negotiated_cap);
+    assert_eq!(
+        over.response.result["inbandLimitBytes"].as_u64(),
+        Some(negotiated_cap as u64)
+    );
+    let parsed: Value = serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
+    assert_eq!(parsed["records"][0]["id"], json!(RECORD_ID));
+
+    // Without blobs the negotiated limit refuses rather than over-framing.
+    let refusal = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_max_frame_bytes(NEGOTIATED),
+        request(12, "collections.query", Some(handle.clone()), params),
+    )
+    .await
+    .expect_err("a response past the negotiated limit without blobs must be refused");
+    assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
+}

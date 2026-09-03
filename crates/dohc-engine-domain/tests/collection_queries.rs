@@ -5,12 +5,12 @@ use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
     CollectionSchemaStatus, CollectionSort, DeleteTextFile, DomainError, FieldDefinition,
-    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults, RenameTextFile, TxnOutcome,
-    VersionedTextStore, ViewSortDirection, WriteText, collection_record_markdown_with_id,
-    get_collection, get_collection_record, index_collection_frontmatter_apply_in_tx,
-    list_collections, list_pending_collection_adoptions, parse_collection_schema,
-    query_collection_records, reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
-    synchronize_collection_frontmatter_index_in_tx,
+    MAX_COLLECTION_HISTORY_LIMIT, MAX_COLLECTION_QUERY_LIMIT, MAX_COLLECTION_QUERY_SORTS, NoFaults,
+    RenameTextFile, TxnOutcome, VersionedTextStore, ViewSortDirection, WriteText,
+    collection_record_markdown_with_id, get_collection, get_collection_record,
+    index_collection_frontmatter_apply_in_tx, list_collections, list_pending_collection_adoptions,
+    parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
+    set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::ScratchDir;
@@ -4202,9 +4202,10 @@ fn root_schema_is_visible_as_degraded_but_does_not_collect_root_markdown() {
     };
     assert!(reconciled.adoptions.is_empty());
     let listed = store
-        .read_with(|conn| list_collections(conn, WORKSPACE_ID))
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
         .expect("list collections");
     let root_status = listed
+        .collections
         .iter()
         .find(|collection| collection.path == ".")
         .expect("root schema status is visible");
@@ -4253,9 +4254,10 @@ fn root_schema_is_visible_as_degraded_but_does_not_collect_root_markdown() {
 fn every_read_answers_for_a_degraded_collection() {
     let (_scratch, store) = seeded_store();
     let listed = store
-        .read_with(|conn| list_collections(conn, WORKSPACE_ID))
+        .read_with(|conn| list_collections(conn, WORKSPACE_ID, MAX_COLLECTION_QUERY_LIMIT, None))
         .expect("list collections");
     let summary = listed
+        .collections
         .iter()
         .find(|collection| collection.path == "broken")
         .expect("degraded collection listed");

@@ -1247,6 +1247,7 @@ describe("CLI socket server", () => {
               recordedAtMs: SERVER_NOW_MS,
             },
           ],
+          nextBeforeHistoryId: null,
         };
       },
     };

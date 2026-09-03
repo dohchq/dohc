@@ -431,6 +431,7 @@ describe("EngineClient", () => {
         authToken: "parent-secret",
         capabilities: ["core", "ydoc", "blobs"],
         lastSessionGeneration: null,
+        maxFrameBytes: LIMITS.maxFrameBytes,
       },
     ]);
     await expect(transport.sendRequest(request(41, "before.ack"))).rejects.toMatchObject({
@@ -1149,6 +1150,24 @@ describe("EngineClient", () => {
     expect(onBlob).toHaveBeenCalledWith(
       expect.objectContaining({ streamId: 83, bytes: Buffer.from("abcdef") }),
     );
+    transport.close();
+  });
+
+  it("refuses a configured frame limit the engine cannot honor", () => {
+    // The engine clamps a requested limit up to 1 MiB; a client that asked
+    // for less would otherwise have its receive cap raised by the ack.
+    expect(() => client(new FakePeerConnection(), { maxFrameBytes: 128 * 1024 })).toThrow(
+      /engine cannot honor less/,
+    );
+  });
+
+  it("adopts the engine's clamped answer to a lowered frame limit", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxFrameBytes: 2 * 1024 * 1024 });
+    peer.send(helloAck({ ...LIMITS, maxFrameBytes: 2 * 1024 * 1024 }));
+    await transport.ready();
+    const hello = peer.received.find((envelope) => envelope.type === "hello");
+    expect(hello).toMatchObject({ maxFrameBytes: 2 * 1024 * 1024 });
     transport.close();
   });
 

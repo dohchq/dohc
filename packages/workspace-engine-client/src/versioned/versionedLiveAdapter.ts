@@ -26,6 +26,7 @@ import {
   type CollectionGetRecordParams,
   type CollectionGetRecordResult,
   type CollectionGetResult,
+  type CollectionListPage,
   type CollectionListResult,
   type CollectionPendingAdoptionsPage,
   type CollectionPendingAdoptionsParams,
@@ -1007,8 +1008,22 @@ export class VersionedLiveAdapter {
     return this.workspaceRequest(WORKSPACE_METHOD.searchQuery, input);
   }
 
+  /**
+   * Drains every `collections.list` page through the exclusive cursor, so
+   * callers keep the full listing while each response stays frame-bounded.
+   */
   async listCollections(): Promise<CollectionListResult> {
-    return this.workspaceRequest(WORKSPACE_METHOD.collectionsList, {});
+    const collections: CollectionListResult["collections"] = [];
+    let cursor: string | null = null;
+    do {
+      const page: CollectionListPage = await this.workspaceRequest(
+        WORKSPACE_METHOD.collectionsList,
+        cursor === null ? {} : { cursor },
+      );
+      collections.push(...page.collections);
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    return { collections };
   }
 
   async listPendingCollectionAdoptions(

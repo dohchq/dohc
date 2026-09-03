@@ -37,6 +37,10 @@ const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
+// Mirrors MIN_NEGOTIABLE_FRAME_BYTES in crates/dohc-engine-protocol/src/limits.rs:
+// the engine clamps a requested limit up to this, so a client that configured
+// less would have its receive cap raised by the ack; refuse it at connect.
+const MIN_REQUESTABLE_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 export const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
 
@@ -628,6 +632,17 @@ export class EngineClient implements EngineTransport {
   ) {
     this.maxFrameBytes =
       connectOptions.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
+    if (
+      connectOptions.maxFrameBytes !== undefined &&
+      (!Number.isSafeInteger(connectOptions.maxFrameBytes) ||
+        connectOptions.maxFrameBytes < MIN_REQUESTABLE_MAX_FRAME_BYTES ||
+        connectOptions.maxFrameBytes > MAX_U32)
+    ) {
+      throw new FrameCodecError(
+        "frame-too-large",
+        `Maximum frame bytes must be between ${MIN_REQUESTABLE_MAX_FRAME_BYTES} and ${MAX_U32}; the engine cannot honor less.`,
+      );
+    }
     this.maxBlobChunkBytesCap =
       connectOptions.maxBlobChunkBytes ?? DEFAULT_MAX_BLOB_CHUNK_BYTES;
     if (
@@ -689,6 +704,9 @@ export class EngineClient implements EngineTransport {
       authToken: connectOptions.authToken,
       capabilities: [...connectOptions.capabilities],
       lastSessionGeneration: null,
+      // Tell the engine this client's receive limit; the engine clamps it
+      // into its negotiable range and echoes the effective value in the ack.
+      maxFrameBytes: connectOptions.maxFrameBytes ?? null,
     }).catch((cause: unknown) => {
       this.fail(
         new EngineClientError("transport-error", "Failed to send engine hello.", {
@@ -1054,10 +1072,13 @@ export class EngineClient implements EngineTransport {
       );
       return;
     }
-    this.maxFrameBytes = Math.min(
-      this.maxFrameBytes,
-      envelope.limits.maxFrameBytes,
-    );
+    // The ack is the negotiated contract. A client that requested a lower
+    // receive limit adopts the engine's clamped answer (the engine sizes its
+    // responses to it); otherwise the engine's advertised bound caps ours.
+    this.maxFrameBytes =
+      this.connectOptions.maxFrameBytes !== undefined
+        ? envelope.limits.maxFrameBytes
+        : Math.min(this.maxFrameBytes, envelope.limits.maxFrameBytes);
     this.maxBlobChunkBytes = Math.min(
       this.maxBlobChunkBytesCap,
       envelope.limits.maxBlobChunkBytes,
