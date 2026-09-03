@@ -46,6 +46,12 @@ const FRONTMATTER_FIELD = "frontmatter";
 // a blip worth waiting out silently.
 export const FILE_LOCKED_REPORT_MS = 15_000;
 
+// How many records a board or calendar drains before the page-by-page
+// drain stops. Ten default engine pages: enough for every view we have
+// seen, small enough that a 10,000-record collection does not issue 100
+// queries and mount them all. Exported for CollectionPage.test.tsx.
+export const DRAIN_RECORD_LIMIT = 1000;
+
 export interface CollectionPageProps {
   workspaceId: string;
   collectionPath: string;
@@ -317,15 +323,26 @@ export function CollectionPage({
   // engine's first page: once a page settles with a cursor, ask for the
   // next until the cursor runs out. One call per settled page — the effect
   // re-runs when the cursor changes, nothing fires after unmount, and the
-  // store ignores overlapping loadMore calls.
+  // store ignores overlapping loadMore calls. The drain stops at
+  // DRAIN_RECORD_LIMIT so a huge collection does not issue every page; the
+  // capped view says how many records it shows.
   const drainAllPages =
     activeView?.kind === "board" || activeView?.kind === "calendar";
   useEffect(() => {
-    if (!drainAllPages || state.status !== "ready" || state.nextCursor === null) {
+    if (
+      !drainAllPages ||
+      state.status !== "ready" ||
+      state.nextCursor === null ||
+      state.records.length >= DRAIN_RECORD_LIMIT
+    ) {
       return;
     }
     void store.loadMore();
-  }, [drainAllPages, state.status, state.nextCursor, store]);
+  }, [drainAllPages, state.status, state.nextCursor, state.records.length, store]);
+  const drainCapped =
+    drainAllPages &&
+    state.nextCursor !== null &&
+    state.records.length >= DRAIN_RECORD_LIMIT;
 
   // The table pages on demand instead: TableView reports when the viewport
   // nears the end of the loaded rows.
@@ -562,6 +579,14 @@ export function CollectionPage({
         </SecondaryButton>
         <NewRecordButton onClick={newRecord} />
       </div>
+      {drainCapped ? (
+        <div
+          data-testid="collection-drain-cap"
+          className="shrink-0 border-b border-line px-3 py-1 text-[11px] text-muted"
+        >
+          This view shows only the first {state.records.length} records.
+        </div>
+      ) : null}
       <div className="min-h-0 flex-1 overflow-auto">
         {boardReady ? (
           <BoardView

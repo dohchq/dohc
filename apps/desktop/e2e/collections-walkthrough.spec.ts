@@ -350,6 +350,12 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
     await expect(
       boardColumn(page, "Doing").locator('[role="listitem"][aria-label="Website"]'),
     ).toBeVisible({ timeout: 30_000 });
+    // A virtualized column mounts only the cards near its viewport; the
+    // header count is what tells the user the rest exist. After the drag
+    // the Doing column holds both records.
+    await expect(
+      boardColumn(page, "Doing").locator("> div").first().locator("span.font-mono"),
+    ).toHaveText("2");
     // The md file IS the record: the grouped-field write settles into its
     // frontmatter on disk.
     await expect

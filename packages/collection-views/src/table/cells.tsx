@@ -3,6 +3,7 @@ import type {
   CollectionIndexedValue,
   CollectionValue,
   FieldDefinition,
+  FieldValueReasonCode,
 } from "@dohc/workspace-contracts";
 import type { CollectionQueryExecutor } from "../store";
 import { RelationPicker } from "../relation/RelationPicker";
@@ -78,13 +79,47 @@ export function fieldDisplayText(
 }
 
 // Settled 2026-08-31 (docs/plans/collections.md): a flagged value renders
-// its raw text with the warning treatment and stays editable. The hover
-// title still shows a generic label; the per-reason copy is the desktop
-// lane's work.
-function wrapFlagged(flagged: boolean, children: ReactNode): ReactNode {
-  if (!flagged) return children;
+// its raw text with the warning treatment, the validation reason on hover,
+// and stays editable.
+/**
+ * The hover line for every reason the engine can flag a value with. The
+ * `Record` type is the exhaustiveness check: a new contract reason without
+ * copy here fails typecheck. cells.test.tsx pins the strings.
+ */
+export const FLAGGED_REASON_TITLES: Record<FieldValueReasonCode, string> = {
+  "expected-text": "This value is not text. Edit the value to replace it.",
+  "expected-number": "This value is not a number. Edit the value to replace it.",
+  "number-not-finite": "This number is not finite. Edit the value to replace it.",
+  "unsupported-tag":
+    "This value uses a YAML tag dohc cannot index. Replace the value.",
+  "value-depth-exceeded":
+    "This value nests too deeply to index. Replace the value.",
+  "expected-boolean":
+    "This value is not true or false. Toggle the checkbox to replace it.",
+  "expected-sequence": "This value is not a list. Edit the value to replace it.",
+  "invalid-date": "This value is not a date. Edit the value to pick a date.",
+  "unknown-option":
+    "This field's options do not include this value. Edit the value to pick or add an option.",
+  "duplicate-value":
+    "This list repeats a value. Edit the value to remove the duplicate.",
+  "empty-person-id":
+    "This person id is empty. Edit the value to enter a person id.",
+  "invalid-record-id":
+    "This value is not a record id. Edit the value to pick a record.",
+  "invalid-url": "This value is not a URL. Edit the value to replace it.",
+};
+
+function wrapFlagged(
+  reason: FieldValueReasonCode | null,
+  children: ReactNode,
+): ReactNode {
+  if (reason === null) return children;
   return (
-    <span data-flagged="true" title="Invalid value" className="flex w-full text-warning">
+    <span
+      data-flagged="true"
+      title={FLAGGED_REASON_TITLES[reason]}
+      className="flex w-full text-warning"
+    >
       {children}
     </span>
   );
@@ -344,13 +379,16 @@ export function FieldCell({
   onChange,
   onEditStart,
 }: FieldCellProps) {
-  const flagged = indexed !== undefined && indexed.validation.status === "flagged";
+  const reason =
+    indexed !== undefined && indexed.validation.status === "flagged"
+      ? indexed.validation.reason.code
+      : null;
   const value = indexed?.value ?? null;
 
   if (field.type === "checkbox") {
     const checked = value === true;
     return wrapFlagged(
-      flagged,
+      reason,
       <input
         type="checkbox"
         checked={checked}
@@ -362,10 +400,10 @@ export function FieldCell({
 
   const text = fieldDisplayText(field, indexed, personLabel);
   if (!onEditStart) {
-    return wrapFlagged(flagged, <span className="truncate text-[13px]">{text}</span>);
+    return wrapFlagged(reason, <span className="truncate text-[13px]">{text}</span>);
   }
   return wrapFlagged(
-    flagged,
+    reason,
     <button
       type="button"
       // min-h keeps an EMPTY cell clickable: with no text the button's
