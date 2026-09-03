@@ -757,11 +757,8 @@ fn drain_deferred_ydoc(
                 recorded_at_ms,
             )
         };
-        let outcome = match apply_result {
-            Ok(applied) => {
-                record_facts.extend(applied.record_facts);
-                applied.outcome
-            }
+        let (outcome, applied_facts) = match apply_result {
+            Ok(applied) => (applied.outcome, applied.record_facts),
             Err(error) => {
                 match map_collab_payload_error(error, "parked ydoc.update could not be applied") {
                     SyncError::InvalidInput { reason } => {
@@ -778,6 +775,22 @@ fn drain_deferred_ydoc(
             TxnOutcome::Committed(ReplicationApplyOutcome::Applied { .. }) => applied += 1,
             TxnOutcome::Committed(ReplicationApplyOutcome::Deduped { .. }) => {}
             TxnOutcome::Crashed { .. } => return Err(SyncError::FaultCrash),
+        }
+        match applied_facts {
+            // A fresh apply's facts committed with the update, and the same
+            // transaction copied them onto this deferred row.
+            Some(facts) => record_facts.push(facts),
+            // A replay of an already-committed apply derives nothing (its
+            // history rows dedupe by coordinate), but an earlier failed
+            // drain may have dropped facts it never surfaced. The decision
+            // persisted on the deferred row carries them to this retry; the
+            // queue cleanup below consumes it, so they surface exactly once
+            // (#1004).
+            None => {
+                record_facts.extend(read_parked_record_facts(
+                    store, key, &origin_id, origin_seq,
+                )?);
+            }
         }
         if let Some(reason) = content_kind_refusal.or(identity_refusal) {
             // The CRDT bytes landed even though the established path identity
@@ -898,6 +911,34 @@ fn drain_deferred_ydoc(
         lineage_replacements,
         record_facts,
     })
+}
+
+/// The record-event decision an earlier drain committed with this parked
+/// coordinate's apply (#1004). `None` for a coordinate that never derived
+/// facts — or one no longer parked, which cannot happen mid-drain.
+fn read_parked_record_facts(
+    store: &EngineStore,
+    key: &DocKey,
+    origin_id: &str,
+    origin_seq: i64,
+) -> Result<Option<dohc_engine_domain::CollectionRecordApplyFacts>, SyncError> {
+    let json: Option<String> = store.read_with(|conn| {
+        conn.query_row(
+            "SELECT record_facts_json FROM ydoc_deferred_updates \
+             WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+            params![key.workspace_id, origin_id, origin_seq],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(SyncError::corrupt)
+        .map(Option::flatten)
+    })?;
+    json.as_deref()
+        .map(|json| {
+            serde_json::from_str(json)
+                .map_err(|_| local_corruption("parked ydoc.update record facts are malformed"))
+        })
+        .transpose()
 }
 
 type FinalDrainProjection = Result<TxnOutcome<crate::BaseOrigination>, SyncError>;

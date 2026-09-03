@@ -6,7 +6,7 @@ use dohc_engine_collab::{
 };
 use dohc_engine_domain::{
     CaptureIngest, NoFaults, TxnOutcome, VersionedTextStore, reconcile_collections_in_tx,
-    set_collection_adoption_state_in_tx,
+    set_collection_adoption_state_in_tx, subscribe_automation_in_tx,
 };
 use dohc_engine_protocol::{
     limits::WireLimits,
@@ -21,7 +21,11 @@ use dohc_engine_sync::{
     apply_ydoc_envelope,
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::{
+    AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineService, RECORD_CREATED_EVENT,
+    RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT,
+    shadow_fence::write_shadow_marker_for_harness,
+};
 use serde_json::{Value, json};
 use std::{fmt::Write as _, sync::Arc};
 
@@ -2388,4 +2392,415 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
         json!([]),
         "a write that removed the frontmatter must clear the indexed values: {query}"
     );
+}
+
+/// #1002 harness: an adopted, replicated collection record whose one synced
+/// `status` update is durably parked behind the live session's lease, with an
+/// automation subscribed to the collection so the drain's no-claim rule
+/// (ADR 0008) is observable.
+struct ParkedRecordUpdate {
+    scratch: ScratchDir,
+    service: Arc<EngineService>,
+    transport: InProcessTransport<EngineService>,
+    handle: WorkspaceHandle,
+    live_session_id: String,
+}
+
+const PARKED_REMOTE_ORIGIN: &str = "remote-parked-editor";
+
+async fn park_remote_status_update() -> ParkedRecordUpdate {
+    #[derive(Debug, Clone, Copy)]
+    struct AlwaysLive;
+
+    impl LeaseProbe for AlwaysLive {
+        fn is_live(&self, _key: &DocKey) -> bool {
+            true
+        }
+    }
+
+    let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_schema(
+        &scratch,
+        "name: Tasks\nfields:\n  status:\n    type: text\n",
+    );
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")?;
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                "main",
+                "tasks/alpha.md",
+                RECORD_ID,
+                "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+    drop(store);
+    let connection = rusqlite::Connection::open(&db).expect("open identity connection");
+    connection
+        .execute(
+            "INSERT INTO sync_identity \
+             (workspace_id,origin_id,replication_epoch,stream_identity,created_at_ms) \
+             VALUES (?1,'local-origin','epoch','stream',1)",
+            [WORKSPACE_ID],
+        )
+        .expect("seed sync identity");
+    connection
+        .execute(
+            "INSERT INTO sync_relay_push_state (workspace_id,origin_id,pushed_seq) \
+             VALUES (?1,'local-origin',0)",
+            [WORKSPACE_ID],
+        )
+        .expect("enable sync");
+    drop(connection);
+    std::fs::write(scratch.path().join("tasks/alpha.md"), &markdown).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                100,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    // Seed the local rich-document lineage from the captured artifact.
+    let seed_doc = Ydoc::wire();
+    seed_doc
+        .rewrite_content_to_markdown(ContentKind::Richdoc, &markdown)
+        .expect("seed shared rich document");
+    let seeded = call(
+        &transport,
+        &handle,
+        101,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "tasks/alpha.md", "contentKind": "richdoc" }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        102,
+        "ydoc.recordUpdate",
+        json!({
+            "sessionId": seeded["sessionId"],
+            "updateBase64":
+                base64::engine::general_purpose::STANDARD.encode(seed_doc.encode_full_state()),
+            "seed": true,
+        }),
+    )
+    .await;
+    call(
+        &transport,
+        &handle,
+        103,
+        "ydoc.close",
+        json!({ "sessionId": seeded["sessionId"] }),
+    )
+    .await;
+
+    // Resume the lineage at the relay so a synced update can enter it.
+    let object_id = seeded["objectId"].as_str().expect("seeded object id");
+    let key = DocKey::new(WORKSPACE_ID, "main", object_id).expect("document key");
+    let mut store = EngineStore::open(&db, 2).expect("open base claim store");
+    let persisted = dohc_engine_collab::load_persisted(&store, &key)
+        .expect("load local collection lineage")
+        .expect("collection lineage exists");
+    let base = persisted.doc.encode_full_state();
+    let base_origin = persisted.marker.base_origin_id.expect("local base origin");
+    let base_seq = persisted
+        .marker
+        .base_origin_seq
+        .expect("local base sequence");
+    assert!(matches!(
+        claim_base_at_relay(
+            &mut store,
+            &key,
+            ContentKind::Richdoc,
+            &base,
+            &BaseRelayCoordinate::new(base_origin, base_seq, 10).expect("base coordinate"),
+            &NoFaults,
+            10,
+        ),
+        Ok(TxnOutcome::Committed(ClaimOutcome::Resumed))
+    ));
+    drop(store);
+
+    // Park one synced frontmatter edit behind the live session's lease.
+    let (live, initial_update) = call_ydoc_with_blob(
+        service.as_ref(),
+        &handle,
+        104,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "tasks/alpha.md", "contentKind": "richdoc" }),
+    )
+    .await;
+    let remote = Ydoc::wire();
+    remote.apply(&initial_update).expect("load shared base");
+    let update = remote.frontmatter_set("status", "remote");
+    let lineage_claim_id = live["lineageClaimId"]
+        .as_str()
+        .expect("replicated lineage claim")
+        .to_owned();
+    let mut store = EngineStore::open(&db, 2).expect("open remote apply store");
+    let update_sha = store.put_binary_blob(&update).expect("store remote update");
+    let envelope = ReplicationEnvelope {
+        workspace_id: WORKSPACE_ID.to_owned(),
+        origin_id: PARKED_REMOTE_ORIGIN.to_owned(),
+        origin_seq: 0,
+        relay_seq: Some(10),
+        op_kind: "ydoc.update".to_owned(),
+        payload: json!({
+            "versionId": "main",
+            "objectId": object_id,
+            "path": "tasks/alpha.md",
+            "contentKind": "richdoc",
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": lineage_claim_id,
+            "isBaseState": false,
+            "actorOriginId": PARKED_REMOTE_ORIGIN,
+        }),
+        recorded_at_ms: 200,
+    };
+    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
+        .expect("queue remote collection update");
+    assert!(
+        matches!(applied, ApplyOutcome::Applied(result) if result.deferred),
+        "the live device must defer the remote update"
+    );
+    // ADR 0008 pin: a subscribed automation must NOT be claimed by the drain
+    // of this SYNCED update; only its origin device claims.
+    store
+        .write_with(&NoFaults, |tx| {
+            subscribe_automation_in_tx(tx, WORKSPACE_ID, "plugin:triage", "tasks", 20)
+        })
+        .expect("subscribe automation");
+    drop(store);
+
+    ParkedRecordUpdate {
+        scratch,
+        service,
+        transport,
+        handle,
+        live_session_id: live["sessionId"].as_str().expect("session id").to_owned(),
+    }
+}
+
+/// Record events named `record.*` (plus any `automation.claimed`) until the
+/// first `record.updated`, panicking past the deadline.
+async fn wait_for_record_events(
+    events: &mut tokio::sync::mpsc::Receiver<EngineEventNotice>,
+) -> Vec<EngineEventNotice> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut seen = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let notice = tokio::time::timeout(remaining, events.recv())
+            .await
+            .expect("timed out waiting for record events")
+            .expect("event channel stays open");
+        let done = notice.name == RECORD_UPDATED_EVENT;
+        if notice.name.starts_with("record.") || notice.name == AUTOMATION_CLAIMED_EVENT {
+            seen.push(notice);
+        }
+        if done {
+            return seen;
+        }
+    }
+}
+
+fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice.name != AUTOMATION_CLAIMED_EVENT),
+        "a drained synced update must not claim automation triggers (ADR 0008): {notices:?}"
+    );
+    assert!(
+        notices
+            .iter()
+            .all(|notice| notice.name != RECORD_CREATED_EVENT),
+        "an adopted record's parked edit is not a creation: {notices:?}"
+    );
+    let field_changed: Vec<_> = notices
+        .iter()
+        .filter(|notice| notice.name == RECORD_FIELD_CHANGED_EVENT)
+        .collect();
+    assert_eq!(
+        field_changed.len(),
+        1,
+        "exactly one field change fires: {notices:?}"
+    );
+    let payload = &field_changed[0].payload;
+    assert_eq!(payload["workspaceId"], json!(WORKSPACE_ID));
+    assert_eq!(payload["collectionPath"], json!("tasks"));
+    assert_eq!(payload["recordId"], json!(RECORD_ID));
+    assert_eq!(payload["field"], json!("status"));
+    assert_eq!(payload["previous"], json!("open"));
+    assert_eq!(payload["next"], json!("remote"));
+    assert_eq!(payload["author"], json!(PARKED_REMOTE_ORIGIN));
+    assert_eq!(
+        payload["source"],
+        json!({ "originId": PARKED_REMOTE_ORIGIN, "originSeq": 0 })
+    );
+}
+
+fn assert_no_automation_claims(scratch: &ScratchDir) {
+    let db = scratch.engine_db_path().expect("engine db path");
+    let store = EngineStore::open(&db, 9).expect("open claim probe store");
+    let claims: i64 = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM automation_claims WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get(0),
+            )
+        })
+        .expect("count automation claims");
+    assert_eq!(
+        claims, 0,
+        "a drained synced update never inserts a claim (ADR 0008)"
+    );
+}
+
+/// #1002: a parked synced update drained by `ydoc.open` fires its record
+/// events on the daemon event channel — the previous session ended with
+/// `workspace.close`, which skips the per-session drain.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_update_drained_on_open_fires_record_events() {
+    let parked = park_remote_status_update().await;
+    call(
+        &parked.transport,
+        &parked.handle,
+        300,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    let reopened = parked
+        .transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                301,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": parked.scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("workspace handle");
+    let mut events = parked.service.events().subscribe();
+    call(
+        &parked.transport,
+        &handle,
+        302,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "tasks/alpha.md", "contentKind": "richdoc" }),
+    )
+    .await;
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+/// #1002: a parked synced update drained by `ydoc.close` (no settle) fires
+/// its record events on the daemon event channel.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_update_drained_on_close_fires_record_events() {
+    let parked = park_remote_status_update().await;
+    let mut events = parked.service.events().subscribe();
+    call(
+        &parked.transport,
+        &parked.handle,
+        300,
+        "ydoc.close",
+        json!({ "sessionId": parked.live_session_id, "settle": false }),
+    )
+    .await;
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}
+
+/// #1002: a settle whose drain lands remote content refuses with
+/// `ydoc-remote-updates-pending` — and still fires the drained updates'
+/// record events, whose queue rows the drain already consumed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal() {
+    let parked = park_remote_status_update().await;
+    let mut events = parked.service.events().subscribe();
+    let refused = parked
+        .transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                300,
+                "ydoc.settle",
+                Some(parked.handle.clone()),
+                json!({ "sessionId": parked.live_session_id }),
+            ),
+        )
+        .await
+        .expect_err("a settle over a parked remote update must refuse");
+    assert_eq!(refused.message, "ydoc-remote-updates-pending");
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &parked.handle,
+        398,
+        "ydoc.close",
+        json!({ "sessionId": parked.live_session_id, "settle": false }),
+    )
+    .await;
+    call(
+        &parked.transport,
+        &parked.handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
 }

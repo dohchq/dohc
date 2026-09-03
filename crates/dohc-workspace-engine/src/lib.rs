@@ -3862,6 +3862,7 @@ impl EngineService {
                 close_ydoc_session_for_version_fence(
                     &sessions,
                     &self_writes,
+                    &events,
                     &open,
                     &handle,
                     &session_id,
@@ -8264,6 +8265,13 @@ impl EngineService {
             // held lease guards the WRONG key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
+        // Post-commit: the open's drain committed these history rows, and no
+        // other path fires a parked update's events (#1002). Never claims —
+        // drained updates are synced, and only the origin device claims its
+        // automation triggers (ADR 0008).
+        for facts in &state.record_facts {
+            emit_record_events(&self.events, &open.workspace_id, facts);
+        }
         let (serial, lease) = if state.seed_materialization_jobs.is_empty() {
             (serial, lease)
         } else {
@@ -8563,23 +8571,24 @@ impl EngineService {
                 cancellation.token(),
             )
             .await
-            .map_err(|error| {
-                // A distinct wire message the client acts on: remote edits
-                // drained under this session's lease mean the client's doc is
-                // BEHIND — it must resync (which returns the full drained
-                // state) and settle again. The generic mapping would bury
-                // the signal as "workspace operation failed".
-                if matches!(
-                    &error,
-                    RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
-                        reason: "ydoc-remote-updates-pending",
-                    })
-                ) {
-                    wire(ErrorCode::InvalidParams, "ydoc-remote-updates-pending")
-                } else {
-                    map_runtime(error)
+            .map_err(map_runtime)?;
+        let settled = match settled {
+            dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
+            // A distinct wire message the client acts on: remote edits
+            // drained under this session's lease mean the client's doc is
+            // BEHIND — it must resync (which returns the full drained
+            // state) and settle again. The drained updates' record facts
+            // ride the refusal and fire here, post-commit (#1002).
+            dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
+                for facts in &record_facts {
+                    emit_record_events(&self.events, &open.workspace_id, facts);
                 }
-            })?;
+                return Err(wire(
+                    ErrorCode::InvalidParams,
+                    "ydoc-remote-updates-pending",
+                ));
+            }
+        };
         if settled.collection_reconcile_required {
             open.request_collection_reconcile();
         }
@@ -8730,6 +8739,8 @@ impl EngineService {
         // has not yet run — a concurrent recordUpdate/settle must NOT be able
         // to find the session and race edits against the in-flight close.
         let taken = lock(&self.sessions).remove(&params.session_id);
+        let close_events = self.events.clone();
+        let close_workspace_id = open.workspace_id.clone();
         let close_task = tokio::spawn(async move {
             let close_result = actor
                 .ydoc_close_session_materialized(
@@ -8741,6 +8752,14 @@ impl EngineService {
                     CancellationToken::new(),
                 )
                 .await;
+            // Post-commit, inside the spawned task — it runs to completion
+            // even when the RPC future is dropped, and the close's drain
+            // committed these history rows (#1002).
+            if let Ok(closed) = &close_result {
+                for facts in &closed.record_facts {
+                    emit_record_events(&close_events, &close_workspace_id, facts);
+                }
+            }
             // Reinsert ONLY on a genuine close refusal (UnsettledClose and
             // friends) — an ActorUnavailable/WorkerPanicked error means the
             // workspace was torn down while this task ran, and resurrecting
@@ -9574,9 +9593,11 @@ fn scene_seed_materialization_error(materialization: YdocSeedMaterialization) ->
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn close_ydoc_session_for_version_fence(
     sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
     self_writes: &SelfWriteSuppression,
+    events: &EngineEvents,
     open: &OpenWorkspace,
     handle: &WorkspaceHandle,
     session_id: &str,
@@ -9591,6 +9612,7 @@ async fn close_ydoc_session_for_version_fence(
         let first = settle_ydoc_session_for_version_fence(
             sessions,
             self_writes,
+            events,
             open,
             session_id,
             &session,
@@ -9604,6 +9626,7 @@ async fn close_ydoc_session_for_version_fence(
                 settle_ydoc_session_for_version_fence(
                     sessions,
                     self_writes,
+                    events,
                     open,
                     session_id,
                     &refreshed,
@@ -9636,7 +9659,11 @@ async fn close_ydoc_session_for_version_fence(
     {
         lock(sessions).insert(session_id.to_owned(), entry);
     }
-    close.map_err(map_runtime)?;
+    let closed = close.map_err(map_runtime)?;
+    // Post-commit: the close's drain committed these history rows (#1002).
+    for facts in &closed.record_facts {
+        emit_record_events(events, &open.workspace_id, facts);
+    }
     Ok(())
 }
 
@@ -9666,6 +9693,7 @@ fn version_fence_session_view(
 async fn settle_ydoc_session_for_version_fence(
     sessions: &Arc<Mutex<HashMap<String, YdocSession>>>,
     self_writes: &SelfWriteSuppression,
+    events: &EngineEvents,
     open: &OpenWorkspace,
     session_id: &str,
     session: &YdocSessionView,
@@ -9687,18 +9715,20 @@ async fn settle_ydoc_session_for_version_fence(
             token.clone(),
         )
         .await
-        .map_err(|error| {
-            if matches!(
-                &error,
-                RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
-                    reason: "ydoc-remote-updates-pending",
-                })
-            ) {
-                wire(ErrorCode::InvalidParams, "ydoc-remote-updates-pending")
-            } else {
-                map_runtime(error)
+        .map_err(map_runtime)?;
+    let settled = match settled {
+        dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
+        dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
+            // Post-commit (#1002); the fence's caller retries the settle.
+            for facts in &record_facts {
+                emit_record_events(events, &open.workspace_id, facts);
             }
-        })?;
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "ydoc-remote-updates-pending",
+            ));
+        }
+    };
     if settled.collection_reconcile_required {
         open.request_collection_reconcile();
     }

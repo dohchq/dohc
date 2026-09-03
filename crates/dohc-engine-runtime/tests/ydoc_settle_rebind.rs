@@ -161,13 +161,11 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             CancellationToken::new(),
         )
         .await
-        .expect_err("unseen applied remote bytes must block settle");
+        .expect("settle resolves");
     assert!(
         matches!(
             refused,
-            RuntimeError::Domain(dohc_engine_domain::DomainError::InvalidInput {
-                reason: "ydoc-remote-updates-pending"
-            })
+            dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { .. }
         ),
         "MUTATION: excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
     );
@@ -498,7 +496,9 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             CancellationToken::new(),
         )
         .await
-        .expect("post-prune settle must succeed");
+        .expect("post-prune settle must succeed")
+        .settled()
+        .expect("settled");
     assert_eq!(settled.content.as_deref(), Some("reseeded body"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk"),
@@ -648,7 +648,9 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             CancellationToken::new(),
         )
         .await
-        .expect("fresh settle succeeds");
+        .expect("fresh settle succeeds")
+        .settled()
+        .expect("settled");
     assert_eq!(settled.content.as_deref(), Some("fresh body"));
     supervisor.close(&db).expect("close actor");
 }
@@ -809,7 +811,9 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             CancellationToken::new(),
         )
         .await
-        .expect("retry settles");
+        .expect("retry settles")
+        .settled()
+        .expect("settled");
     assert_eq!(settled.content.as_deref(), Some("v2 v1"));
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("disk v2"),
@@ -885,7 +889,9 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             CancellationToken::new(),
         )
         .await
-        .expect("a freshly blocked settle is durably accepted");
+        .expect("a freshly blocked settle is durably accepted")
+        .settled()
+        .expect("settled");
     assert_eq!(blocked.content.as_deref(), Some("durable blocked body"));
     assert_eq!(recorder.records.load(Ordering::Relaxed), 1);
     assert_eq!(
@@ -956,7 +962,9 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
             CancellationToken::new(),
         )
         .await
-        .expect("the next settle replays after containment is restored");
+        .expect("the next settle replays after containment is restored")
+        .settled()
+        .expect("settled");
     assert_eq!(recovered.moment_id, blocked.moment_id);
     assert_eq!(recovered.sha256, blocked.sha256);
     assert_eq!(recovered.content.as_deref(), Some("durable blocked body"));

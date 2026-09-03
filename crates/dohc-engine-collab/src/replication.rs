@@ -204,6 +204,27 @@ fn apply_remote_update_outer(
             now_ms,
             maintain_frontier.then_some(&mut candidate),
         )?;
+        // The record-event decision commits WITH the update (#1004): this
+        // apply replays a parked coordinate, and if the drain's final
+        // projection fails after this transaction, the retry's apply is a
+        // no-op that derives no facts. The deferred row (deleted only when
+        // the drain completes) carries the decision to that retry; a
+        // coordinate no longer parked matches zero rows.
+        if let Some(facts) = facts.as_ref() {
+            let facts_json = serde_json::to_string(facts)
+                .map_err(dohc_engine_storage::StorageError::persist_public)?;
+            tx.execute(
+                "UPDATE ydoc_deferred_updates SET record_facts_json = ?4 \
+                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                rusqlite::params![
+                    key.workspace_id,
+                    remote.origin_id,
+                    remote.origin_seq,
+                    facts_json
+                ],
+            )
+            .map_err(dohc_engine_storage::StorageError::persist_public)?;
+        }
         record_facts = facts;
         Ok::<_, CollabError>(outcome)
     })?;

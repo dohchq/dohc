@@ -266,6 +266,11 @@ pub struct YdocOpenState {
     pub seed_content: Option<String>,
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
+    /// Record facts the open's deferred drain committed, in drain order. The
+    /// service emits them post-commit (#1002); they never claim automation
+    /// triggers — drained updates are synced, and ADR 0008 gives the claim to
+    /// the origin device alone.
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 pub type ArtifactAssetDescriptor = SceneAsset;
@@ -306,6 +311,56 @@ pub struct YdocSettlement {
     /// record id and must run through ordinary collection reconciliation.
     pub collection_reconcile_required: bool,
     pub projection: Projection,
+}
+
+/// What one settle attempt resolved to on the store thread. A settle whose
+/// deferred drain lands remote content cannot settle — the client's doc is
+/// behind — but the drained updates' record facts are already committed and
+/// their queue rows consumed, so they must cross the mailbox with the
+/// refusal or no path ever emits them (#1002).
+#[derive(Debug)]
+pub enum YdocSettleOutcome {
+    Settled(Box<YdocSettlement>),
+    /// Remote edits drained under this session's lease: the caller reports
+    /// `ydoc-remote-updates-pending` after emitting the drained facts.
+    RemoteUpdatesPending {
+        record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
+    },
+}
+
+impl YdocSettleOutcome {
+    /// The settlement, or `None` for the remote-updates-pending refusal.
+    pub fn settled(self) -> Option<Box<YdocSettlement>> {
+        match self {
+            Self::Settled(settlement) => Some(settlement),
+            Self::RemoteUpdatesPending { .. } => None,
+        }
+    }
+
+    /// Collapse to the settlement for an engine-internal settle (collection
+    /// adoption, relation cleanup), restoring the refusal those callers
+    /// already handle. Their drained facts have no event route; the durable
+    /// history rows remain for a catch-up reader.
+    fn into_settlement_for_internal_caller(self) -> Result<YdocSettlement, RuntimeError> {
+        match self {
+            Self::Settled(settlement) => Ok(*settlement),
+            Self::RemoteUpdatesPending { .. } => {
+                Err(dohc_engine_domain::DomainError::InvalidInput {
+                    reason: "ydoc-remote-updates-pending",
+                }
+                .into())
+            }
+        }
+    }
+}
+
+/// A close's actor-side result: the collab close outcome (`None` when no
+/// lineage existed) plus the record facts the close's deferred drain
+/// committed, which the service emits post-commit (#1002).
+#[derive(Debug)]
+pub struct YdocCloseSessionOutcome {
+    pub outcome: Option<CloseOutcome>,
+    pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
 }
 
 /// The settled content as the response may carry it: `None` once past the
@@ -1732,7 +1787,7 @@ enum Command {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocSettlement, RuntimeError>>,
+        reply: oneshot::Sender<Result<YdocSettleOutcome, RuntimeError>>,
     },
     YdocResync {
         key: DocKey,
@@ -1751,7 +1806,7 @@ enum Command {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<CloseOutcome>, RuntimeError>>,
+        reply: oneshot::Sender<Result<YdocCloseSessionOutcome, RuntimeError>>,
     },
     RepairConflictedYdocRecoveries {
         workspace_id: String,
@@ -4403,7 +4458,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<YdocSettlement, RuntimeError> {
+    ) -> Result<YdocSettleOutcome, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocSettle {
@@ -4470,7 +4525,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+    ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
         self.ydoc_close_session_inner(key, None, now_ms, faults, token)
             .await
     }
@@ -4485,7 +4540,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+    ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
         self.ydoc_close_session_inner(
             key,
             Some(YdocCloseMaterialization {
@@ -4506,7 +4561,7 @@ impl ActorHandle {
         now_ms: i64,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
-    ) -> Result<Option<CloseOutcome>, RuntimeError> {
+    ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::YdocCloseSession {
@@ -11311,6 +11366,7 @@ fn ydoc_open_state_on_store(
     // behind its active editor with no event or resync signal. The RPC layer
     // rejects the mismatched open right after; skipping the drain keeps this
     // read side-effect-free for the foreign key.
+    let mut record_facts = Vec::new();
     if drain_deferred
         && expected_key_matches
         && dohc_engine_collab::read_marker(store, &key)?
@@ -11319,7 +11375,8 @@ fn ydoc_open_state_on_store(
         // Only the POST-LEASE read drains: a pre-lease probe mutating the
         // lineage while another session holds the lease would advance state
         // behind the active editor with no event or resync signal.
-        drain_deferred_ydoc_for_local_rpc(store, doc_cache, &key, &NoFaults)?;
+        let drained = drain_deferred_ydoc_for_local_rpc(store, doc_cache, &key, &NoFaults)?;
+        record_facts = drained.record_facts;
     }
     // An open sync conflict on this object freezes the OPEN as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
@@ -11503,6 +11560,7 @@ fn ydoc_open_state_on_store(
             .flatten(),
         artifact_assets,
         seed_materialization_jobs,
+        record_facts,
     })
 }
 
@@ -11774,7 +11832,7 @@ fn ydoc_settle_on_store(
     faults: &dyn FaultInjector,
     token: &CancellationToken,
     root_guard: Option<&dyn WorkspaceRootGuard>,
-) -> Result<YdocSettlement, RuntimeError> {
+) -> Result<YdocSettleOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -11834,10 +11892,12 @@ fn ydoc_settle_on_store(
                     faults,
                 )?;
                 if drained.drained > 0 {
-                    return Err(dohc_engine_domain::DomainError::InvalidInput {
-                        reason: "ydoc-remote-updates-pending",
-                    }
-                    .into());
+                    // The drained facts ride the refusal: the drain committed
+                    // them and consumed their queue rows, so this is their
+                    // only crossing (#1002).
+                    return Ok(YdocSettleOutcome::RemoteUpdatesPending {
+                        record_facts: drained.record_facts,
+                    });
                 }
             }
         }
@@ -12026,7 +12086,7 @@ fn ydoc_settle_on_store(
         == Some(projected_sha.as_str())
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        return Ok(YdocSettlement {
+        return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
             content: inband_settled_content(current.text),
@@ -12036,7 +12096,7 @@ fn ydoc_settle_on_store(
             materialized: true,
             collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
-        });
+        })));
     }
     // A session with no edits settles WITHOUT writing (#815). The lineage's
     // durable history is exactly one client-declared seed importing the
@@ -12057,7 +12117,7 @@ fn ydoc_settle_on_store(
         )
     {
         let current = head_probe.ok_or(dohc_engine_domain::DomainError::FileNotFound)?;
-        return Ok(YdocSettlement {
+        return Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
             moment_id: current.latest_moment_id,
             path: current.path,
             content: inband_settled_content(current.text),
@@ -12065,7 +12125,7 @@ fn ydoc_settle_on_store(
             materialized: true,
             collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
             projection,
-        });
+        })));
     }
     let Projection {
         content: ydoc_projected_text,
@@ -12308,7 +12368,7 @@ fn ydoc_settle_on_store(
     };
     let content = (projection.content.len() <= dohc_engine_domain::INBAND_CONTENT_CAP_BYTES)
         .then(|| projection.content.clone());
-    Ok(YdocSettlement {
+    Ok(YdocSettleOutcome::Settled(Box::new(YdocSettlement {
         moment_id: write.moment.moment_id,
         path: write.snapshot.path,
         content,
@@ -12316,7 +12376,7 @@ fn ydoc_settle_on_store(
         materialized,
         collection_reconcile_required: settled_collection_record_id_mismatch(store, key, path)?,
         projection,
-    })
+    })))
 }
 
 fn ydoc_resync_on_store(
@@ -12410,7 +12470,7 @@ fn ydoc_close_session_on_store(
     now_ms: i64,
     faults: &dyn FaultInjector,
     token: &CancellationToken,
-) -> Result<Option<CloseOutcome>, RuntimeError> {
+) -> Result<YdocCloseSessionOutcome, RuntimeError> {
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
@@ -12421,7 +12481,10 @@ fn ydoc_close_session_on_store(
     doc_cache.remove(key);
     doc_cache.unpin(key);
     let Some(marker) = dohc_engine_collab::read_marker(store, key)? else {
-        return Ok(None);
+        return Ok(YdocCloseSessionOutcome {
+            outcome: None,
+            record_facts: Vec::new(),
+        });
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
     // same workspace-file artifact rule (close_session refuses a DIRTY local
@@ -12450,6 +12513,7 @@ fn ydoc_close_session_on_store(
         TxnOutcome::Committed(outcome) => outcome,
         TxnOutcome::Crashed { .. } => return Err(RuntimeError::OperationCrashed),
     };
+    let mut record_facts = Vec::new();
     if marker.regime == Regime::Replicated {
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
@@ -12458,8 +12522,12 @@ fn ydoc_close_session_on_store(
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
         }
+        record_facts = drained.record_facts;
     }
-    Ok(Some(outcome))
+    Ok(YdocCloseSessionOutcome {
+        outcome: Some(outcome),
+        record_facts,
+    })
 }
 
 fn materialize_ydoc_drain(
@@ -12538,12 +12606,9 @@ fn materialize_ydoc_drain(
 
 /// Local Y.Doc RPCs have no sync-pass result. Keep an actionable origination
 /// decline visible at this boundary, matching the existing #632 diagnostic.
-/// A drain on the open, settle, or close RPC path applies parked updates
-/// whose record facts have no route to the service's event emitter from
-/// here yet: a tracked gap (#1002), not an accepted contract. Until it
-/// closes, their history rows commit and a subscriber that missed the events
-/// reads history past its last seen id. The pull pass is the path that fires
-/// a drained update's events today.
+/// The caller owns the drained record facts: the open, settle, and close
+/// RPC results carry them to the service, which emits them post-commit like
+/// the pull pass (#1002).
 fn drain_deferred_ydoc_for_local_rpc(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -14572,6 +14637,7 @@ fn adopt_collection_record_on_store(
             token,
             root_guard,
         )?
+        .into_settlement_for_internal_caller()?
         .path,
     );
     Ok(Some(CollectionAdoptionExecution::Applied { changed_path }))
@@ -14738,7 +14804,8 @@ fn cleanup_collection_relation_on_store(
         faults,
         token,
         root_guard,
-    )?;
+    )?
+    .into_settlement_for_internal_caller()?;
     Ok(CollectionRelationCleanupExecution::Applied(settlement.path))
 }
 

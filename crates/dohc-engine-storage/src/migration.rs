@@ -3136,6 +3136,21 @@ CREATE INDEX idx_automation_claims_state
 
 pub(crate) const AUTOMATION_CLAIMS_MIGRATION_ID: &str = "v1-automation-claims";
 
+/// Ordinal 47. The record-event decision a drained parked `ydoc.update`
+/// committed, persisted on its still-parked coordinate (#1004). The drain
+/// derives a parked update's collection record facts inside the same
+/// transaction that commits the update and its field history; if the drain's
+/// final projection then fails, those facts would otherwise vanish — the
+/// retry dedupes the committed update and derives nothing. Storing the
+/// decision on the deferred row (device-local, never replicated) lets the
+/// retry return it; the existing queue cleanup consumes it, so the facts
+/// surface exactly once.
+const V1_DEFERRED_RECORD_FACTS_DDL: &str = "\
+ALTER TABLE ydoc_deferred_updates ADD COLUMN record_facts_json TEXT;
+";
+
+pub(crate) const DEFERRED_RECORD_FACTS_MIGRATION_ID: &str = "v1-deferred-record-facts";
+
 /// The frozen, ordered list of migrations this build knows. The baseline (0) is
 /// the day-one v2 schema; future schema changes append with a monotone ordinal.
 pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
@@ -3470,6 +3485,13 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         id: AUTOMATION_CLAIMS_MIGRATION_ID,
         kind: MigrationKind::Transactional,
         sql: V1_AUTOMATION_CLAIMS_DDL,
+        sets_user_version: None,
+    },
+    Migration {
+        ordinal: 47,
+        id: DEFERRED_RECORD_FACTS_MIGRATION_ID,
+        kind: MigrationKind::Transactional,
+        sql: V1_DEFERRED_RECORD_FACTS_DDL,
         sets_user_version: None,
     },
 ];
@@ -4335,9 +4357,18 @@ mod tests {
             dump_table_rows(&conn, "ydoc_inactive_lineages"),
             inactive_before
         );
+        // The drained record-event decision adds one column to
+        // `ydoc_deferred_updates`, which a pre-existing parked row gains as NULL.
+        let deferred_expected: Vec<Vec<(String, rusqlite::types::Value)>> = deferred_before
+            .into_iter()
+            .map(|mut row| {
+                row.push(("record_facts_json".to_owned(), rusqlite::types::Value::Null));
+                row
+            })
+            .collect();
         assert_eq!(
             dump_table_rows(&conn, "ydoc_deferred_updates"),
-            deferred_before
+            deferred_expected
         );
         assert_eq!(
             dump_table_rows(&conn, "ydoc_recovery_decisions"),
