@@ -1,4 +1,5 @@
 import { useMemo, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { DragDropProvider, useDraggable, useDroppable } from "@dnd-kit/react";
 import type { DragEndEvent } from "@dnd-kit/react";
 import type {
@@ -160,13 +161,31 @@ interface BoardColumnProps {
   personLabel?: PersonLabel;
 }
 
+/**
+ * The virtualizer's initial card-height guess: a one-line card plus the
+ * wrapper's bottom gap. Mounted cards report their real height through
+ * measureElement, so a card with a field strip only shifts its neighbors.
+ */
+const CARD_ESTIMATE = 48;
+
 function BoardColumn({ group, index, label, fields, onOpen, personLabel }: BoardColumnProps) {
   const { ref, isDropTarget } = useDroppable({ id: index });
+  // A column mounts only the cards near its viewport (TableView precedent):
+  // the column scrolls its own cards, and a 10,000-record group costs the
+  // DOM a screenful, not 10,000 cards.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtualizer = useVirtualizer({
+    count: group.records.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => CARD_ESTIMATE,
+    getItemKey: (itemIndex) => group.records[itemIndex]?.id ?? itemIndex,
+    overscan: 5,
+  });
   return (
     <section
       ref={ref}
       aria-label={label}
-      className={`flex w-64 shrink-0 flex-col rounded-lg p-2 ${
+      className={`flex max-h-full w-64 shrink-0 flex-col rounded-lg p-2 ${
         isDropTarget ? "bg-line/60" : "bg-panel-2"
       }`}
     >
@@ -174,16 +193,36 @@ function BoardColumn({ group, index, label, fields, onOpen, personLabel }: Board
         <span className="truncate text-[12px] font-medium text-muted">{label}</span>
         <span className="font-mono text-[11px] text-subtle">{group.records.length}</span>
       </div>
-      <div role="list" aria-label={label} className="flex min-h-8 flex-col gap-2">
-        {group.records.map((record) => (
-          <BoardCard
-            key={record.id}
-            record={record}
-            fields={fields}
-            onOpen={onOpen}
-            personLabel={personLabel}
-          />
-        ))}
+      <div
+        ref={scrollRef}
+        role="list"
+        aria-label={label}
+        className="min-h-8 overflow-y-auto"
+      >
+        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+          {virtualizer.getVirtualItems().map((item) => {
+            const record = group.records[item.index];
+            if (!record) return null;
+            return (
+              <div
+                key={record.id}
+                ref={virtualizer.measureElement}
+                data-index={item.index}
+                // The bottom padding is the gap the flex column's gap-2 gave;
+                // inside the measured wrapper it rides the virtual offsets.
+                className="absolute left-0 top-0 w-full pb-2"
+                style={{ transform: `translateY(${item.start}px)` }}
+              >
+                <BoardCard
+                  record={record}
+                  fields={fields}
+                  onOpen={onOpen}
+                  personLabel={personLabel}
+                />
+              </div>
+            );
+          })}
+        </div>
       </div>
     </section>
   );

@@ -19,6 +19,7 @@ import {
   CollectionPage,
   CollectionRecordFieldWrite,
   FILE_LOCKED_REPORT_MS,
+  DRAIN_RECORD_LIMIT,
   frontmatterWriteValue,
 } from "./CollectionPage";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
@@ -956,6 +957,26 @@ describe("pagination", () => {
         cursor: expect.objectContaining({ recordId: "page-0" }),
       }),
     );
+  });
+
+  it("stops the drain at the record cap and says how many records show", async () => {
+    const bridge = makeBridge([], BOARD_SCHEMA);
+    // Two pages cross the cap; a third page exists and must not be asked for.
+    const pageSize = (DRAIN_RECORD_LIMIT / 10) * 6;
+    const page = (start: number) => {
+      const records = Array.from({ length: pageSize }, (_, index) =>
+        statusRecord(`rec-${start + index}`, `Task ${start + index}`),
+      );
+      return { records, groups: [{ value: "Todo", records }] };
+    };
+    servePages(bridge, [page(0), page(pageSize), page(pageSize * 2)]);
+    renderPage(bridge);
+
+    const cap = await screen.findByTestId("collection-drain-cap");
+    expect(cap.textContent).toBe(
+      `This view shows only the first ${pageSize * 2} records.`,
+    );
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
   });
 
   it("drains every page so a calendar view places all events", async () => {
