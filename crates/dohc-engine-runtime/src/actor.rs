@@ -338,9 +338,10 @@ impl YdocSettleOutcome {
     }
 
     /// Collapse to the settlement for an engine-internal settle (collection
-    /// adoption, relation cleanup), restoring the refusal those callers
-    /// already handle. Their drained facts have no event route; the durable
-    /// history rows remain for a catch-up reader.
+    /// adoption, relation cleanup). Those callers settle with
+    /// `drain_deferred = false` — they have no event route for drained
+    /// record facts — so the remote-updates-pending arm is defensive: it
+    /// restores the refusal rather than silently dropping facts (#1008).
     fn into_settlement_for_internal_caller(self) -> Result<YdocSettlement, RuntimeError> {
         match self {
             Self::Settled(settlement) => Ok(*settlement),
@@ -9255,6 +9256,7 @@ fn worker_main(
                     &key,
                     &path,
                     content_kind,
+                    true,
                     expected_lineage_claim_id.as_deref(),
                     expected_head_sha,
                     None,
@@ -11306,6 +11308,33 @@ fn ydoc_open_state_on_store(
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
+    // An open sync conflict on this object freezes the OPEN as well as the
+    // settle: the claimed lineage may be a peer's unreviewed base, and
+    // serving it would put the editor on the very side the conflict
+    // preserves the head against — the user types into unreviewed content
+    // and resolution rewrites the lineage under the live client. Refuse
+    // with the same reason the settle freeze uses; resolution lifts both.
+    // The check runs BEFORE the lineage clear and the deferred drain below:
+    // both mutate durable state, and a drain whose open then refuses would
+    // consume the parked rows — and the record facts persisted on them —
+    // with no caller left to emit their events (#1009).
+    if expected_key_matches
+        && store
+            .read_with(|conn| {
+                dohc_engine_sync::open_sync_conflict_for_object(
+                    conn,
+                    &key.workspace_id,
+                    &key.version_id,
+                    &key.object_id,
+                )
+            })?
+            .is_some()
+    {
+        return Err(dohc_engine_domain::DomainError::InvalidInput {
+            reason: "ydoc-conflict-open",
+        }
+        .into());
+    }
     // RETIRED artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
     // settled artifact survived (workspace teardown skips the prune).
@@ -11377,29 +11406,6 @@ fn ydoc_open_state_on_store(
         // behind the active editor with no event or resync signal.
         let drained = drain_deferred_ydoc_for_local_rpc(store, doc_cache, &key, &NoFaults)?;
         record_facts = drained.record_facts;
-    }
-    // An open sync conflict on this object freezes the OPEN as well as the
-    // settle: the claimed lineage may be a peer's unreviewed base, and
-    // serving it would put the editor on the very side the conflict
-    // preserves the head against — the user types into unreviewed content
-    // and resolution rewrites the lineage under the live client. Refuse
-    // with the same reason the settle freeze uses; resolution lifts both.
-    if expected_key_matches
-        && store
-            .read_with(|conn| {
-                dohc_engine_sync::open_sync_conflict_for_object(
-                    conn,
-                    &key.workspace_id,
-                    &key.version_id,
-                    &key.object_id,
-                )
-            })?
-            .is_some()
-    {
-        return Err(dohc_engine_domain::DomainError::InvalidInput {
-            reason: "ydoc-conflict-open",
-        }
-        .into());
     }
     // A post-lease open starts a live session on this doc: prefer keeping its
     // cache entry resident (eviction order only; a leaked pin never affects
@@ -11823,6 +11829,7 @@ fn ydoc_settle_on_store(
     key: &DocKey,
     path: &str,
     content_kind: ContentKind,
+    drain_deferred: bool,
     expected_lineage_claim_id: Option<&str>,
     expected_head_sha: Option<String>,
     settled_content_override: Option<String>,
@@ -11883,7 +11890,14 @@ fn ydoc_settle_on_store(
             // not seen them: settling would materialize content the user
             // never saw while they keep editing stale state. Refuse; the
             // client resyncs (which also drains) and settles again.
-            if marker.regime == Regime::Replicated {
+            // Engine-internal settles (collection adoption, relation
+            // cleanup) pass `drain_deferred = false` and skip this drain,
+            // like their opens: their refusal path has no event route, so a
+            // parked update they drained would fire no record events. The
+            // rows stay queued for the next pull, open, settle, or close,
+            // which all emit; the later drain applies and projects the
+            // remote content over whatever the pass settled (#1008).
+            if drain_deferred && marker.regime == Regime::Replicated {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
                     doc_cache,
@@ -12517,10 +12531,24 @@ fn ydoc_close_session_on_store(
     if marker.regime == Regime::Replicated {
         // The drain PROJECTS internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
-        // session left to settle it.
-        let drained = drain_deferred_ydoc_for_local_rpc(store, doc_cache, key, faults)?;
+        // session left to settle it. The drain HOLDS its queue-row cleanup
+        // until materialization succeeded: a failed materialization would
+        // otherwise error out of this close after the rows — and the record
+        // facts persisted on them — were already deleted, and no retry could
+        // ever emit the events (#1009). With the rows kept, the retried
+        // close re-drains content-deduped and reads the facts back (#1004).
+        let (drained, cleanup) =
+            dohc_engine_sync::drain_deferred_ydoc_for_key_cached_holding_cleanup(
+                store, doc_cache, key, faults,
+            )?;
+        for declined in &drained.sharing_declined {
+            eprintln!("engine: {declined}");
+        }
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
+        }
+        if let Some(cleanup) = cleanup {
+            dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
         }
         record_facts = drained.record_facts;
     }
@@ -14538,12 +14566,22 @@ fn adopt_collection_record_on_store(
         Err(CollabError::LeaseHeld) => return Ok(None),
         Err(error) => return Err(error.into()),
     };
+    // `drain_deferred = false`: this engine-internal open must not consume
+    // the parked deferred queue. Its caller discards `state.record_facts`,
+    // so a parked update drained here would fire no record events on any
+    // path. The rows stay queued for the next pull, open, settle, or close,
+    // which all emit. Skipping the drain can change what this pass sees: a
+    // queued update whose base has arrived would otherwise be applied
+    // first. The result still converges: at worst adoption writes a record
+    // id the queued update also carries, which the CRDT merge and the
+    // by-sha projection make idempotent, and the later drain projects the
+    // queued update over the adopted result (#1008).
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
         workspace_id,
         now_ms,
-        true,
+        false,
         Some(&probe.key),
         version_id,
         &candidate.file_path,
@@ -14627,6 +14665,7 @@ fn adopt_collection_record_on_store(
             &state.key,
             &candidate.file_path,
             ContentKind::Richdoc,
+            false,
             lineage_claim_id.as_deref(),
             state.head_blob_sha256,
             settled_content_override,
@@ -14690,12 +14729,15 @@ fn cleanup_collection_relation_on_store(
         }
         Err(error) => return Err(error.into()),
     };
+    // `drain_deferred = false` for the same reason as the adoption pass:
+    // this caller has no event route for drained record facts, so the
+    // parked rows stay queued for a path that emits (#1008).
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
         workspace_id,
         now_ms,
-        true,
+        false,
         Some(&probe.key),
         version_id,
         &candidate.source_file_path,
@@ -14792,6 +14834,7 @@ fn cleanup_collection_relation_on_store(
         &state.key,
         &candidate.source_file_path,
         ContentKind::Richdoc,
+        false,
         append.lineage_claim_id.as_deref(),
         state.head_blob_sha256,
         None,

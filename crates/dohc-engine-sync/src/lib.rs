@@ -94,9 +94,10 @@ pub use share::{
 pub use share_grant::GrantBinding;
 pub use version_apply::{apply_version_envelope, apply_workspace_envelope};
 pub use ydoc_apply::{
-    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainResult,
+    LeaseProbe, NoLiveLeases, ResultingHead, YdocApplyResult, YdocDrainCleanup, YdocDrainResult,
     YdocLineageReplacement, apply_ydoc_envelope, apply_ydoc_envelope_cached,
-    drain_deferred_ydoc_for_key, drain_deferred_ydoc_for_key_cached,
+    complete_deferred_ydoc_drain_cleanup, drain_deferred_ydoc_for_key,
+    drain_deferred_ydoc_for_key_cached, drain_deferred_ydoc_for_key_cached_holding_cleanup,
     drain_deferred_ydoc_for_live_session, drain_deferred_ydoc_for_live_session_cached,
     fold_resolution_into_ydoc_in_tx, open_sync_conflict_for_object, project_and_write_in_tx,
     project_ydoc_with_store, reconcile_imported_resulting_head_in_tx,
