@@ -406,6 +406,10 @@ export interface WorkbenchState {
   // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
+  // Which view each collection tab shows, keyed by the collection's folder
+  // path (Phase 2 collections). Per-user local state: closing the tab or
+  // restarting the app must not reset the open view.
+  collectionViews: Record<string, string>;
 }
 
 type EditorTransitionActivation = "target" | "preserve";
@@ -434,6 +438,9 @@ export const MAX_EXPANDED_FOLDERS = 500;
 export const MAX_PINNED_PATHS = 100;
 // Recent-files list for quick-open ranking (Phase E5.0).
 export const MAX_RECENT_FILES = 20;
+// Bounds the persisted collection-view map (pinned precedent: a payload
+// bound, not a UX target — at the bound the oldest entry gives way).
+export const MAX_COLLECTION_VIEWS = 100;
 
 export function defaultWorkbenchState(): WorkbenchState {
   return {
@@ -450,6 +457,7 @@ export function defaultWorkbenchState(): WorkbenchState {
     expandedFolders: [],
     pinned: [],
     recentFiles: [],
+    collectionViews: {},
   };
 }
 
@@ -979,6 +987,32 @@ export function recordRecentFile(state: WorkbenchState, path: string): Workbench
   return { ...state, recentFiles };
 }
 
+// Remembers which view a collection tab shows, per collection path. null
+// clears the entry (the view was deleted); the next open falls back to the
+// schema's first view. At the bound the map's oldest entry gives way
+// (appendCapped precedent; string-key insertion order is exact enough for a
+// payload bound).
+export function setCollectionActiveView(
+  state: WorkbenchState,
+  collectionPath: string,
+  viewName: string | null,
+): WorkbenchState {
+  if (viewName === null) {
+    if (!Object.hasOwn(state.collectionViews, collectionPath)) return state;
+    const collectionViews = { ...state.collectionViews };
+    delete collectionViews[collectionPath];
+    return { ...state, collectionViews };
+  }
+  if (state.collectionViews[collectionPath] === viewName) return state;
+  const collectionViews = {
+    ...state.collectionViews,
+    [collectionPath]: viewName,
+  };
+  const paths = Object.keys(collectionViews);
+  if (paths.length > MAX_COLLECTION_VIEWS) delete collectionViews[paths[0]];
+  return { ...state, collectionViews };
+}
+
 export function togglePinned(state: WorkbenchState, path: string): WorkbenchState {
   return {
     ...state,
@@ -1021,12 +1055,20 @@ export function remapWorkbenchPaths(
     }
     return out;
   };
+  const collectionViews: Record<string, string> = {};
+  for (const [path, view] of Object.entries(state.collectionViews)) {
+    const next = project(path);
+    if (next !== null && !Object.hasOwn(collectionViews, next)) {
+      collectionViews[next] = view;
+    }
+  }
   return {
     ...state,
     editorGroups,
     expandedFolders: remapList(state.expandedFolders),
     pinned: remapList(state.pinned),
     recentFiles: remapList(state.recentFiles),
+    collectionViews,
   };
 }
 
@@ -1093,6 +1135,7 @@ export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
     expandedFolders: state.expandedFolders,
     pinned: state.pinned,
     recentFiles: state.recentFiles,
+    collectionViews: state.collectionViews,
   };
 }
 
@@ -1264,5 +1307,29 @@ export function parseUiState(raw: unknown): WorkbenchState {
     expandedFolders: collectPaths(own("expandedFolders"), MAX_EXPANDED_FOLDERS),
     pinned: collectPaths(own("pinned"), MAX_PINNED_PATHS),
     recentFiles: collectPaths(own("recentFiles"), MAX_RECENT_FILES),
+    collectionViews: collectCollectionViews(own("collectionViews")),
   };
+}
+
+// Bounded map collector for parseUiState, the collectPaths posture applied to
+// a record: OWN string entries only, both sides bounded, stop at the cap.
+function collectCollectionViews(raw: unknown): Record<string, string> {
+  // Prototype-free: a collection folder named "__proto__" is an own key in
+  // the file, and assigning it into a plain object would not keep it.
+  const out: Record<string, string> = Object.create(null);
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
+  const record = raw as Record<string, unknown>;
+  let collected = 0;
+  for (const path in record) {
+    if (collected >= MAX_COLLECTION_VIEWS) break;
+    if (!Object.hasOwn(record, path)) continue;
+    const view = record[path];
+    if (path.length === 0 || path.length > 4096) continue;
+    if (typeof view !== "string" || view.length === 0 || view.length > 4096) {
+      continue;
+    }
+    out[path] = view;
+    collected += 1;
+  }
+  return out;
 }

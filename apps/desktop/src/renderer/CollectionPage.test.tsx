@@ -18,6 +18,7 @@ import type {
 import {
   CollectionPage,
   CollectionRecordFieldWrite,
+  FILE_LOCKED_REPORT_MS,
   frontmatterWriteValue,
 } from "./CollectionPage";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
@@ -214,12 +215,18 @@ function renderPage(
   bridge: ReturnType<typeof makeBridge>,
   onNewRecord: (collectionPath: string) => void = () => undefined,
   onOpenRecord: (recordPath: string) => void = () => undefined,
+  view?: {
+    activeViewName?: string | null;
+    onActiveViewChange?: (viewName: string | null) => void;
+  },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
   return render(
     <CollectionPage
       workspaceId="ws-1"
       collectionPath="tasks"
+      activeViewName={view?.activeViewName ?? null}
+      onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
       onNewRecord={onNewRecord}
       onOpenRecord={onOpenRecord}
     />,
@@ -352,6 +359,73 @@ describe("CollectionPage", () => {
 
     expect(await screen.findByText("Plan")).toBeDefined();
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+  });
+});
+
+const TWO_VIEW_SCHEMA: CollectionSchema = {
+  name: "Tasks",
+  description: null,
+  fields: [{ name: "title", type: "text" }],
+  views: [
+    {
+      name: "All",
+      kind: "table",
+      groupBy: null,
+      sort: [],
+      visibleFields: null,
+      dateField: null,
+    },
+    {
+      name: "Sorted",
+      kind: "table",
+      groupBy: null,
+      sort: [{ field: "title", direction: "desc" }],
+      visibleFields: null,
+      dateField: null,
+    },
+  ],
+};
+
+describe("view persistence", () => {
+  // The open view is per-user local state the shell stores in the workbench
+  // UI state; the page only reflects and reports it.
+  it("opens the stored view instead of the schema's first", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    renderPage(bridge, undefined, undefined, { activeViewName: "Sorted" });
+
+    await waitFor(() =>
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
+    );
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      sort: [{ field: "title", direction: "desc" }],
+      resolveRelations: true,
+    });
+  });
+
+  it("falls back to the first view when the stored view is gone", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    renderPage(bridge, undefined, undefined, { activeViewName: "Gone" });
+
+    await waitFor(() =>
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce(),
+    );
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      resolveRelations: true,
+    });
+  });
+
+  it("reports a view switch so the shell can persist it", async () => {
+    const bridge = makeBridge([record("rec-1", "Plan")], TWO_VIEW_SCHEMA);
+    const onActiveViewChange = vi.fn();
+    renderPage(bridge, undefined, undefined, { onActiveViewChange });
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByRole("button", { name: "Sorted" }));
+    expect(onActiveViewChange).toHaveBeenCalledExactlyOnceWith("Sorted");
   });
 });
 
@@ -648,6 +722,8 @@ describe("cell write queue", () => {
       <CollectionPage
         workspaceId="ws-1"
         collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
         onNewRecord={() => undefined}
         onOpenRecord={() => undefined}
       />,
@@ -659,6 +735,71 @@ describe("cell write queue", () => {
     );
     await waitFor(() =>
       expect(nextDoc.getMap("frontmatter").has("done")).toBe(true),
+    );
+  });
+
+  it("reports a head write held file-locked past the window and unblocks the queue", async () => {
+    const firstDoc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc: firstDoc });
+    const base = record("rec-1", "Plan");
+    const checkboxRecord: CollectionRecord = {
+      ...base,
+      values: [
+        ...base.values,
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    const checkbox = screen.getByRole("checkbox");
+    fireEvent.click(checkbox);
+    fireEvent.click(checkbox);
+    expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
+
+    vi.useFakeTimers();
+    const nextDoc = new Y.Doc();
+    let writerRender = 0;
+    docMock.current = () => {
+      writerRender += 1;
+      return writerRender === 1
+        ? engineDocState({
+            available: true,
+            doc: firstDoc,
+            saveState: "file-locked",
+          })
+        : engineDocState({ available: true, doc: nextDoc });
+    };
+    page.rerender(
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
+        onNewRecord={() => undefined}
+        onOpenRecord={() => undefined}
+      />,
+    );
+
+    // Inside the window: no line yet, the queue waits on main's retries.
+    await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS - 1);
+    expect(screen.queryByTestId("collection-write-error")).toBeNull();
+
+    await vi.advanceTimersByTimeAsync(1);
+    vi.useRealTimers();
+    const error = await screen.findByTestId("collection-write-error");
+    expect(error.textContent).toBe(
+      "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
+    );
+    // The locked head released its queue slot: the next edit reached its doc.
+    await waitFor(() =>
+      expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
     );
   });
 });
@@ -996,7 +1137,72 @@ describe("CollectionRecordFieldWrite", () => {
         onError={onError}
       />,
     );
-    expect(onError).toHaveBeenCalledExactlyOnceWith("file too large");
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      "dohc could not save this change. file too large",
+    );
+    expect(onDone).toHaveBeenCalledOnce();
+  });
+
+  it("reports the locked file and releases only after the bounded window", () => {
+    vi.useFakeTimers();
+    const doc = new Y.Doc();
+    docMock.current = engineDocState({ available: true, doc });
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    const view = render(
+      <CollectionRecordFieldWrite
+        workspaceId="ws-1"
+        change={CHANGE}
+        onDone={onDone}
+        onError={onError}
+      />,
+    );
+
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: "file-locked",
+    });
+    view.rerender(
+      <CollectionRecordFieldWrite
+        workspaceId="ws-1"
+        change={CHANGE}
+        onDone={onDone}
+        onError={onError}
+      />,
+    );
+    // Inside the window the writer waits on main's own retries.
+    vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS - 1);
+    expect(onDone).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+
+    // A retry's own saving flip must not restart the window.
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    view.rerender(
+      <CollectionRecordFieldWrite
+        workspaceId="ws-1"
+        change={CHANGE}
+        onDone={onDone}
+        onError={onError}
+      />,
+    );
+    docMock.current = engineDocState({
+      available: true,
+      doc,
+      saveState: "file-locked",
+    });
+    view.rerender(
+      <CollectionRecordFieldWrite
+        workspaceId="ws-1"
+        change={CHANGE}
+        onDone={onDone}
+        onError={onError}
+      />,
+    );
+    vi.advanceTimersByTime(1);
+    expect(onError).toHaveBeenCalledExactlyOnceWith(
+      "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
+    );
     expect(onDone).toHaveBeenCalledOnce();
   });
 

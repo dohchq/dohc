@@ -69,10 +69,12 @@ import {
   toggleSidebar,
   MAX_EDITOR_GROUPS,
   MAX_OPEN_TABS,
+  MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
   MAX_PINNED_PATHS,
   MAX_RECENT_FILES,
   recordRecentFile,
+  setCollectionActiveView,
   remapWorkbenchPaths,
   resizeEditorGroups,
   setFolderExpanded,
@@ -1429,6 +1431,92 @@ describe("recent files (Phase E5.0 quick-open ranking)", () => {
     expect(
       parseUiState({ version: 1, tabs: ["a.md"], activeTab: "a.md" }).recentFiles,
     ).toEqual([]);
+  });
+});
+
+describe("collection views (Phase 2 collections)", () => {
+  it("stores, overwrites, and clears the view per collection path", () => {
+    let state = defaultWorkbenchState();
+    state = setCollectionActiveView(state, "tasks", "Board");
+    state = setCollectionActiveView(state, "people", "Table");
+    expect(state.collectionViews).toEqual({ tasks: "Board", people: "Table" });
+    // Re-storing the same view is a no-op (same reference).
+    expect(setCollectionActiveView(state, "tasks", "Board")).toBe(state);
+    state = setCollectionActiveView(state, "tasks", "Calendar");
+    expect(state.collectionViews.tasks).toBe("Calendar");
+    state = setCollectionActiveView(state, "tasks", null);
+    expect(state.collectionViews).toEqual({ people: "Table" });
+    // Clearing an absent entry is a no-op (same reference).
+    expect(setCollectionActiveView(state, "tasks", null)).toBe(state);
+  });
+
+  it("caps at MAX_COLLECTION_VIEWS (oldest gives way)", () => {
+    let state = defaultWorkbenchState();
+    for (let i = 0; i < MAX_COLLECTION_VIEWS + 3; i++) {
+      state = setCollectionActiveView(state, `c-${i}`, "Board");
+    }
+    const paths = Object.keys(state.collectionViews);
+    expect(paths).toHaveLength(MAX_COLLECTION_VIEWS);
+    expect(paths).not.toContain("c-0");
+    expect(paths).toContain(`c-${MAX_COLLECTION_VIEWS + 2}`);
+  });
+
+  it("round-trips through ui-state; files written before it parse to empty", () => {
+    let state = withTabs("a.md");
+    state = setCollectionActiveView(state, "tasks", "Board");
+    expect(parseUiState(serializeUiState(state)).collectionViews).toEqual({
+      tasks: "Board",
+    });
+    const { collectionViews: _dropped, ...withoutField } =
+      serializeUiState(state);
+    expect(parseUiState(withoutField).collectionViews).toEqual({});
+  });
+
+  it("parse drops foreign entries and stops collecting at the cap", () => {
+    const serialized = serializeUiState(defaultWorkbenchState());
+    expect(
+      parseUiState({ ...serialized, collectionViews: ["Board"] }).collectionViews,
+    ).toEqual({});
+    expect(
+      parseUiState({
+        ...serialized,
+        collectionViews: {
+          tasks: 3,
+          "": "Board",
+          ok: "Board",
+          huge: "x".repeat(5000),
+        },
+      }).collectionViews,
+    ).toEqual({ ok: "Board" });
+    const flood: Record<string, string> = {};
+    for (let i = 0; i < MAX_COLLECTION_VIEWS + 50; i++) flood[`c-${i}`] = "Board";
+    expect(
+      Object.keys(
+        parseUiState({ ...serialized, collectionViews: flood }).collectionViews,
+      ),
+    ).toHaveLength(MAX_COLLECTION_VIEWS);
+  });
+
+  it("parse keeps a collection folder named __proto__", () => {
+    const serialized = serializeUiState(defaultWorkbenchState());
+    const views = JSON.parse('{"__proto__":"Board","tasks":"Table"}') as Record<
+      string,
+      string
+    >;
+    const parsed = parseUiState({ ...serialized, collectionViews: views }).collectionViews;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    expect(parsed["__proto__"]).toBe("Board");
+    expect(parsed.tasks).toBe("Table");
+  });
+
+  it("follows a collection rename through the remap projection and drops deletions", () => {
+    let state = defaultWorkbenchState();
+    state = setCollectionActiveView(state, "tasks", "Board");
+    state = setCollectionActiveView(state, "junk", "Table");
+    const remapped = remapWorkbenchPaths(state, (path) =>
+      path === "tasks" ? "org/tasks" : path === "junk" ? null : path,
+    );
+    expect(remapped.collectionViews).toEqual({ "org/tasks": "Board" });
   });
 });
 

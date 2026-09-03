@@ -236,6 +236,7 @@ import {
   serializeUiState,
   siteTabPath,
   setChatsWidth,
+  setCollectionActiveView,
   setFolderExpanded,
   setOpenEditorsHeight,
   setSidebarWidth,
@@ -6766,6 +6767,12 @@ export function DesktopWorkspaceShell(props: {
                     key={tabPath}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
+                    activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
+                    onActiveViewChange={(viewName) =>
+                      mutateWb((state) =>
+                        setCollectionActiveView(state, groupCollectionPath, viewName),
+                      )
+                    }
                     onNewRecord={createCollectionRecord}
                     onOpenRecord={openFile}
                   />

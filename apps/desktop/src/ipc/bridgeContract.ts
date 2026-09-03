@@ -39,6 +39,7 @@ import {
   isPluginPanelTabPath,
   isSiteTabPath,
   isSingletonEditorTabPath,
+  MAX_COLLECTION_VIEWS,
   MAX_EXPANDED_FOLDERS,
   MAX_EDITOR_GROUPS,
   MAX_EDITOR_GROUP_ID_CHARS,
@@ -5504,6 +5505,14 @@ export const WorkspaceUiState = z.object({
   pinned: z.array(PATH_STRING).max(MAX_PINNED_PATHS).optional(),
   // The last ~20 opened files, most recent first.
   recentFiles: z.array(PATH_STRING).max(MAX_RECENT_FILES).optional(),
+  // Which view each collection tab shows, keyed by the collection folder path.
+  collectionViews: z
+    .record(PATH_STRING, z.string().min(1).max(4096))
+    .refine(
+      (views) => Object.keys(views).length <= MAX_COLLECTION_VIEWS,
+      { message: "Too many collection view entries." },
+    )
+    .optional(),
 }).superRefine((state, context) => {
   const groupIds = new Set<string>();
   const singletonOwners = new Set<string>();
