@@ -14570,9 +14570,12 @@ fn adopt_collection_record_on_store(
     // the parked deferred queue. Its caller discards `state.record_facts`,
     // so a parked update drained here would fire no record events on any
     // path. The rows stay queued for the next pull, open, settle, or close,
-    // which all emit; adoption is correct on the un-drained head because a
-    // queued update is not in the visible head either way, and the later
-    // drain applies and projects it over the adopted result (#1008).
+    // which all emit. Skipping the drain can change what this pass sees: a
+    // queued update whose base has arrived would otherwise be applied
+    // first. The result still converges: at worst adoption writes a record
+    // id the queued update also carries, which the CRDT merge and the
+    // by-sha projection make idempotent, and the later drain projects the
+    // queued update over the adopted result (#1008).
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
