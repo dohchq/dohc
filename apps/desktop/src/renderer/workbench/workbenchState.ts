@@ -1314,7 +1314,9 @@ export function parseUiState(raw: unknown): WorkbenchState {
 // Bounded map collector for parseUiState, the collectPaths posture applied to
 // a record: OWN string entries only, both sides bounded, stop at the cap.
 function collectCollectionViews(raw: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
+  // Prototype-free: a collection folder named "__proto__" is an own key in
+  // the file, and assigning it into a plain object would not keep it.
+  const out: Record<string, string> = Object.create(null);
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return out;
   const record = raw as Record<string, unknown>;
   let collected = 0;

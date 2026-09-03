@@ -1497,6 +1497,18 @@ describe("collection views (Phase 2 collections)", () => {
     ).toHaveLength(MAX_COLLECTION_VIEWS);
   });
 
+  it("parse keeps a collection folder named __proto__", () => {
+    const serialized = serializeUiState(defaultWorkbenchState());
+    const views = JSON.parse('{"__proto__":"Board","tasks":"Table"}') as Record<
+      string,
+      string
+    >;
+    const parsed = parseUiState({ ...serialized, collectionViews: views }).collectionViews;
+    expect(Object.hasOwn(parsed, "__proto__")).toBe(true);
+    expect(parsed["__proto__"]).toBe("Board");
+    expect(parsed.tasks).toBe("Table");
+  });
+
   it("follows a collection rename through the remap projection and drops deletions", () => {
     let state = defaultWorkbenchState();
     state = setCollectionActiveView(state, "tasks", "Board");
