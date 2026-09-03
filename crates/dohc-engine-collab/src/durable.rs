@@ -1258,6 +1258,7 @@ pub(crate) fn index_applied_frontmatter(
         &after,
         &authored_before,
         &authored_after,
+        None,
         author_origin_id,
         attribution,
         history_source,

@@ -657,8 +657,11 @@ fn apply_moment_append(
                         dohc_engine_domain::collections::markdown_frontmatter_json(&snapshot.text)
                     })
                     .unwrap_or_else(empty);
-                let frontmatter = dohc_engine_domain::collections::markdown_frontmatter_json(text)
-                    .unwrap_or_else(empty);
+                let (frontmatter, provenance) =
+                    dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance(
+                        text,
+                    )
+                    .unwrap_or_else(|| (empty(), Default::default()));
                 record_facts = dohc_engine_domain::index_collection_frontmatter_apply_in_tx(
                     tx,
                     &envelope.workspace_id,
@@ -668,6 +671,7 @@ fn apply_moment_append(
                     &frontmatter,
                     &before_frontmatter,
                     &frontmatter,
+                    Some(&provenance),
                     Some(&envelope.origin_id),
                     None,
                     Some((&envelope.origin_id, envelope.origin_seq)),

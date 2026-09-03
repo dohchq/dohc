@@ -1671,6 +1671,30 @@ pub fn markdown_frontmatter_json(markdown: &str) -> Option<Value> {
     parse_markdown_frontmatter(markdown).map(|frontmatter| frontmatter.value)
 }
 
+/// Parse-time field provenance the coerced JSON cannot carry: an unquoted
+/// `.nan` and the quoted string `".nan"` both coerce to the string `".nan"`,
+/// so only the parse knows which top-level fields held a non-finite YAML
+/// number or an unsupported tag.
+#[derive(Debug, Default)]
+pub struct FrontmatterProvenance {
+    pub non_finite_fields: HashSet<String>,
+    pub unsupported_tag_fields: HashSet<String>,
+}
+
+pub fn markdown_frontmatter_json_with_provenance(
+    markdown: &str,
+) -> Option<(Value, FrontmatterProvenance)> {
+    parse_markdown_frontmatter(markdown).map(|frontmatter| {
+        (
+            frontmatter.value,
+            FrontmatterProvenance {
+                non_finite_fields: frontmatter.non_finite_fields,
+                unsupported_tag_fields: frontmatter.unsupported_tag_fields,
+            },
+        )
+    })
+}
+
 pub fn markdown_frontmatter_json_with_body(markdown: &str) -> Option<(Value, &str)> {
     parse_markdown_frontmatter(markdown).map(|frontmatter| (frontmatter.value, frontmatter.body))
 }
@@ -2358,6 +2382,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
     after: &Value,
     authored_before: &Value,
     authored_after: &Value,
+    after_provenance: Option<&FrontmatterProvenance>,
     author_origin_id: Option<&str>,
     attribution: Option<&ChangeAttribution>,
     source_update: Option<(&str, i64)>,
@@ -2475,7 +2500,16 @@ pub fn index_collection_frontmatter_apply_in_tx(
         &record_id,
         &schema,
         after,
-        FieldProvenance::PreserveStored,
+        // A caller that parsed the after state from Markdown knows which
+        // fields held a non-finite number before coercion; without it, keep
+        // the stored reasons (#987).
+        match after_provenance {
+            Some(provenance) => FieldProvenance::Parsed {
+                non_finite_fields: &provenance.non_finite_fields,
+                unsupported_tag_fields: &provenance.unsupported_tag_fields,
+            },
+            None => FieldProvenance::PreserveStored,
+        },
     )?;
     // An apply whose every history insert deduped is a replay of facts this
     // device already surfaced once.

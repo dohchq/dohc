@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use dohc_engine_domain::collections::markdown_frontmatter_json_with_provenance;
 use dohc_engine_domain::{
     CollectionFilter, CollectionFilterOperator, CollectionIndexedValueValidation,
     CollectionPendingAdoptionCursor, CollectionQuery, CollectionSchemaReasonCode,
@@ -681,6 +682,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &integer_frontmatter,
                 &float_frontmatter,
                 &integer_frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -708,6 +710,7 @@ fn numeric_equality_uses_one_rule_across_every_collection_surface() {
                 &changed_frontmatter,
                 &integer_frontmatter,
                 &changed_frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -760,6 +763,7 @@ fn body_only_collection_apply_does_not_rewrite_index_or_history() {
                 &frontmatter,
                 &frontmatter,
                 &frontmatter,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -847,6 +851,7 @@ fn multi_field_history_order_matches_across_independent_stores() {
                     &after,
                     &before,
                     &after,
+                    None,
                     Some("editor"),
                     None,
                     None,
@@ -1335,6 +1340,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &review,
                 &draft,
                 &review,
+                None,
                 Some("human-editor"),
                 None,
                 None,
@@ -1349,6 +1355,7 @@ fn changing_an_adopted_record_id_keeps_authored_history_under_the_engine_id() {
                 &done,
                 &review,
                 &done,
+                None,
                 Some("agent-editor"),
                 None,
                 None,
@@ -1548,6 +1555,7 @@ fn deleted_record_id_stays_reserved_and_keeps_its_history() {
                 &after,
                 &before,
                 &after,
+                None,
                 Some("alpha-editor"),
                 None,
                 None,
@@ -1823,6 +1831,7 @@ fn rename_and_same_id_copy_keep_identity_and_history_with_the_original_object() 
                 &after,
                 &before,
                 &after,
+                None,
                 Some("editor"),
                 None,
                 None,
@@ -1993,6 +2002,148 @@ fn reconcile_indexes_non_finite_yaml_numbers_without_dropping_them() {
             "status": "flagged",
             "reason": { "code": "expected-number", "path": "" }
         })
+    );
+}
+
+// #987: both `.nan` spellings coerce to the string ".nan", so the synced
+// moment.append lane could not tell a non-finite number from a string that
+// merely spells one and flagged both expected-number. The parse provenance
+// now rides the apply; the stored value stays the coerced string.
+#[test]
+fn moment_lane_indexing_distinguishes_non_finite_numbers_from_nan_strings() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:
+  estimate:
+    type: number
+",
+        2,
+    )
+    .expect("measurement schema");
+    write_text(
+        &mut store,
+        "measurements/unquoted.md",
+        &format!(
+            "---
+id: {FIRST_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        3,
+    )
+    .expect("unquoted seed");
+    write_text(
+        &mut store,
+        "measurements/quoted.md",
+        &format!(
+            "---
+id: {SECOND_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        4,
+    )
+    .expect("quoted seed");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    for (object_id, text, now) in [
+        (
+            "object-3",
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: .nan
+---
+"
+            ),
+            5,
+        ),
+        (
+            "object-4",
+            format!(
+                "---
+id: {SECOND_TASK_ID}
+estimate: \".nan\"
+---
+"
+            ),
+            6,
+        ),
+    ] {
+        let before = json!({ "estimate": 0 });
+        let (after, provenance) =
+            markdown_frontmatter_json_with_provenance(&text).expect("incoming frontmatter parses");
+        let applied = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    object_id,
+                    &before,
+                    &after,
+                    &before,
+                    &after,
+                    Some(&provenance),
+                    Some("peer"),
+                    None,
+                    Some(("peer", now)),
+                    now,
+                )
+            })
+            .expect("apply synced frontmatter");
+        assert!(matches!(applied, TxnOutcome::Committed(Some(_))));
+    }
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "measurements",
+                &CollectionQuery::default(),
+            )
+        })
+        .expect("query measurements")
+        .expect("measurement collection");
+    let validation = |record_id: &str| {
+        let record = query
+            .records
+            .iter()
+            .find(|record| record.id == record_id)
+            .unwrap_or_else(|| panic!("missing record {record_id}"));
+        let value = record
+            .values
+            .iter()
+            .find(|value| value.field == "estimate")
+            .expect("estimate value");
+        assert_eq!(value.value, json!(".nan"), "the coerced value is preserved");
+        serde_json::to_value(&value.validation).expect("serialize validation")
+    };
+    assert_eq!(
+        validation(FIRST_TASK_ID),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "number-not-finite", "path": "" }
+        }),
+        "an unquoted .nan is a non-finite number"
+    );
+    assert_eq!(
+        validation(SECOND_TASK_ID),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "expected-number", "path": "" }
+        }),
+        "a quoted \".nan\" is a string in a number field"
     );
 }
 
