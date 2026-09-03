@@ -3153,3 +3153,141 @@ async fn collections_list_pages_with_the_exclusive_cursor() {
     );
     assert_eq!(unpaged["nextCursor"], Value::Null);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
+    const COLLECTIONS: [&str; 6] = ["alpha", "beta", "delta", "epsilon", "gamma", "zeta"];
+    const REASONS_PER_COLLECTION: usize = 700;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    // A pathological but honestly parsed degradation: each unknown root key
+    // yields one UnknownProperty reason with a long path, so the reason COUNT
+    // cap alone cannot bound the serialized reasons - the #990 shape.
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let mut schema = format!(
+            "name: {name}
+"
+        );
+        for reason in 0..REASONS_PER_COLLECTION {
+            let _ = writeln!(schema, "unknown{}{reason}: x", "p".repeat(120));
+        }
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    let stored_reasons = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT degradation_reasons_json FROM collections                  WHERE workspace_id=?1 AND version_id='main' AND collection_path='alpha'",
+                rusqlite::params![WORKSPACE_ID],
+                |row| row.get::<_, String>(0),
+            )
+        })
+        .expect("stored reasons");
+    assert!(
+        stored_reasons.len() > 80 * 1024,
+        "the fixture must exceed the per-summary reason budget: {} bytes",
+        stored_reasons.len()
+    );
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    let mut saw_page_cut = false;
+    for request_id in 100..110 {
+        let mut params = json!({ "limit": 500 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let serialized = serde_json::to_string(&page).expect("serialize list page");
+        assert!(
+            serialized.len() <= 512 * 1024,
+            "a byte-bounded page must stay well under the frame: {} bytes",
+            serialized.len()
+        );
+        let collections = page["collections"].as_array().expect("collections page");
+        saw_page_cut |= !collections.is_empty() && collections.len() < COLLECTIONS.len();
+        for summary in collections {
+            let kept = summary["reasons"].as_array().expect("reasons").len();
+            let omitted = summary["omittedReasons"]
+                .as_u64()
+                .expect("omitted reason count") as usize;
+            assert!(
+                kept > 0,
+                "a truncated reason list keeps a diagnostic prefix"
+            );
+            assert_eq!(
+                kept + omitted,
+                REASONS_PER_COLLECTION,
+                "the omitted count must complete the stored reason list"
+            );
+            paths.push(summary["path"].as_str().expect("path").to_owned());
+        }
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert!(
+        saw_page_cut,
+        "the fixture must force a byte cut below the row limit"
+    );
+    assert!(cursor.is_null(), "paging must terminate");
+    assert_eq!(
+        paths, COLLECTIONS,
+        "byte-cut pages must cover every collection in order"
+    );
+
+    // The full stored reason list stays readable through collections.get.
+    let details = call(
+        &transport,
+        &handle,
+        120,
+        "collections.get",
+        json!({ "collectionPath": "alpha" }),
+    )
+    .await;
+    assert_eq!(
+        details["reasons"].as_array().expect("full reasons").len(),
+        REASONS_PER_COLLECTION
+    );
+}

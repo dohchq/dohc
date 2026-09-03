@@ -776,6 +776,7 @@ const CollectionSummarySchema = mutableStruct({
   path: Schema.String,
   status: Schema.Literals(["valid", "degraded"]),
   reasons: Schema.mutable(Schema.Array(CollectionSchemaReasonSchema)),
+  omittedReasons: Schema.optionalKey(Schema.Int),
 });
 
 const CollectionDetailsSchema = mutableStruct({

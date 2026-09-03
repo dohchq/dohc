@@ -432,6 +432,7 @@ const collectionSummaryShape = {
   path: PATH_STRING,
   status: z.enum(["valid", "degraded"]),
   reasons: z.array(CollectionSchemaReason).max(MAX_SCHEMA_COLLECTION_ITEMS),
+  omittedReasons: z.number().int().nonnegative().optional(),
 } as const;
 
 export const CollectionSummarySchema: z.ZodType<CollectionSummaryContract> =

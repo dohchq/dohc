@@ -427,8 +427,51 @@ fn bound_collection_history_page(response: &mut Value) {
     response["nextBeforeHistoryId"] = next_before_history_id;
 }
 
-fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
-    let response = collection_response_value(response)?;
+/// Approximate serialized-bytes budget for one `collections.list` page.
+const COLLECTIONS_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// The most one summary's serialized degradation-reason list may occupy in a
+/// `collections.list` page. The reason COUNT is capped at the wire collection
+/// limit, but 16,384 reasons with long paths can still pass the frame; the
+/// full list stays readable through `collections.get`, which rides blob
+/// egress.
+const COLLECTION_SUMMARY_REASONS_BYTE_BUDGET: usize = 64 * 1024;
+
+/// Bounds an encoded `collections.list` page by serialized bytes: each
+/// summary's reason list truncates to its budget with an `omittedReasons`
+/// count, then the page cuts to its budget and `nextCursor` repoints at the
+/// cut so a caller keeps paging instead of hitting a frame refusal.
+fn bound_collections_list_page(response: &mut Value) {
+    let Some(collections) = response
+        .get_mut("collections")
+        .and_then(Value::as_array_mut)
+    else {
+        return;
+    };
+    for summary in collections.iter_mut() {
+        let Some(reasons) = summary.get_mut("reasons").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let included = byte_budget_cut_serialized(reasons, COLLECTION_SUMMARY_REASONS_BYTE_BUDGET);
+        if included < reasons.len() {
+            let omitted = reasons.len() - included;
+            reasons.truncate(included);
+            summary["omittedReasons"] = json!(omitted);
+        }
+    }
+    let included = byte_budget_cut_serialized(collections, COLLECTIONS_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(collections.len());
+    if included < collections.len() {
+        collections.truncate(included);
+        let next_cursor = collections
+            .last()
+            .map_or(Value::Null, |summary| summary["path"].clone());
+        response["nextCursor"] = next_cursor;
+    }
+}
+
+fn in_band_collection_response(response: Value) -> Result<Value, WireError> {
     let encoded_len = serde_json::to_vec(&response)
         .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
         .len();
@@ -439,6 +482,10 @@ fn collection_response_json(response: impl Serialize) -> Result<Value, WireError
         ));
     }
     Ok(response)
+}
+
+fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
+    in_band_collection_response(collection_response_value(response)?)
 }
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
@@ -4158,7 +4205,9 @@ impl EngineService {
                 .collections_list(open.workspace_id, params.limit, params.cursor),
         )
         .await?;
-        collection_response_json(page)
+        let mut response = collection_response_value(page)?;
+        bound_collections_list_page(&mut response);
+        in_band_collection_response(response)
     }
 
     /// Returns active-version collection bindings waiting for the shared

@@ -138,6 +138,12 @@ export interface CollectionSummary {
   path: string;
   status: CollectionStatus;
   reasons: CollectionSchemaReason[];
+  /**
+   * How many degradation reasons a byte-bounded `collections.list` page
+   * dropped from `reasons`. Absent when the list is complete; the full list
+   * stays readable through `collections.get`.
+   */
+  omittedReasons?: number;
 }
 
 export interface CollectionDetails extends CollectionSummary {
