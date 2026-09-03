@@ -40,6 +40,12 @@ import { rewriteCollectionSchema } from "./collections/schemaWrite";
 // The live document field PropertiesPanel writes; one name for one thing.
 const FRONTMATTER_FIELD = "frontmatter";
 
+// How long a cell write may sit "file-locked" before the queue reports it.
+// Main's settle retries double from 800 ms to a 10 s cap, so 15 s spans the
+// whole ladder: a lock still held then is a program sitting on the file, not
+// a blip worth waiting out silently.
+export const FILE_LOCKED_REPORT_MS = 15_000;
+
 export interface CollectionPageProps {
   workspaceId: string;
   collectionPath: string;
@@ -78,7 +84,9 @@ export function frontmatterWriteValue(value: CollectionValue): unknown {
  * engine doc session, set the field on the frontmatter map inside a
  * transaction, then hold the lease until the engine reports the save
  * settled (local updates are staged and flushed asynchronously, so
- * releasing at transact time could drop the write). Renders nothing.
+ * releasing at transact time could drop the write). A save stuck
+ * "file-locked" past FILE_LOCKED_REPORT_MS reports the lock and releases —
+ * the engine holds the write durably and keeps retrying. Renders nothing.
  */
 export function CollectionRecordFieldWrite({
   workspaceId,
@@ -89,7 +97,8 @@ export function CollectionRecordFieldWrite({
   workspaceId: string;
   change: CollectionCellChange;
   onDone: () => void;
-  onError: (detail: string | null) => void;
+  // The full state line the queue shows, or null for its generic one.
+  onError: (message: string | null) => void;
 }) {
   const docState = useEngineDoc({
     workspaceId,
@@ -98,6 +107,13 @@ export function CollectionRecordFieldWrite({
   });
   const applied = useRef(false);
   const sawSaving = useRef(false);
+  const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (lockedReport.current !== null) clearTimeout(lockedReport.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (applied.current || docState.opening) return;
@@ -128,17 +144,37 @@ export function CollectionRecordFieldWrite({
         if (sawSaving.current) onDone();
         return;
       case "file-locked":
-        // Main keeps retrying this transient refusal until the lock releases.
+        // Main retries this transient refusal until the lock releases, but
+        // nothing bounds that wait. A "file-locked" report means the settle
+        // committed — the edit is journaled and its write job durably
+        // pending, retried while the session lives and paid after release —
+        // so after the window the queue reports the lock and moves on
+        // instead of stalling every later edit behind this one. A retry's
+        // own saving flip must not reset the window: the timer arms once.
+        if (lockedReport.current === null) {
+          lockedReport.current = setTimeout(() => {
+            const file =
+              change.recordPath.split("/").at(-1) ?? change.recordPath;
+            onError(
+              `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`,
+            );
+            onDone();
+          }, FILE_LOCKED_REPORT_MS);
+        }
         return;
       case "error":
       case "read-only":
       case "changed-on-disk":
       case "deleted":
-        onError(docState.saveError);
+        onError(
+          docState.saveError
+            ? `dohc could not save this change. ${docState.saveError}`
+            : null,
+        );
         onDone();
         return;
     }
-  }, [docState.saveState, docState.saveError, onDone, onError]);
+  }, [docState.saveState, docState.saveError, change.recordPath, onDone, onError]);
 
   return null;
 }
@@ -307,12 +343,8 @@ export function CollectionPage({
     // now instead of waiting for the activity event.
     void store.refresh();
   }, [store]);
-  const failWrite = useCallback((detail: string | null) => {
-    setWriteError(
-      detail
-        ? `dohc could not save this change. ${detail}`
-        : "dohc could not save this change.",
-    );
+  const failWrite = useCallback((message: string | null) => {
+    setWriteError(message ?? "dohc could not save this change.");
   }, []);
   const headWrite = writes[0];
 
