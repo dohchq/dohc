@@ -252,14 +252,17 @@
     <div class="section-head reveal">
       <h2 id="sync-title">Files on your computer. Sync when you need it.</h2>
       <p class="section-lede">
-        Your laptop and your phone each keep a full copy of the folder. Edit
-        on one and the other catches up. No signal? Keep working. When you're
-        back online, the edits come together.
+        Every device holds the whole folder. Each edit is written to your
+        disk first, as a signed entry in a local journal. A relay carries
+        those entries between your devices and keeps no readable copy. Lose
+        the connection and the journal keeps growing; get it back and the
+        engine replays both sides until they match.
       </p>
     </div>
     <div class="sync-demo reveal d1" data-sync-demo>
       <div class="device laptop">
         <div class="laptop-lid">
+          <span class="laptop-notch" aria-hidden="true"></span>
           <div class="laptop-screen">
             <div class="device-bar"><span class="device-bar-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>plan.md</span><span class="device-state" data-sync-state="a">in sync</span></div>
             <div class="device-doc">
@@ -269,7 +272,7 @@
             <div class="device-foot" data-sync-foot="a">saved on this laptop</div>
           </div>
         </div>
-        <div class="laptop-base" aria-hidden="true"></div>
+        <div class="laptop-base" aria-hidden="true"><span class="laptop-trackpad"></span></div>
       </div>
 
       <div class="sync-link" data-sync-link>
@@ -278,9 +281,11 @@
       </div>
 
       <div class="device phone">
+        <span class="phone-button phone-button-action" aria-hidden="true"></span>
+        <span class="phone-button phone-button-vol phone-button-vol-up" aria-hidden="true"></span>
+        <span class="phone-button phone-button-vol phone-button-vol-down" aria-hidden="true"></span>
         <span class="phone-button phone-button-power" aria-hidden="true"></span>
-        <span class="phone-button phone-button-vol phone-button-vol-1" aria-hidden="true"></span>
-        <span class="phone-button phone-button-vol phone-button-vol-2" aria-hidden="true"></span>
+        <div class="phone-bezel">
         <div class="phone-screen">
           <div class="phone-status" aria-hidden="true">
             <span data-sync-clock>9:41</span>
@@ -294,6 +299,7 @@
           </div>
           <div class="device-foot" data-sync-foot="b">saved on this phone</div>
           <span class="phone-home" aria-hidden="true"></span>
+        </div>
         </div>
       </div>
     </div>
