@@ -591,5 +591,458 @@ if (principlesGraph) {
   if (initialPrinciple) selectPrinciple(initialPrinciple);
 }
 
+// Agent chat demo: friends ask, you @ your own agent, and the split app it
+// built sits beside the conversation. The picker swaps which model the
+// agent runs on; the split app is a small working calculator.
+const agentDemo = document.querySelector('[data-agent-demo]');
+
+if (agentDemo) {
+  const AGENTS = {
+    claude: {
+      name: 'Claude',
+      color: '#D97757',
+    },
+    codex: {
+      name: 'Codex',
+      color: 'var(--ink)',
+    },
+    gemini: {
+      name: 'Gemini',
+      color: '#4285F4',
+    },
+  };
+  const chips = Array.from(agentDemo.querySelectorAll('[data-agent]'));
+  const names = Array.from(agentDemo.querySelectorAll('[data-agent-name]'));
+  const logos = Array.from(agentDemo.querySelectorAll('[data-agent-logo]'));
+
+  const selectAgent = (chip) => {
+    const agent = AGENTS[chip.dataset.agent];
+    if (!agent) return;
+    chips.forEach((candidate) => {
+      candidate.setAttribute('aria-pressed', String(candidate === chip));
+    });
+    agentDemo.style.setProperty('--agent-color', agent.color);
+    names.forEach((el) => { el.textContent = agent.name; });
+    logos.forEach((el) => el.setAttribute('href', `#logo-${chip.dataset.agent}`));
+  };
+
+  chips.forEach((chip) => chip.addEventListener('click', () => selectAgent(chip)));
+
+  // The Split app: everyone ticks what they had; each item's price divides
+  // between whoever ticked it, and the izakaya service charge follows the
+  // same shares. Ticks are demo state only.
+  const split = agentDemo.querySelector('[data-split]');
+
+  if (split) {
+    const PEOPLE = { you: 'you', maya: 'Maya', sam: 'Sam' };
+    // Each receipt's total (with service) is what its payer put down.
+    const PAID = { you: 4500, maya: 7568, sam: 1080 };
+    const RECEIPTS = [
+      {
+        name: 'izakaya', paidBy: 'maya', service: 0.1,
+        items: [
+          { name: 'sashimi platter', price: 2400, had: ['you', 'sam'] },
+          { name: 'yakitori × 12', price: 1800, had: ['you', 'maya', 'sam'] },
+          { name: 'beer × 4', price: 2000, had: ['you', 'maya'] },
+          { name: 'karaage', price: 680, had: ['maya', 'sam'] },
+        ],
+      },
+      {
+        name: 'ramen', paidBy: 'you',
+        items: [
+          { name: 'tonkotsu × 3', price: 3300, had: ['you', 'maya', 'sam'] },
+          { name: 'gyoza × 2', price: 1200, had: ['you', 'sam'] },
+        ],
+      },
+      {
+        name: 'konbini', paidBy: 'sam',
+        items: [
+          { name: 'onigiri × 4', price: 720, had: ['you', 'maya', 'sam'] },
+          { name: 'ice cream', price: 360, had: ['sam'] },
+        ],
+      },
+    ];
+    const yen = (amount) => `¥${Math.round(amount).toLocaleString('en-US')}`;
+    const list = split.querySelector('[data-split-receipts]');
+    const personButtons = Array.from(split.querySelectorAll('[data-person]'));
+    const label = split.querySelector('[data-split-label]');
+    const amount = split.querySelector('[data-split-amount]');
+    const meta = split.querySelector('[data-split-meta]');
+    const transfersHost = split.querySelector('[data-split-transfers]');
+    // Sam already paid Maya back, so the app opens with one settled row.
+    const settled = new Set(['sam>maya']);
+    let person = 'you';
+
+    const receiptTotal = (receipt) =>
+      receipt.items.reduce((sum, item) => sum + item.price, 0) * (1 + (receipt.service || 0));
+
+    // Render the receipts once, then keep the DOM and only update state.
+    RECEIPTS.forEach((receipt) => {
+      const group = document.createElement('div');
+      group.className = 'app-group';
+      group.innerHTML = `<span>${receipt.name}</span><span>${PEOPLE[receipt.paidBy]} paid ${yen(receiptTotal(receipt))}</span>`;
+      list.appendChild(group);
+      receipt.items.forEach((item) => {
+        const row = document.createElement('label');
+        row.className = 'app-item';
+        row.innerHTML = `<input type="checkbox" /><span class="app-check" aria-hidden="true"></span><span>${item.name}</span><span class="app-price"><small></small><span></span></span>`;
+        item.row = row;
+        item.box = row.querySelector('input');
+        item.box.addEventListener('change', () => {
+          const set = new Set(item.had);
+          if (item.box.checked) set.add(person); else set.delete(person);
+          item.had = Array.from(set);
+          settled.clear();
+          render();
+        });
+        list.appendChild(row);
+      });
+    });
+
+    const shareOf = (who) => {
+      let total = 0;
+      RECEIPTS.forEach((receipt) => {
+        receipt.items.forEach((item) => {
+          if (!item.had.includes(who)) return;
+          total += (item.price / item.had.length) * (1 + (receipt.service || 0));
+        });
+      });
+      return total;
+    };
+
+    // Pairwise settlement: whoever owes most pays whoever is owed most.
+    const settle = () => {
+      const nets = Object.keys(PEOPLE).map((who) => ({ who, net: shareOf(who) - PAID[who] }));
+      const debtors = nets.filter((n) => n.net > 0.5).sort((a, b) => b.net - a.net);
+      const creditors = nets.filter((n) => n.net < -0.5).map((n) => ({ who: n.who, net: -n.net })).sort((a, b) => b.net - a.net);
+      const transfers = [];
+      let d = 0;
+      let k = 0;
+      while (d < debtors.length && k < creditors.length) {
+        const value = Math.min(debtors[d].net, creditors[k].net);
+        transfers.push({ from: debtors[d].who, to: creditors[k].who, value, key: `${debtors[d].who}>${creditors[k].who}` });
+        debtors[d].net -= value;
+        creditors[k].net -= value;
+        if (debtors[d].net < 0.5) d += 1;
+        if (creditors[k].net < 0.5) k += 1;
+      }
+      return transfers;
+    };
+
+    transfersHost.addEventListener('click', (event) => {
+      const button = event.target.closest('[data-settle]');
+      if (!button) return;
+      settled.add(button.dataset.settle);
+      render();
+    });
+
+    const render = () => {
+      personButtons.forEach((button) => {
+        button.setAttribute('aria-selected', String(button.dataset.person === person));
+      });
+      RECEIPTS.forEach((receipt) => {
+        receipt.items.forEach((item) => {
+          const mine = item.had.includes(person);
+          item.box.checked = mine;
+          item.row.classList.toggle('is-mine', mine);
+          const shared = mine && item.had.length > 1;
+          item.row.querySelector('small').textContent = shared ? `÷${item.had.length}` : '';
+          item.row.querySelector('.app-price > span').textContent =
+            shared ? yen(item.price / item.had.length) : yen(item.price);
+        });
+      });
+
+      const name = PEOPLE[person];
+      const me = person === 'you';
+      const transfers = settle();
+      const open = transfers.filter((t) => !settled.has(t.key));
+      const outgoing = open.filter((t) => t.from === person);
+      const incoming = open.filter((t) => t.to === person);
+      const names = (list) => list.map((t) => `<b>${PEOPLE[t.from === person ? t.to : t.from]}</b>`).join(' and ');
+      const sum = (list) => list.reduce((acc, t) => acc + t.value, 0);
+
+      const hero = split.querySelector('.app-hero');
+      hero.classList.toggle('is-clear', !outgoing.length && !incoming.length);
+      if (outgoing.length) {
+        label.innerHTML = `${me ? 'you owe' : `${name} owes`} ${names(outgoing)}`;
+        amount.textContent = yen(sum(outgoing));
+      } else if (incoming.length) {
+        label.innerHTML = `${names(incoming)} ${incoming.length > 1 || incoming[0].from === 'you' ? 'owe' : 'owes'} ${me ? 'you' : name}`;
+        amount.textContent = yen(sum(incoming));
+      } else {
+        label.textContent = me ? "you're all settled" : `${name} is all settled`;
+        amount.textContent = yen(0);
+      }
+      meta.textContent = `had ${yen(shareOf(person))} · paid ${yen(PAID[person])}`;
+
+      transfersHost.innerHTML = transfers
+        .map((t) => {
+          const done = settled.has(t.key);
+          const verb = t.from === 'you' ? 'pay' : 'pays';
+          const action = done
+            ? '<span class="app-settled">settled &#10003;</span>'
+            : `<button class="app-settle" type="button" data-settle="${t.key}">Settle</button>`;
+          return `<div class="app-transfer${done ? ' is-settled' : ''}"><span><b>${PEOPLE[t.from]}</b> ${verb} <b>${PEOPLE[t.to]}</b></span><span class="amt">${yen(t.value)}</span>${action}</div>`;
+        })
+        .join('');
+    };
+
+    personButtons.forEach((button) => {
+      button.addEventListener('click', () => {
+        person = button.dataset.person;
+        render();
+      });
+    });
+    render();
+  }
+
+}
+
+// Local-first sync demo: a laptop and a phone hold the same file. It plays
+// itself (type, go offline, type on both, reconnect, merge, loop) and hands
+// control to the visitor on their first click, keypress, or switch flip.
+const syncDemo = document.querySelector('[data-sync-demo]');
+
+if (syncDemo) {
+  const a = syncDemo.querySelector('[data-sync-editor="a"]');
+  const b = syncDemo.querySelector('[data-sync-editor="b"]');
+  const toggle = document.querySelector('[data-sync-toggle]');
+  const hint = document.querySelector('[data-sync-hint]');
+  const link = syncDemo.querySelector('[data-sync-link]');
+  const linkLabel = syncDemo.querySelector('[data-sync-link-label]');
+  const signal = syncDemo.querySelector('[data-sync-signal]');
+  const clock = syncDemo.querySelector('[data-sync-clock]');
+  const state = { a: syncDemo.querySelector('[data-sync-state="a"]'), b: syncDemo.querySelector('[data-sync-state="b"]') };
+  const foot = { a: syncDemo.querySelector('[data-sync-foot="a"]'), b: syncDemo.querySelector('[data-sync-foot="b"]') };
+  const START = a.value;
+  let base = START;
+  let manual = false;
+  let timers = [];
+
+  if (clock) {
+    const now = new Date();
+    clock.textContent = `${now.getHours() % 12 || 12}:${String(now.getMinutes()).padStart(2, '0')}`;
+  }
+
+  // Schedule fn on the next frame, but no later than 50ms, so streams keep
+  // moving in a hidden or throttled tab. Returns a handle for cancelTick.
+  const tick = (fn) => {
+    const handle = { done: false };
+    const run = (now) => {
+      if (handle.done) return;
+      handle.done = true;
+      fn(now || performance.now());
+    };
+    handle.raf = requestAnimationFrame(run);
+    handle.timer = setTimeout(run, 50);
+    return handle;
+  };
+  const cancelTick = (handle) => {
+    if (!handle) return;
+    handle.done = true;
+    cancelAnimationFrame(handle.raf);
+    clearTimeout(handle.timer);
+  };
+
+  // One pending swap per label, so a fast pair of changes can't land out
+  // of order and leave a stale word on screen.
+  const pendingSwap = new WeakMap();
+  const swapText = (el, text) => {
+    clearTimeout(pendingSwap.get(el));
+    if (el.textContent === text) { el.classList.remove('is-swapping'); return; }
+    if (reduced) { el.textContent = text; return; }
+    el.classList.add('is-swapping');
+    pendingSwap.set(el, setTimeout(() => { el.textContent = text; el.classList.remove('is-swapping'); }, 180));
+  };
+  const setStatus = (key, text, footText) => {
+    swapText(state[key], text);
+    swapText(foot[key], footText);
+  };
+  const savedOn = (key) => (key === 'a' ? 'saved on this laptop' : 'saved on this phone');
+
+  // Three-way merge on sentences: keep what both changed, append what one added.
+  const merge = (basis, left, right) => {
+    if (left === right) return left;
+    if (left === basis) return right;
+    if (right === basis) return left;
+    const split = (s) => s.split(/(?<=[.!?])\s+/).filter(Boolean);
+    const ls = split(left), rs = split(right), bs = split(basis);
+    const out = [];
+    const seen = new Set();
+    ls.concat(rs).forEach((s) => {
+      if (seen.has(s)) return;
+      const inBase = bs.includes(s);
+      if (inBase && !(ls.includes(s) && rs.includes(s))) return;
+      seen.add(s);
+      out.push(s);
+    });
+    return out.join(' ');
+  };
+
+  // Stream an editor toward a target value from where they diverge.
+  const receiving = { a: null, b: null };
+  const keyOf = (el) => (el === a ? 'a' : 'b');
+  const stopReceiving = (el) => {
+    cancelTick(receiving[keyOf(el)]);
+    receiving[keyOf(el)] = null;
+    el.classList.remove('is-receiving');
+  };
+  const receive = (el, target) => {
+    const key = keyOf(el);
+    stopReceiving(el);
+    if (reduced || el.value === target) { el.value = target; return; }
+    let start = 0;
+    while (start < el.value.length && start < target.length && el.value[start] === target[start]) start += 1;
+    const remaining = target.length - start;
+    const duration = Math.min(1400, Math.max(240, remaining * 16));
+    const t0 = performance.now();
+    el.value = target.slice(0, start);
+    el.classList.add('is-receiving');
+    const frame = (now) => {
+      const p = Math.min(1, (now - t0) / duration);
+      const eased = 1 - (1 - p) * (1 - p);
+      el.value = target.slice(0, start + Math.round(remaining * eased));
+      if (p < 1) receiving[key] = tick(frame);
+      else { receiving[key] = null; el.value = target; el.classList.remove('is-receiving'); }
+    };
+    receiving[key] = tick(frame);
+  };
+
+  const onInput = (from) => {
+    const other = from === a ? b : a;
+    const key = keyOf(from);
+    const otherKey = keyOf(other);
+    if (toggle.checked) {
+      receive(other, from.value);
+      base = from.value;
+      setStatus(key, 'in sync', savedOn(key));
+      setStatus(otherKey, 'in sync', 'just updated');
+    } else {
+      setStatus(key, 'offline', 'saved here · will sync later');
+    }
+  };
+
+  const setConnection = (on) => {
+    toggle.checked = on;
+    link.classList.toggle('is-off', !on);
+    if (signal) signal.classList.toggle('is-off', !on);
+    if (on) {
+      const merged = merge(base, a.value, b.value);
+      const changed = merged !== a.value || merged !== b.value;
+      base = merged;
+      receive(a, merged);
+      receive(b, merged);
+      swapText(linkLabel, 'connected');
+      setStatus('a', 'in sync', changed ? 'both edits kept' : savedOn('a'));
+      setStatus('b', 'in sync', changed ? 'both edits kept' : savedOn('b'));
+      swapText(hint, changed ? 'back online. nothing was lost.' : (manual ? 'try typing on either device' : 'watching. click or type to take over.'));
+    } else {
+      swapText(linkLabel, 'no connection');
+      setStatus('a', 'offline', 'saved here · will sync later');
+      setStatus('b', 'offline', 'saved here · will sync later');
+      swapText(hint, manual ? 'now type on both, then turn it back on' : 'no signal. both devices keep working.');
+    }
+  };
+
+  // ---------- autoplay ----------
+  let typing = false;
+  let typeFrame = null;
+  const wait = (ms) => new Promise((resolve) => { timers.push(setTimeout(resolve, ms)); });
+  const clearTimers = () => {
+    timers.forEach(clearTimeout);
+    timers = [];
+    cancelTick(typeFrame);
+    typeFrame = null;
+  };
+
+  const type = (el, text) => new Promise((resolve) => {
+    const startValue = el.value;
+    const t0 = performance.now();
+    let shown = 0;
+    typing = true;
+    const frame = (now) => {
+      if (manual) { typing = false; typeFrame = null; resolve(); return; }
+      const want = Math.min(text.length, Math.floor((now - t0) / 42));
+      if (want > shown) {
+        shown = want;
+        el.value = startValue + text.slice(0, shown);
+        onInput(el);
+      }
+      if (shown < text.length) typeFrame = tick(frame);
+      else { typing = false; typeFrame = null; resolve(); }
+    };
+    typeFrame = tick(frame);
+  });
+
+  const resetEditors = async () => {
+    if (a.value === START && b.value === START) return;
+    a.classList.add('is-fading');
+    b.classList.add('is-fading');
+    await wait(380);
+    a.value = START; b.value = START; base = START;
+    a.classList.remove('is-fading');
+    b.classList.remove('is-fading');
+    await wait(420);
+  };
+
+  const play = async () => {
+    while (!manual) {
+      await resetEditors(); if (manual) break;
+      setConnection(true);
+      swapText(hint, 'watching. click or type to take over.');
+      await wait(1200); if (manual) break;
+      await type(a, ' Rail passes packed.'); if (manual) break;
+      await wait(1400); if (manual) break;
+      setConnection(false);
+      await wait(1300); if (manual) break;
+      await type(b, ' Book the tea ceremony.'); if (manual) break;
+      await wait(500); if (manual) break;
+      await type(a, ' Market run on Saturday.'); if (manual) break;
+      await wait(1400); if (manual) break;
+      setConnection(true);
+      await wait(5000);
+    }
+  };
+
+  const takeOver = () => {
+    if (manual) return;
+    manual = true;
+    clearTimers();
+    [a, b].forEach((el) => { stopReceiving(el); el.classList.remove('is-fading'); });
+    if (toggle.checked) {
+      const m = merge(base, a.value, b.value);
+      a.value = m; b.value = m; base = m;
+    }
+    if (!typing) hint.textContent = toggle.checked ? 'your turn. try typing on either device' : 'now type on both, then turn it back on';
+  };
+
+  a.addEventListener('input', () => { if (!typing) { takeOver(); onInput(a); } });
+  b.addEventListener('input', () => { if (!typing) { takeOver(); onInput(b); } });
+  a.addEventListener('pointerdown', takeOver);
+  b.addEventListener('pointerdown', takeOver);
+  toggle.addEventListener('change', () => { takeOver(); setConnection(toggle.checked); });
+
+  if (reduced) {
+    manual = true;
+    hint.textContent = 'try typing on either device';
+  } else {
+    // Start when the section is close to view so the loop isn't half over
+    // by the time anyone sees it.
+    let started = false;
+    const start = () => { if (!started) { started = true; play(); } };
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) { io.disconnect(); start(); }
+      }, { rootMargin: '200px 0px' });
+      io.observe(syncDemo);
+      // Some embedded browsers never deliver observer callbacks; poll as a floor.
+      const near = () => syncDemo.getBoundingClientRect().top < innerHeight + 200;
+      const poll = setInterval(() => { if (started) clearInterval(poll); else if (near()) { clearInterval(poll); start(); } }, 500);
+    } else {
+      start();
+    }
+  }
+}
+
 const year = document.getElementById('year');
 if (year) year.textContent = new Date().getFullYear();
