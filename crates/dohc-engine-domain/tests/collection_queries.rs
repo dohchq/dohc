@@ -2148,6 +2148,121 @@ estimate: \".nan\"
 }
 
 #[test]
+fn a_same_value_provenance_change_refreshes_the_flag_reason() {
+    let (_scratch, mut store) = fresh_store();
+    write_text(
+        &mut store,
+        "measurements/collection.yaml",
+        "fields:
+  estimate:
+    type: number
+",
+        2,
+    )
+    .expect("measurement schema");
+    write_text(
+        &mut store,
+        "measurements/one.md",
+        &format!(
+            "---
+id: {FIRST_TASK_ID}
+estimate: 0
+---
+"
+        ),
+        3,
+    )
+    .expect("seed");
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, VERSION_ID)
+        })
+        .expect("reconcile measurements");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+
+    // Unquoted .nan, then the quoted string: the coerced JSON value is the
+    // same ".nan" both times, so nothing but the provenance changes.
+    let mut before = json!({ "estimate": 0 });
+    for (text, now) in [
+        (
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: .nan
+---
+"
+            ),
+            5,
+        ),
+        (
+            format!(
+                "---
+id: {FIRST_TASK_ID}
+estimate: \".nan\"
+---
+"
+            ),
+            6,
+        ),
+    ] {
+        let (after, provenance) =
+            markdown_frontmatter_json_with_provenance(&text).expect("incoming frontmatter parses");
+        let applied = store
+            .write_with(&NoFaults, |tx| {
+                index_collection_frontmatter_apply_in_tx(
+                    tx,
+                    WORKSPACE_ID,
+                    VERSION_ID,
+                    "object-3",
+                    &before,
+                    &after,
+                    &before,
+                    &after,
+                    Some(&provenance),
+                    Some("peer"),
+                    None,
+                    Some(("peer", now)),
+                    now,
+                )
+            })
+            .expect("apply synced frontmatter");
+        assert!(matches!(applied, TxnOutcome::Committed(_)));
+        before = after;
+    }
+
+    let query = store
+        .read_with(|conn| {
+            query_collection_records(
+                conn,
+                WORKSPACE_ID,
+                "measurements",
+                &CollectionQuery::default(),
+            )
+        })
+        .expect("query measurements")
+        .expect("measurement collection");
+    let record = query
+        .records
+        .iter()
+        .find(|record| record.id == FIRST_TASK_ID)
+        .expect("record");
+    let value = record
+        .values
+        .iter()
+        .find(|value| value.field == "estimate")
+        .expect("estimate value");
+    assert_eq!(value.value, json!(".nan"));
+    assert_eq!(
+        serde_json::to_value(&value.validation).expect("serialize validation"),
+        json!({
+            "status": "flagged",
+            "reason": { "code": "expected-number", "path": "" }
+        }),
+        "the quoted rewrite replaces the non-finite reason even though the value is unchanged"
+    );
+}
+
+#[test]
 fn collection_reconcile_keeps_fresh_lossless_mode_distinct_from_established_repair() {
     let (_scratch, mut store) = fresh_store();
     write_text(&mut store, "tasks/collection.yaml", "name: Tasks\n", 2).expect("task schema");

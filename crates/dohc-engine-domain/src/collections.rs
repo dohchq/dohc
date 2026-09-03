@@ -2489,7 +2489,12 @@ pub fn index_collection_frontmatter_apply_in_tx(
             }
         }
     }
-    if applied_frontmatter_unchanged && authored_frontmatter_unchanged {
+    // Parsed provenance can change a field's validation without changing its
+    // coerced value: `estimate: .nan` and `estimate: ".nan"` both index as
+    // the string ".nan" but flag for different reasons, so a caller that
+    // supplied provenance always reindexes (#987).
+    if applied_frontmatter_unchanged && authored_frontmatter_unchanged && after_provenance.is_none()
+    {
         return Ok(None);
     }
     let schema = load_collection_schema(conn, workspace_id, version_id, &collection_path)?;
