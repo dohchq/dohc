@@ -36,7 +36,7 @@ impl SelfWriteRecorder for NoRecorder {
 }
 
 fn deferred_rows(db: &std::path::Path) -> i64 {
-    let store = EngineStore::open(db, 9_100).expect("open store");
+    let store = EngineStore::open_read_only(db).expect("open probe store");
     store
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -47,7 +47,7 @@ fn deferred_rows(db: &std::path::Path) -> i64 {
 }
 
 fn applied_update_rows(db: &std::path::Path) -> i64 {
-    let store = EngineStore::open(db, 9_101).expect("open store");
+    let store = EngineStore::open_read_only(db).expect("open probe store");
     store
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| {

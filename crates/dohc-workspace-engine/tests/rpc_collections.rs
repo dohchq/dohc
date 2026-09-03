@@ -2875,6 +2875,7 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
         .expect("reopen workspace");
     let handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("workspace handle");
+    let mut events = parked.service.events().subscribe();
     reconcile_capture(&parked.transport, &handle, 310).await;
 
     // The pass processed the candidate...
@@ -2894,14 +2895,21 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
         "the reconcile pass must process the reopened candidate"
     );
     drop(store);
-    // ...without consuming the parked update it cannot emit events for.
+    // ...without consuming the parked update it cannot emit events for,
+    // and without emitting anything for it either: the pass ran to
+    // completion above, so every notice it produced has been delivered.
     assert_eq!(
         deferred_update_rows(&parked.scratch),
         1,
         "the reconcile pass must leave the parked update queued (#1008)"
     );
+    while let Ok(notice) = events.try_recv() {
+        assert!(
+            !notice.name.starts_with("record."),
+            "the reconcile pass must emit no record event for the parked update: {notice:?}"
+        );
+    }
 
-    let mut events = parked.service.events().subscribe();
     call(
         &parked.transport,
         &handle,

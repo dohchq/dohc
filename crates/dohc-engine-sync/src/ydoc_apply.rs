@@ -529,6 +529,11 @@ pub fn drain_deferred_ydoc_for_key_cached(
 /// A caller that fails between the drain and the cleanup leaves the rows in
 /// place, exactly like a crash before the cleanup transaction: the retry
 /// re-drains content-deduped and reads the facts back (#1009).
+///
+/// The pending projection refusal, if any, travels in the cleanup rather
+/// than in the result's `refusals`: it is persisted when the cleanup runs,
+/// so a caller reading `refusals` here sees one fewer refusal than the
+/// immediate drain would report.
 pub fn drain_deferred_ydoc_for_key_cached_holding_cleanup(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
@@ -550,7 +555,6 @@ pub fn drain_deferred_ydoc_for_key_cached_holding_cleanup(
 /// transaction the immediate drain would have run last.
 pub fn complete_deferred_ydoc_drain_cleanup(
     store: &mut EngineStore,
-    key: &DocKey,
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
 ) -> Result<(), SyncError> {
@@ -562,7 +566,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
             tx.execute(
                 "DELETE FROM ydoc_deferred_updates \
                  WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                params![key.workspace_id, origin_id, origin_seq],
+                params![cleanup.workspace_id, origin_id, origin_seq],
             )
             .map_err(SyncError::persist)?;
         }
@@ -643,6 +647,7 @@ enum DeferredDrainMode<'a> {
 /// [`drain_deferred_ydoc_for_key_cached_holding_cleanup`].
 #[derive(Debug)]
 pub struct YdocDrainCleanup {
+    workspace_id: String,
     coordinates: Vec<(String, i64)>,
     projection_refusal: Option<crate::ReplicationRefusal>,
 }
@@ -963,6 +968,7 @@ fn drain_deferred_ydoc(
     let mut held_cleanup = None;
     if hold_cleanup {
         held_cleanup = Some(YdocDrainCleanup {
+            workspace_id: key.workspace_id.clone(),
             coordinates: drained_coordinates.clone(),
             projection_refusal,
         });
