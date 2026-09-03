@@ -2804,3 +2804,121 @@ async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal(
     )
     .await;
 }
+
+fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
+    let db = scratch.engine_db_path().expect("engine db path");
+    let store = EngineStore::open(&db, 8).expect("open deferred probe store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM ydoc_deferred_updates WHERE workspace_id=?1",
+                [WORKSPACE_ID],
+                |row| row.get::<_, i64>(0),
+            )
+        })
+        .expect("count deferred updates")
+}
+
+/// #1008: the engine-internal collection reconcile pass (record-id adoption,
+/// relation cleanup) has no event route for drained record facts, so its open
+/// and settle must LEAVE a parked synced update queued. The next `ydoc.open`
+/// drains it and fires the events.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record_events() {
+    let parked = park_remote_status_update().await;
+    call(
+        &parked.transport,
+        &parked.handle,
+        300,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+
+    // Reopen the adoption so the reconcile pass processes the parked record's
+    // document again, and touch the schema so the next capture pass runs
+    // collection reconciliation at all.
+    let db = parked.scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 5).expect("open adoption reset store");
+    store
+        .write_with(&NoFaults, |tx| {
+            set_collection_adoption_state_in_tx(
+                tx,
+                WORKSPACE_ID,
+                "main",
+                "tasks/alpha.md",
+                RECORD_ID,
+                "pending",
+            )
+        })
+        .expect("reset adoption state");
+    drop(store);
+    let schema_path = parked.scratch.path().join("tasks/collection.yaml");
+    let schema = std::fs::read_to_string(&schema_path).expect("read schema");
+    std::fs::write(&schema_path, format!("{schema}# reconcile trigger\n")).expect("touch schema");
+
+    let reopened = parked
+        .transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                301,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": parked.scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("reopen workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(reopened.result["workspace"].clone()).expect("workspace handle");
+    reconcile_capture(&parked.transport, &handle, 310).await;
+
+    // The pass processed the candidate...
+    let store = EngineStore::open(&db, 6).expect("open adoption probe store");
+    let state: String = store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT adoption_state FROM collection_records \
+                 WHERE workspace_id=?1 AND version_id=?2 AND file_path=?3",
+                rusqlite::params![WORKSPACE_ID, "main", "tasks/alpha.md"],
+                |row| row.get(0),
+            )
+        })
+        .expect("read adoption state");
+    assert_eq!(
+        state, "adopted",
+        "the reconcile pass must process the reopened candidate"
+    );
+    drop(store);
+    // ...without consuming the parked update it cannot emit events for.
+    assert_eq!(
+        deferred_update_rows(&parked.scratch),
+        1,
+        "the reconcile pass must leave the parked update queued (#1008)"
+    );
+
+    let mut events = parked.service.events().subscribe();
+    call(
+        &parked.transport,
+        &handle,
+        350,
+        "ydoc.open",
+        json!({ "versionId": "main", "path": "tasks/alpha.md", "contentKind": "richdoc" }),
+    )
+    .await;
+    let notices = wait_for_record_events(&mut events).await;
+    assert_parked_drain_events(&notices);
+    assert_no_automation_claims(&parked.scratch);
+    call(
+        &parked.transport,
+        &handle,
+        399,
+        "workspace.close",
+        json!({}),
+    )
+    .await;
+}

@@ -497,7 +497,10 @@ pub fn drain_deferred_ydoc_for_key(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    drain_deferred_ydoc(store, None, key, DeferredDrainMode::All, faults)
+    let (drained, cleanup) =
+        drain_deferred_ydoc(store, None, key, DeferredDrainMode::All, false, faults)?;
+    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
+    Ok(drained)
 }
 
 /// Cache-backed actor form of [`drain_deferred_ydoc_for_key`].
@@ -507,7 +510,68 @@ pub fn drain_deferred_ydoc_for_key_cached(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    drain_deferred_ydoc(store, Some(cache), key, DeferredDrainMode::All, faults)
+    let (drained, cleanup) = drain_deferred_ydoc(
+        store,
+        Some(cache),
+        key,
+        DeferredDrainMode::All,
+        false,
+        faults,
+    )?;
+    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
+    Ok(drained)
+}
+
+/// [`drain_deferred_ydoc_for_key_cached`], holding the final queue-row
+/// cleanup for the caller. The drained coordinates — and the record facts
+/// persisted on them — stay queued until the caller runs the returned
+/// [`YdocDrainCleanup`] through [`complete_deferred_ydoc_drain_cleanup`].
+/// A caller that fails between the drain and the cleanup leaves the rows in
+/// place, exactly like a crash before the cleanup transaction: the retry
+/// re-drains content-deduped and reads the facts back (#1009).
+pub fn drain_deferred_ydoc_for_key_cached_holding_cleanup(
+    store: &mut EngineStore,
+    cache: &mut WriterDocCache,
+    key: &DocKey,
+    faults: &dyn FaultInjector,
+) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
+    drain_deferred_ydoc(
+        store,
+        Some(cache),
+        key,
+        DeferredDrainMode::All,
+        true,
+        faults,
+    )
+}
+
+/// The final queue-row cleanup a held-cleanup drain still owes: persist the
+/// pending projection refusal, then delete the drained rows. Runs the same
+/// transaction the immediate drain would have run last.
+pub fn complete_deferred_ydoc_drain_cleanup(
+    store: &mut EngineStore,
+    key: &DocKey,
+    cleanup: YdocDrainCleanup,
+    faults: &dyn FaultInjector,
+) -> Result<(), SyncError> {
+    let cleared = store.write_with(faults, |tx| {
+        if let Some(refusal) = cleanup.projection_refusal.as_ref() {
+            crate::apply::persist_refusal(tx, refusal)?;
+        }
+        for (origin_id, origin_seq) in &cleanup.coordinates {
+            tx.execute(
+                "DELETE FROM ydoc_deferred_updates \
+                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                params![key.workspace_id, origin_id, origin_seq],
+            )
+            .map_err(SyncError::persist)?;
+        }
+        Ok::<_, SyncError>(())
+    })?;
+    if matches!(cleared, TxnOutcome::Crashed { .. }) {
+        return Err(SyncError::FaultCrash);
+    }
+    Ok(())
 }
 
 /// Drain only deferred coordinates that belong to the lineage an open editor
@@ -529,13 +593,16 @@ pub fn drain_deferred_ydoc_for_live_session(
             reason: "live Y.Doc session lineage changed before deferred drain",
         });
     }
-    drain_deferred_ydoc(
+    let (drained, cleanup) = drain_deferred_ydoc(
         store,
         None,
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
+        false,
         faults,
-    )
+    )?;
+    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
+    Ok(drained)
 }
 
 /// Cache-backed actor form of [`drain_deferred_ydoc_for_live_session`].
@@ -554,13 +621,16 @@ pub fn drain_deferred_ydoc_for_live_session_cached(
             reason: "live Y.Doc session lineage changed before deferred drain",
         });
     }
-    drain_deferred_ydoc(
+    let (drained, cleanup) = drain_deferred_ydoc(
         store,
         Some(cache),
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
+        false,
         faults,
-    )
+    )?;
+    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
+    Ok(drained)
 }
 
 #[derive(Clone, Copy)]
@@ -569,13 +639,22 @@ enum DeferredDrainMode<'a> {
     Live(Option<&'a str>),
 }
 
+/// The queue-row cleanup a held-cleanup drain still owes. See
+/// [`drain_deferred_ydoc_for_key_cached_holding_cleanup`].
+#[derive(Debug)]
+pub struct YdocDrainCleanup {
+    coordinates: Vec<(String, i64)>,
+    projection_refusal: Option<crate::ReplicationRefusal>,
+}
+
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
     mut cache: Option<&mut WriterDocCache>,
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
+    hold_cleanup: bool,
     faults: &dyn FaultInjector,
-) -> Result<YdocDrainResult, SyncError> {
+) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
     let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
         store.read_with(|conn| {
             let mut stmt = conn
@@ -640,7 +719,7 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        return Ok(YdocDrainResult::default());
+        return Ok((YdocDrainResult::default(), None));
     }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
@@ -878,39 +957,52 @@ fn drain_deferred_ydoc(
     // terminal disposition was persisted. A crash anywhere above leaves the
     // rows in place, and the retry re-runs apply (content-deduped) AND the
     // projection; deleting first opened a window where the CRDT held the edit
-    // but nothing would ever project it.
-    let cleared = store.write_with(faults, |tx| {
-        if let Some(refusal) = projection_refusal.as_ref() {
-            crate::apply::persist_refusal(tx, refusal)?;
+    // but nothing would ever project it. A held cleanup extends the same
+    // contract past the drain: the caller clears the rows only after its own
+    // fallible follow-up (close-time materialization) succeeded (#1009).
+    let mut held_cleanup = None;
+    if hold_cleanup {
+        held_cleanup = Some(YdocDrainCleanup {
+            coordinates: drained_coordinates.clone(),
+            projection_refusal,
+        });
+    } else {
+        let cleared = store.write_with(faults, |tx| {
+            if let Some(refusal) = projection_refusal.as_ref() {
+                crate::apply::persist_refusal(tx, refusal)?;
+            }
+            for (origin_id, origin_seq) in &drained_coordinates {
+                tx.execute(
+                    "DELETE FROM ydoc_deferred_updates \
+                     WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
+                    params![key.workspace_id, origin_id, origin_seq],
+                )
+                .map_err(SyncError::persist)?;
+            }
+            Ok::<_, SyncError>(())
+        })?;
+        if matches!(cleared, TxnOutcome::Crashed { .. }) {
+            return Err(SyncError::FaultCrash);
         }
-        for (origin_id, origin_seq) in &drained_coordinates {
-            tx.execute(
-                "DELETE FROM ydoc_deferred_updates \
-                 WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                params![key.workspace_id, origin_id, origin_seq],
-            )
-            .map_err(SyncError::persist)?;
+        if let Some(refusal) = projection_refusal {
+            refusals.push(refusal);
         }
-        Ok::<_, SyncError>(())
-    })?;
-    if matches!(cleared, TxnOutcome::Crashed { .. }) {
-        return Err(SyncError::FaultCrash);
-    }
-    if let Some(refusal) = projection_refusal {
-        refusals.push(refusal);
     }
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
     // callers (the settle's remote-updates-pending refusal) must still see
     // that remote content landed which the live client has not resynced.
     let _ = applied;
-    Ok(YdocDrainResult {
-        drained: drained_coordinates.len(),
-        refusals,
-        sharing_declined,
-        lineage_replacements,
-        record_facts,
-    })
+    Ok((
+        YdocDrainResult {
+            drained: drained_coordinates.len(),
+            refusals,
+            sharing_declined,
+            lineage_replacements,
+            record_facts,
+        },
+        held_cleanup,
+    ))
 }
 
 /// The record-event decision an earlier drain committed with this parked
