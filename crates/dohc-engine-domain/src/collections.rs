@@ -4289,14 +4289,21 @@ fn value_contains(value: &Value, needle: &Value) -> bool {
     }
 }
 
-fn matches_collection_filter(record: &CollectionRecord, filter: &CollectionFilter) -> bool {
-    let Some(value) = value_for_field(record, &filter.field) else {
-        return false;
-    };
-    match filter.operator {
-        CollectionFilterOperator::Equals => collection_values_equal(value, &filter.value),
-        CollectionFilterOperator::Contains => value_contains(value, &filter.value),
+fn collection_filter_value_matches(
+    value: &Value,
+    operator: CollectionFilterOperator,
+    needle: &Value,
+) -> bool {
+    match operator {
+        CollectionFilterOperator::Equals => collection_values_equal(value, needle),
+        CollectionFilterOperator::Contains => value_contains(value, needle),
     }
+}
+
+#[cfg(test)]
+fn matches_collection_filter(record: &CollectionRecord, filter: &CollectionFilter) -> bool {
+    value_for_field(record, &filter.field)
+        .is_some_and(|value| collection_filter_value_matches(value, filter.operator, &filter.value))
 }
 
 fn json_kind(value: &Value) -> u8 {
@@ -4513,6 +4520,7 @@ fn compare_json(left: &Value, right: &Value) -> Ordering {
     }
 }
 
+#[cfg(test)]
 fn compare_optional_json(left: Option<&Value>, right: Option<&Value>) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
@@ -4522,6 +4530,7 @@ fn compare_optional_json(left: Option<&Value>, right: Option<&Value>) -> Orderin
     }
 }
 
+#[cfg(test)]
 fn compare_collection_records(
     left: &CollectionRecord,
     right: &CollectionRecord,
@@ -4557,6 +4566,7 @@ fn query_cursor_value(
     }
 }
 
+#[cfg(test)]
 fn compare_record_to_cursor(
     record: &CollectionRecord,
     cursor: &CollectionQueryCursor,
@@ -4640,9 +4650,137 @@ fn group_collection_records(
     Ok(groups)
 }
 
+/// Registers the connection-scoped SQL pieces the collection query pushdown
+/// needs: a collation reproducing `compare_json` over stored `value_json`
+/// text, and the filter matcher. Registration replaces any previous copy, so
+/// repeating it per query is cheap and idempotent.
+fn register_collection_query_sql(conn: &Connection) -> Result<(), crate::DomainError> {
+    conn.create_collation("DOHC_COLLECTION_JSON", |left, right| {
+        match (
+            serde_json::from_str::<Value>(left),
+            serde_json::from_str::<Value>(right),
+        ) {
+            (Ok(left), Ok(right)) => compare_json(&left, &right),
+            // value_json is CHECK json_valid; an unparsable operand still
+            // needs a TOTAL order, so fall back to byte order.
+            _ => left.cmp(right),
+        }
+    })
+    .map_err(crate::DomainError::sql_corrupt)?;
+    conn.create_scalar_function(
+        "dohc_collection_filter_match",
+        3,
+        rusqlite::functions::FunctionFlags::SQLITE_UTF8
+            | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let value: String = ctx.get(0)?;
+            let operator: String = ctx.get(1)?;
+            let needle: String = ctx.get(2)?;
+            let (Ok(value), Ok(needle)) = (
+                serde_json::from_str::<Value>(&value),
+                serde_json::from_str::<Value>(&needle),
+            ) else {
+                return Ok(false);
+            };
+            Ok(match operator.as_str() {
+                "equals" => collection_filter_value_matches(
+                    &value,
+                    CollectionFilterOperator::Equals,
+                    &needle,
+                ),
+                "contains" => collection_filter_value_matches(
+                    &value,
+                    CollectionFilterOperator::Contains,
+                    &needle,
+                ),
+                _ => false,
+            })
+        },
+    )
+    .map_err(crate::DomainError::sql_corrupt)?;
+    Ok(())
+}
+
+/// The SQL expression for one sort field's value: the indexed `value_json`,
+/// with depth-flagged values treated as missing exactly like
+/// `sortable_value_for_field`.
+fn sort_value_expression(join: &str) -> String {
+    format!(
+        "CASE WHEN {join}.validation_status='flagged' \
+               AND json_extract({join}.validation_reason_json,'$.code')='value-depth-exceeded' \
+          THEN NULL ELSE {join}.value_json END"
+    )
+}
+
+/// One keyset level of the cursor predicate: the SQL expression, whether the
+/// scan ascends through it, the serialized cursor value (`None` = the cursor
+/// row had no value), and whether comparisons need the JSON collation.
+struct CursorLevel {
+    expression: String,
+    ascending: bool,
+    cursor_text: Option<String>,
+    json_collation: bool,
+}
+
+/// Builds the strictly-after-the-cursor predicate as the standard keyset
+/// expansion `OR_k (eq_0 AND .. AND eq_{k-1} AND after_k)`. NULL semantics
+/// mirror `compare_optional_json`: a missing value sorts before every present
+/// value ascending and after every present value descending, which is also
+/// SQLite's NULL placement for ASC/DESC.
+fn cursor_after_predicate(
+    parameters: &mut Vec<rusqlite::types::Value>,
+    levels: &[CursorLevel],
+) -> String {
+    let mut level_parts = Vec::new();
+    for level in levels {
+        let collate = if level.json_collation {
+            " COLLATE DOHC_COLLECTION_JSON"
+        } else {
+            ""
+        };
+        let expression = &level.expression;
+        let (after, equal) = match &level.cursor_text {
+            Some(text) => {
+                parameters.push(rusqlite::types::Value::Text(text.clone()));
+                let parameter = parameters.len();
+                let after = if level.ascending {
+                    format!("({expression}{collate} > ?{parameter})")
+                } else {
+                    format!("({expression} IS NULL OR {expression}{collate} < ?{parameter})")
+                };
+                (after, format!("({expression}{collate} = ?{parameter})"))
+            }
+            None => {
+                let after = if level.ascending {
+                    format!("({expression} IS NOT NULL)")
+                } else {
+                    "(0)".to_owned()
+                };
+                (after, format!("({expression} IS NULL)"))
+            }
+        };
+        level_parts.push((after, equal));
+    }
+    let mut branches = Vec::new();
+    for (index, (after, _)) in level_parts.iter().enumerate() {
+        let mut branch = level_parts[..index]
+            .iter()
+            .map(|(_, equal)| equal.clone())
+            .collect::<Vec<_>>();
+        branch.push(after.clone());
+        branches.push(format!("({})", branch.join(" AND ")));
+    }
+    format!("({})", branches.join(" OR "))
+}
+
 /// Filter, sort, group, and optionally resolve relation labels from the active
 /// version's persisted collection index. Raw indexed values are never reparsed
 /// from record files, including when the schema is degraded.
+///
+/// The filter, sort, and cursor run in SQL over the indexed values (#986,
+/// #991): a registered collation reproduces the cross-type `compare_json`
+/// order over stored `value_json`, so a page reads and hydrates only the
+/// records it returns instead of materializing the collection.
 pub fn query_collection_records(
     conn: &Connection,
     workspace_id: &str,
@@ -4659,45 +4797,158 @@ pub fn query_collection_records(
             reason: "collection query sort limit is exceeded",
         });
     }
+    if let Some(cursor) = &query.cursor
+        && (cursor.sort_values.len() != query.sort.len()
+            || cursor.record_path.is_empty()
+            || cursor.record_id.is_empty())
+    {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection query cursor is invalid",
+        });
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let Some(collection) =
         collection_summary_for_version(conn, workspace_id, &version_id, collection_path)?
     else {
         return Ok(None);
     };
-    let candidate_fields = query.filter.as_ref().map(|filter| {
-        let mut fields = vec![filter.field.clone()];
-        for sort in &query.sort {
-            if !fields.contains(&sort.field) {
-                fields.push(sort.field.clone());
-            }
+    register_collection_query_sql(conn)?;
+    let mut parameters = vec![
+        rusqlite::types::Value::Text(workspace_id.to_owned()),
+        rusqlite::types::Value::Text(version_id.clone()),
+        rusqlite::types::Value::Text(collection_path.to_owned()),
+    ];
+    let mut joins = String::new();
+    let mut sort_expressions = Vec::new();
+    for (index, sort) in query.sort.iter().enumerate() {
+        parameters.push(rusqlite::types::Value::Text(sort.field.clone()));
+        let parameter = parameters.len();
+        joins.push_str(&format!(
+            " LEFT JOIN collection_record_fields s{index} \
+               ON s{index}.workspace_id=r.workspace_id AND s{index}.version_id=r.version_id \
+              AND s{index}.record_id=r.record_id AND s{index}.field_name=?{parameter}"
+        ));
+        sort_expressions.push(format!("({})", sort_value_expression(&format!("s{index}"))));
+    }
+    let mut predicates = vec![
+        "r.workspace_id=?1 AND r.version_id=?2 AND r.collection_path=?3 \
+         AND r.record_id IS NOT NULL"
+            .to_owned(),
+    ];
+    if let Some(filter) = &query.filter {
+        parameters.push(rusqlite::types::Value::Text(filter.field.clone()));
+        let field_parameter = parameters.len();
+        joins.push_str(&format!(
+            " LEFT JOIN collection_record_fields f0 \
+               ON f0.workspace_id=r.workspace_id AND f0.version_id=r.version_id \
+              AND f0.record_id=r.record_id AND f0.field_name=?{field_parameter}"
+        ));
+        let operator = match filter.operator {
+            CollectionFilterOperator::Equals => "equals",
+            CollectionFilterOperator::Contains => "contains",
+        };
+        parameters.push(rusqlite::types::Value::Text(operator.to_owned()));
+        let operator_parameter = parameters.len();
+        parameters.push(rusqlite::types::Value::Text(
+            serde_json::to_string(&filter.value).map_err(|_| crate::DomainError::StateCorrupt {
+                reason: "collection filter value does not serialize",
+            })?,
+        ));
+        let needle_parameter = parameters.len();
+        predicates.push(format!(
+            "f0.value_json IS NOT NULL \
+             AND dohc_collection_filter_match(f0.value_json, ?{operator_parameter}, ?{needle_parameter})"
+        ));
+    }
+    if let Some(cursor) = &query.cursor {
+        let mut levels = Vec::new();
+        for ((expression, sort), value) in sort_expressions
+            .iter()
+            .zip(&query.sort)
+            .zip(&cursor.sort_values)
+        {
+            let cursor_text = query_cursor_value(value)?
+                .map(|value| {
+                    serde_json::to_string(value).map_err(|_| crate::DomainError::InvalidInput {
+                        reason: "collection query cursor is invalid",
+                    })
+                })
+                .transpose()?;
+            levels.push(CursorLevel {
+                expression: expression.clone(),
+                ascending: sort.direction == ViewSortDirection::Asc,
+                cursor_text,
+                json_collation: true,
+            });
         }
-        fields
-    });
+        levels.push(CursorLevel {
+            expression: "r.file_path".to_owned(),
+            ascending: true,
+            cursor_text: Some(cursor.record_path.clone()),
+            json_collation: false,
+        });
+        levels.push(CursorLevel {
+            expression: "r.record_id".to_owned(),
+            ascending: true,
+            cursor_text: Some(cursor.record_id.clone()),
+            json_collation: false,
+        });
+        predicates.push(cursor_after_predicate(&mut parameters, &levels));
+    }
+    let mut order_by = sort_expressions
+        .iter()
+        .zip(&query.sort)
+        .map(|(expression, sort)| {
+            let direction = match sort.direction {
+                ViewSortDirection::Asc => "ASC",
+                ViewSortDirection::Desc => "DESC",
+            };
+            format!("{expression} COLLATE DOHC_COLLECTION_JSON {direction}")
+        })
+        .collect::<Vec<_>>();
+    order_by.push("r.file_path".to_owned());
+    order_by.push("r.record_id".to_owned());
+    parameters.push(rusqlite::types::Value::Integer(
+        i64::try_from(query.limit + 1).expect("bounded collection query page limit"),
+    ));
+    let limit_parameter = parameters.len();
+    let sql = format!(
+        "SELECT r.record_id FROM collection_records r{joins} WHERE {} \
+         ORDER BY {} LIMIT ?{limit_parameter}",
+        predicates.join(" AND "),
+        order_by.join(",")
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let mut selected_ids = statement
+        .query_map(rusqlite::params_from_iter(parameters.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(crate::DomainError::sql_corrupt)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(crate::DomainError::sql_corrupt)?;
+    let has_more = selected_ids.len() > query.limit;
+    selected_ids.truncate(query.limit);
+    let selected_order = selected_ids
+        .iter()
+        .enumerate()
+        .map(|(index, record_id)| (record_id.as_str(), index))
+        .collect::<HashMap<_, _>>();
     let mut records = load_collection_records_selected(
         conn,
         workspace_id,
         &version_id,
         collection_path,
+        Some(&selected_ids),
         None,
-        candidate_fields.as_deref(),
     )?;
-    if let Some(filter) = &query.filter {
-        records.retain(|record| matches_collection_filter(record, filter));
-    }
-    records.sort_by(|left, right| compare_collection_records(left, right, &query.sort));
-    if let Some(cursor) = &query.cursor {
-        let mut page_start = 0;
-        while page_start < records.len()
-            && compare_record_to_cursor(&records[page_start], cursor, &query.sort)?
-                != Ordering::Greater
-        {
-            page_start += 1;
-        }
-        records.drain(..page_start);
-    }
-    let has_more = records.len() > query.limit;
-    records.truncate(query.limit);
+    records.sort_by_key(|record| {
+        selected_order
+            .get(record.id.as_str())
+            .copied()
+            .unwrap_or(usize::MAX)
+    });
     let next_cursor = if has_more {
         records
             .last()
@@ -4705,31 +4956,6 @@ pub fn query_collection_records(
     } else {
         None
     };
-    if query.filter.is_some() {
-        let selected_ids = records
-            .iter()
-            .map(|record| record.id.clone())
-            .collect::<Vec<_>>();
-        let selected_order = selected_ids
-            .iter()
-            .enumerate()
-            .map(|(index, record_id)| (record_id.as_str(), index))
-            .collect::<HashMap<_, _>>();
-        records = load_collection_records_selected(
-            conn,
-            workspace_id,
-            &version_id,
-            collection_path,
-            Some(&selected_ids),
-            None,
-        )?;
-        records.sort_by_key(|record| {
-            selected_order
-                .get(record.id.as_str())
-                .copied()
-                .unwrap_or(usize::MAX)
-        });
-    }
     if query.resolve_relations {
         resolve_record_relations(
             conn,
@@ -5116,6 +5342,11 @@ mod tests {
         mint_record_id, parse_markdown_frontmatter, query_cursor_for_record, record_id_from_random,
         unindexed_or_conflicted_relation_targets_still_present, validate_field_value,
     };
+    use super::{
+        CollectionFilter, CollectionFilterOperator, CollectionQuery, matches_collection_filter,
+        query_collection_records,
+    };
+    use serde_json::Value;
 
     #[test]
     fn integer_json_comparison_preserves_precision_beyond_f64() {
@@ -5470,5 +5701,269 @@ mod tests {
     fn minted_record_id_matches_the_contract() {
         let id = mint_record_id().expect("the operating system provides randomness");
         assert!(is_record_id(&id));
+    }
+
+    /// Deterministic xorshift64* generator: the differential below must be
+    /// reproducible from its printed seed.
+    struct DifferentialRng(u64);
+
+    impl DifferentialRng {
+        fn next(&mut self) -> u64 {
+            let mut state = self.0;
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            self.0 = state;
+            state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+        }
+
+        fn pick(&mut self, bound: usize) -> usize {
+            (self.next() % bound as u64) as usize
+        }
+    }
+
+    fn differential_value_pool() -> Vec<Value> {
+        vec![
+            Value::Null,
+            json!(true),
+            json!(false),
+            json!(-1),
+            json!(0),
+            json!(1),
+            json!(i64::MIN),
+            json!(i64::MAX),
+            json!(u64::MAX),
+            json!(9_007_199_254_740_993_u64),
+            json!(-0.5),
+            json!(2.5),
+            json!(1e300),
+            json!(-1e300),
+            json!(9_007_199_254_740_992.0),
+            json!(""),
+            json!("a"),
+            json!("b"),
+            json!("aa"),
+            json!([1, "a"]),
+            json!([[2], {"k": 1}]),
+            json!({"k": 1}),
+            json!({"a": 1, "b": 2}),
+        ]
+    }
+
+    /// The pre-pushdown in-memory pipeline, kept as the differential oracle:
+    /// filter, total sort, then fixed-size pages.
+    fn reference_page_ids(
+        records: &[CollectionRecord],
+        query: &CollectionQuery,
+    ) -> Vec<Vec<String>> {
+        let mut records = records.to_vec();
+        if let Some(filter) = &query.filter {
+            records.retain(|record| matches_collection_filter(record, filter));
+        }
+        records.sort_by(|left, right| compare_collection_records(left, right, &query.sort));
+        let mut pages = records
+            .chunks(query.limit)
+            .map(|page| page.iter().map(|record| record.id.clone()).collect())
+            .collect::<Vec<Vec<String>>>();
+        if pages.is_empty() {
+            pages.push(Vec::new());
+        }
+        pages
+    }
+
+    #[test]
+    fn sql_query_pushdown_matches_the_in_memory_reference() {
+        const WORKSPACE: &str = "differential-workspace";
+        const COLLECTION: &str = "c";
+        const FIELDS: [&str; 3] = ["alpha", "beta", "gamma"];
+        let connection = Connection::open_in_memory().expect("open differential database");
+        connection
+            .execute_batch(
+                "CREATE TABLE versioned_workspaces(\
+                   workspace_id TEXT PRIMARY KEY, main_version_id TEXT NOT NULL);\
+                 CREATE TABLE active_versions(\
+                   workspace_id TEXT PRIMARY KEY, version_id TEXT NOT NULL);\
+                 CREATE TABLE collections(\
+                   workspace_id TEXT, version_id TEXT, collection_path TEXT,\
+                   schema_status TEXT NOT NULL, degradation_reasons_json TEXT NOT NULL,\
+                   PRIMARY KEY (workspace_id, version_id, collection_path));\
+                 CREATE TABLE collection_records(\
+                   workspace_id TEXT, version_id TEXT, record_id TEXT,\
+                   collection_path TEXT, file_path TEXT, adoption_state TEXT NOT NULL,\
+                   PRIMARY KEY (workspace_id, version_id, file_path));\
+                 CREATE TABLE collection_record_fields(\
+                   workspace_id TEXT, version_id TEXT, record_id TEXT,\
+                   field_name TEXT, value_json TEXT NOT NULL,\
+                   validation_status TEXT NOT NULL, validation_reason_json TEXT,\
+                   PRIMARY KEY (workspace_id, version_id, record_id, field_name));",
+            )
+            .expect("differential schema");
+        connection
+            .execute(
+                "INSERT INTO versioned_workspaces VALUES (?1, 'main')",
+                [WORKSPACE],
+            )
+            .expect("workspace row");
+        connection
+            .execute(
+                "INSERT INTO collections VALUES (?1, 'main', ?2, 'valid', '[]')",
+                [WORKSPACE, COLLECTION],
+            )
+            .expect("collection row");
+        let pool = differential_value_pool();
+        let depth_reason = serde_json::to_string(&FieldValueReason {
+            code: FieldValueReasonCode::ValueDepthExceeded,
+            path: String::new(),
+        })
+        .expect("depth reason");
+        let flagged_reason = serde_json::to_string(&FieldValueReason {
+            code: FieldValueReasonCode::ExpectedText,
+            path: String::new(),
+        })
+        .expect("flagged reason");
+
+        for seed in 1_u64..=60 {
+            let mut rng = DifferentialRng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            connection
+                .execute("DELETE FROM collection_records", [])
+                .expect("clear records");
+            connection
+                .execute("DELETE FROM collection_record_fields", [])
+                .expect("clear fields");
+            let record_count = rng.pick(12);
+            let mut records = Vec::new();
+            for index in 0..record_count {
+                let record_id = format!("rec_{seed}_{index}");
+                let file_path = format!("{COLLECTION}/r{index}.md");
+                connection
+                    .execute(
+                        "INSERT INTO collection_records VALUES (?1,'main',?2,?3,?4,'adopted')",
+                        rusqlite::params![WORKSPACE, record_id, COLLECTION, file_path],
+                    )
+                    .expect("record row");
+                let mut values = Vec::new();
+                for field in FIELDS {
+                    // A quarter of fields are missing entirely.
+                    if rng.pick(4) == 0 {
+                        continue;
+                    }
+                    let value = pool[rng.pick(pool.len())].clone();
+                    let (status, reason, validation) = match rng.pick(6) {
+                        0 => (
+                            "flagged",
+                            Some(depth_reason.as_str()),
+                            CollectionIndexedValueValidation::Flagged {
+                                reason: FieldValueReason {
+                                    code: FieldValueReasonCode::ValueDepthExceeded,
+                                    path: String::new(),
+                                },
+                            },
+                        ),
+                        1 => (
+                            "flagged",
+                            Some(flagged_reason.as_str()),
+                            CollectionIndexedValueValidation::Flagged {
+                                reason: FieldValueReason {
+                                    code: FieldValueReasonCode::ExpectedText,
+                                    path: String::new(),
+                                },
+                            },
+                        ),
+                        2 => ("untyped", None, CollectionIndexedValueValidation::Untyped),
+                        _ => ("valid", None, CollectionIndexedValueValidation::Valid),
+                    };
+                    connection
+                        .execute(
+                            "INSERT INTO collection_record_fields \
+                             VALUES (?1,'main',?2,?3,?4,?5,?6)",
+                            rusqlite::params![
+                                WORKSPACE,
+                                record_id,
+                                field,
+                                serde_json::to_string(&value).expect("value json"),
+                                status,
+                                reason,
+                            ],
+                        )
+                        .expect("field row");
+                    values.push(CollectionIndexedValue {
+                        field: field.to_owned(),
+                        value,
+                        validation,
+                        resolved_relations: Vec::new(),
+                    });
+                }
+                records.push(CollectionRecord {
+                    id: record_id,
+                    path: file_path,
+                    conflicted: false,
+                    values,
+                });
+            }
+            let sort = (0..rng.pick(4))
+                .map(|_| CollectionSort {
+                    field: FIELDS[rng.pick(FIELDS.len())].to_owned(),
+                    direction: if rng.pick(2) == 0 {
+                        ViewSortDirection::Asc
+                    } else {
+                        ViewSortDirection::Desc
+                    },
+                })
+                .collect::<Vec<_>>();
+            let filter = (rng.pick(2) == 0).then(|| CollectionFilter {
+                field: FIELDS[rng.pick(FIELDS.len())].to_owned(),
+                operator: if rng.pick(2) == 0 {
+                    CollectionFilterOperator::Equals
+                } else {
+                    CollectionFilterOperator::Contains
+                },
+                value: pool[rng.pick(pool.len())].clone(),
+            });
+            let query = CollectionQuery {
+                filter,
+                sort,
+                group_by: None,
+                resolve_relations: false,
+                limit: 1 + rng.pick(3),
+                cursor: None,
+            };
+            let expected_pages = reference_page_ids(&records, &query);
+
+            let mut actual_pages = Vec::new();
+            let mut cursor = None;
+            loop {
+                let page = query_collection_records(
+                    &connection,
+                    WORKSPACE,
+                    COLLECTION,
+                    &CollectionQuery {
+                        cursor: cursor.clone(),
+                        ..query.clone()
+                    },
+                )
+                .expect("differential query")
+                .expect("differential collection");
+                actual_pages.push(
+                    page.records
+                        .iter()
+                        .map(|record| record.id.clone())
+                        .collect::<Vec<_>>(),
+                );
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+                assert!(
+                    actual_pages.len() <= records.len() + 1,
+                    "seed {seed}: the cursor loop must terminate"
+                );
+            }
+            assert_eq!(
+                actual_pages, expected_pages,
+                "seed {seed}: the SQL pushdown must page exactly like the \
+                 in-memory reference (sort {:?}, filter {:?}, limit {})",
+                query.sort, query.filter, query.limit
+            );
+        }
     }
 }
