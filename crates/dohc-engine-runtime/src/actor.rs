@@ -2283,17 +2283,23 @@ enum Command {
         automation_id: String,
         prefix: String,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     AutomationUnsubscribe {
         workspace_id: String,
         automation_id: String,
         prefix: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     AutomationClaimNext {
         workspace_id: String,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<Option<AutomationClaim>, RuntimeError>>,
     },
     AutomationSettle {
@@ -2301,6 +2307,8 @@ enum Command {
         claim_id: String,
         settle: AutomationSettle,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<AutomationClaim, RuntimeError>>,
     },
     AutomationReclaimRunning {
@@ -2308,6 +2316,8 @@ enum Command {
         max_attempts: i64,
         stale_before_ms: i64,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
         reply: oneshot::Sender<Result<Vec<AutomationClaim>, RuntimeError>>,
     },
     AutomationFailures {
@@ -6143,6 +6153,8 @@ impl ActorHandle {
         automation_id: String,
         prefix: String,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -6151,6 +6163,8 @@ impl ActorHandle {
                 automation_id,
                 prefix,
                 now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -6163,6 +6177,8 @@ impl ActorHandle {
         workspace_id: String,
         automation_id: String,
         prefix: String,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -6170,6 +6186,8 @@ impl ActorHandle {
                 workspace_id,
                 automation_id,
                 prefix,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -6181,12 +6199,16 @@ impl ActorHandle {
         &self,
         workspace_id: String,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
     ) -> Result<Option<AutomationClaim>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::AutomationClaimNext {
                 workspace_id,
                 now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -6200,6 +6222,8 @@ impl ActorHandle {
         claim_id: String,
         settle: AutomationSettle,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
     ) -> Result<AutomationClaim, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -6208,6 +6232,8 @@ impl ActorHandle {
                 claim_id,
                 settle,
                 now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -6221,6 +6247,8 @@ impl ActorHandle {
         max_attempts: i64,
         stale_before_ms: i64,
         now_ms: i64,
+        faults: Arc<dyn FaultInjector>,
+        token: CancellationToken,
     ) -> Result<Vec<AutomationClaim>, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -6229,6 +6257,8 @@ impl ActorHandle {
                 max_attempts,
                 stale_before_ms,
                 now_ms,
+                faults,
+                token,
                 reply,
             })
             .await
@@ -10399,47 +10429,65 @@ fn worker_main(
                 automation_id,
                 prefix,
                 now_ms,
+                faults,
+                token,
                 reply,
             } => {
-                let outcome = dohc_engine_domain::subscribe_automation(
-                    &mut store,
-                    &workspace_id,
-                    &automation_id,
-                    &prefix,
-                    now_ms,
-                    &NoFaults,
-                )
-                .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_domain::subscribe_automation(
+                        &mut store,
+                        &workspace_id,
+                        &automation_id,
+                        &prefix,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::AutomationUnsubscribe {
                 workspace_id,
                 automation_id,
                 prefix,
+                faults,
+                token,
                 reply,
             } => {
-                let outcome = dohc_engine_domain::unsubscribe_automation(
-                    &mut store,
-                    &workspace_id,
-                    &automation_id,
-                    &prefix,
-                    &NoFaults,
-                )
-                .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_domain::unsubscribe_automation(
+                        &mut store,
+                        &workspace_id,
+                        &automation_id,
+                        &prefix,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::AutomationClaimNext {
                 workspace_id,
                 now_ms,
+                faults,
+                token,
                 reply,
             } => {
-                let outcome = dohc_engine_domain::claim_next_pending_automation(
-                    &mut store,
-                    &workspace_id,
-                    now_ms,
-                    &NoFaults,
-                )
-                .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_domain::claim_next_pending_automation(
+                        &mut store,
+                        &workspace_id,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::AutomationSettle {
@@ -10447,17 +10495,23 @@ fn worker_main(
                 claim_id,
                 settle,
                 now_ms,
+                faults,
+                token,
                 reply,
             } => {
-                let outcome = dohc_engine_domain::settle_automation_claim(
-                    &mut store,
-                    &workspace_id,
-                    &claim_id,
-                    &settle,
-                    now_ms,
-                    &NoFaults,
-                )
-                .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_domain::settle_automation_claim(
+                        &mut store,
+                        &workspace_id,
+                        &claim_id,
+                        &settle,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::AutomationReclaimRunning {
@@ -10465,17 +10519,23 @@ fn worker_main(
                 max_attempts,
                 stale_before_ms,
                 now_ms,
+                faults,
+                token,
                 reply,
             } => {
-                let outcome = dohc_engine_domain::reclaim_running_automations(
-                    &mut store,
-                    &workspace_id,
-                    max_attempts,
-                    stale_before_ms,
-                    now_ms,
-                    &NoFaults,
-                )
-                .map_err(RuntimeError::from);
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    dohc_engine_domain::reclaim_running_automations(
+                        &mut store,
+                        &workspace_id,
+                        max_attempts,
+                        stale_before_ms,
+                        now_ms,
+                        faults.as_ref(),
+                    )
+                    .map_err(RuntimeError::from)
+                };
                 let _ = reply.send(outcome);
             }
             Command::AutomationFailures {
