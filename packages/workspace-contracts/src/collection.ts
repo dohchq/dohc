@@ -257,4 +257,9 @@ export interface CollectionGetRecordResult {
   collection: CollectionSummary;
   record: CollectionRecord;
   history: CollectionFieldHistoryEntry[];
+  /**
+   * Exclusive continuation cursor: pass as `beforeHistoryId` to read the next
+   * newest-first history page. `null` when this page reached the oldest entry.
+   */
+  nextBeforeHistoryId: number | null;
 }

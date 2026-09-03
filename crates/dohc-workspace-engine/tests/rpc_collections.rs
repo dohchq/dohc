@@ -2930,3 +2930,123 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
+    const SEEDED_HISTORY: usize = 32;
+    const VALUE_BYTES: usize = 32 * 1024;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    seed_collection_state(&scratch);
+
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut connection = rusqlite::Connection::open(&db).expect("open history database");
+    let tx = connection.transaction().expect("begin history seed");
+    let next_value = serde_json::to_string(&"x".repeat(VALUE_BYTES)).expect("history value");
+    for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
+        tx.execute(
+            "INSERT INTO collection_field_history \
+             (workspace_id,version_id,record_id,field_name,previous_value_json,\
+              next_value_json,author_origin_id,recorded_at_ms) \
+             VALUES (?1,'main',?2,'Raw',NULL,?3,'origin',?4)",
+            rusqlite::params![WORKSPACE_ID, RECORD_ID, next_value, recorded_at_ms],
+        )
+        .expect("seed history row");
+    }
+    tx.commit().expect("commit history seed");
+    drop(connection);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let first = call(
+        &transport,
+        &handle,
+        100,
+        "collections.getRecord",
+        json!({
+            "collectionPath": "broken",
+            "recordId": RECORD_ID,
+            "historyLimit": 500,
+        }),
+    )
+    .await;
+    let first_page = first["history"].as_array().expect("first history page");
+    assert!(
+        first_page.len() < SEEDED_HISTORY,
+        "the byte budget must cut a page whose {SEEDED_HISTORY} rows exceed it, got {}",
+        first_page.len()
+    );
+    assert!(!first_page.is_empty(), "a cut page still makes progress");
+    let serialized = serde_json::to_string(&first["history"]).expect("serialize history page");
+    assert!(
+        serialized.len() <= 512 * 1024,
+        "a cut history page must stay well under the frame: {} bytes",
+        serialized.len()
+    );
+    assert_eq!(
+        first["nextBeforeHistoryId"],
+        first_page.last().expect("last row")["historyId"],
+        "the cursor must point at the cut"
+    );
+
+    let mut history = first_page.clone();
+    let mut before_history_id = first["nextBeforeHistoryId"].clone();
+    for request_id in 101..110 {
+        if before_history_id.is_null() {
+            break;
+        }
+        let page = call(
+            &transport,
+            &handle,
+            request_id,
+            "collections.getRecord",
+            json!({
+                "collectionPath": "broken",
+                "recordId": RECORD_ID,
+                "historyLimit": 500,
+                "beforeHistoryId": before_history_id,
+            }),
+        )
+        .await;
+        history.extend(
+            page["history"]
+                .as_array()
+                .expect("history page")
+                .iter()
+                .cloned(),
+        );
+        before_history_id = page["nextBeforeHistoryId"].clone();
+    }
+
+    assert!(before_history_id.is_null(), "paging must terminate");
+    assert_eq!(
+        history.len(),
+        SEEDED_HISTORY,
+        "byte-cut pages must cover every seeded row without loss"
+    );
+    assert!(
+        history.windows(2).all(|entries| {
+            let left = entries[0]["historyId"].as_i64().expect("left id");
+            let right = entries[1]["historyId"].as_i64().expect("right id");
+            left > right
+        }),
+        "pages must stay newest-first without duplicates"
+    );
+}

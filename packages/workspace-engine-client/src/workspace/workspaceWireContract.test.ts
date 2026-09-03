@@ -325,6 +325,7 @@ describe("workspace wire schemas", () => {
             recordedAtMs: 1,
           },
         ],
+        nextBeforeHistoryId: null,
       },
     );
     expect(fetched.record.values[0]?.value).toBe(decoded);

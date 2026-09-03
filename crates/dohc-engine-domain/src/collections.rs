@@ -507,6 +507,9 @@ pub struct CollectionRecordDetails {
     pub collection: CollectionSummary,
     pub record: CollectionRecord,
     pub history: Vec<CollectionFieldHistoryEntry>,
+    /// Exclusive continuation cursor: pass as `before_history_id` to read the
+    /// next newest-first page. `None` when this page reached the oldest entry.
+    pub next_before_history_id: Option<i64>,
 }
 
 pub const MAX_COLLECTION_HISTORY_LIMIT: usize = 500;
@@ -3827,8 +3830,7 @@ pub fn list_collections(
     let version_id = active_version_id(conn, workspace_id)?;
     let mut statement = conn
         .prepare(
-            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections \
-             WHERE workspace_id=?1 AND version_id=?2 ORDER BY collection_path",
+            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections              WHERE workspace_id=?1 AND version_id=?2 ORDER BY collection_path",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let rows = statement
@@ -4789,9 +4791,10 @@ pub fn get_collection_record(
             " AND (recorded_at_ms,history_id) < (?{recorded_at_parameter},?{history_id_parameter})"
         ));
     }
-    values.push(rusqlite::types::Value::Integer(
-        history_limit.min(MAX_COLLECTION_HISTORY_LIMIT) as i64,
-    ));
+    let history_limit = history_limit.min(MAX_COLLECTION_HISTORY_LIMIT);
+    // One extra row makes "more pages exist" exact instead of inferred from a
+    // full page, so the returned cursor is never a dead end or a false stop.
+    values.push(rusqlite::types::Value::Integer(history_limit as i64 + 1));
     let limit_parameter = values.len();
     sql.push_str(&format!(
         " ORDER BY recorded_at_ms DESC,history_id DESC LIMIT ?{limit_parameter}"
@@ -4816,7 +4819,7 @@ pub fn get_collection_record(
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
-    let history = rows
+    let mut history = rows
         .into_iter()
         .map(
             |(
@@ -4851,10 +4854,16 @@ pub fn get_collection_record(
             },
         )
         .collect::<Result<Vec<_>, crate::DomainError>>()?;
+    let has_more = history.len() > history_limit;
+    history.truncate(history_limit);
+    let next_before_history_id = has_more
+        .then(|| history.last().map(|entry| entry.history_id))
+        .flatten();
     Ok(Some(CollectionRecordDetails {
         collection,
         record,
         history,
+        next_before_history_id,
     }))
 }
 

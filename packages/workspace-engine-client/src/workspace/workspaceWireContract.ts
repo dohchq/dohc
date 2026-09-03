@@ -899,6 +899,7 @@ const CollectionGetRecordResultSchema = mutableStruct({
       }),
     ),
   ),
+  nextBeforeHistoryId: NullableInt,
 });
 
 const SearchResultSchema = mutableStruct({

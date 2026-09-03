@@ -400,6 +400,33 @@ fn collection_query_response_value(
     Ok(response)
 }
 
+/// Approximate serialized-bytes budget for one `collections.getRecord`
+/// history page — the same measured discipline as every other list family.
+/// Rows carry full previous and next field values, so a row count alone can
+/// never bound the frame.
+const COLLECTION_HISTORY_PAGE_BYTE_BUDGET: usize = 256 * 1024;
+
+/// Cuts an encoded `collections.getRecord` response's history page to the
+/// byte budget and repoints `nextBeforeHistoryId` at the cut, so a caller
+/// keeps paging instead of hitting a frame refusal. A single over-budget row
+/// still ships (progress guarantee) and rides blob egress when oversized.
+fn bound_collection_history_page(response: &mut Value) {
+    let Some(history) = response.get_mut("history").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let included = byte_budget_cut_serialized(history, COLLECTION_HISTORY_PAGE_BYTE_BUDGET)
+        .max(1)
+        .min(history.len());
+    if included == history.len() {
+        return;
+    }
+    history.truncate(included);
+    let next_before_history_id = history
+        .last()
+        .map_or(Value::Null, |row| row["historyId"].clone());
+    response["nextBeforeHistoryId"] = next_before_history_id;
+}
+
 fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
     let response = collection_response_value(response)?;
     let encoded_len = serde_json::to_vec(&response)
@@ -4264,12 +4291,14 @@ impl EngineService {
         )
         .await?
         .ok_or_else(|| wire(ErrorCode::InvalidParams, "collection-record-not-found"))?;
+        let mut response = collection_response_value(result)?;
+        bound_collection_history_page(&mut response);
         self.collection_response_with_blob(
             ctx,
             &cancellation,
             request_id,
             "collections.getRecord",
-            collection_response_value(result)?,
+            response,
         )
         .await
     }

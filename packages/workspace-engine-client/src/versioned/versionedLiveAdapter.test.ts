@@ -358,6 +358,7 @@ const WORKSPACE_DECODER_CASES: Array<{
           recordedAtMs: 1,
         },
       ],
+      nextBeforeHistoryId: null,
     },
   },
   { method: WORKSPACE_METHOD.searchQuery, valid: [] },
@@ -1616,6 +1617,7 @@ describe("VersionedLiveAdapter", () => {
         collection: { path: "projects", status: "valid", reasons: [] },
         record,
         history: [],
+        nextBeforeHistoryId: null,
       },
     } as const;
     const blobHandlers = new Set<
