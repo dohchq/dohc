@@ -991,13 +991,13 @@ if (syncDemo) {
       setConnection(true);
       swapText(hint, 'watching. click or type to take over.');
       await wait(1200); if (manual) break;
-      await type(a, ' Rail passes packed.'); if (manual) break;
+      await type(a, ' Underline the bit about habits.'); if (manual) break;
       await wait(1400); if (manual) break;
       setConnection(false);
       await wait(1300); if (manual) break;
-      await type(b, ' Book the tea ceremony.'); if (manual) break;
+      await type(b, ' Ask Dana if she has read it.'); if (manual) break;
       await wait(500); if (manual) break;
-      await type(a, ' Market run on Saturday.'); if (manual) break;
+      await type(a, ' Chapter 4 next week.'); if (manual) break;
       await wait(1400); if (manual) break;
       setConnection(true);
       await wait(5000);
