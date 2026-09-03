@@ -66,6 +66,12 @@ pub struct Hello {
     /// The engine always issues a fresh generation in `helloAck`.
     #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
     pub last_session_generation: Option<u64>,
+    /// The largest control frame the client will accept. The engine clamps it
+    /// into `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]`, echoes the
+    /// effective value in `helloAck.limits`, and sizes its responses to it.
+    #[serde(default)]
+    #[cfg_attr(feature = "bindings", ts(type = "number | null", optional))]
+    pub max_frame_bytes: Option<u32>,
 }
 
 /// Engine → client handshake acknowledgement.

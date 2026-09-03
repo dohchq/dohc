@@ -471,11 +471,21 @@ fn bound_collections_list_page(response: &mut Value) {
     }
 }
 
-fn in_band_collection_response(response: Value) -> Result<Value, WireError> {
+/// This request's in-band collection response cap: the negotiated client
+/// frame minus envelope headroom, never above the engine default cap. The
+/// hello clamp keeps the negotiated frame at 1 MiB or more, so the cap always
+/// clears the single-row hard cap and page byte budgets.
+fn collection_in_band_cap(ctx: &RequestContext) -> usize {
+    (ctx.max_frame_bytes as usize)
+        .saturating_sub(64 * 1024)
+        .min(COLLECTION_RESPONSE_HARD_CAP_BYTES)
+}
+
+fn in_band_collection_response(response: Value, cap: usize) -> Result<Value, WireError> {
     let encoded_len = serde_json::to_vec(&response)
         .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?
         .len();
-    if encoded_len > COLLECTION_RESPONSE_HARD_CAP_BYTES {
+    if encoded_len > cap {
         return Err(wire(
             ErrorCode::LimitExceeded,
             "collection-response-exceeds-wire-limit",
@@ -484,8 +494,14 @@ fn in_band_collection_response(response: Value) -> Result<Value, WireError> {
     Ok(response)
 }
 
-fn collection_response_json(response: impl Serialize) -> Result<Value, WireError> {
-    in_band_collection_response(collection_response_value(response)?)
+fn collection_response_json(
+    response: impl Serialize,
+    ctx: &RequestContext,
+) -> Result<Value, WireError> {
+    in_band_collection_response(
+        collection_response_value(response)?,
+        collection_in_band_cap(ctx),
+    )
 }
 
 /// Aggregate hydrated blob bytes allowed to wait for or flow through framed
@@ -1173,9 +1189,10 @@ impl EngineService {
         operation: &str,
         response: Value,
     ) -> Result<(Value, Option<BlobEgress>), WireError> {
+        let cap = collection_in_band_cap(ctx);
         let bytes = serde_json::to_vec(&response)
             .map_err(|_| wire(ErrorCode::Internal, "state-corrupt"))?;
-        if bytes.len() <= COLLECTION_RESPONSE_HARD_CAP_BYTES {
+        if bytes.len() <= cap {
             return Ok((response, None));
         }
         if !ctx.has_capability("blobs") {
@@ -1196,7 +1213,7 @@ impl EngineService {
                 "collectionJson": Value::Null,
                 "blobSha256": sha256,
                 "byteLength": byte_length,
-                "inbandLimitBytes": COLLECTION_RESPONSE_HARD_CAP_BYTES,
+                "inbandLimitBytes": cap,
             }),
             Some(BlobEgress {
                 stream_id: request_id,
@@ -4207,7 +4224,7 @@ impl EngineService {
         .await?;
         let mut response = collection_response_value(page)?;
         bound_collections_list_page(&mut response);
-        in_band_collection_response(response)
+        in_band_collection_response(response, collection_in_band_cap(ctx))
     }
 
     /// Returns active-version collection bindings waiting for the shared
@@ -4237,7 +4254,7 @@ impl EngineService {
             ),
         )
         .await?;
-        collection_response_json(page)
+        collection_response_json(page, ctx)
     }
 
     async fn collections_get(

@@ -689,6 +689,9 @@ export class EngineClient implements EngineTransport {
       authToken: connectOptions.authToken,
       capabilities: [...connectOptions.capabilities],
       lastSessionGeneration: null,
+      // Tell the engine this client's receive limit; the engine clamps it
+      // into its negotiable range and echoes the effective value in the ack.
+      maxFrameBytes: connectOptions.maxFrameBytes ?? null,
     }).catch((cause: unknown) => {
       this.fail(
         new EngineClientError("transport-error", "Failed to send engine hello.", {
@@ -1054,10 +1057,13 @@ export class EngineClient implements EngineTransport {
       );
       return;
     }
-    this.maxFrameBytes = Math.min(
-      this.maxFrameBytes,
-      envelope.limits.maxFrameBytes,
-    );
+    // The ack is the negotiated contract. A client that requested a lower
+    // receive limit adopts the engine's clamped answer (the engine sizes its
+    // responses to it); otherwise the engine's advertised bound caps ours.
+    this.maxFrameBytes =
+      this.connectOptions.maxFrameBytes !== undefined
+        ? envelope.limits.maxFrameBytes
+        : Math.min(this.maxFrameBytes, envelope.limits.maxFrameBytes);
     this.maxBlobChunkBytes = Math.min(
       this.maxBlobChunkBytesCap,
       envelope.limits.maxBlobChunkBytes,

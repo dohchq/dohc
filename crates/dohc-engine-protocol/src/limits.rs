@@ -9,6 +9,11 @@ use serde::{Deserialize, Serialize};
 /// TypeScript side can use plain `number` without silent precision loss.
 pub const MAX_WIRE_INTEGER: u64 = (1 << 53) - 1;
 
+/// The smallest client receive limit a `hello` may negotiate. Below this the
+/// engine cannot ship a bounded response page plus its envelope in band, so a
+/// lower request clamps up to it.
+pub const MIN_NEGOTIABLE_FRAME_BYTES: u32 = 1024 * 1024;
+
 /// Bounds enforced by both encoder and decoder, and advertised to the client
 /// in `helloAck` so both sides agree on what a well-formed peer may send.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

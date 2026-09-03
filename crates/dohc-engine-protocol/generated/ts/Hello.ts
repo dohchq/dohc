@@ -16,4 +16,10 @@ capabilities: Array<string>,
  * saw, so the engine can tell resume-after-restart from first contact.
  * The engine always issues a fresh generation in `helloAck`.
  */
-lastSessionGeneration?: number | null, };
+lastSessionGeneration?: number | null, 
+/**
+ * The largest control frame the client will accept. The engine clamps it
+ * into `[MIN_NEGOTIABLE_FRAME_BYTES, engine default]`, echoes the
+ * effective value in `helloAck.limits`, and sizes its responses to it.
+ */
+maxFrameBytes?: number | null, };

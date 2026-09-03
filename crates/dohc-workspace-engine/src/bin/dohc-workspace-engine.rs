@@ -149,6 +149,7 @@ where
     let mut read_buf = vec![0_u8; READ_CHUNK_BYTES];
     let mut authenticated = false;
     let mut negotiated_capabilities = HashSet::new();
+    let mut negotiated_max_frame_bytes = WireLimits::default().max_frame_bytes;
     let mut keep_running = true;
     let mut read_error: Option<io::Error> = None;
     let active_requests = Arc::new(Mutex::new(HashSet::new()));
@@ -238,6 +239,7 @@ where
                     Ok(ack) => {
                         authenticated = true;
                         negotiated_capabilities.extend(ack.capabilities.iter().cloned());
+                        negotiated_max_frame_bytes = ack.limits.max_frame_bytes;
                         let generation = ack.session_generation;
                         if output_tx
                             .send(Envelope::HelloAck(ack).into())
@@ -278,6 +280,7 @@ where
                     &active_egress,
                     &mut request_tasks,
                     negotiated_capabilities.contains("blobs"),
+                    negotiated_max_frame_bytes,
                 )
                 .await
                 {
@@ -449,6 +452,7 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
         protocol_version,
         auth_token: candidate,
         capabilities,
+        max_frame_bytes,
         ..
     }) = envelope
     else {
@@ -473,11 +477,25 @@ fn authenticate(envelope: Envelope, auth_token: &str) -> Result<HelloAck, WireEr
         .into_iter()
         .filter(|capability| capability == "shadow-r13" || capability == "blobs")
         .collect();
+    // A client may lower its receive limit; the engine clamps the request
+    // into the negotiable range and echoes the effective value, which sizes
+    // this connection's in-band responses.
+    let default_limits = WireLimits::default();
+    let effective_max_frame_bytes =
+        max_frame_bytes.map_or(default_limits.max_frame_bytes, |requested| {
+            requested.clamp(
+                dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES,
+                default_limits.max_frame_bytes,
+            )
+        });
     Ok(HelloAck {
         protocol_version: PROTOCOL_VERSION,
         session_generation: NEXT_SESSION_GENERATION.fetch_add(1, Ordering::Relaxed),
         capabilities: negotiated,
-        limits: WireLimits::default(),
+        limits: WireLimits {
+            max_frame_bytes: effective_max_frame_bytes,
+            ..default_limits
+        },
     })
 }
 
@@ -491,6 +509,7 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
     active_egress: &Arc<Mutex<HashMap<u64, CancelSignal>>>,
     request_tasks: &mut JoinSet<()>,
     blobs_negotiated: bool,
+    max_frame_bytes: u32,
 ) -> bool {
     if *writer_gone.borrow() {
         return false;
@@ -504,17 +523,22 @@ async fn dispatch_authenticated<S: ProtocolEngineService + 'static>(
                 Arc::from([])
             };
             let completion_egress = Arc::clone(active_egress);
-            match supervisor.try_submit_with(request, capabilities, move |outcome| {
-                // The handoff runs before the supervisor drops its cancel
-                // registration. Cancel therefore always reaches either the
-                // request signal, this egress signal, or both.
-                if blobs_negotiated
-                    && let Ok(service_response) = outcome
-                    && let Some(egress) = &service_response.blob_egress
-                {
-                    lock(&completion_egress).insert(id, egress.cancel.clone());
-                }
-            }) {
+            match supervisor.try_submit_with(
+                request,
+                capabilities,
+                max_frame_bytes,
+                move |outcome| {
+                    // The handoff runs before the supervisor drops its cancel
+                    // registration. Cancel therefore always reaches either the
+                    // request signal, this egress signal, or both.
+                    if blobs_negotiated
+                        && let Ok(service_response) = outcome
+                        && let Some(egress) = &service_response.blob_egress
+                    {
+                        lock(&completion_egress).insert(id, egress.cancel.clone());
+                    }
+                },
+            ) {
                 Ok(receiver) => {
                     let output = output.clone();
                     let writer_gone = writer_gone.clone();
@@ -752,6 +776,7 @@ mod tests {
             auth_token: TEST_AUTH_TOKEN.to_owned(),
             capabilities: Vec::new(),
             last_session_generation: None,
+            max_frame_bytes: None,
         }))
     }
 
@@ -1023,6 +1048,7 @@ mod tests {
             &active_egress,
             &mut request_tasks,
             false,
+            WireLimits::default().max_frame_bytes,
         )
         .await;
         assert!(!keep_running);
@@ -1241,6 +1267,7 @@ mod tests {
                     Vec::new()
                 },
                 last_session_generation: None,
+                max_frame_bytes: None,
             }));
             input_bytes.extend_from_slice(&encode_envelope(&Envelope::Request(WireRequest {
                 id,
@@ -1452,11 +1479,40 @@ mod tests {
                 auth_token: TEST_AUTH_TOKEN.to_owned(),
                 capabilities: vec!["unknown".to_owned(), "blobs".to_owned()],
                 last_session_generation: None,
+                max_frame_bytes: None,
             }),
             TEST_AUTH_TOKEN,
         )
         .expect("authenticated hello");
         assert_eq!(ack.capabilities, vec!["blobs"]);
+    }
+
+    #[test]
+    fn hello_frame_limit_clamps_into_the_negotiable_range_and_echoes() {
+        // MUTATION: ignore the requested limit, skip the clamp floor, or echo
+        // the default -> a lower-limit client keeps receiving default-sized
+        // frames it must reject.
+        let ack_for = |requested: Option<u32>| {
+            authenticate(
+                Envelope::Hello(Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    auth_token: TEST_AUTH_TOKEN.to_owned(),
+                    capabilities: vec![],
+                    last_session_generation: None,
+                    max_frame_bytes: requested,
+                }),
+                TEST_AUTH_TOKEN,
+            )
+            .expect("authenticated hello")
+            .limits
+            .max_frame_bytes
+        };
+        let default = WireLimits::default().max_frame_bytes;
+        let floor = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+        assert_eq!(ack_for(None), default);
+        assert_eq!(ack_for(Some(2 * 1024 * 1024)), 2 * 1024 * 1024);
+        assert_eq!(ack_for(Some(1024)), floor);
+        assert_eq!(ack_for(Some(u32::MAX)), default);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

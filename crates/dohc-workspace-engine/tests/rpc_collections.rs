@@ -3291,3 +3291,104 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
         REASONS_PER_COLLECTION
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default() {
+    const LARGE_FIELD_BYTES: usize = 2 * 1024 * 1024;
+    const NEGOTIATED: u32 = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    let schema = "fields:\n  notes:\n    type: text\n";
+    let large_value = "x".repeat(LARGE_FIELD_BYTES);
+    let record = format!("---\nid: {RECORD_ID}\nnotes: {large_value}\n---\n");
+    seed_text(&mut store, "negotiated/collection.yaml", schema, 2);
+    seed_text(&mut store, "negotiated/record.md", &record, 3);
+    store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile negotiated collection");
+    drop(store);
+    let collection_dir = scratch.path().join("negotiated");
+    std::fs::create_dir_all(&collection_dir).expect("collection directory");
+    std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    std::fs::write(collection_dir.join("record.md"), &record).expect("record file");
+
+    let service = Arc::new(EngineService::new());
+    let transport = InProcessTransport::new(Arc::clone(&service));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+    let params = json!({ "collectionPath": "negotiated", "limit": 1 });
+
+    // At the daemon default the 2 MiB record travels in band.
+    let in_band = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded(),
+        request(
+            10,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("default-limit query");
+    assert!(in_band.blob_egress.is_none());
+
+    // At a negotiated 1 MiB frame the same response must ride blob egress
+    // sized to the NEGOTIATED cap, not the daemon default.
+    let negotiated_cap = NEGOTIATED as usize - 64 * 1024;
+    let over = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded()
+            .with_capability("blobs")
+            .with_max_frame_bytes(NEGOTIATED),
+        request(
+            11,
+            "collections.query",
+            Some(handle.clone()),
+            params.clone(),
+        ),
+    )
+    .await
+    .expect("negotiated-limit query with blobs");
+    let egress = over.blob_egress.expect("negotiated blob egress");
+    assert!(egress.bytes.len() > negotiated_cap);
+    assert_eq!(
+        over.response.result["inbandLimitBytes"].as_u64(),
+        Some(negotiated_cap as u64)
+    );
+    let parsed: Value = serde_json::from_slice(&egress.bytes).expect("blob-backed collection JSON");
+    assert_eq!(parsed["records"][0]["id"], json!(RECORD_ID));
+
+    // Without blobs the negotiated limit refuses rather than over-framing.
+    let refusal = ProtocolEngineService::call(
+        service.as_ref(),
+        RequestContext::unbounded().with_max_frame_bytes(NEGOTIATED),
+        request(12, "collections.query", Some(handle.clone()), params),
+    )
+    .await
+    .expect_err("a response past the negotiated limit without blobs must be refused");
+    assert_eq!(refusal.message, "collection-response-exceeds-wire-limit");
+}

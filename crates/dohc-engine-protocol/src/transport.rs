@@ -64,6 +64,9 @@ pub struct RequestContext {
     /// Capabilities negotiated by the framed session. Direct in-process calls
     /// default to none and may opt in explicitly.
     pub capabilities: Arc<[String]>,
+    /// The largest control frame the session's client accepts, negotiated in
+    /// `hello`. Direct in-process calls default to the engine default.
+    pub max_frame_bytes: u32,
 }
 
 impl RequestContext {
@@ -72,6 +75,7 @@ impl RequestContext {
             cancel: CancelSignal::new(),
             deadline: None,
             capabilities: Arc::from([]),
+            max_frame_bytes: crate::limits::WireLimits::SPIKE_DEFAULTS.max_frame_bytes,
         }
     }
 
@@ -79,6 +83,11 @@ impl RequestContext {
         let mut capabilities = self.capabilities.to_vec();
         capabilities.push(capability.into());
         self.capabilities = capabilities.into();
+        self
+    }
+
+    pub fn with_max_frame_bytes(mut self, max_frame_bytes: u32) -> Self {
+        self.max_frame_bytes = max_frame_bytes;
         self
     }
 

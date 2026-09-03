@@ -431,6 +431,7 @@ describe("EngineClient", () => {
         authToken: "parent-secret",
         capabilities: ["core", "ydoc", "blobs"],
         lastSessionGeneration: null,
+        maxFrameBytes: LIMITS.maxFrameBytes,
       },
     ]);
     await expect(transport.sendRequest(request(41, "before.ack"))).rejects.toMatchObject({

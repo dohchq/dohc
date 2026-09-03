@@ -462,6 +462,7 @@ impl Daemon {
                 auth_token: TOKEN.to_owned(),
                 capabilities: Vec::new(),
                 last_session_generation: None,
+                max_frame_bytes: None,
             }))
             .await;
         // A daemon that starts but never completes the handshake must fail
