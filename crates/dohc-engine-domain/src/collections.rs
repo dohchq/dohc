@@ -2255,8 +2255,10 @@ impl ChangeAttribution {
 
 /// One applied field difference, exactly as its history row was recorded.
 /// Values stay as the stored JSON text; the event layer decides parsing and
-/// size bounds.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// size bounds. Serialized device-locally onto a parked update's deferred
+/// coordinate so a drain retry can surface facts an earlier failed drain
+/// already committed (#1004) — never a wire shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionFieldChangeFact {
     pub field_name: String,
     pub previous_json: Option<String>,
@@ -2270,7 +2272,7 @@ pub struct CollectionFieldChangeFact {
 /// is true when this apply indexed field content for a binding reconciliation
 /// inserted without any (a fresh record file carries only the engine-owned
 /// id until its first field write).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionRecordApplyFacts {
     pub collection_path: String,
     pub record_id: String,

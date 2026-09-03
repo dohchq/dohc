@@ -9534,14 +9534,22 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     let redrained =
         drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
     assert_eq!(redrained.drained, 1);
-    // The failed first drain already committed the update and its history
-    // row, so the redelivery dedupes and derives no facts: the events for
-    // this edit belong to the apply that committed it, exactly once.
-    assert!(
-        redrained.record_facts.is_empty(),
-        "a redelivered drain must not re-derive facts: {:?}",
+    // The failed first drain committed the update, its history row, and its
+    // record-event decision, then dropped the derived facts with its error —
+    // nothing was emitted. The redrain's replay derives no second fact set
+    // (the history insert dedupes by coordinate); it returns the persisted
+    // decision instead, so the facts surface exactly once (#1004).
+    assert_eq!(
+        redrained.record_facts.len(),
+        1,
+        "the redrain returns the committed decision: {:?}",
         redrained.record_facts
     );
+    let facts = &redrained.record_facts[0];
+    assert_eq!(facts.record_id, RECORD_ID);
+    assert_eq!(facts.fields.len(), 1);
+    assert_eq!(facts.fields[0].field_name, "title");
+    assert_eq!(facts.fields[0].next_json.as_deref(), Some("\"Remote\""));
     let (history_rows, deferred_rows): (i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -9563,6 +9571,196 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
         "redelivery must reuse the journal identity"
     );
     assert_eq!(deferred_rows, 0, "successful projection clears the marker");
+}
+
+/// #1004: a deferred drain whose final projection fails has already committed
+/// the parked update, its history row, and its record-event decision — but
+/// returns an error, dropping the derived facts unemitted. The redrain
+/// dedupes the update and returns the persisted decision; the successful
+/// drain consumes it, so a third drain finds nothing. The facts surface
+/// exactly once and history is never duplicated.
+#[test]
+fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain() {
+    const RECORD_ID: &str = "rec_cccccccccccccccccccccccccc";
+    const OBJECT_ID: &str = "projection-failure-object";
+    const PATH: &str = "tasks/projection.md";
+
+    let (_scratch, _path, mut engine) = store();
+    VersionedTextStore::new(&mut engine)
+        .ensure_main_version("ws", "main", 1_300, &NoFaults)
+        .expect("main version");
+    seed_text_head(
+        &mut engine,
+        "projection-failure-schema",
+        "tasks/collection.yaml",
+        "fields:\n  title:\n    type: text\n",
+    );
+    let markdown = format!("---\nid: {RECORD_ID}\ntitle: Original\n---\n\nBody\n");
+    seed_text_head(&mut engine, OBJECT_ID, PATH, &markdown);
+    engine
+        .write_with(&NoFaults, |tx| {
+            dohc_engine_domain::reconcile_collections_in_tx(tx, "ws", "main")?;
+            dohc_engine_domain::set_collection_adoption_state_in_tx(
+                tx, "ws", "main", PATH, RECORD_ID, "adopted",
+            )
+        })
+        .expect("bind adopted collection record");
+
+    let key = dohc_engine_collab::DocKey::new("ws", "main", OBJECT_ID).expect("key");
+    let local = dohc_engine_collab::Ydoc::wire();
+    local
+        .rewrite_content_to_markdown(dohc_engine_collab::ContentKind::Richdoc, &markdown)
+        .expect("seed rich document");
+    let base = local.encode_full_state();
+    let claim_id = match dohc_engine_collab::claim_base(
+        &mut engine,
+        &key,
+        dohc_engine_collab::ContentKind::Richdoc,
+        &base,
+        &NoFaults,
+        1_500,
+    )
+    .expect("claim replicated base")
+    {
+        TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed { base_snapshot_sha }) => {
+            base_snapshot_sha
+        }
+        other => panic!("unexpected base claim: {other:?}"),
+    };
+
+    let remote = dohc_engine_collab::Ydoc::wire();
+    remote.apply(&base).expect("remote sees base");
+    let remote_update = remote.frontmatter_set("title", "Remote");
+    let update_sha = engine
+        .put_binary_blob(&remote_update)
+        .expect("store remote update");
+    let operation = envelope(
+        "projection-failure-peer",
+        0,
+        "ydoc.update",
+        json!({
+            "versionId": "main",
+            "objectId": OBJECT_ID,
+            "path": PATH,
+            "contentKind": "richdoc",
+            "updateBlobSha256": update_sha,
+            "lineageClaimId": claim_id,
+            "isBaseState": false,
+            "actorOriginId": "remote-author"
+        }),
+    );
+    assert!(matches!(
+        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        Ok(ApplyOutcome::Applied(YdocApplyResult {
+            deferred: true,
+            ..
+        }))
+    ));
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch(
+                "CREATE TRIGGER inject_projection_failure \
+                 BEFORE INSERT ON moments \
+                 BEGIN SELECT RAISE(ABORT, 'injected drain projection failure'); END",
+            )
+            .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("install projection failure");
+    assert!(matches!(
+        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        Err(SyncError::Storage(_))
+    ));
+    // The apply's transaction committed the update, the history row, AND the
+    // event decision on the still-parked coordinate; the projection failure
+    // dropped only the returned facts.
+    let (history_after_failure, decision): (i64, Option<String>) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_field_history \
+                     WHERE workspace_id='ws' AND version_id='main' \
+                       AND record_id=?1 AND field_name='title'",
+                    [RECORD_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row(
+                    "SELECT record_facts_json FROM ydoc_deferred_updates \
+                     WHERE workspace_id='ws' AND origin_id='projection-failure-peer' \
+                       AND origin_seq=0",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .expect("state after failed projection");
+    assert_eq!(history_after_failure, 1);
+    assert!(
+        decision.is_some(),
+        "the record-event decision persists with the committed update"
+    );
+
+    engine
+        .write_with(&NoFaults, |tx| {
+            tx.execute_batch("DROP TRIGGER inject_projection_failure")
+                .map_err(SyncError::persist)?;
+            Ok::<_, SyncError>(())
+        })
+        .expect("clear projection failure");
+    let redrained =
+        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    assert_eq!(redrained.drained, 1);
+    assert_eq!(
+        redrained.record_facts.len(),
+        1,
+        "{:?}",
+        redrained.record_facts
+    );
+    let facts = &redrained.record_facts[0];
+    assert_eq!(facts.record_id, RECORD_ID);
+    assert_eq!(facts.collection_path, "tasks");
+    assert!(!facts.created);
+    assert_eq!(facts.author_origin_id.as_deref(), Some("remote-author"));
+    assert_eq!(
+        facts.source,
+        Some(("projection-failure-peer".to_owned(), 0))
+    );
+    assert_eq!(facts.fields.len(), 1);
+    assert_eq!(facts.fields[0].field_name, "title");
+    assert_eq!(
+        facts.fields[0].previous_json.as_deref(),
+        Some("\"Original\"")
+    );
+    assert_eq!(facts.fields[0].next_json.as_deref(), Some("\"Remote\""));
+
+    let (history_rows, deferred_rows): (i64, i64) = engine
+        .read_with(|conn| {
+            Ok::<_, rusqlite::Error>((
+                conn.query_row(
+                    "SELECT COUNT(*) FROM collection_field_history \
+                     WHERE workspace_id='ws' AND version_id='main' \
+                       AND record_id=?1 AND field_name='title'",
+                    [RECORD_ID],
+                    |row| row.get(0),
+                )?,
+                conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
+                    row.get(0)
+                })?,
+            ))
+        })
+        .expect("state after redrain");
+    assert_eq!(history_rows, 1, "the history row is never duplicated");
+    assert_eq!(
+        deferred_rows, 0,
+        "the successful drain consumes the decision with the marker"
+    );
+
+    // Exactly once: with the decision consumed, a further drain has nothing
+    // to apply and nothing to surface.
+    let idle = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("idle drain");
+    assert_eq!(idle.drained, 0);
+    assert!(idle.record_facts.is_empty());
 }
 
 #[test]

@@ -2173,7 +2173,9 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             CancellationToken::new(),
         )
         .await
-        .expect("settle later text");
+        .expect("settle later text")
+        .settled()
+        .expect("settled");
     assert_eq!(
         std::fs::read_to_string(scratch.path().join(PATH)).expect("settled disk"),
         AFTER
