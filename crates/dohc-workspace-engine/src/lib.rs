@@ -2185,6 +2185,7 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
+        let shadow_token = validated.token.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
@@ -2202,6 +2203,21 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
+            // The shadow bind runs HERE, inside the task no cancellation can
+            // interrupt, not as the first await after it. The first open of a
+            // workspace creates and migrates engine.db; a request dropped
+            // between that commit and the bind left the store migrated but
+            // unbound, and every later open then refused it as a mismatch,
+            // permanently (#908). Now the store is either bound or the actor
+            // is closed before the request can observe either.
+            let opened = opened.and_then(|open| {
+                if !open.created_actor {
+                    return Ok((open, None));
+                }
+                let bound = tokio::runtime::Handle::current()
+                    .block_on(open.actor.bind_shadow_clone(shadow_token))?;
+                Ok((open, Some(bound)))
+            });
             #[cfg(test)]
             if open_guard.db_path.is_some()
                 && let Some((reached, release, armed)) = open_install_probe
@@ -2224,7 +2240,7 @@ impl EngineService {
                 opened.map_err(|_| wire(ErrorCode::Internal, "workspace open task failed"))?
             }
         };
-        let actor_open = actor_open.map_err(map_runtime)?;
+        let (actor_open, bound) = actor_open.map_err(map_runtime)?;
         // The supervisor deduplicates by physical engine.db identity, including
         // root aliases and hard links. EngineService state (capture driver,
         // session registry, and version barriers) deliberately has one owner:
@@ -2239,16 +2255,10 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
-        let binding = actor.bind_shadow_clone(validated.token).await;
-        let binding_error = match binding {
-            Ok(true) => None,
-            Ok(false) => Some(map_shadow_fence(
+        if bound != Some(true) {
+            return Err(map_shadow_fence(
                 shadow_fence::ShadowFenceError::DatabaseTokenMismatch,
-            )),
-            Err(error) => Some(map_runtime(error)),
-        };
-        if let Some(error) = binding_error {
-            return Err(error);
+            ));
         }
         let sequence = self
             .next_handle
