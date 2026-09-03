@@ -1153,6 +1153,24 @@ describe("EngineClient", () => {
     transport.close();
   });
 
+  it("refuses a configured frame limit the engine cannot honor", () => {
+    // The engine clamps a requested limit up to 1 MiB; a client that asked
+    // for less would otherwise have its receive cap raised by the ack.
+    expect(() => client(new FakePeerConnection(), { maxFrameBytes: 128 * 1024 })).toThrow(
+      /engine cannot honor less/,
+    );
+  });
+
+  it("adopts the engine's clamped answer to a lowered frame limit", async () => {
+    const peer = new FakePeerConnection();
+    const transport = client(peer, { maxFrameBytes: 2 * 1024 * 1024 });
+    peer.send(helloAck({ ...LIMITS, maxFrameBytes: 2 * 1024 * 1024 }));
+    await transport.ready();
+    const hello = peer.received.find((envelope) => envelope.type === "hello");
+    expect(hello).toMatchObject({ maxFrameBytes: 2 * 1024 * 1024 });
+    transport.close();
+  });
+
   it("fails the handshake on malformed helloAck capabilities", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);
