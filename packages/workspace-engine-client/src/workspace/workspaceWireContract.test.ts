@@ -189,6 +189,7 @@ describe("workspace wire schemas", () => {
               reasons: [{ code, path: "/fields" }],
             },
           ],
+          nextCursor: null,
         }),
       ).not.toThrow();
     }
@@ -360,6 +361,7 @@ describe("workspace wire schemas", () => {
         collections: [
           { path: "projects", status: "valid", reasons: [] },
         ],
+        nextCursor: null,
       }).collections,
     ).toHaveLength(1);
     expect(

@@ -3050,3 +3050,106 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
         "pages must stay newest-first without duplicates"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn collections_list_pages_with_the_exclusive_cursor() {
+    const COLLECTIONS: [&str; 3] = ["alpha", "beta", "gamma"];
+    let scratch = ScratchDir::new().expect("scratch");
+    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
+    let db = scratch.engine_db_path().expect("engine db path");
+    let mut store = EngineStore::open(&db, 1).expect("open store");
+    store.bind_shadow_clone_token(TOKEN).expect("bind token");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
+        .expect("main version");
+    for (index, name) in COLLECTIONS.iter().enumerate() {
+        let schema = format!("name: {name}\n");
+        seed_text(
+            &mut store,
+            &format!("{name}/collection.yaml"),
+            &schema,
+            2 + index as i64,
+        );
+        let collection_dir = scratch.path().join(name);
+        std::fs::create_dir_all(&collection_dir).expect("collection directory");
+        std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
+    }
+    let reconciled = store
+        .write_with(&NoFaults, |tx| {
+            reconcile_collections_in_tx(tx, WORKSPACE_ID, "main")
+        })
+        .expect("reconcile collections");
+    assert!(matches!(reconciled, TxnOutcome::Committed(_)));
+    drop(store);
+
+    let transport = InProcessTransport::new(Arc::new(EngineService::new()));
+    let opened = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                1,
+                "workspace.open",
+                None,
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": WORKSPACE_ID,
+                }),
+            ),
+        )
+        .await
+        .expect("open workspace");
+    let handle: WorkspaceHandle =
+        serde_json::from_value(opened.result["workspace"].clone()).expect("workspace handle");
+
+    let refused = transport
+        .call(
+            RequestContext::unbounded(),
+            request(
+                99,
+                "collections.list",
+                Some(handle.clone()),
+                json!({ "limit": 501 }),
+            ),
+        )
+        .await
+        .expect_err("an over-limit collections.list must be refused");
+    assert_eq!(refused.message, "collection-list-limit-out-of-range");
+
+    let mut paths = Vec::new();
+    let mut cursor = Value::Null;
+    for request_id in 100..105 {
+        let mut params = json!({ "limit": 1 });
+        if !cursor.is_null() {
+            params["cursor"] = cursor.clone();
+        }
+        let page = call(&transport, &handle, request_id, "collections.list", params).await;
+        let collections = page["collections"].as_array().expect("collections page");
+        assert!(
+            collections.len() <= 1,
+            "the requested page bound must be honored"
+        );
+        paths.extend(
+            collections
+                .iter()
+                .map(|summary| summary["path"].as_str().expect("path").to_owned()),
+        );
+        cursor = page["nextCursor"].clone();
+        if cursor.is_null() {
+            break;
+        }
+    }
+
+    assert_eq!(paths, COLLECTIONS);
+    assert!(cursor.is_null(), "the final page must terminate the cursor");
+
+    let unpaged = call(&transport, &handle, 110, "collections.list", json!({})).await;
+    assert_eq!(
+        unpaged["collections"]
+            .as_array()
+            .expect("collections")
+            .len(),
+        COLLECTIONS.len(),
+        "the default limit returns every collection in one page"
+    );
+    assert_eq!(unpaged["nextCursor"], Value::Null);
+}

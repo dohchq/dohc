@@ -285,7 +285,7 @@ const WORKSPACE_DECODER_CASES: Array<{
   },
   {
     method: WORKSPACE_METHOD.collectionsList,
-    valid: { collections: [collectionSummary] },
+    valid: { collections: [collectionSummary], nextCursor: null },
   },
   {
     method: WORKSPACE_METHOD.collectionsListPendingAdoptions,

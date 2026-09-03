@@ -4134,23 +4134,31 @@ impl EngineService {
         })
     }
 
-    /// Returns every collection in the workspace's active version, ordered by path.
+    /// Returns one path-ordered page of the workspace's active-version
+    /// collections with an exclusive continuation cursor.
     async fn collections_list(
         &self,
         ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
-        let _: CollectionsListParams = parse(params)?;
+        let params: CollectionsListParams = parse(params)?;
+        if params.limit == 0 || params.limit > MAX_COLLECTION_QUERY_LIMIT {
+            return Err(wire(
+                ErrorCode::InvalidParams,
+                "collection-list-limit-out-of-range",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        let collections = Self::read_under_ctx(
+        let page = Self::read_under_ctx(
             &cancellation,
             "collections.list",
-            open.actor.collections_list(open.workspace_id),
+            open.actor
+                .collections_list(open.workspace_id, params.limit, params.cursor),
         )
         .await?;
-        collection_response_json(json!({ "collections": collections }))
+        collection_response_json(page)
     }
 
     /// Returns active-version collection bindings waiting for the shared
@@ -10760,8 +10768,13 @@ struct SearchEnsureIndexParams {
 }
 
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CollectionsListParams {}
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CollectionsListParams {
+    #[serde(default = "default_collection_query_limit")]
+    limit: usize,
+    #[serde(default)]
+    cursor: Option<String>,
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

@@ -51,22 +51,22 @@ use dohc_engine_domain::{
     ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage,
     ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionPendingAdoptionCursor,
-    CollectionPendingAdoptionPage, CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
-    CollectionRelationCleanupCandidate, CollectionSummary, CompareTextFileVersions,
-    CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim,
-    DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText, LinkedChatStore,
-    ListMomentsQuery, MentionCursor, MergeTextFileFromVersion, MergeTextFileResult, MomentPage,
-    MomentRecord, PendingBookmarkRow, ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult,
-    RenameTextFile, ResolveDecision, ResolveTextConflict, ResolveTextConflictResult,
-    RollbackTextFileMutation, RunRecordLink, SaveBookmark, SecretComparePage, SecretDelete,
-    SecretFileStat, SecretFileStore, SecretMomentPage, SecretMomentRecord, SecretOp,
-    SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage, SetFollow, SetReaction,
-    SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
+    CollectionAdoptionCandidate, CollectionDetails, CollectionListPage,
+    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
+    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
+    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
+    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
+    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
+    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
+    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
+    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
+    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
+    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
+    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -1444,7 +1444,9 @@ enum Command {
     },
     CollectionsList {
         workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<CollectionSummary>, RuntimeError>>,
+        limit: usize,
+        cursor: Option<String>,
+        reply: oneshot::Sender<Result<CollectionListPage, RuntimeError>>,
     },
     CollectionsListPendingAdoptions {
         workspace_id: String,
@@ -3408,11 +3410,15 @@ impl ActorHandle {
     pub async fn collections_list(
         &self,
         workspace_id: String,
-    ) -> Result<Vec<CollectionSummary>, RuntimeError> {
+        limit: usize,
+        cursor: Option<String>,
+    ) -> Result<CollectionListPage, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::CollectionsList {
                 workspace_id,
+                limit,
+                cursor,
                 reply,
             })
             .await
@@ -8393,10 +8399,14 @@ fn worker_main(
             }
             Command::CollectionsList {
                 workspace_id,
+                limit,
+                cursor,
                 reply,
             } => {
                 let outcome = store
-                    .read_with(|conn| list_collections(conn, &workspace_id))
+                    .read_with(|conn| {
+                        list_collections(conn, &workspace_id, limit, cursor.as_deref())
+                    })
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }

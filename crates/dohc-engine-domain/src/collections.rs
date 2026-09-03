@@ -3822,29 +3822,64 @@ fn collection_summary_for_version(
         .transpose()
 }
 
-/// Every collection in the active workspace version, ordered by path.
+/// One `list_collections` page: path-ordered summaries and the exclusive
+/// continuation cursor (the last returned path), `None` on the final page.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CollectionListPage {
+    pub collections: Vec<CollectionSummary>,
+    pub next_cursor: Option<String>,
+}
+
+/// One page of the active workspace version's collections, ordered by path
+/// with the same exclusive-cursor keyset pattern as the pending-adoptions
+/// listing, so discovery never outgrows the protocol collection limit.
 pub fn list_collections(
     conn: &Connection,
     workspace_id: &str,
-) -> Result<Vec<CollectionSummary>, crate::DomainError> {
+    limit: usize,
+    cursor: Option<&str>,
+) -> Result<CollectionListPage, crate::DomainError> {
+    if limit == 0 || limit > MAX_COLLECTION_QUERY_LIMIT {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection list limit is invalid",
+        });
+    }
+    if cursor.is_some_and(str::is_empty) {
+        return Err(crate::DomainError::InvalidInput {
+            reason: "collection list cursor is invalid",
+        });
+    }
     let version_id = active_version_id(conn, workspace_id)?;
     let mut statement = conn
         .prepare(
-            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections              WHERE workspace_id=?1 AND version_id=?2 ORDER BY collection_path",
+            "SELECT collection_path,schema_status,degradation_reasons_json FROM collections \
+             WHERE workspace_id=?1 AND version_id=?2 \
+               AND (?3 IS NULL OR collection_path>?3) \
+             ORDER BY collection_path LIMIT ?4",
         )
         .map_err(crate::DomainError::sql_corrupt)?;
     let rows = statement
-        .query_map(params![workspace_id, version_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
+        .query_map(
+            params![
+                workspace_id,
+                version_id,
+                cursor,
+                i64::try_from(limit + 1).expect("bounded collection list page limit")
+            ],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
         .map_err(crate::DomainError::sql_corrupt)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(crate::DomainError::sql_corrupt)?;
-    rows.into_iter()
+    let mut collections = rows
+        .into_iter()
         .map(|(path, status, reasons)| {
             Ok(CollectionSummary {
                 path,
@@ -3852,7 +3887,13 @@ pub fn list_collections(
                 reasons: stored_schema_reasons(&reasons)?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, crate::DomainError>>()?;
+    let next_cursor = (collections.len() > limit).then(|| collections[limit - 1].path.clone());
+    collections.truncate(limit);
+    Ok(CollectionListPage {
+        collections,
+        next_cursor,
+    })
 }
 
 /// The parsed schema and record count for one active-version collection.

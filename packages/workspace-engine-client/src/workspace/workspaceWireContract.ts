@@ -211,6 +211,14 @@ export type ConflictResolveResult =
   | ReplicatedConflictResult;
 
 export type CollectionListResult = CollectionListContractResult;
+export type CollectionListParams = WorkspaceJsonObject & {
+  limit?: number;
+  cursor?: string;
+};
+export type CollectionListPage = WorkspaceJsonObject & {
+  collections: CollectionListResult["collections"];
+  nextCursor: string | null;
+};
 export type CollectionPendingAdoption = WorkspaceJsonObject & {
   versionId: string;
   recordId: string;
@@ -364,7 +372,7 @@ export type WorkspaceMethodParamsMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListParams;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenParams;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveParams;
-  [WORKSPACE_METHOD.collectionsList]: WorkspaceEmptyParams;
+  [WORKSPACE_METHOD.collectionsList]: CollectionListParams;
   [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsParams;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetParams;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryParams;
@@ -389,7 +397,7 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.conflictsList]: ConflictListPage;
   [WORKSPACE_METHOD.conflictsOpen]: ConflictOpenResult;
   [WORKSPACE_METHOD.conflictsResolve]: ConflictResolveResult;
-  [WORKSPACE_METHOD.collectionsList]: CollectionListResult;
+  [WORKSPACE_METHOD.collectionsList]: CollectionListPage;
   [WORKSPACE_METHOD.collectionsListPendingAdoptions]: CollectionPendingAdoptionsPage;
   [WORKSPACE_METHOD.collectionsGet]: CollectionGetResult;
   [WORKSPACE_METHOD.collectionsQuery]: CollectionQueryResult;
@@ -815,8 +823,9 @@ const CollectionRecordSchema = mutableStruct({
   ),
 });
 
-const CollectionListResultSchema = mutableStruct({
+const CollectionListPageSchema = mutableStruct({
   collections: Schema.mutable(Schema.Array(CollectionSummarySchema)),
+  nextCursor: NullableString,
 });
 
 const CollectionQueryCursorSchema = mutableStruct({
@@ -976,7 +985,7 @@ const WorkspaceResultSchemas = {
     }),
     ReplicatedConflictResultSchema,
   ]),
-  [WORKSPACE_METHOD.collectionsList]: CollectionListResultSchema,
+  [WORKSPACE_METHOD.collectionsList]: CollectionListPageSchema,
   [WORKSPACE_METHOD.collectionsListPendingAdoptions]:
     CollectionPendingAdoptionsPageSchema,
   [WORKSPACE_METHOD.collectionsGet]: CollectionDetailsSchema,
