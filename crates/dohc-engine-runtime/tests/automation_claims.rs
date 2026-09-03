@@ -8,13 +8,13 @@
 
 use dohc_engine_collab::{ContentKind, DocKey, Regime, Ydoc};
 use dohc_engine_domain::{
-    AutomationClaimState, AutomationTrigger, ChangeActorKind, ChangeAttribution,
-    VersionedTextStore, WriteText, subscribe_automation,
+    AUTOMATION_RECLAIM_EXHAUSTED, AutomationClaimState, AutomationSettle, AutomationTrigger,
+    ChangeActorKind, ChangeAttribution, VersionedTextStore, WriteText, subscribe_automation,
 };
-use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
-use dohc_engine_storage::{EngineStore, StorageError};
+use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
+use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -228,6 +228,8 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             AUTOMATION.to_owned(),
             "tasks".to_owned(),
             150,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
         )
         .await
         .expect("subscribe automation");
@@ -403,4 +405,326 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
         peer_claims.is_empty(),
         "the non-origin device never claims: {peer_claims:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The claim ledger's crash tier: a claim is served at most once per attempt,
+// a crashed settle rolls back to running for the open-time reaper, and the
+// attempt bound turns an exhausted claim terminally failed.
+// ---------------------------------------------------------------------------
+
+const CRASH_CLAIM: &str = "atc_crash_recovery_claim";
+
+/// A pending claim seeded straight into the ledger (History trigger shape),
+/// so the crash tests exercise the claim/settle/reclaim transitions alone.
+fn seed_pending_claim(db: &Path, workspace_id: &str, claim_id: &str, now_ms: i64) {
+    let mut store = EngineStore::open(db, 9_130).expect("open store");
+    store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO automation_claims \
+                 (workspace_id, claim_id, automation_id, trigger_history_id, \
+                  record_id, collection_path, depth, state, attempts, \
+                  created_at_ms, updated_at_ms) \
+                 VALUES (?1, ?2, ?3, 1, ?4, 'tasks', 0, 'pending', 0, ?5, ?5)",
+                rusqlite::params![workspace_id, claim_id, AUTOMATION, RECORD, now_ms],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("seed pending claim");
+}
+
+fn claim_ledger(db: &Path, workspace_id: &str, claim_id: &str) -> (String, i64, Option<String>) {
+    let store = EngineStore::open(db, 9_131).expect("open store");
+    store
+        .read_with(|conn| {
+            conn.query_row(
+                "SELECT state, attempts, error FROM automation_claims \
+                 WHERE workspace_id = ?1 AND claim_id = ?2",
+                rusqlite::params![workspace_id, claim_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+        })
+        .expect("read claim ledger")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+
+    // Attempt 1: the claim is served exactly once.
+    let claim = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            200,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next")
+        .expect("the seeded claim is pending");
+    assert_eq!(claim.claim_id, CRASH_CLAIM);
+    assert_eq!(claim.state, AutomationClaimState::Running);
+    assert_eq!(claim.attempts, 1);
+    let none = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            210,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next again");
+    assert!(
+        none.is_none(),
+        "a running claim is never served twice within one attempt"
+    );
+
+    // The settle crashes inside its transaction, before the commit is
+    // durable: the done transition rolls back whole.
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+    handle
+        .automation_settle(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            AutomationSettle::Done,
+            300,
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the injected mid-settle crash surfaces as an error");
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after settle crash");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("running".to_owned(), 1, None),
+        "a crashed settle leaves the claim running for the reaper"
+    );
+
+    // Restart: the open-time reaper requeues the stale running claim, and
+    // the next claim serves it again as attempt 2.
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let reclaimed = handle
+        .automation_reclaim_running(
+            WS.to_owned(),
+            2,
+            1_000,
+            1_000,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("reclaim after restart");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].state, AutomationClaimState::Pending);
+    let claim = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            1_100,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next after requeue")
+        .expect("the requeued claim is served again");
+    assert_eq!(claim.attempts, 2, "the retry is a new attempt");
+
+    // A second crashed settle exhausts the attempt bound: the reaper turns
+    // the claim terminally failed with the reclaim-exhausted reason, and it
+    // is never served again.
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+    handle
+        .automation_settle(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            AutomationSettle::Done,
+            1_200,
+            faults.clone(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect_err("the second injected mid-settle crash surfaces as an error");
+    assert!(faults.fired());
+    supervisor
+        .close(&db)
+        .expect("close after second settle crash");
+
+    let handle = supervisor.open(&db, 3).expect("reopen actor twice").actor;
+    let reclaimed = handle
+        .automation_reclaim_running(
+            WS.to_owned(),
+            2,
+            2_000,
+            2_000,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("exhausting reclaim");
+    assert_eq!(reclaimed.len(), 1);
+    assert_eq!(reclaimed[0].state, AutomationClaimState::Failed);
+    assert_eq!(
+        reclaimed[0].error.as_deref(),
+        Some(AUTOMATION_RECLAIM_EXHAUSTED)
+    );
+    let none = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            2_100,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next after exhaustion");
+    assert!(none.is_none(), "a terminally failed claim is never served");
+    supervisor.close(&db).expect("close at end");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        (
+            "failed".to_owned(),
+            2,
+            Some(AUTOMATION_RECLAIM_EXHAUSTED.to_owned())
+        )
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+    handle
+        .automation_claim_next(WS.to_owned(), 200, faults.clone(), CancellationToken::new())
+        .await
+        .expect_err("the injected mid-claim crash surfaces as an error");
+    assert!(faults.fired());
+    supervisor.close(&db).expect("close after claim crash");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("pending".to_owned(), 0, None),
+        "a crashed claim rolls back whole: still pending, no attempt spent"
+    );
+
+    // Restart: the retry serves the claim exactly once, as attempt 1.
+    let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
+    let claim = handle
+        .automation_claim_next(
+            WS.to_owned(),
+            300,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("claim next after restart")
+        .expect("the rolled-back claim is still pending");
+    assert_eq!(claim.claim_id, CRASH_CLAIM);
+    assert_eq!(claim.attempts, 1);
+    let settled = handle
+        .automation_settle(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            AutomationSettle::Done,
+            400,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("settle done");
+    assert_eq!(settled.state, AutomationClaimState::Done);
+    supervisor.close(&db).expect("close at end");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("done".to_owned(), 1, None)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_token_short_circuits_every_automation_command_without_writing() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
+
+    let supervisor = WorkspaceSupervisor::new();
+    let handle = supervisor.open(&db, 1).expect("open actor").actor;
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    let error = handle
+        .automation_claim_next(WS.to_owned(), 200, Arc::new(NoFaults), cancelled.clone())
+        .await
+        .expect_err("a cancelled claim next returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_reclaim_running(
+            WS.to_owned(),
+            2,
+            1_000,
+            1_000,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled reclaim returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_settle(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            AutomationSettle::Done,
+            300,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled settle returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_subscribe(
+            WS.to_owned(),
+            AUTOMATION.to_owned(),
+            "tasks".to_owned(),
+            400,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled subscribe returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_unsubscribe(
+            WS.to_owned(),
+            AUTOMATION.to_owned(),
+            "tasks".to_owned(),
+            Arc::new(NoFaults),
+            cancelled,
+        )
+        .await
+        .expect_err("a cancelled unsubscribe returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    supervisor.close(&db).expect("close at end");
+    assert_eq!(
+        claim_ledger(&db, WS, CRASH_CLAIM),
+        ("pending".to_owned(), 0, None),
+        "a cancelled command writes nothing"
+    );
+    let subscriptions: i64 = {
+        let conn = rusqlite::Connection::open(&db).expect("open db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM automation_subscriptions WHERE workspace_id = ?1",
+            [WS],
+            |row| row.get(0),
+        )
+        .expect("count subscriptions")
+    };
+    assert_eq!(subscriptions, 0, "a cancelled subscribe registers nothing");
 }

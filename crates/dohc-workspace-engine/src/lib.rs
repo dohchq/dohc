@@ -2249,6 +2249,8 @@ impl EngineService {
                         AUTOMATION_CLAIM_MAX_ATTEMPTS,
                         now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
+                        Arc::new(NoFaults),
+                        cancellation.token(),
                     ),
                 )
                 .await?;
@@ -7482,6 +7484,8 @@ impl EngineService {
                 params.automation_id,
                 params.path,
                 now_ms()?,
+                Arc::new(NoFaults),
+                cancellation.token(),
             ),
         )
         .await?;
@@ -7500,8 +7504,13 @@ impl EngineService {
         let unsubscribed = Self::read_under_ctx(
             &cancellation,
             "automations.unsubscribe",
-            open.actor
-                .automation_unsubscribe(open.workspace_id, params.automation_id, params.path),
+            open.actor.automation_unsubscribe(
+                open.workspace_id,
+                params.automation_id,
+                params.path,
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(json!({ "unsubscribed": unsubscribed }))
@@ -7519,8 +7528,12 @@ impl EngineService {
         let claim = Self::read_under_ctx(
             &cancellation,
             "automations.claimNext",
-            open.actor
-                .automation_claim_next(open.workspace_id, params.now_ms.unwrap_or(now_ms()?)),
+            open.actor.automation_claim_next(
+                open.workspace_id,
+                params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
+            ),
         )
         .await?;
         Ok(claim
@@ -7595,6 +7608,8 @@ impl EngineService {
                 params.claim_id,
                 settle,
                 params.now_ms.unwrap_or(now_ms()?),
+                Arc::new(NoFaults),
+                cancellation.token(),
             ),
         )
         .await?;
