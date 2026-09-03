@@ -650,7 +650,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_cancelled_token_short_circuits_claim_and_reclaim_without_writing() {
+async fn a_cancelled_token_short_circuits_every_automation_command_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
@@ -671,10 +671,45 @@ async fn a_cancelled_token_short_circuits_claim_and_reclaim_without_writing() {
             1_000,
             1_000,
             Arc::new(NoFaults),
-            cancelled,
+            cancelled.clone(),
         )
         .await
         .expect_err("a cancelled reclaim returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_settle(
+            WS.to_owned(),
+            CRASH_CLAIM.to_owned(),
+            AutomationSettle::Done,
+            300,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled settle returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_subscribe(
+            WS.to_owned(),
+            AUTOMATION.to_owned(),
+            "tasks".to_owned(),
+            400,
+            Arc::new(NoFaults),
+            cancelled.clone(),
+        )
+        .await
+        .expect_err("a cancelled subscribe returns the cancellation error");
+    assert!(matches!(error, RuntimeError::Cancelled));
+    let error = handle
+        .automation_unsubscribe(
+            WS.to_owned(),
+            AUTOMATION.to_owned(),
+            "tasks".to_owned(),
+            Arc::new(NoFaults),
+            cancelled,
+        )
+        .await
+        .expect_err("a cancelled unsubscribe returns the cancellation error");
     assert!(matches!(error, RuntimeError::Cancelled));
     supervisor.close(&db).expect("close at end");
     assert_eq!(
@@ -682,4 +717,14 @@ async fn a_cancelled_token_short_circuits_claim_and_reclaim_without_writing() {
         ("pending".to_owned(), 0, None),
         "a cancelled command writes nothing"
     );
+    let subscriptions: i64 = {
+        let conn = rusqlite::Connection::open(&db).expect("open db");
+        conn.query_row(
+            "SELECT COUNT(*) FROM automation_subscriptions WHERE workspace_id = ?1",
+            [WS],
+            |row| row.get(0),
+        )
+        .expect("count subscriptions")
+    };
+    assert_eq!(subscriptions, 0, "a cancelled subscribe registers nothing");
 }
