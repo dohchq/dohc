@@ -16,8 +16,7 @@ pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
 /// `conflicts.list` page can serve rather than from what a caller mints, and it
 /// deliberately admits a much longer id.
 ///
-/// MEASURED against the identifiers the product actually mints, not chosen.
-/// `dohc-engine-domain/tests/identifier_bounds.rs` measures them:
+/// MEASURED against the identifiers the product actually mints, not chosen:
 /// a bare UUID is 36 bytes, the prefixed forms the desktop mints
 /// (`object-<uuid>`, `moment-<uuid>`) are 43, and the widest the engine
 /// generates for itself — `derive_capture_object_id`, a `object-` prefix over

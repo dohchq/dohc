@@ -1,9 +1,6 @@
-//! BINHEAD (rev2) permanent regression, ported from the convergence reviewer's
-//! probe: the FTS file-index rebuild is a reader of `snapshots` that BINHEAD did
-//! not originally own, and whose in-code comment once claimed "all snapshots rows
-//! are text". This proves the rebuild (a) does not crash when a binary snapshot
-//! is present and (b) does NOT index the binary head — matching the TS oracle's
-//! `deleteFileSearchIndex` on a binary write. The exclusion is now explicit
+//! A binary head is never in the file FTS index. The index rebuild reads
+//! `snapshots`, where a binary head is a row like any other; it must (a) not
+//! crash on one and (b) not index it. The exclusion is explicit
 //! (`content_kind IS NOT 'binary'`) in the candidate CTE, backstopped by the
 //! INNER `JOIN blobs` that drops NULL-blob binary rows.
 
