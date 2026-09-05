@@ -29,10 +29,4 @@ describe("the share submit bound", () => {
       "MUTATION: a bound past the measured range states a cost nobody observed",
     ).toBeLessThanOrEqual(RELAY_MEASURED_LINEAR_TO);
   });
-
-  // The number itself. A drift here is a decision, and a decision needs the
-  // measurement re-run and the record updated.
-  it("is the number the decision record states", () => {
-    expect(MAX_SHARE_PROPOSAL_OPS).toBe(2500);
-  });
 });

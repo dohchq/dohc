@@ -103,13 +103,13 @@ export interface SyncRelayLogRow extends SyncRelayLogInput {
   relaySeq: number;
 }
 
-export interface AppendLogBatchResult {
+interface AppendLogBatchResult {
   inserted: number;
   skipped: number;
   currentMaxOriginSeq: number;
 }
 
-export interface FetchLogPageResult {
+interface FetchLogPageResult {
   rows: SyncRelayLogRow[];
   nextCursor: number;
   hasMore: boolean;
@@ -128,7 +128,7 @@ export interface CurrentFileStateSnapshot {
   tooMany: boolean;
 }
 
-export interface PutBlobResult {
+interface PutBlobResult {
   byteLength: number;
   alreadyHad: boolean;
 }
@@ -138,7 +138,7 @@ export interface CollectUnreferencedBlobsResult {
   removedSha256s: string[];
 }
 
-export interface KeyEnvelopeRow {
+interface KeyEnvelopeRow {
   envelopeJson: string;
   sha256: string;
   updatedAtMs: number;
@@ -380,7 +380,7 @@ export interface SyncRelayIndependentGrantInventoryPage {
 export const LINK_INVENTORY_PAGE_SIZE = 1_000;
 export const LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT = 1_000;
 
-export interface SyncRelayLinkCredentialMint {
+interface SyncRelayLinkCredentialMint {
   credentialId: string;
   secretHash: string;
 }
@@ -437,7 +437,7 @@ export interface WorkspaceSyncIdentity {
   streamIdentity: string;
 }
 
-export interface WorkspaceBootstrap {
+interface WorkspaceBootstrap {
   hasContent: boolean;
   identity: WorkspaceSyncIdentity | null;
 }

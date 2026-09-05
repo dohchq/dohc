@@ -29,7 +29,7 @@ export type SitePreviewExecutionInput = {
   sharedView: boolean;
 };
 
-export interface SitePreviewRendererSession {
+interface SitePreviewRendererSession {
   isCurrent(): boolean;
 }
 

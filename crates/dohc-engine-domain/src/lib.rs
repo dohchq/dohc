@@ -1,4 +1,4 @@
-//! dohc engine domain — CAL-2 calibration slice.
+//! dohc engine domain: what a version, moment, fork, and restore mean.
 //!
 //! The versioning domain: stable object identity, versioned text write/read,
 //! moment history with keyset pagination, text delete/rename/rollback,
@@ -23,8 +23,6 @@
 //! - **Differential surface.** [`normalize::NormalizedState`] is a deterministic
 //!   projection of the version graph, moment order, active version, and
 //!   snapshot blob hashes for the TS-vs-Rust comparison.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 
@@ -151,9 +149,9 @@ pub use store::{
     capture_retire_in_tx, decode_binary_rollback_job_identity, delete_text_in_tx,
     derive_capture_moment_id, derive_capture_object_id, derive_capture_retire_moment_id,
     ensure_main_version_in_tx, normalize_tracked_workspace_path, object_has_live_alias,
-    rollback_compensating_moment_id,
-    validate_addressable_plaintext_path, validate_delete_input, validate_plaintext_storable_path,
-    validate_write_input, write_binary_in_tx, write_projected_text_in_tx, write_text_in_tx,
+    rollback_compensating_moment_id, validate_addressable_plaintext_path, validate_delete_input,
+    validate_plaintext_storable_path, validate_write_input, write_binary_in_tx,
+    write_projected_text_in_tx, write_text_in_tx,
 };
 
 // Re-export the storage surface a domain caller needs on the common path.

@@ -18,12 +18,12 @@ import {
 // the user switches to B — the stale snapshot is dropped because its token no
 // longer matches the live one.
 
-export interface PresenceLocalState {
+interface PresenceLocalState {
   displayName: string;
   typing: boolean;
 }
 
-export interface UsePresenceInput {
+interface UsePresenceInput {
   // collaborationEnabled (signedIn && relayConnected) AND a resolvable scope.
   enabled: boolean;
   // The relay-backed (or test) transport, or null when collaboration is off.

@@ -72,7 +72,7 @@ export function resolveCaretUser(awareness: Awareness): DocPresenceUser {
 // color.
 const HEX_COLOR_RE = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
-export function safeCaretColor(color: unknown): string {
+function safeCaretColor(color: unknown): string {
   if (typeof color === "string") {
     if ((CARET_PALETTE as readonly string[]).includes(color)) return color;
     if (HEX_COLOR_RE.test(color)) return color;

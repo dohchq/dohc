@@ -45,7 +45,7 @@ function normalizeLanguage(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
-export type MermaidBlock = {
+type MermaidBlock = {
   /** Doc position of the codeBlock's own start (before its content). */
   pos: number
   /** Doc position immediately after the block — where the preview widget

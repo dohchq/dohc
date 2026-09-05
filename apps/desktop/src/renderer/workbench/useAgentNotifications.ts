@@ -51,7 +51,7 @@ function sameAsk(a: AgentPermissionRequest, b: AgentPermissionRequest): boolean 
   );
 }
 
-export interface UseAgentNotifications {
+interface UseAgentNotifications {
   notifications: AgentNotification[];
   // The active session's unanswered permission requests (current workspace).
   pendingPermissions: AgentPermissionRequest[];

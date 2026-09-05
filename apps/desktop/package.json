@@ -21,8 +21,6 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@babel/parser": "7.29.8",
-    "@babel/types": "7.29.8",
     "@codemirror/commands": "^6.10.4",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.12",
@@ -34,13 +32,11 @@
     "@dohc/brand": "workspace:*",
     "@dohc/excalidraw-scene": "workspace:*",
     "@dohc/mcp": "workspace:*",
-    "@dohc/performance": "workspace:*",
     "@electron/asar": "^4.2.1",
     "@electron/fuses": "^2.1.3",
     "@excalidraw/excalidraw": "0.18.1",
     "@fontsource-variable/inter": "^5.3.0",
     "@fontsource/ibm-plex-mono": "^5.3.0",
-    "@modelcontextprotocol/sdk": "^1.30.0",
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/react": "^16.3.2",

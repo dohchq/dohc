@@ -70,7 +70,7 @@ type HastNode = {
   children?: HastNode[]
 }
 
-export type HighlightSpan = { start: number; end: number; className: string }
+type HighlightSpan = { start: number; end: number; className: string }
 
 function classNameOf(node: HastNode): string | null {
   const className = node.properties?.className
@@ -132,7 +132,7 @@ function normalizeLanguage(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : ''
 }
 
-export type CodeHighlightRange = { from: number; to: number; className: string }
+type CodeHighlightRange = { from: number; to: number; className: string }
 
 /** PURE: walk the doc, resolve each codeBlock's spans (via `cache` when the
  *  node object is unchanged — ProseMirror nodes are immutable, so a cache

@@ -25,20 +25,18 @@
     "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "node scripts/check-brand.mjs && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
-    "test:phase0-agent-cli": "node scripts/phase0-agent-cli-smoke.mjs",
+    "test": "node scripts/check-brand.mjs && node --test scripts/ci-verdict-provenance.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",
-    "sync:local": "pnpm --filter @dohc/workspace-fs sync",
     "check:self-host": "node scripts/check-self-host.mjs",
-    "check:debt": "node scripts/check-tech-debt.mjs",
     "check:brand": "node scripts/check-brand.mjs"
   },
   "packageManager": "pnpm@11.20.0",
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
+    "js-yaml": "5.2.3",
     "vitest": "^4.1.10"
   }
 }

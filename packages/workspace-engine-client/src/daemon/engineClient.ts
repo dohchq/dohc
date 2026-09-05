@@ -1,6 +1,4 @@
-// R13b transport for the opt-in Rust workspace-engine sidecar. The shipping
-// desktop launches it only behind the temporary migration flag; real workspace
-// consumers remain on the TypeScript engine until the atomic cutover.
+// Framed stdio transport to the workspace engine daemon.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
@@ -33,7 +31,7 @@ const MAX_BUFFERED_BLOB_CHUNKS = 8192;
 // chunks, so this leaves ample headroom for legitimate chunking.
 const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
-// frame sniffing (ENGINE_PROTOCOL.md row 13).
+// frame sniffing.
 const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
@@ -42,7 +40,7 @@ const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;
 // less would have its receive cap raised by the ack; refuse it at connect.
 const MIN_REQUESTABLE_MAX_FRAME_BYTES = 1024 * 1024;
 const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
-export const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
+const ENGINE_AUTH_TOKEN_ENV = "DOHC_ENGINE_AUTH_TOKEN";
 
 export const enum FrameType {
   Control = 1,
@@ -53,12 +51,12 @@ export type Frame =
   | { kind: "control"; payload: Buffer }
   | { kind: "blobChunk"; streamId: number; fin: boolean; payload: Buffer };
 
-export interface BlobChunkPayload {
+interface BlobChunkPayload {
   readonly streamId: number;
   readonly bytes: Buffer;
 }
 
-export type FrameCodecErrorCode =
+type FrameCodecErrorCode =
   | "bad-magic"
   | "blob-chunk-missing-stream-id"
   | "blob-chunk-too-large"
@@ -69,7 +67,7 @@ export type FrameCodecErrorCode =
   | "truncated-frame"
   | "unknown-frame-type";
 
-export class FrameCodecError extends Error {
+class FrameCodecError extends Error {
   readonly code: FrameCodecErrorCode;
 
   constructor(code: FrameCodecErrorCode, message: string) {
@@ -414,7 +412,7 @@ export class FrameDecoder {
 
 export { FrameCodecError as EngineFrameError };
 
-export type EngineClientErrorCode =
+type EngineClientErrorCode =
   | "closed"
   | "connect-timeout"
   | "handshake-incomplete"
@@ -507,7 +505,7 @@ export class EngineRequestDeadlineError extends EngineClientError {
   }
 }
 
-export type BlobStreamErrorCode =
+type BlobStreamErrorCode =
   | "blob-backpressure-exceeded"
   | "blob-digest-mismatch"
   | "blob-size-mismatch"
@@ -519,7 +517,7 @@ export type BlobStreamErrorCode =
   | "unknown-blob-request"
   | "unknown-blob-stream";
 
-export class BlobStreamError extends Error {
+class BlobStreamError extends Error {
   readonly code: BlobStreamErrorCode;
 
   constructor(code: BlobStreamErrorCode, message: string) {
@@ -1442,18 +1440,6 @@ export class DuplexEngineClientConnection implements EngineClientConnection {
   close(): void {
     this.duplex.destroy();
   }
-}
-
-export async function connectEngineClient(
-  connection: Duplex,
-  options: EngineClientConnectOptions,
-): Promise<EngineClient> {
-  const client = new EngineClient(
-    new DuplexEngineClientConnection(connection),
-    options,
-  );
-  await client.ready();
-  return client;
 }
 
 export async function createEngineClient(

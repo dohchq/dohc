@@ -3,11 +3,11 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, externalizeDepsPlugin } from "electron-vite";
 import type { Plugin } from "vite";
 
-// Electron 42 ships Chromium 148 and Node 24.15. electron-vite 5.0.0
-// currently only maps Electron targets through major 39, so keep these
-// explicit until upstream support lands.
-const electronMainTarget = "node24.15";
-const electronRendererTarget = "chrome148";
+// Electron 43.3.0 ships Chromium 150 and Node 24.18. electron-vite 5.0.0
+// maps Electron targets only through major 39, so keep these explicit until
+// upstream support lands. Update both with the `electron` pin in package.json.
+const electronMainTarget = "node24.18";
+const electronRendererTarget = "chrome150";
 
 export const mainBundledWorkspaceDeps = [
   "@dohc/cli",

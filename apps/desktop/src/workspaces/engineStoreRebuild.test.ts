@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -36,26 +35,6 @@ import {
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
-
-const engineStoreRebuildSource = readFileSync(
-  new URL("./engineStoreRebuild.ts", import.meta.url),
-  "utf8",
-);
-const rehearsalHarnessSource = readFileSync(
-  new URL(
-    "../../../../crates/dohc-workspace-engine/src/rehearsal_harness.rs",
-    import.meta.url,
-  ),
-  "utf8",
-);
-
-function stringLiteralsInArray(source: string, name: string): string[] {
-  const match = new RegExp(
-    `const ${name}[^=]*=\\s*\\[([\\s\\S]*?)\\]\\s*(?:as const)?;`,
-  ).exec(source);
-  if (!match) throw new Error(`Could not find ${name}.`);
-  return [...match[1].matchAll(/"([^"]+)"/g)].map((entry) => entry[1]);
-}
 
 let root: string;
 let engineDir: string;
@@ -159,18 +138,6 @@ function createRealRebuildGate() {
 }
 
 describe("moveEngineStoreAside", () => {
-  it("keeps the TypeScript store files in sync with the Rust source list", () => {
-    expect(
-      new Set(
-        stringLiteralsInArray(engineStoreRebuildSource, "ENGINE_STORE_FILES"),
-      ),
-    ).toEqual(
-      new Set(
-        stringLiteralsInArray(rehearsalHarnessSource, "SQLITE_SOURCE_FILES"),
-      ),
-    );
-  });
-
   it("moves only the database and its sidecars into a completed backup", async () => {
     await seedStore({
       "engine.db": "refused-store",

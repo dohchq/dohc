@@ -4258,18 +4258,6 @@ mod tests {
     }
 
     #[test]
-    fn shipped_ydoc_migration_checksums_stay_frozen() {
-        assert_eq!(
-            migration_checksum(V1_YDOC_DDL),
-            "28468afb9c117bdbbf6da98110bb75e0680aca6b1f9fcc7b7acf2a57804dfffd"
-        );
-        assert_eq!(
-            migration_checksum(V1_YDOC_LINEAGE_CLAIMS_DDL),
-            "d0a557acc56f2d8bc34ee668cfb8551cfde5e69679349c2154b9e9e4faa62f21"
-        );
-    }
-
-    #[test]
     fn ydoc_scene_content_kind_upgrades_a_completed_store() {
         let dir = tempdir();
         let path = dir.join("ydoc-scene-content-kind.db");

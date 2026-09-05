@@ -209,7 +209,7 @@ export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 // one place the relay and the engine read it. All three levels read the same
 // files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
 // The chat-channel grant's own binary access is a different field.
-export const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
+const SHARE_ACCESS = z.enum(SHARE_ACCESS_VALUES);
 export type ShareAccess = z.infer<typeof SHARE_ACCESS>;
 
 // Ops a share pull skipped, and why. Durable state, not a status: the pull
@@ -410,7 +410,7 @@ const CollectionValueNodeSchema: z.ZodType<CollectionValue> = z.lazy(() =>
   ]),
 );
 
-export const CollectionValueSchema: z.ZodType<CollectionValue> = z
+const CollectionValueSchema: z.ZodType<CollectionValue> = z
   .unknown()
   .superRefine((value, ctx) => {
     if (collectionValueWithinDepth(value)) return;
@@ -754,10 +754,10 @@ export type ImportWorkspaceFilesResult = z.infer<
   typeof ImportWorkspaceFilesResult
 >;
 
-export const OpenWorkspacePayload = z.object({
+const OpenWorkspacePayload = z.object({
   workspaceId: WORKSPACE_ID,
 });
-export type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
+type OpenWorkspacePayload = z.infer<typeof OpenWorkspacePayload>;
 
 // Preload adds one identity for its renderer document. It is intentionally not
 // part of DohcDesktopBridge: renderer code cannot choose or reuse it across a
@@ -1301,10 +1301,10 @@ export type ListEngineMomentsResult = z.infer<typeof ListEngineMomentsResult>;
 // `history.page` can answer that its capture flush is still settling. Main
 // classifies that typed daemon refusal before Electron serializes it into a
 // generic rejected invoke, then sends this small progress result instead.
-export const ListEngineMomentsUpdatingResult = z.object({
+const ListEngineMomentsUpdatingResult = z.object({
   status: z.literal("updating"),
 });
-export type ListEngineMomentsUpdatingResult = z.infer<
+type ListEngineMomentsUpdatingResult = z.infer<
   typeof ListEngineMomentsUpdatingResult
 >;
 export const ListEngineMomentsResponse = z.union([
@@ -1728,7 +1728,7 @@ export type ChatRunRecordsForThreadResult = z.infer<
 // ES2022), so `\p{Extended_Pictographic}` is safe here.
 const EMOJI_ATOM =
   "(?:\\p{Regional_Indicator}\\p{Regional_Indicator}|\\p{Extended_Pictographic}[\\p{Emoji_Modifier}\\uFE0F\\u20E3]*)";
-export const EMOJI_GRAPHEME_PATTERN = new RegExp(
+const EMOJI_GRAPHEME_PATTERN = new RegExp(
   `^${EMOJI_ATOM}(?:\\u200D${EMOJI_ATOM})*$`,
   "u",
 );
@@ -1755,7 +1755,7 @@ export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 // channels, plus per-thread monotonic read cursors. Same gate as the file
 // rail — every handler rejects for unflagged workspaces.
 const CHAT_CHANNEL_ID = z.string().min(1).max(200);
-export const CHAT_CHANNEL_NAME_MAX = 80;
+const CHAT_CHANNEL_NAME_MAX = 80;
 
 export const ChatChannelRecord = z.object({
   id: CHAT_CHANNEL_ID,
@@ -1822,13 +1822,13 @@ export type ListChatChannelsResult = z.infer<typeof ListChatChannelsResult>;
 const CHAT_FOLLOW_TARGET_KIND = z.enum(["person", "agent", "channel", "thread"]);
 const CHAT_FOLLOW_STATE = z.enum(["following", "unfollowed"]);
 
-export const ChatFollowRecord = z.object({
+const ChatFollowRecord = z.object({
   targetKind: CHAT_FOLLOW_TARGET_KIND,
   targetId: z.string().min(1).max(300),
   state: CHAT_FOLLOW_STATE,
   updatedAtMs: z.number(),
 });
-export type ChatFollowRecord = z.infer<typeof ChatFollowRecord>;
+type ChatFollowRecord = z.infer<typeof ChatFollowRecord>;
 
 export const ListChatFollowsPayload = z.object({ workspaceId: WORKSPACE_ID });
 export type ListChatFollowsPayload = z.infer<typeof ListChatFollowsPayload>;
@@ -2256,7 +2256,7 @@ export type PresenceResult = z.infer<typeof PresenceResult>;
 // these handlers are gated in main on the workspace's engine capture being
 // attached (flag on) — for unflagged workspaces they reject.
 const VERSION_ID = z.string().min(1).max(200);
-export const WORKSPACE_VERSION_NAME_MAX = 80;
+const WORKSPACE_VERSION_NAME_MAX = 80;
 // Conflict and compare sides are the same hydrated stored bodies the timeline
 // carries, passed through verbatim (`engineHistoryIpc.ts` versionConflictForIpc,
 // `versionCompare.ts`), so they carry the engine's own text contract.
@@ -2461,7 +2461,7 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 // "Try it in a version" (PR 0N-2): one gesture — fork a version named after
 // the task, switch into it, start a dohc-tracked agent run. Gated in main on
 // the workspace-engine alpha capture like every version operation.
-export const TRY_IN_VERSION_TASK_MAX = 2000;
+const TRY_IN_VERSION_TASK_MAX = 2000;
 
 // How a driver is named wherever a payload or a result carries one. Every
 // surface on the path — the manifest, the probe list, the workspace's own
@@ -2778,8 +2778,8 @@ export const StopSitePreviewPayload = z.object({
   siteRoot: SITE_ROOT_STRING,
 });
 export type StopSitePreviewPayload = z.infer<typeof StopSitePreviewPayload>;
-export const StopSitePreviewResult = z.void();
-export type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
+const StopSitePreviewResult = z.void();
+type StopSitePreviewResult = z.infer<typeof StopSitePreviewResult>;
 
 const MAX_PLUGIN_ID_CHARS = 214;
 const MAX_PLUGIN_PANEL_ID_CHARS = 120;
@@ -2906,8 +2906,8 @@ export const StopPluginPanelPayload = z.object({
   panelId: PLUGIN_PANEL_ID,
 }).strict();
 export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
-export const StopPluginPanelResult = z.void();
-export type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
+const StopPluginPanelResult = z.void();
+type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 
 // Wrapper-plugin web apps (PR3): the guest is a main-process WebContentsView,
 // so the renderer never receives the guest URL — the pairing credential in
@@ -4515,7 +4515,7 @@ export const RelayShareGrantRevokeResponse = RevokeRelayShareGrantResult.extend(
 // the granter's files without that act. The user-facing noun is `changes`
 // throughout; `proposal` is code and storage only.
 
-export const SHARE_PROPOSAL_ID = z.string().min(1).max(128);
+const SHARE_PROPOSAL_ID = z.string().min(1).max(128);
 
 // A proposal carries at most what one submit carries, and that number is
 // measured rather than borrowed from a paging bound
@@ -4551,7 +4551,7 @@ export const ListShareProposalsPayload = z.object({
 });
 export type ListShareProposalsPayload = z.infer<typeof ListShareProposalsPayload>;
 
-export const ShareProposalFileRow = z.object({
+const ShareProposalFileRow = z.object({
   // Position in the submit, dense from 0, so the last valid index is one
   // below the number of files a submit may carry.
   opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS - 1),
@@ -4565,7 +4565,7 @@ export const ShareProposalFileRow = z.object({
   // describe it. null for a delete and for a size the relay did not state.
   afterByteLength: z.number().int().nonnegative().nullable(),
 });
-export type ShareProposalFileRow = z.infer<typeof ShareProposalFileRow>;
+type ShareProposalFileRow = z.infer<typeof ShareProposalFileRow>;
 
 export const ShareProposalRow = z.object({
   proposalId: SHARE_PROPOSAL_ID,
@@ -5400,7 +5400,6 @@ export type UpdateStateEvent = z.infer<typeof UpdateStateEvent>;
 
 export const UpdateActionResult = z.object({
   accepted: z.boolean(),
-  completed: z.boolean(),
   state: UpdateStateEvent,
 });
 export type UpdateActionResult = z.infer<typeof UpdateActionResult>;

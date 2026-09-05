@@ -53,7 +53,7 @@ export function isViewId(value: unknown): value is ViewId {
   return typeof value === "string" && (VIEW_IDS as readonly string[]).includes(value);
 }
 
-export function isActivityViewId(value: unknown): value is ActivityViewId {
+function isActivityViewId(value: unknown): value is ActivityViewId {
   if (typeof value !== "string") return false;
   return isViewId(value) || parsePluginViewId(value) !== null;
 }
@@ -75,23 +75,22 @@ export const GRAPH_TAB_PATH = "dohc://graph";
 export const HISTORY_TAB_PATH = "dohc://history";
 // Chats expanded to a full editor tab (singleton, graph/history precedent).
 export const CHATS_TAB_PATH = "dohc://chats";
-export const HISTORY_DIFF_TAB_PREFIX = "dohc://history-diff/";
-export const SITE_TAB_PREFIX = "dohc://site/";
-export const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
-export const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
+const SITE_TAB_PREFIX = "dohc://site/";
+const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
+const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
 // precedent). Deliberately NOT a singleton: singletons own a process and
 // refuse to split, and this page only reads.
-export const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
-export const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
+const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
+const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
 // Engine moment diff (PR 0M-5): flagged workspaces open history diffs by
 // MOMENT id, not legacy change-set id. The id alone is the tab identity: it
 // is contract-bounded, while a percent-encoded valid workspace path can
 // exceed the UI-state path bound. The moment record supplies its display path.
-export const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
+const MOMENT_DIFF_TAB_PREFIX = "dohc://moment-diff/";
 // A collection folder opened as its views (Phase 2 collections). Keyed by
 // the folder path, so reopening re-activates instead of duplicating.
-export const COLLECTION_TAB_PREFIX = "dohc://collection/";
+const COLLECTION_TAB_PREFIX = "dohc://collection/";
 
 export function collectionTabPath(collectionPath: string): string {
   return `${COLLECTION_TAB_PREFIX}${encodeURIComponent(collectionPath)}`;
@@ -129,12 +128,6 @@ export function parseMomentDiffTabPath(path: string | null): string | null {
   } catch {
     return null;
   }
-}
-
-export function historyDiffTabPath(changeSetId: string, filePath: string): string {
-  return `${HISTORY_DIFF_TAB_PREFIX}${encodeURIComponent(
-    changeSetId,
-  )}?file=${encodeURIComponent(filePath)}`;
 }
 
 export function siteTabPath(siteRoot: string): string {
@@ -205,10 +198,6 @@ export function isHistoryTabPath(path: string | null): boolean {
 
 export function isChatsTabPath(path: string | null): boolean {
   return path === CHATS_TAB_PATH;
-}
-
-export function isHistoryDiffTabPath(path: string | null): boolean {
-  return typeof path === "string" && path.startsWith(HISTORY_DIFF_TAB_PREFIX);
 }
 
 export function isSiteTabPath(path: string | null): boolean {
@@ -299,26 +288,6 @@ export function parsePluginWebAppTabPath(
   }
 }
 
-export function parseHistoryDiffTabPath(
-  path: string | null,
-): { changeSetId: string; filePath: string } | null {
-  if (typeof path !== "string" || !path.startsWith(HISTORY_DIFF_TAB_PREFIX)) {
-    return null;
-  }
-  const suffix = path.slice(HISTORY_DIFF_TAB_PREFIX.length);
-  const separator = suffix.indexOf("?file=");
-  if (separator <= 0) return null;
-  try {
-    const changeSetId = decodeURIComponent(suffix.slice(0, separator));
-    const filePath = decodeURIComponent(suffix.slice(separator + "?file=".length));
-    return changeSetId.length > 0 && filePath.length > 0
-      ? { changeSetId, filePath }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 // Versions compare page (PR 0M-4): one tab per compared version, keyed by
 // the version id so re-comparing re-activates instead of duplicating.
 export function versionCompareTabPath(versionId: string): string {
@@ -359,7 +328,6 @@ export function isVirtualTabPath(path: string | null): boolean {
     isGraphTabPath(path) ||
     isHistoryTabPath(path) ||
     isChatsTabPath(path) ||
-    isHistoryDiffTabPath(path) ||
     isMomentDiffTabPath(path) ||
     isCollectionTabPath(path) ||
     isVersionCompareTabPath(path) ||

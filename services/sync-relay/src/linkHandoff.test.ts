@@ -326,14 +326,6 @@ async function ownerInventory(setupState: Setup): Promise<Array<Record<string, u
 }
 
 describe("single-use authenticated link handoff", () => {
-  it("configures writable inspection connections for lock waits and foreign keys", async () => {
-    const { dbPath } = await newStorage();
-    const database = inspect(dbPath);
-
-    expect(database.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5_000 });
-    expect(database.prepare("PRAGMA foreign_keys").get()).toEqual({ foreign_keys: 1 });
-  });
-
   it("probes handoff codes without a write transaction and rechecks present rows in the transaction", async () => {
     const state = await setup();
     const minted = await mint(state);

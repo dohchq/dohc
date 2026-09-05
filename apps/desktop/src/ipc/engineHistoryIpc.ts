@@ -75,7 +75,7 @@ function engineMomentBaseForIpc(
   };
 }
 
-export function engineMomentForIpc(
+function engineMomentForIpc(
   moment: WorkspaceEngineMomentSummary,
   agentAuthorDisplayName: EngineMomentAuthorNamer,
 ): EngineMomentRecord {

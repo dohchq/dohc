@@ -15,10 +15,9 @@ const SCRATCH_PARENT = "dohc-test-scratch";
 // How long a run root must be untouched before this sweep may remove it.
 //
 // This sweep walks the parent every runtime shares, so it can reach a live Rust
-// soak's workspace, not just an abandoned vitest run. It is a limit that
-// destroys work, so it is set past the longest run this repo asks for:
-// `tools/rust-engine-program/soak-config.json` declares
-// `postCutoverContinuous.durationsHours: [6, 24]`. Double the longest.
+// test's workspace, not just an abandoned vitest run. It is a limit that
+// destroys work, so it sits at twice the longest run anything here is expected
+// to hold a workspace open: a day.
 const MAX_RUN_AGE_MS = 48 * 60 * 60 * 1_000;
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle can hold one for a beat. This is the budget the e2e helper this
@@ -215,7 +214,7 @@ function scratchRunId(): string {
 /// not own — an external target with recent files would pin an abandoned run
 /// forever, and a cycle answers `ELOOP`, which reads as "still busy" and pins it
 /// the same way.
-export async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
+async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
   let metadata;
   try {
     metadata = await lstat(path);

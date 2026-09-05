@@ -29,7 +29,7 @@ export type FlatRow = {
   parentPath: string | null
 }
 
-export type NavAction =
+type NavAction =
   | { kind: 'focus'; path: string }
   | { kind: 'expand'; path: string }
   | { kind: 'collapse'; path: string }

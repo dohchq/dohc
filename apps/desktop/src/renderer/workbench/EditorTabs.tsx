@@ -4,7 +4,6 @@ import { prefersReducedMotion } from "../reducedMotion";
 import {
   isChatsTabPath,
   isGraphTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   isPluginDetailsTabPath,
@@ -12,7 +11,6 @@ import {
   isPluginWebAppTabPath,
   isSingletonEditorTabPath,
   isVersionCompareTabPath,
-  parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -45,11 +43,6 @@ function fileName(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     return label ?? parsePluginDetailsTabPath(path)?.pluginId ?? "Plugin";
   }
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    const name = parsed?.filePath.split("/").pop() ?? "Diff";
-    return `Diff: ${name}`;
-  }
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
   }
@@ -75,10 +68,6 @@ function tabTitle(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     const details = parsePluginDetailsTabPath(path);
     return details ? `Plugin details: ${details.pluginId}` : "Plugin details";
-  }
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    return parsed ? `History diff: ${parsed.filePath}` : "History diff";
   }
   if (isMomentDiffTabPath(path)) {
     return label ? `History diff: ${label}` : "History change";

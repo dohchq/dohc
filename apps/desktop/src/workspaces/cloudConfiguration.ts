@@ -1,7 +1,7 @@
 const MAX_CLOUD_ORIGIN_LENGTH = 2048;
 
-export const MANAGED_CLOUD_SERVER_ENV = "DOHC_CLOUD_URL";
-export const MANAGED_CLOUD_RELAY_ENV = "DOHC_CLOUD_RELAY_URL";
+const MANAGED_CLOUD_SERVER_ENV = "DOHC_CLOUD_URL";
+const MANAGED_CLOUD_RELAY_ENV = "DOHC_CLOUD_RELAY_URL";
 
 export type ManagedCloudConfiguration =
   | { status: "ready"; serverUrl: string; relayUrl: string }

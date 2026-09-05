@@ -303,8 +303,8 @@ const fetchHandler = async (request: Request): Promise<Response> => {
   return relayHandler(request);
 };
 
-// Hand-rolled node:http -> fetch Request adapter (the sqlite-worker
-// precedent) instead of better-auth's toNodeHandler: toNodeHandler silently
+// Hand-rolled node:http -> fetch Request adapter instead of better-auth's
+// toNodeHandler: toNodeHandler silently
 // drops request bodies that arrive WITHOUT a content-type header, which
 // breaks raw-bytes blob PUTs. The relay never mounts better-auth's own
 // routes (it only calls auth.api.getSession), so it does not need that

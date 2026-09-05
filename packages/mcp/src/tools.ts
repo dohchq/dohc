@@ -8,8 +8,6 @@
 // auto-apply a boundary crossing.
 
 import {
-  addFileChanges,
-  createChangeSet,
   databaseSyncStrategy,
   DOHC_METADATA_GUARD,
   DOHC_TRASH_GUARD,
@@ -29,12 +27,8 @@ import {
   WINDOWS_MAX_PATH_CHARS,
   validateUserMaterializePath,
   validateUserReadPath,
-  type ChangeAuthor,
-  type ChangeProvenance,
-  type ChangeSetKind,
   type DohcPathGuard,
   type DohcSiteConfig,
-  type FileChange,
   type FsEntryIdentity,
   type PackageJson,
   type SiteConfidence,
@@ -106,12 +100,6 @@ export interface ToolContext {
   request?: (request: CliRequestWithoutToken) => Promise<unknown>;
 }
 
-const MCP_AUTHOR: ChangeAuthor = {
-  kind: "agent",
-  agentId: "dohc-mcp",
-  onBehalfOf: "local",
-};
-const historyRecordedAtMsByRoot = new Map<string, number>();
 const DEFAULT_READ_MAX_BYTES = 1024 * 1024;
 const HARD_READ_MAX_BYTES = 10 * 1024 * 1024;
 const DEFAULT_SEARCH_MAX_RESULTS = 100;
@@ -406,17 +394,6 @@ async function recordedChangeFields(ctx: ToolContext): Promise<RecordedChangeFie
   if (history.state === "on") return { recordedBy: "workspace-engine" };
   if (history.state === "off") return { historyRecording: "off" };
   return { historyRecording: "unknown", historyRecordingUnavailable: history.cause };
-}
-
-// Forward a write's history fields whole. Naming them one by one dropped the
-// unknown arm's cause, which is the only part of it an agent can act on.
-function forwardedRecordedChangeFields(written: RecordedChangeFields): RecordedChangeFields {
-  if ("recordedBy" in written) return { recordedBy: written.recordedBy };
-  if (written.historyRecording === "off") return { historyRecording: "off" };
-  return {
-    historyRecording: "unknown",
-    historyRecordingUnavailable: written.historyRecordingUnavailable,
-  };
 }
 
 function failureReason(error: unknown, fallback: string): string {

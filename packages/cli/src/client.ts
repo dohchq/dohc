@@ -33,7 +33,7 @@ const responseVersionEnvelopeSchema = z
   .object({ protocolVersion: z.number().int().nonnegative() })
   .passthrough();
 
-export interface CliEndpoint {
+interface CliEndpoint {
   stateDir: string;
   socketPath: string;
   tokenPath: string;

@@ -19,7 +19,6 @@ import { isLoopbackHostname } from "../security/loopback";
 import {
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
-  shouldUseDarkSystemIcon,
 } from "../systemThemeIcon";
 import { stateDir } from "../workspaces/WorkspaceRegistry";
 import { installRendererCrashRecovery } from "./rendererCrashRecovery";
@@ -181,7 +180,7 @@ export function createMainWindow(options?: {
   });
   const iconPath = resolveSystemThemeIconPath(
     iconDirectory,
-    shouldUseDarkSystemIcon(nativeTheme),
+    nativeTheme.shouldUseDarkColors,
   );
 
   const window = new BrowserWindow({
