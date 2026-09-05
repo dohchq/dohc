@@ -1,9 +1,12 @@
 # Engine benchmarks
 
 This harness drives the daemon through the framed workspace-engine client and
-measures three curves: B1, the cost of one appended character as a Y.Doc
-grows; B2, the admission latency of a remote delta behind a queue of
-predecessors; B3, the time for an empty store to catch up through the relay.
+measures three curves.
+
+- B1: the cost of one appended character as a Y.Doc grows.
+- B2: the admission latency of a remote delta behind a queue of predecessors.
+- B3: the time for an empty store to catch up through the relay.
+
 B2 and B3 use the same real relay and two-daemon path as
 `twoDaemonSync.e2e.test.ts`.
 

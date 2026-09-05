@@ -134,9 +134,9 @@ means two.
 - When the codebase has not settled a term, say so instead of picking a winner
   silently.
 
-The term list is `CONTEXT.md` at the repository root. It is the canonical
-vocabulary; check a name against it before defining one, and add a term there
-when the code settles it.
+The term list is [`CONTEXT.md`](../../../CONTEXT.md) at the repository root. It
+is the canonical vocabulary; check a name against it before defining one, and
+add a term there when the code settles it.
 
 ### One reading per sentence
 

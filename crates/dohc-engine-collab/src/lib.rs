@@ -1,12 +1,12 @@
 //! dohc engine collab: the durable Y.Doc layer.
 //!
-//! The Rust-owned durable Y.Doc update cache, snapshots, convergence-neutral
-//! compaction, per-document leases, the base-once replicated lineage, idempotent
-//! and echo-suppressed `ydoc.update` replication apply, and the settle pipeline
-//! (Y.Doc → artifact content with provenance, materialized through R04's job
-//! pipeline). It enforces the yrs spike's four caveats
-//! (`crates/yrs-spike/SPIKE_REPORT.md`) plus the shared root schema; see
-//! [`ydoc`] for the per-constraint enforcement.
+//! Owns the durable Y.Doc update cache, its snapshots, and their compaction.
+//! Holds per-document leases and the base-once replicated lineage. Applies
+//! `ydoc.update` replication idempotently with echo suppression. Settles a
+//! Y.Doc into artifact content with provenance through the job pipeline.
+//!
+//! It enforces the yrs spike's four caveats (`crates/yrs-spike/SPIKE_REPORT.md`)
+//! plus the shared root schema; see [`ydoc`] for the per-constraint enforcement.
 //!
 //! # Two regimes (do not conflate)
 //!
