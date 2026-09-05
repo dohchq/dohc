@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
+import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -16,6 +16,28 @@ const inputPaths = {
 
 export function hashFile(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+export function engineArtifactMatches(path, expectedHash) {
+  try {
+    accessSync(path, constants.X_OK);
+    return hashFile(path) === expectedHash;
+  } catch (error) {
+    if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) return false;
+    throw error;
+  }
+}
+
+export function repairOwnedEngineExecutable(path) {
+  if (process.platform === "win32") return;
+  try { accessSync(path, constants.X_OK); return; }
+  catch (error) { if (error.code !== "EACCES") throw error; }
+  const artifact = lstatSync(path);
+  if (!artifact.isFile() || artifact.uid !== process.getuid()) {
+    throw new Error(`Cannot repair execute permission on an unowned engine artifact: ${path}`);
+  }
+  chmodSync(path, artifact.mode | 0o100);
+  accessSync(path, constants.X_OK);
 }
 
 export function sourceFingerprint(kind, root = repoRoot) {
@@ -71,7 +93,8 @@ function artifactFingerprint(kind) {
 export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   try {
     return receipt?.[kind]?.source === sourceFingerprint(kind)
-      && receipt[kind].artifact === artifactFingerprint(kind);
+      && (kind === "engine" ? engineArtifactMatches(enginePath, receipt[kind].artifact)
+        : receipt[kind].artifact === artifactFingerprint(kind));
   } catch (error) {
     if (error.code === "ENOENT") return false;
     throw error;
@@ -84,7 +107,7 @@ export function assertPrepared() {
     throw new Error("The desktop or engine does not match this checkout. Run pnpm qa:prepare before driving it.");
   }
   const staged = join(repoRoot, "apps/desktop/target/debug", enginePath.split(/[\\/]/).at(-1));
-  if (!existsSync(staged) || hashFile(staged) !== receipt.engine.artifact) {
+  if (!engineArtifactMatches(staged, receipt.engine.artifact)) {
     throw new Error("The staged engine differs from the prepared engine. Run pnpm qa:prepare.");
   }
   return receipt;
@@ -124,6 +147,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   try {
   const receipt = readJson(receiptPath) ?? { version: 1 };
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
+    if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
     if (preparedStatus(kind, receipt)) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
     const source = sourceFingerprint(kind);
     if (kind === "engine") {
@@ -133,6 +157,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
         const executable = artifacts.findLast((entry) => entry.reason === "compiler-artifact" && entry.target?.name === "dohc-workspace-engine" && entry.executable)?.executable;
         if (!executable || resolve(executable).toLowerCase() !== resolve(enginePath).toLowerCase()) throw new Error(`Cargo did not build the native engine at ${enginePath}. Check Cargo target configuration.`);
       });
+      repairOwnedEngineExecutable(enginePath);
     } else {
       await run(...pnpm(["--filter", "@dohc/desktop", "build"]), { log: join(output, "desktop-build.log") });
     }

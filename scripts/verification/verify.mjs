@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
@@ -20,6 +21,17 @@ export function selectedGates(files, workflow) {
   const filterStep = document.jobs.changes.steps.find((step) => step.with?.filters);
   const filters = yaml.load(filterStep.with.filters);
   return Object.fromEntries(["rust", "js"].map((name) => [name, files.some((file) => filters[name].some((pattern) => matchesGlob(file, pattern)))]));
+}
+
+export function changedFiles(baseCommit, includeUncommitted = false, root = repoRoot) {
+  const paths = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).split("\0").filter(Boolean);
+  return [...new Set([
+    ...paths(["diff", "--no-renames", "--name-only", "-z", `${baseCommit}...HEAD`]),
+    ...(includeUncommitted ? [
+      ...paths(["diff", "--no-renames", "--name-only", "-z", "HEAD"]),
+      ...paths(["ls-files", "--others", "--exclude-standard", "-z"]),
+    ] : []),
+  ])];
 }
 
 async function postgres(output) {
@@ -54,10 +66,7 @@ export async function verify(args) {
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
   const baseCommit = base ? git(["rev-parse", "--verify", `${base}^{commit}`]) : null;
-  const files = base ? [...new Set([
-    ...git(["diff", "--name-only", `${baseCommit}...HEAD`]).split(/\r?\n/),
-    ...(mode === "plan" ? git(["diff", "--name-only", "HEAD"]).split(/\r?\n/).concat(git(["ls-files", "--others", "--exclude-standard"]).split(/\r?\n/)) : []),
-  ])].filter(Boolean) : [];
+  const files = base ? changedFiles(baseCommit, mode === "plan") : [];
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   const requiredGates = selectedGates(files, workflow);
   if (job) requiredGates[job] = true;

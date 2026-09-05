@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildEnvironment, directoryFingerprint, sourceFingerprint } from "./build.mjs";
-import { selectedGates } from "./verify.mjs";
+import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
+import { changedFiles, selectedGates } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
+import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 
 test("source identity changes for dirty, untracked, deleted, and ignored build configuration", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-provenance-"));
@@ -61,6 +62,70 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
+});
+
+test("gate selection includes the old path of committed, staged, and unstaged renames", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-gate-rename-"));
+  const git = (args) => execFileSync("git", [
+    "-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
+    "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
+  ], { cwd: root, encoding: "utf8" }).trim();
+  try {
+    git(["init"]);
+    mkdirSync(join(root, "crates"));
+    mkdirSync(join(root, "docs"));
+    const oldPath = "crates/renamed fixture.rs";
+    const newPath = process.platform === "win32" ? "docs/renamed fixture.rs" : "docs/renamed\nfixture.rs";
+    writeFileSync(join(root, oldPath), "fn main() {}\n");
+    git(["add", "."]); git(["commit", "-m", "Fixture base"]);
+    const base = git(["rev-parse", "HEAD"]);
+    const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
+    const assertRenameGates = (files) => {
+      assert.deepEqual(new Set(files), new Set([oldPath, newPath]));
+      assert.deepEqual(selectedGates(files, workflow), { rust: true, js: true });
+    };
+    renameSync(join(root, oldPath), join(root, newPath));
+    assert.deepEqual(changedFiles(base, false, root), []);
+    assertRenameGates(changedFiles(base, true, root));
+    git(["add", "-A"]);
+    assertRenameGates(changedFiles(base, true, root));
+    git(["commit", "-m", "Move fixture outside code filters"]);
+    assertRenameGates(changedFiles(base, false, root));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("POSIX engine permission loss rejects unchanged bytes and repairs only owned artifacts", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-engine-permission-"));
+  try {
+    const source = join(root, "dohc-workspace-engine");
+    const stagedDirectory = join(root, "staged");
+    mkdirSync(stagedDirectory);
+    const staged = join(stagedDirectory, "dohc-workspace-engine");
+    writeFileSync(source, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    copyFileSync(source, staged);
+    const expectedHash = hashFile(source);
+    assert.equal(engineArtifactMatches(source, expectedHash), true);
+    assert.equal(engineArtifactMatches(staged, expectedHash), true);
+
+    chmodSync(source, 0o644);
+    assert.equal(hashFile(source), expectedHash);
+    assert.equal(engineArtifactMatches(source, expectedHash), false);
+    repairOwnedEngineExecutable(source);
+    assert.equal(engineArtifactMatches(source, expectedHash), true);
+
+    chmodSync(staged, 0o644);
+    assert.equal(hashFile(staged), expectedHash);
+    assert.equal(engineArtifactMatches(staged, expectedHash), false);
+    requireE2eEngine({ override: source, desktopTargetDir: stagedDirectory, platform: "linux" });
+    assert.equal(engineArtifactMatches(staged, expectedHash), true);
+
+    const external = join(root, "external-engine");
+    const link = join(root, "linked-engine");
+    writeFileSync(external, "foreign artifact", { mode: 0o644 });
+    symlinkSync(external, link);
+    assert.throws(() => repairOwnedEngineExecutable(link), /unowned engine artifact/);
+    assert.equal(statSync(external).mode & 0o777, 0o644);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("build children use owned output paths and cannot expand the compiler budget", () => {

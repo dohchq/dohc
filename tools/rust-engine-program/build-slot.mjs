@@ -37,14 +37,15 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 /**
  * The budget this host imposes, or null on a single-tenant host (CI runners
  * have no slot root and run uncapped). The root comes from
- * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows — the shared
- * dev machine the budget exists for. Tests point the root at a private
+ * `DOHC_BUILD_SLOT_ROOT`, defaulting to `C:\w\_locks` on Windows outside CI —
+ * the shared dev machine the budget exists for. Tests point the root at a private
  * directory so a suite run never holds a real lane's slot.
  */
 export function resolveBuildBudget(env = process.env, host = {}) {
   const os = host.platform ?? platform();
+  const ci = env.CI && !["false", "0"].includes(env.CI.toLowerCase());
   const root =
-    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" ? "C:\\w\\_locks" : null);
+    env.DOHC_BUILD_SLOT_ROOT || (os === "win32" && !ci ? "C:\\w\\_locks" : null);
   if (!root) return null;
   const slots = 4;
   const cores = host.cores ?? availableParallelism();
@@ -289,6 +290,9 @@ function claimSlot(dir, name, heartbeatMs) {
     if (released) return;
     released = true;
     clearInterval(beat);
+    process.off("exit", release);
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
     try {
       // Release by identity, never by path: if this claim's own record is
       // no longer at the path — the slot was reclaimed out from under a
@@ -302,17 +306,19 @@ function claimSlot(dir, name, heartbeatMs) {
       // process is dead and the heartbeat goes stale.
     }
   };
+  function onSigint() {
+    release();
+    process.exit(130);
+  }
+  function onSigterm() {
+    release();
+    process.exit(143);
+  }
   process.once("exit", release);
   // Signal death skips 'exit' listeners; release first so an interrupted gate
   // frees its slot instead of parking it for the 30-minute reclaim window.
-  process.once("SIGINT", () => {
-    release();
-    process.exit(130);
-  });
-  process.once("SIGTERM", () => {
-    release();
-    process.exit(143);
-  });
+  process.once("SIGINT", onSigint);
+  process.once("SIGTERM", onSigterm);
   return { name, dir, release };
 }
 

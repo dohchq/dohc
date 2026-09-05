@@ -80,6 +80,48 @@ test("the budget is an even share of the cores across four slots", () => {
   );
 });
 
+test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {
+  const host = { platform: "win32", cores: 32 };
+  for (const CI of ["true", "1"]) {
+    assert.equal(resolveBuildBudget({ CI }, host), null);
+    assert.equal(resolveBuildBudget({ CI, DOHC_BUILD_SLOT_ROOT: "" }, host), null);
+    assert.deepEqual(resolveBuildBudget({ CI, DOHC_BUILD_SLOT_ROOT: "D:\\ci-locks" }, host), {
+      root: "D:\\ci-locks", slots: 4, jobs: 8, diskFloorGb: 40,
+    });
+  }
+  for (const env of [{}, { CI: "false" }, { CI: "0" }]) {
+    assert.deepEqual(resolveBuildBudget(env, host), {
+      root: "C:\\w\\_locks", slots: 4, jobs: 8, diskFloorGb: 40,
+    });
+  }
+});
+
+test("released slots remove only their listeners and allow later interrupt cleanup", () => {
+  const root = slotRoot();
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { acquireBuildSlot } from ${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)};
+      const unrelated = () => {};
+      const events = ["exit", "SIGINT", "SIGTERM"];
+      for (const event of events) process.on(event, unrelated);
+      const before = events.map(event => process.listeners(event));
+      const slot = await acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 0 });
+      slot.release();
+      slot.release();
+      assert.deepEqual(events.map(event => process.listeners(event)), before);
+      let cleaned = false;
+      process.once("SIGINT", () => { cleaned = true; });
+      process.emit("SIGINT");
+      assert.equal(cleaned, true);
+      console.log("later-phase cleanup completed");
+    `, root], { encoding: "utf8", timeout: 5000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /later-phase cleanup completed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("acquire takes a free slot, writes its owner, and release frees it", async () => {
   const root = slotRoot();
   try {
@@ -98,6 +140,8 @@ test("acquire takes a free slot, writes its owner, and release frees it", async 
 
 test("release removes nothing when the slot no longer holds this claim", async () => {
   const root = slotRoot();
+  const events = ["exit", "SIGINT", "SIGTERM"];
+  const listenersBefore = events.map((event) => process.listeners(event));
   try {
     const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
     // The slot was reclaimed out from under a suspended holder and
@@ -107,6 +151,7 @@ test("release removes nothing when the slot no longer holds this claim", async (
       JSON.stringify({ pid: 99999, start: "someone else" }),
     );
     slot.release();
+    assert.deepEqual(events.map((event) => process.listeners(event)), listenersBefore);
     assert.equal(
       existsSync(slot.dir),
       true,
