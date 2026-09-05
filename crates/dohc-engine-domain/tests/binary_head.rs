@@ -1,8 +1,6 @@
-//! BINHEAD (rev2) permanent regressions, ported from the convergence reviewer's
-//! adversarial probes. They exercise the binary-head-as-real-head claim end to
-//! end: M2 same-path generation supersede against the REAL materializer, and
-//! binary-head round-trips through history/rollback. The same-path supersede
-//! test is the load-bearing proof for the whole shard.
+//! A binary head is a real head. Same-path generation supersede runs against
+//! the REAL materializer, and a binary head round-trips through history and
+//! rollback. The same-path supersede test is the load-bearing proof.
 
 use dohc_engine_domain::{
     EngineStore, NoFaults, RollbackTextFileMutation, VersionedTextStore, WriteBinaryFile,

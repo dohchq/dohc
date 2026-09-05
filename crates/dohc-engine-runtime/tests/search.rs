@@ -1,4 +1,4 @@
-//! R12 search traces: the index+query round-trip over REAL file snapshots and
+//! Search: the index+query round-trip over REAL file snapshots and
 //! chat messages (built through the versioning + chat domains, never hand-poked
 //! FTS rows), policy-filtered visibility, the fail-closed FILE policy (scoped so
 //! chat search survives a broken file policy), read-your-writes with no torn

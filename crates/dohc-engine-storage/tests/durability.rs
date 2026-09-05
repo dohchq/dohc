@@ -1,4 +1,4 @@
-//! R04 durable-storage-core integration tests: blob dedup/integrity, verified
+//! Durable storage core: blob dedup/integrity, verified
 //! restore-tested backups (+ disk-full + crash boundaries), corruption
 //! classification with evidence preservation, and the materialization-job
 //! ledger (+ phase-1 atomicity). Crash-injection cases are gated on the

@@ -18,11 +18,8 @@ const SCRATCH_PARENT: &str = "dohc-test-scratch";
 const RUN_NONCE_HEX: usize = 16;
 /// How long a run root must be untouched before the sweep may remove it.
 ///
-/// This is a limit that destroys work, so it is set past the longest run this
-/// repo asks for. `tools/rust-engine-program/soak-config.json` declares
-/// `postCutoverContinuous.durationsHours: [6, 24]`, so a soak legitimately runs
-/// for a day, holding an engine workspace open the whole time. Double the
-/// longest declared soak.
+/// This is a limit that destroys work, so it sits at twice the longest run
+/// anything here is expected to hold an engine workspace open: a day.
 const MAX_RUN_AGE: Duration = Duration::from_secs(48 * 60 * 60);
 // Windows refuses to unlink a file whose handle is still open, and a just-closed
 // SQLite handle (engine.db plus its -wal and -shm) can hold one for a beat after
