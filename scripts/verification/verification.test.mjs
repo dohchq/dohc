@@ -27,6 +27,16 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     const configured = sourceFingerprint("desktop", root);
     writeFileSync(join(root, ".env.local"), "VITE_FIXTURE=two");
     assert.notEqual(sourceFingerprint("desktop", root), configured);
+    const previousDebug = process.env.CARGO_PROFILE_DEV_DEBUG;
+    try {
+      process.env.CARGO_PROFILE_DEV_DEBUG = "0";
+      const withoutDebug = sourceFingerprint("desktop", root);
+      process.env.CARGO_PROFILE_DEV_DEBUG = "2";
+      assert.notEqual(sourceFingerprint("desktop", root), withoutDebug);
+    } finally {
+      if (previousDebug === undefined) delete process.env.CARGO_PROFILE_DEV_DEBUG;
+      else process.env.CARGO_PROFILE_DEV_DEBUG = previousDebug;
+    }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

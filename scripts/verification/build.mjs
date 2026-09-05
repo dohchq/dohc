@@ -23,7 +23,7 @@ export function sourceFingerprint(kind, root = repoRoot) {
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version,
     rustflags: process.env.RUSTFLAGS ?? "", encodedRustflags: process.env.CARGO_ENCODED_RUSTFLAGS ?? "" }));
-  const environment = Object.entries(process.env).filter(([key]) => /^(VITE_|RUSTUP_TOOLCHAIN$|CC$|CXX$|CFLAGS$|CXXFLAGS$|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
+  const environment = Object.entries(process.env).filter(([key]) => /^(VITE_|CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$)|RUST(?:UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$)|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
   hash.update(JSON.stringify(environment));
   if (kind === "engine") {
     hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
