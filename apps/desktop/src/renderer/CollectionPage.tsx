@@ -120,6 +120,11 @@ export function CollectionPage({
   // The store owns query state and guards its own async responses with a
   // request token; the desktop binds its executor to the query bridge call.
   const nextEditId = useRef(0);
+  const discardListeners = useRef(new Set<(writeId: number) => void>());
+  const subscribeToDiscardedWrites = useCallback((listener: (writeId: number) => void) => {
+    discardListeners.current.add(listener);
+    return () => { discardListeners.current.delete(listener); };
+  }, []);
   const completedEdits = useRef(new Map<string, number>());
   const indexedEdits = useRef(new WeakMap<CollectionRecord, ReadonlyMap<string, number>>());
   const executor = useCallback(
@@ -250,10 +255,18 @@ export function CollectionPage({
       const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
       enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
         completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
+      }, {
+        selectionBase: details?.schema.fields.find((field) => field.name === change.field)?.type === "multi-select"
+          ? state.records.find((record) => record.id === change.recordId && record.path === change.recordPath)
+            ?.values.find((value) => value.field === change.field)?.value ?? null
+          : undefined,
+        onDiscarded: () => {
+          for (const listener of discardListeners.current) listener(editId);
+        },
       });
       return editId;
     },
-    [workspaceId, collectionPath, lineage],
+    [workspaceId, collectionPath, lineage, details?.schema.fields, state.records],
   );
   // File and version operations disable new edits until their paths settle.
   const writesPaused = useCollectionWritesPaused(workspaceId);
@@ -514,6 +527,7 @@ export function CollectionPage({
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={onCellChange}
             acknowledgedWriteId={acknowledgedWriteId}
+            subscribeToDiscardedWrites={subscribeToDiscardedWrites}
             onCreateOption={writesPaused ? undefined : createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}

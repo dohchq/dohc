@@ -1,10 +1,8 @@
-import { beginCollectionWriteOperation, collectionWriteFailures } from "./recordFieldWrites";
-
-// A stuck queue must not hold a path or version operation open forever.
-// Matches RecoveryCloseGuard's exit cap: main's settle retries top out well
-// inside it, so a queue still silent after this is a hung engine, not a slow
-// save.
-export const COLLECTION_WRITE_STALL_MS = 20_000;
+import {
+  COLLECTION_WRITE_STALL_MS,
+  beginCollectionWriteOperation,
+  collectionWriteFailures,
+} from "./recordFieldWrites";
 
 /**
  * The renderer-side gate every lineage operation (Explorer rename/move/

@@ -16,6 +16,8 @@ const FRONTMATTER_FIELD = "frontmatter";
 // lock after that retry window; the engine already holds the edit durably.
 export const FILE_LOCKED_REPORT_MS = 15_000;
 
+export const COLLECTION_WRITE_STALL_MS = 20_000;
+
 /**
  * Frontmatter values are what js-yaml round-trips. The one indexed shape it
  * cannot carry as-is is bigint (the engine's wire marker for big integers):
@@ -50,6 +52,7 @@ export function CollectionRecordFieldWrite({
   collectionPath,
   change,
   createOption,
+  retryBaseValue,
   onPrepared,
   onPreparationStarted,
   onMutationStarted,
@@ -65,6 +68,7 @@ export function CollectionRecordFieldWrite({
   // A select option the schema must contain before the cell value writes;
   // undefined for a plain edit or once the schema write landed.
   createOption?: string;
+  retryBaseValue?: CollectionValue;
   // The option's schema write landed: the queue clears it from the entry so
   // a later failure's retry does not redo a landed schema write.
   onPrepared: () => void;
@@ -79,7 +83,7 @@ export function CollectionRecordFieldWrite({
   onHeldDurably: (message: string) => void;
   // The change did NOT reach the engine: the queue must retain it. The full
   // state line to show, or null for the generic one.
-  onFailed: (message: string | null) => void;
+  onFailed: (message: string | null, recoveryOnly?: boolean) => void;
 }) {
   const docState = useEngineDoc({
     workspaceId,
@@ -116,11 +120,18 @@ export function CollectionRecordFieldWrite({
       return;
     }
     prepStarted.current = true;
+    if (retryChangesSelection(docState.doc.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value)) {
+      onFailed(CHANGED_SELECTION_MESSAGE, true);
+      return;
+    }
     releasePreparation.current = onPreparationStarted?.(preparationAbort);
+    let selectionChanged = false;
     void rewriteCollectionSchema({
       workspaceId,
       collectionPath,
       mutate: (schema) => {
+        selectionChanged = retryChangesSelection(docState.doc?.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value);
+        if (selectionChanged) throw new Error(CHANGED_SELECTION_MESSAGE);
         const next = addSelectOption(schema, change.field, createOption);
         const field = next.fields.find((entry) => entry.name === change.field);
         const valueMatches = field?.type === "select"
@@ -140,6 +151,10 @@ export function CollectionRecordFieldWrite({
       // An unmounted writer's result must not settle a write it no longer
       // owns. A retry belongs to a fresh writer.
       if (!alive.current) return;
+      if (selectionChanged) {
+        onFailed(CHANGED_SELECTION_MESSAGE, true);
+        return;
+      }
       if (result.status === "written") {
         onPrepared();
         return;
@@ -167,6 +182,7 @@ export function CollectionRecordFieldWrite({
     onMutationStarted,
     onFailed,
     preparationAbort,
+    retryBaseValue,
   ]);
 
   useEffect(() => {
@@ -186,6 +202,10 @@ export function CollectionRecordFieldWrite({
       );
       return;
     }
+    if (retryChangesSelection(doc.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value)) {
+      onFailed(CHANGED_SELECTION_MESSAGE, true);
+      return;
+    }
     applied.current = true;
     onApplied?.();
     doc.transact(() => {
@@ -201,6 +221,7 @@ export function CollectionRecordFieldWrite({
     createOption,
     onFailed,
     onApplied,
+    retryBaseValue,
   ]);
 
   useEffect(() => {
@@ -261,6 +282,12 @@ export type CollectionFieldWrite = {
   // Settlement committed the index; a query started after this callback can
   // acknowledge the edit. An already-running query cannot.
   onIndexed?: () => void;
+  recovery?: {
+    // The indexed multi-select value presented when this input was accepted.
+    selectionBase?: CollectionValue;
+    onDiscarded?: () => void;
+  };
+  retry?: boolean;
   // A select option the collection's schema must gain before the cell value
   // writes. Cleared when that schema write lands, so a retry after a later
   // failure replays only what did not land. Undefined for a plain edit.
@@ -275,6 +302,7 @@ export type CollectionWriteFailure = CollectionFieldWrite & {
   // The state line the failure row shows.
   message: string;
   superseded?: boolean;
+  recoveryOnly?: boolean;
 };
 
 export type CollectionWriteStatus = {
@@ -331,6 +359,21 @@ const SUPERSEDED_MESSAGE =
   "A newer edit replaced this value. Copy your unsaved value before discarding it.";
 const SAVE_UNCONFIRMED_MESSAGE =
   "dohc has not confirmed this save yet. Keep dohc open until saving finishes.";
+const CHANGED_SELECTION_MESSAGE =
+  "This selection changed since your edit. Copy your unsaved value before discarding it.";
+
+function sameSelectionValue(left: unknown, right: CollectionValue): boolean {
+  const a = left ?? [];
+  const b = right ?? [];
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  const expected = new Set(b);
+  return a.length === b.length && new Set(a).size === a.length &&
+    expected.size === b.length && a.every((value) => typeof value === "string" && expected.has(value));
+}
+
+function retryChangesSelection(current: unknown, base: CollectionValue | undefined, desired: CollectionValue): boolean {
+  return base !== undefined && !sameSelectionValue(current, base) && !sameSelectionValue(current, desired);
+}
 
 function sameField(left: CollectionFieldWrite, right: CollectionFieldWrite): boolean {
   return left.workspaceId === right.workspaceId &&
@@ -353,9 +396,9 @@ function recordWriteOrder(write: CollectionFieldWrite): boolean {
   return superseded;
 }
 
-function retainFailure(write: CollectionFieldWrite, message: string): void {
+function retainFailure(write: CollectionFieldWrite, message: string, recoveryOnly = false): void {
   const superseded = recordWriteOrder(write);
-  failures = [...failures, { ...write, message, superseded }];
+  failures = [...failures, { ...write, message, superseded, recoveryOnly }];
 }
 
 function collectionWriteLineage(workspaceId: string): number {
@@ -412,11 +455,17 @@ export function enqueueCollectionFieldWrite(
   createOption?: string,
   lineage = collectionWriteLineage(workspaceId),
   onIndexed?: () => void,
+  recovery?: CollectionFieldWrite["recovery"],
 ): boolean {
+  return enqueueWrite({ workspaceId, collectionPath, change, createOption, lineage, onIndexed, recovery });
+}
+
+function enqueueWrite(input: Omit<CollectionFieldWrite, "id">): boolean {
+  const { workspaceId, collectionPath, lineage } = input;
   nextWriteId += 1;
   const key = keyFor(workspaceId, collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
-  const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage, onIndexed };
+  const write = { ...input, id: nextWriteId };
   if (pausedWorkspaces.has(workspaceId) || lineage !== collectionWriteLineage(workspaceId)) {
     const message = lineage !== collectionWriteLineage(workspaceId)
       ? STALE_LINEAGE_MESSAGE
@@ -467,13 +516,13 @@ function completeCollectionFieldWrite(id: number): void {
 // failures whole, so a retry can replay the exact accepted value and only an
 // explicit discard may drop it. The collection's status line repaints too,
 // for a page that is still mounted.
-function failCollectionFieldWrite(id: number, message: string | null): void {
+function failCollectionFieldWrite(id: number, message: string | null, recoveryOnly = false): void {
   const head = queue[0];
   if (head?.id !== id) return;
   if (appliedWrite?.id === id) appliedWrite = null;
   queue = queue.slice(1);
   const line = message ?? "dohc could not save this change.";
-  retainFailure(head, line);
+  retainFailure(head, line, recoveryOnly);
   const key = keyFor(head.workspaceId, head.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
   statuses.set(key, { ...current, error: line });
@@ -499,16 +548,9 @@ export function retryCollectionFieldWrite(id: number): void {
   // While the workspace's edits are paused the retry button is disabled;
   // this guard covers a programmatic caller. The failure stays retained.
   if (pausedWorkspaces.has(failure.workspaceId)) return;
-  if (failure.superseded || failure.lineage !== collectionWriteLineage(failure.workspaceId)) return;
+  if (failure.superseded || failure.recoveryOnly || failure.lineage !== collectionWriteLineage(failure.workspaceId)) return;
   failures = failures.filter((entry) => entry.id !== id);
-  enqueueCollectionFieldWrite(
-    failure.workspaceId,
-    failure.collectionPath,
-    failure.change,
-    failure.createOption,
-    failure.lineage,
-    failure.onIndexed,
-  );
+  enqueueWrite({ ...failure, retry: true });
 }
 
 /** The user's explicit decision to drop a retained failure's value. */
@@ -516,6 +558,7 @@ export function discardCollectionFieldWrite(id: number): void {
   const discarded = failures.find((entry) => entry.id === id);
   if (!discarded) return;
   failures = failures.filter((entry) => entry.id !== id);
+  discarded.recovery?.onDiscarded?.();
   const key = keyFor(discarded.workspaceId, discarded.collectionPath);
   const current = statuses.get(key);
   if (current?.error === discarded.message) {
@@ -539,6 +582,15 @@ export function collectionWriteFailures(): readonly CollectionWriteFailure[] {
 
 export function useCollectionWriteFailures(): readonly CollectionWriteFailure[] {
   return useSyncExternalStore(subscribe, collectionWriteFailures);
+}
+
+/** Admission waits for work owned by other workspaces, including retained input. */
+export function useCollectionWritesBlockingAdmission(workspaceId: string): boolean {
+  return useSyncExternalStore(subscribe, () => {
+    const otherWorkspace = (entry: { workspaceId: string }) => entry.workspaceId !== workspaceId;
+    return queue.some(otherWorkspace) || failures.some(otherWorkspace) ||
+      [...schemaMutations.values()].some(otherWorkspace);
+  });
 }
 
 // Unapplied input can become a retained failure. An applied head stays under
@@ -740,7 +792,7 @@ function CollectionWriteFailureRow({
   const paused = useCollectionWritesPaused(failure.workspaceId);
   const lineage = useCollectionWriteLineage(failure.workspaceId);
   const stale = failure.lineage !== lineage;
-  const recoverOnly = stale || failure.superseded;
+  const recoverOnly = stale || failure.superseded || failure.recoveryOnly;
   const [copyState, setCopyState] = useState<string | null>(null);
   const value = failure.change.value;
   const recoveryText = typeof value === "string"
@@ -825,6 +877,7 @@ export function CollectionFieldWriteHost() {
           collectionPath={head.collectionPath}
           change={head.change}
           createOption={head.createOption}
+          retryBaseValue={head.retry ? head.recovery?.selectionBase : undefined}
           onPrepared={() => completeCollectionFieldWritePreparation(head.id)}
           onPreparationStarted={(controller) => {
             schemaPreparations.set(head.id, controller);
@@ -849,7 +902,7 @@ export function CollectionFieldWriteHost() {
           onHeldDurably={(message) =>
             holdCollectionFieldWriteDurably(head.id, message)
           }
-          onFailed={(message) => failCollectionFieldWrite(head.id, message)}
+          onFailed={(message, recoveryOnly) => failCollectionFieldWrite(head.id, message, recoveryOnly)}
         />
       )}
       {retained.length === 0 && !saveUnconfirmed ? null : (

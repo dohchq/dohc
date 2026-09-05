@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FIELD_VALUE_REASON_CODES } from "@dohc/workspace-contracts";
 import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
@@ -312,6 +312,29 @@ describe("CellEditor", () => {
     expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
     expect(emit).toHaveBeenLastCalledWith(["beta"]);
+  });
+
+  it("retires only the discarded toggle while earlier unindexed input remains", () => {
+    const emit = writeEmitter();
+    let discard!: (writeId: number) => void;
+    const unsubscribe = vi.fn();
+    const view = render(<CellEditor
+      field={field("tags")}
+      indexed={indexedValue("tags", ["alpha"])}
+      acknowledgedWriteId={0}
+      subscribeToDiscardedWrites={(listener) => { discard = listener; return unsubscribe; }}
+      emit={emit}
+      close={vi.fn()}
+    />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    act(() => discard(2));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 
   it("keeps the current multi-select selection when a delayed prop refresh repeats a stale value", () => {

@@ -4548,6 +4548,44 @@ describe("workspace admission over collection writes", () => {
     expect(collectionWriteFailures()).toHaveLength(0);
   });
 
+  it("keeps an applied-only stalled save visible until its engine acknowledgement admits B", async () => {
+    const harness = admissionHarness();
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => { enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(collectionWriteFailures()).toEqual([]);
+      const blocked = screen.getByTestId("workspace-open-failed");
+      expect(blocked.textContent).toContain("dohc has not confirmed this save yet. Keep dohc open until saving finishes.");
+      expect(screen.queryByTestId("collection-write-retry")).toBeNull();
+      expect(screen.queryByTestId("collection-write-discard")).toBeNull();
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(screen.getByTestId("workspace-open-failed")).toBe(blocked);
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+      await act(async () => {
+        const sessionId = harness.sessions.get("tasks/one.md")!;
+        for (const listener of [...harness.saveListeners]) {
+          listener({ sessionId, state: "saved", seq: 1 });
+        }
+      });
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
+      expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("holds B's open until A's queued collection write settles", async () => {
     const harness = admissionHarness();
     const gate = deferred<void>();

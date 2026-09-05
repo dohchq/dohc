@@ -7,7 +7,7 @@
 // mounted, and an operation guard pauses new acceptance without dropping a
 // racing edit.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
@@ -24,6 +24,7 @@ import {
   resetCollectionFieldWritesForTests,
   retryCollectionFieldWrite,
   settleCollectionFieldWrites,
+  useCollectionWritesBlockingAdmission,
 } from "./recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collectionLineageGate";
 import { serializeCollectionSchema } from "./schemaAuthoring";
@@ -86,6 +87,62 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it.each(["addition", "removal", "duplicate"] as const)("keeps a retry copy-only after a collaborator's %s", (operation) => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const base = ["alpha", "beta"];
+    const value = [...base, "gamma"];
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
+      undefined, undefined, undefined, { selectionBase: base }); });
+    const failure = collectionWriteFailures()[0]!;
+    const doc = new Y.Doc();
+    const remote = operation === "addition" ? [...base, "delta"] : operation === "removal" ? ["beta"] : ["alpha", "alpha"];
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", remote);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(failure.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value } });
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(remote);
+    host.unmount();
+  });
+
+  it.each(["base", "already-applied"] as const)("retries a selection against its %s value", (current) => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const value = ["alpha", "gamma"];
+    const onDiscarded = vi.fn();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
+      undefined, undefined, undefined, { selectionBase: ["alpha"], onDiscarded }); });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", current === "base" ? ["alpha"] : value);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
+    settleHead(host, doc);
+    expect(collectionWriteFailures()).toEqual([]);
+    expect(onDiscarded).not.toHaveBeenCalled();
+  });
+
+  it("preserves exact discard notification through a failed Retry without reporting an index commit", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    const onDiscarded = vi.fn();
+    const onIndexed = vi.fn();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE,
+      undefined, undefined, onIndexed, { onDiscarded }); });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(onDiscarded).not.toHaveBeenCalled();
+    const failureId = collectionWriteFailures()[0]!.id;
+    act(() => { discardCollectionFieldWrite(failureId); discardCollectionFieldWrite(failureId); });
+    expect(onDiscarded).toHaveBeenCalledOnce();
+    expect(onIndexed).not.toHaveBeenCalled();
+  });
+
   it("exposes the exact retained input for copying when its record cannot open", async () => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
@@ -506,6 +563,32 @@ describe("abandoned schema preparation", () => {
     contentHash: "same-schema-in-both-versions",
   };
 
+  it("does not prepare a retried option after the selection changes during the schema read", async () => {
+    let finishRead!: (value: typeof read) => void;
+    const readWorkspaceText = vi.fn(() => new Promise<typeof read>((resolve) => { finishRead = resolve; }));
+    const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
+    vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
+      ...CHANGE, field: "tags", value: ["alpha", "gamma"],
+    }, "gamma", undefined, undefined, { selectionBase: ["alpha"] }); });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(readWorkspaceText).toHaveBeenCalledOnce();
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    await act(async () => finishRead({ ...read, text: serializeCollectionSchema({
+      name: null, description: null,
+      fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }], views: [],
+    }) }));
+    expect(writeWorkspaceText).not.toHaveBeenCalled();
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, createOption: "gamma" });
+  });
+
   it.each(["removed", "renamed", "number", "multi-select"] as const)(
     "retains an option edit when its select field was %s before preparation",
     async (scenario) => {
@@ -581,6 +664,7 @@ describe("abandoned schema preparation", () => {
   });
 
   it("keeps an issued schema mutation owned after the user discards its stalled entry", async () => {
+    const observer = renderHook(() => useCollectionWritesBlockingAdmission("ws-2"));
     let finishWrite!: (value: { status: "written" }) => void;
     const writing = new Promise<{ status: "written" }>((resolve) => { finishWrite = resolve; });
     const writeWorkspaceText = vi.fn(() => writing);
@@ -596,6 +680,7 @@ describe("abandoned schema preparation", () => {
       discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
     });
     expect(hasPendingCollectionFieldWrites()).toBe(true);
+    expect(observer.result.current).toBe(true);
     let admitted = false;
     const beginning = beginCollectionLineageOperation("ws-1").then((release) => { admitted = true; release(); });
     await Promise.resolve();
@@ -603,11 +688,27 @@ describe("abandoned schema preparation", () => {
     await act(async () => { finishWrite({ status: "written" }); await writing; await beginning; });
     expect(admitted).toBe(true);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(observer.result.current).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);
   });
 });
 
 describe("abandonPendingCollectionFieldWrites", () => {
+  it("observes admission blockers from other workspaces through retention and discard", () => {
+    const observer = renderHook(() => useCollectionWritesBlockingAdmission("ws-2"));
+    expect(observer.result.current).toBe(false);
+    act(() => { enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE); });
+    expect(observer.result.current).toBe(false);
+    enqueue();
+    expect(observer.result.current).toBe(true);
+    act(() => abandonPendingCollectionFieldWrites("stalled", "ws-2"));
+    expect(observer.result.current).toBe(true);
+    act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(observer.result.current).toBe(false);
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    observer.unmount();
+  });
+
   it("orders an abandoned older edit against newer input already retained during a pause", () => {
     docMock.current = engineDocState({ opening: true });
     const host = render(<CollectionFieldWriteHost />);

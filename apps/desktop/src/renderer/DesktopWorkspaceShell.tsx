@@ -102,15 +102,14 @@ import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import {
   abandonPendingCollectionFieldWrites,
   advanceCollectionWriteLineage,
+  COLLECTION_WRITE_STALL_MS,
+  collectionWriteFailures,
   remapCollectionFieldWritePaths,
   settleCollectionFieldWrites,
-  useCollectionWriteFailures,
+  useCollectionWritesBlockingAdmission,
   useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
-import {
-  COLLECTION_WRITE_STALL_MS,
-  beginCollectionLineageOperation,
-} from "./collections/collectionLineageGate";
+import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -1989,8 +1988,8 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
-    // Admission stopped on retained collection write failures from another
-    // workspace. Resolving the last one retries the open without a click.
+    // Admission stopped on pending writes or retained failures from another
+    // workspace. Resolving the last blocker retries the open without a click.
     blockedOnCollectionWrites?: boolean;
   } | null>(null);
   const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
@@ -2002,14 +2001,11 @@ export function DesktopWorkspaceShell(props: {
   // Admission must wait for ANOTHER workspace's accepted writes: they still
   // need that workspace's renderer session, which `openWorkspace` revokes.
   // This workspace's own failures never block its admission.
-  const collectionWriteFailureList = useCollectionWriteFailures();
-  const admissionBlockedOnWrites = collectionWriteFailureList.some(
-    (failure) => failure.workspaceId !== workspaceId,
-  );
+  const admissionBlockedOnWrites = useCollectionWritesBlockingAdmission(workspaceId);
   useEffect(() => {
     if (!workspaceOpenFailure?.blockedOnCollectionWrites) return;
     if (admissionBlockedOnWrites) return;
-    // The blocking failures were retried or discarded; run admission again.
+    // Pending saves, schema mutations, and retained failures have all cleared.
     setWorkspaceOpenFailedFor(null);
     setWorkspaceOpenAttempt((attempt) => attempt + 1);
   }, [admissionBlockedOnWrites, workspaceOpenFailure]);
@@ -5014,13 +5010,18 @@ export function DesktopWorkspaceShell(props: {
         // Admission would strand these writes' retries. The failure surface
         // shows blocked instead of a spinner, and resolving the failures
         // (or Try again) reruns this effect.
+        const retainedFailures = collectionWriteFailures().filter(
+          (failure) => failure.workspaceId !== workspaceId,
+        ).length;
         setWorkspaceOpenFailedFor({
           workspaceId,
           selectionGeneration: workspaceSelectionGeneration,
           message:
-            settled.failed === 1 && !settled.stalled
-              ? "A collection change in another workspace has not saved. Retry or discard it to continue."
-              : "Collection changes in another workspace have not saved. Retry or discard them to continue.",
+            retainedFailures === 0
+              ? "dohc has not confirmed this save yet. Keep dohc open until saving finishes."
+              : retainedFailures === 1
+                ? "A collection change in another workspace has not saved. Retry or discard it to continue."
+                : "Collection changes in another workspace have not saved. Retry or discard them to continue.",
           blockedOnCollectionWrites: true,
         });
         return;

@@ -28,17 +28,6 @@ import {
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../FileInspector";
-
-// One Explorer disk operation, as the shell's onBeginChanges opens it.
-// `settle` is the deferred draft settlement runChanges awaits before it
-// projects paths. `release` ends the collection cell-edit pause the begin
-// acquired; runChanges holds it until the successful paths are projected —
-// a drain alone is not enough, because a cell edit accepted while
-// moveWorkspacePath is pending would enqueue the path the move vacates.
-export type TreeChangeOperation = {
-  settle: DraftFlush;
-  release: () => void;
-};
 import { Overlay } from "../Overlay";
 import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
@@ -71,6 +60,17 @@ import {
   parseSiteTabPath,
 } from "./workbenchState";
 import { useCommitOnRelease } from "./useCommitOnRelease";
+
+// One Explorer disk operation, as the shell's onBeginChanges opens it.
+// `settle` is the deferred draft settlement runChanges awaits before it
+// projects paths. `release` ends the collection cell-edit pause the begin
+// acquired; runChanges holds it until the successful paths are projected —
+// a drain alone is not enough, because a cell edit accepted while
+// moveWorkspacePath is pending would enqueue the path the move vacates.
+export type TreeChangeOperation = {
+  settle: DraftFlush;
+  release: () => void;
+};
 
 // The explorer: a real nested tree over the flat (files, folders) lists with
 // inline create/rename editboxes, optimistic pending ops (rollback on error),

@@ -9,6 +9,7 @@ import {
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import {
+  COLLECTION_WRITE_STALL_MS,
   abandonPendingCollectionFieldWrites,
   collectionWriteFailures,
   hasPendingCollectionFieldWrites,
@@ -119,15 +120,13 @@ function resumeExit(kind: "update" | "quit"): Promise<boolean> {
     );
 }
 
-const WRITE_SETTLE_CAP_MS = 20_000;
-
 function hasUnsettledCollectionWrites(): boolean {
   return hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
 }
 
 async function settleCollectionWritesForExit(): Promise<boolean> {
   const settled = await settleCollectionFieldWrites(undefined, {
-    stallMs: WRITE_SETTLE_CAP_MS,
+    stallMs: COLLECTION_WRITE_STALL_MS,
   });
   if (settled.stalled) {
     abandonPendingCollectionFieldWrites(

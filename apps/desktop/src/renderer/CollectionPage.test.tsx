@@ -463,6 +463,49 @@ describe("CollectionPage", () => {
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
+  it.each(["retry", "discard"] as const)("keeps an open multi-select consistent after %s of retained input", async (action) => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    docMock.current = engineDocState({ available: false });
+    const bridge = makeBridge(records, schema);
+    renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha", "gamma"]);
+
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    docMock.current = engineDocState({ available: true, doc });
+    records[0] = {
+      ...records[0]!,
+      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
+    };
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+
+    fireEvent.click(screen.getByTestId(`collection-write-${action}`));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    if (action === "retry") {
+      expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value: ["alpha", "gamma"] } });
+      expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    } else {
+      expect(collectionWriteFailures()).toEqual([]);
+      expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+      fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(["beta"]);
+    }
+  });
+
   it("does not acknowledge a save through an index query that started before it", async () => {
     const schema: CollectionSchema = {
       ...SCHEMA,

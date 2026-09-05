@@ -49,6 +49,8 @@ export interface TableViewProps {
   onCellChange?: (change: CollectionCellChange) => number;
   /** Highest saved edit id reflected in this record's queried field value. */
   acknowledgedWriteId?: (record: CollectionRecord, field: string) => number;
+  /** Explicitly discarded edit ids retire local input without claiming a save. */
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
   onCreateOption?: (create: CollectionOptionCreate) => void;
   /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
@@ -95,6 +97,7 @@ export function TableView({
   onSortChange,
   onCellChange,
   acknowledgedWriteId,
+  subscribeToDiscardedWrites,
   onCreateOption,
   onOpenRecord,
   relationExecutor,
@@ -313,6 +316,7 @@ export function TableView({
                 <CellEditor
                   field={editingField}
                   acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
+                  subscribeToDiscardedWrites={subscribeToDiscardedWrites}
                   indexed={editingRow.original.values.find(
                     (entry) => entry.field === editingField.name,
                   )}

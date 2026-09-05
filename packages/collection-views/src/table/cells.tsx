@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -195,6 +195,7 @@ function MultiSelectEditor({
   options,
   value,
   acknowledgedWriteId,
+  subscribeToDiscardedWrites,
   emit,
   close,
   onCreateOption,
@@ -202,6 +203,7 @@ function MultiSelectEditor({
   options: readonly string[];
   value: CollectionValue;
   acknowledgedWriteId: number;
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
   emit: (value: CollectionValue) => number;
   close: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
@@ -211,6 +213,12 @@ function MultiSelectEditor({
     acknowledgedWriteId,
     pending: [] as PendingSelection[],
   }));
+  useEffect(() => subscribeToDiscardedWrites?.((writeId) => {
+    setSelection((current) => ({
+      ...current,
+      pending: current.pending.filter((change) => change.writeId !== writeId),
+    }));
+  }), [subscribeToDiscardedWrites]);
   const observed = asTextArray(value);
   let current = selection;
   if (acknowledgedWriteId !== selection.acknowledgedWriteId || !sameSelection(observed, selection.observed)) {
@@ -292,6 +300,7 @@ export interface CellEditorProps {
   indexed: CollectionIndexedValue | undefined;
   /** Highest saved edit id reflected in this indexed value; 0 before any edit. */
   acknowledgedWriteId: number;
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
   /**
    * Receives the edited value. The host applies it through its own write
    * path and returns a monotonically increasing edit id; this package never writes.
@@ -316,6 +325,7 @@ export function CellEditor({
   field,
   indexed,
   acknowledgedWriteId,
+  subscribeToDiscardedWrites,
   emit,
   close,
   onCreateOption,
@@ -402,6 +412,7 @@ export function CellEditor({
           options={field.options}
           value={value}
           acknowledgedWriteId={acknowledgedWriteId}
+          subscribeToDiscardedWrites={subscribeToDiscardedWrites}
           emit={emit}
           close={close}
           onCreateOption={onCreateOption}
