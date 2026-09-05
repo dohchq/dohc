@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
-import { markdownToYDoc } from "@dohc/ydoc-projection";
+import { markdownToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,
@@ -1376,12 +1377,39 @@ export class YdocLiveAdapter {
           result.contentKind === "plaintext"
             ? createPlaintextSeedDoc(result.seedContent)
             : markdownToYDoc(result.seedContent);
-        await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
-        // The exposed initial state must INCLUDE the seed: consumers (the
-        // desktop bridge) forward session.initialUpdate to the renderer,
-        // and the pre-seed encoding would render an empty document and
-        // baseline subsequent edits wrongly.
-        session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
+        try {
+          if (result.contentKind === "richdoc") {
+            let projection: string | undefined;
+            try {
+              projection = yDocToMarkdown(seedDoc);
+            } catch {
+              // The serializer rejects some accepted imports. They can still
+              // open, but cannot carry an exact-source witness yet.
+            }
+            if (projection !== undefined && projection !== result.seedContent) {
+              // The first replicated base must still match the captured file.
+              // The engine validates this source against the projection witness.
+              const meta = seedDoc.getMap("meta");
+              meta.set("dohcMarkdownSource", result.seedContent);
+              meta.set(
+                "dohcMarkdownSourceSha256",
+                createHash("sha256").update(result.seedContent).digest("hex"),
+              );
+              meta.set(
+                "dohcMarkdownSourceProjectionSha256",
+                createHash("sha256").update(projection).digest("hex"),
+              );
+            }
+          }
+          await session.applySeedUpdate(Y.encodeStateAsUpdate(seedDoc));
+          // The exposed initial state must INCLUDE the seed: consumers (the
+          // desktop bridge) forward session.initialUpdate to the renderer,
+          // and the pre-seed encoding would render an empty document and
+          // baseline subsequent edits wrongly.
+          session.initialUpdate = Y.encodeStateAsUpdate(session.doc);
+        } finally {
+          seedDoc.destroy();
+        }
       } catch (error) {
         // A failed seed must not leak the registered session (and with it
         // the daemon lease). settle:false is refused precisely when the
