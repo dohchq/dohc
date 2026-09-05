@@ -2747,6 +2747,17 @@ describe('parseBoundedV1Json', () => {
       .toEqual(JSON.parse(source))
   })
 
+  it('charges a lone low surrogate and refuses truncated Unicode before native parse', () => {
+    let nativeCalls = 0
+    const native = (text: string): unknown => { nativeCalls += 1; return JSON.parse(text) }
+    expect(() => parse('"\\uDC00"', { bytes: 2 }, native)).toThrow('bytes')
+    expect(() => parse('"\\u00', {}, native)).toThrow(SyntaxError)
+    expect(nativeCalls).toBe(0)
+    expect(parse('"\\uDC00"', { bytes: 3 }, native))
+      .toEqual({ value: '\uDC00', nodes: 1, bytes: 3 })
+    expect(nativeCalls).toBe(1)
+  })
+
   it('measures strings before materializing only charged object keys', () => {
     let keyMaterializations = 0
     let nativeCalls = 0

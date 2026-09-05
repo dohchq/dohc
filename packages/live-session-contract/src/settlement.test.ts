@@ -75,13 +75,6 @@ function createManualClock(initialTimeMs = 0): ManualClock {
   };
 }
 
-async function drainPromiseTurns(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
 function proveExplicitFlushReasons(
   scheduler: SettlementSchedulerHandle,
 ): void {
@@ -411,9 +404,7 @@ it("restarts an immediate flush retry after rejection", async () => {
   const failure = new Error("first flush failed");
   settlements[0]!.reject(failure);
   await expect(firstFailure).resolves.toBe(failure);
-  await drainPromiseTurns();
-
-  expect(settlements).toHaveLength(2);
+  await vi.waitFor(() => expect(settlements).toHaveLength(2));
   expect(
     events
       .filter((event) => event.type === "settlement-start")
@@ -447,12 +438,13 @@ it("uses host receipt order and deadlines when timer delivery is late", async ()
   reorderedScheduler.markDirty(0);
   reorderedClock.set(899);
   reorderedClock.runDueTimers();
-  await drainPromiseTurns();
   expect.soft(reorderedSettlements).toHaveLength(0);
 
   reorderedClock.set(900);
   reorderedClock.runDueTimers();
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(reorderedEvents).toContainEqual(
+    expect.objectContaining({ type: "settlement-success" }),
+  ));
   expect.soft(reorderedSettlements).toEqual(["quiet"]);
   expect.soft(
     reorderedEvents.find((event) => event.type === "trigger"),
@@ -479,7 +471,9 @@ it("uses host receipt order and deadlines when timer delivery is late", async ()
   delayedScheduler.markDirty(0);
   delayedClock.set(900);
   delayedScheduler.markDirty(900);
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(delayedEvents).toContainEqual(
+    expect.objectContaining({ type: "settlement-success" }),
+  ));
 
   expect.soft(
     delayedEvents
@@ -526,11 +520,10 @@ it("keeps settlement truth when trigger and success event sinks throw", async ()
   expect.soft(() => {
     triggerFlush = triggerScheduler.flush("orderly-shutdown");
   }).not.toThrow();
-  await drainPromiseTurns();
-  expect.soft(triggerSettlementCalls).toBe(1);
   if (triggerFlush !== undefined) {
     await expect.soft(triggerFlush).resolves.toBeUndefined();
   }
+  expect.soft(triggerSettlementCalls).toBe(1);
 
   const successEvents: SettlementSchedulerEvent["type"][] = [];
   const successScheduler = createSettlementScheduler({
@@ -576,31 +569,24 @@ it("bounds catch-up to one head and one coalescing tail", async () => {
   heldScheduler.markDirty(0);
   heldClock.set(1);
   heldClock.runDueTimers();
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(heldSettlements).toHaveLength(1));
 
   for (let hostReceivedAtMs = 2; hostReceivedAtMs <= 20; hostReceivedAtMs += 1) {
     heldClock.set(hostReceivedAtMs);
     heldScheduler.markDirty(hostReceivedAtMs);
     heldClock.runDueTimers();
-    await drainPromiseTurns();
   }
 
   expect.soft(
     heldEvents.filter((event) => event.type === "window-open"),
   ).toHaveLength(2);
   const heldFlush = heldScheduler.flush("maintenance-drain");
-  let heldFlushState = "pending";
-  void heldFlush.then(() => {
-    heldFlushState = "resolved";
-  });
   heldSettlements[0]!.resolve();
   await heldSettlements[0]!.promise;
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(heldSettlements).toHaveLength(2));
   heldSettlements[1]!.resolve();
-  await heldSettlements[1]!.promise;
-  await drainPromiseTurns();
+  await heldFlush;
   expect.soft(heldSettlements).toHaveLength(2);
-  expect.soft(heldFlushState).toBe("resolved");
 
   const failedClock = createManualClock();
   const failedEvents: SettlementSchedulerEvent[] = [];
@@ -622,29 +608,25 @@ it("bounds catch-up to one head and one coalescing tail", async () => {
   const headFailure = new Error("head failed");
   failedSettlements[0]!.reject(headFailure);
   await expect(failedSettlements[0]!.promise).rejects.toBe(headFailure);
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(failedEvents).toContainEqual(
+    expect.objectContaining({ type: "settlement-failure" }),
+  ));
 
   for (let hostReceivedAtMs = 2; hostReceivedAtMs <= 20; hostReceivedAtMs += 1) {
     failedClock.set(hostReceivedAtMs);
     failedScheduler.markDirty(hostReceivedAtMs);
     failedClock.runDueTimers();
-    await drainPromiseTurns();
   }
 
   expect.soft(
     failedEvents.filter((event) => event.type === "window-open"),
   ).toHaveLength(2);
   const failedFlush = failedScheduler.flush("maintenance-drain");
-  let failedFlushState = "pending";
-  void failedFlush.then(() => {
-    failedFlushState = "resolved";
-  });
+  await vi.waitFor(() => expect(failedSettlements).toHaveLength(2));
   failedSettlements[1]!.resolve();
   await failedSettlements[1]!.promise;
-  await drainPromiseTurns();
+  await vi.waitFor(() => expect(failedSettlements).toHaveLength(3));
   failedSettlements[2]!.resolve();
-  await failedSettlements[2]!.promise;
-  await drainPromiseTurns();
+  await failedFlush;
   expect.soft(failedSettlements).toHaveLength(3);
-  expect.soft(failedFlushState).toBe("resolved");
 });

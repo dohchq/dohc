@@ -133,15 +133,43 @@ describe('Y.Doc markdown import/export', () => {
 
   it('keeps malformed and over-parser-limit frontmatter visible as body text', () => {
     const overLimit = `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.\n`
-    for (const [markdown, visible] of [
-      [overLimit, 'depth-limit-leaf'],
-      ['---\nvalue: [unterminated\n---\nBody remains.\n', 'unterminated'],
-    ]) {
-      const restored = markdownToYDoc(markdown!)
+    const cases: { markdown: string; heading: JSONContent[] }[] = [
+      {
+        markdown: overLimit,
+        heading: [
+          { type: 'text', text: 'value: ' },
+          {
+            type: 'wikilink',
+            attrs: { target: `${'['.repeat(128)}"depth-limit-leaf"`, label: null },
+          },
+          { type: 'text', text: ']'.repeat(128) },
+        ],
+      },
+      {
+        markdown: '---\nvalue: [unterminated\n---\nBody remains.\n',
+        heading: [{ type: 'text', text: 'value: [unterminated' }],
+      },
+    ]
+    for (const { markdown, heading } of cases) {
+      const expectedBody: JSONContent = {
+        type: 'doc',
+        content: [
+          { type: 'horizontalRule' },
+          { type: 'heading', attrs: { level: 2 }, content: heading },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] },
+        ],
+      }
+      const restored = markdownToYDoc(markdown)
       try {
         expect(getDohcYDocFrontmatter(restored)).toEqual({})
-        expect(yDocToMarkdown(restored)).toContain(visible)
-        expect(yDocToMarkdown(restored)).toContain('Body remains.')
+        expect(yDocBodyJSON(restored)).toEqual(expectedBody)
+        const reimported = markdownToYDoc(yDocToMarkdown(restored))
+        try {
+          expect(getDohcYDocFrontmatter(reimported)).toEqual({})
+          expect(yDocBodyJSON(reimported)).toEqual(expectedBody)
+        } finally {
+          reimported.destroy()
+        }
       } finally {
         restored.destroy()
       }

@@ -711,6 +711,23 @@ describe("result literals", () => {
 });
 
 describe("replay identity fixture integrity", () => {
+  it("normalizes order and duplicate selectors to the same submission identity", () => {
+    const canonical = {
+      deliveryId: "delivery-1",
+      updateDigest: digestA,
+      binding: { ...binding, selectorPaths: ["notes/a.md", "notes/b.md"] },
+    };
+    for (const selectorPaths of [
+      ["notes/b.md", "notes/a.md"],
+      ["notes/b.md", "notes/a.md", "notes/b.md"],
+    ]) {
+      expect(parseLiveUpdateSubmissionMetadata({
+        ...canonical,
+        binding: { ...binding, selectorPaths },
+      })).toEqual(canonical);
+    }
+  });
+
   function normalizedIdentity(value: {
     deliveryId: unknown;
     updateDigest: unknown;
