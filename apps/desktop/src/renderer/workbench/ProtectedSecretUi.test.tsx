@@ -114,8 +114,7 @@ describe("VersionComparePage protected rows", () => {
       (section) => section.dataset.comparePath === ".env",
     );
     expect(secretSection?.querySelector('[data-testid="version-compare-protected"]')).toBeTruthy();
-    // The protected section renders NO unified diff body.
-    expect(secretSection?.textContent).not.toContain("old text");
-    expect(secretSection?.textContent).not.toContain("new text");
+    // The protected section renders no diff body at all.
+    expect(secretSection?.querySelector('[data-testid="version-compare-diff-lines"]')).toBeNull();
   });
 });

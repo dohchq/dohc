@@ -4117,7 +4117,7 @@ describe("requireExactSiteRoot", () => {
     );
 
     const exact = await getSitePackage(root, "ancestor", sites);
-    expect(() => requireExactSiteRoot(exact, "ancestor")).not.toThrow();
+    expect(requireExactSiteRoot(exact, "ancestor")).toBe(exact);
   });
 
   it("uses the requested root in the missing-site error", () => {

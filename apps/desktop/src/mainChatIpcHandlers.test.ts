@@ -1407,12 +1407,9 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
   });
 });
 
-// #646 PR2 — the LEVEL as a write gate, driven through the real factories.
-//
-// The source pins in main.chatSecurity.test.ts prove the gate's POSITION.
-// Position is not behaviour: a gate can sit first and decide nothing. These
-// drive the factory and watch what runs.
-describe("chat scope write gate (#646 PR2)", () => {
+// The write gate driven through the real handler factories: a refusal must
+// stop the store, not only precede it.
+describe("chat scope write gate", () => {
   type ShareAccess = "view" | "comment" | "edit";
   type ChatScope =
     | { kind: "workspace"; workspace: { workspaceId: string } }
