@@ -73,11 +73,7 @@ import {
   pluginBaselineManifestPath,
   pluginUninstallPreflight,
 } from "./pluginUninstallPreflight";
-
-interface Deferred {
-  promise: Promise<void>;
-  resolve(): void;
-}
+import { deferred, type Deferred } from "../testing/deferred";
 
 interface TestUninstallQueueClaim {
   readonly ready: Promise<void>;
@@ -129,16 +125,6 @@ let resourcesBasePath: string;
 // The production install forks this file, and so does every install here:
 // Node runs its TypeScript source directly.
 const pnpmRunnerEntry = join(import.meta.dirname, "pluginPnpmRunnerProcess.ts");
-
-function deferred(): Deferred {
-  let resolvePromise: (() => void) | undefined;
-  return {
-    promise: new Promise<void>((resolve) => {
-      resolvePromise = resolve;
-    }),
-    resolve: () => resolvePromise?.(),
-  };
-}
 
 function nodeForkProcess(
   modulePath: string,
@@ -365,13 +351,12 @@ async function waitFor(
   message: string | (() => string),
   timeoutMs = 30_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() >= deadline) {
-      throw new Error(typeof message === "string" ? message : message());
-    }
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  }
+  await vi.waitFor(
+    () => {
+      if (!condition()) throw new Error(typeof message === "string" ? message : message());
+    },
+    { timeout: timeoutMs, interval: 20 },
+  );
 }
 
 async function settleWithin<T>(

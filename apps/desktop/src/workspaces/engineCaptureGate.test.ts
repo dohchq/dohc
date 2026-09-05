@@ -1,7 +1,7 @@
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   captureForFlaggedWorkspace,
   createDispatchRunRelease,
@@ -17,8 +17,8 @@ import {
   WORKSPACE_SETTINGS_FILE,
   writeWorkspaceSettingsFile,
 } from "./workspaceSettingsFile";
-import { createTestScratch } from "./testTemp";
 
+import { createTestScratch } from "./testTemp";
 // The gate now requires daemon sessions, matching production, where main.ts
 // quits the app if the daemon does not start. These tests only assert null vs
 // non-null and never invoke an engine operation, so the sessions throw on any
@@ -32,20 +32,7 @@ const unusedSessions = new Proxy({} as EngineWorkspaceSessions, {
   },
 });
 
-const roots: string[] = [];
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-engine-gate-");
-  roots.push(root);
-  return root;
-}
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
 
 const hooks: WorkspaceCaptureHooks = {
   activeAgentRun: () => null,
@@ -74,7 +61,7 @@ async function writeOptOut(root: string): Promise<void> {
 // The gate is that read, so it must hand back why it recorded nothing.
 describe("captureForFlaggedWorkspace decision", () => {
   it("returns the unreadable-file reason with the null capture", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-gate-");
     const workspace = {
       workspaceId: "ws-gate",
       rootPath: root,
@@ -122,7 +109,7 @@ describe("captureForFlaggedWorkspace decision", () => {
   });
 
   it("carries no reason for a deliberate opt-out or a readable file", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-gate-");
     const workspace = {
       workspaceId: "ws-gate",
       rootPath: root,
@@ -139,7 +126,7 @@ describe("captureForFlaggedWorkspace decision", () => {
     // The generic "turned off in Settings" notice is the honest one here.
     expect(optedOut.warning).toBeUndefined();
 
-    const on = await tempRoot();
+    const on = await createTestScratch("dohc-engine-gate-");
     const recording = await captureForFlaggedWorkspace(
       {
         workspaceId: "ws-gate-on",
@@ -471,7 +458,7 @@ describe("dispatchScanEligible", () => {
     // retain the open-session value). A chat sent after opting out while the
     // workspace is still open must still dispatch, or it stays pending
     // forever; only the reopen — where captureFor reads the flag — opts out.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-gate-");
     const workspace = {
       workspaceId: "ws-gate",
       rootPath: root,
@@ -502,7 +489,7 @@ describe("dispatchScanEligible", () => {
   });
 
   it("an unopened workspace answers from the settings file (its open-time read)", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-gate-");
     const workspace = { workspaceId: "ws-gate", rootPath: root, shareView: false };
     const closed = activityWith(null, []);
     await expect(dispatchScanEligible(workspace, closed)).resolves.toBe(true);

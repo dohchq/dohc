@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
@@ -17,6 +14,16 @@ import {
   referencedBlobShas,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  reopenTestStorage,
+  request,
+  sha256,
+  tempRoot,
+  testStorage,
+} from "./linkTestHelpers";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
@@ -38,35 +45,7 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   ) => InspectionDatabase;
 };
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs: Windows cannot unlink
-  // files that still have open handles (EBUSY).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function tempRoot(label: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), `dohc-sync-relay-${label}-`));
-  roots.push(root);
-  return root;
-}
-
-async function testStorage(
-  options?: Parameters<typeof openSyncRelayStorage>[1],
-): Promise<SyncRelayStorage> {
-  const root = await tempRoot("db");
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"), options);
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -75,32 +54,6 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     return { userId: auth.slice("Bearer user:".length), workspaceId };
   };
   return createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
-}
-
-function request(
-  userId: string | null,
-  path: string,
-  init: RequestInit = {},
-): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 interface ConflictResolveFixture {
@@ -2250,8 +2203,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
   it("records supersession time from the injected relay clock", async () => {
     const root = await tempRoot("epoch-clock");
     const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storages.push(storage);
+    const storage = reopenTestStorage(dbPath);
     const h = handler(storage);
     await createWorkspace(h);
     expect(
@@ -2720,8 +2672,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
       firstStorage.close();
     }
 
-    const reopenedStorage = openSyncRelayStorage(dbPath);
-    storages.push(reopenedStorage);
+    const reopenedStorage = reopenTestStorage(dbPath);
     const reopenedHandler = handler(reopenedStorage);
     expect(reopenedStorage.getWorkspaceIdentity("workspace-a")).toEqual({
       replicationEpoch: EPOCH_2,

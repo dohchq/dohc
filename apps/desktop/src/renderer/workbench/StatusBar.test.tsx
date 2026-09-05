@@ -8,6 +8,7 @@ import type {
 } from "../../ipc/bridgeContract";
 import type { AgentNotification } from "./agentNotifications";
 import { StatusBar } from "./StatusBar";
+import { deferred } from "../../testing/deferred";
 
 // Captures the renderer-side update listener exactly as the preload would
 // install it — the auto-updater itself never runs in dev/test (gated on
@@ -26,14 +27,6 @@ const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
     version: "1.2.3",
   },
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 beforeEach(() => {
   vi.stubGlobal("dohcDesktop", {

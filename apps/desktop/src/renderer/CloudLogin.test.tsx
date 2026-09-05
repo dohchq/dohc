@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CloudLogin } from "./CloudLogin";
 
+import { deferred } from "../testing/deferred";
 const bridgeMock = {
   cloudStatus: vi.fn(),
   cloudEnableSync: vi.fn(),
@@ -16,16 +17,6 @@ const bridgeMock = {
 vi.mock("./bridge", () => ({
   bridge: () => bridgeMock,
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
 
 beforeEach(() => {
   vi.useRealTimers();

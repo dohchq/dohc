@@ -11,6 +11,7 @@ import {
 } from "../agents/AgentDriver";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
+import { until } from "../testing/until";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginChildProcessBroker } from "./pluginChildProcessBroker";
 import { createPluginAgentDrivers, type PluginAgentDrivers } from "./pluginAgentDrivers";
@@ -42,20 +43,6 @@ afterEach(async () => {
   await Promise.allSettled(liveBrokers.splice(0).map((broker) => broker.dispose()));
   await Promise.all(scratchRoots.splice(0).map((root) => removeTestScratch(root)));
 });
-
-async function until<T>(
-  probe: () => T | undefined | Promise<T | undefined>,
-  label: string,
-  timeoutMs = 10_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
-    await new Promise((settle) => setTimeout(settle, 25));
-  }
-}
 
 interface CodexFixture {
   drivers: PluginAgentDrivers;

@@ -12,16 +12,7 @@ import { Profiler, useLayoutEffect } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WorkspaceGraphResult } from "../../ipc/bridgeContract";
 import { GraphView } from "./GraphView";
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from "../../testing/deferred";
 
 function immediateResponse<T>() {
   let onSuccess: ((value: T) => void) | null = null;

@@ -9,6 +9,7 @@ import type {
   PluginUninstallPreflightRecord,
 } from "../ipc/bridgeContract";
 import { PluginDetailsPage } from "./PluginDetailsPage";
+import { deferred } from "../testing/deferred";
 
 let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
@@ -99,16 +100,6 @@ const cleanPreflight: PluginUninstallPreflightRecord = {
   warning: null,
   packagedDisplayName: null,
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason: unknown) => void;
-  const promise = new Promise<T>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
-}
 
 function enoent(relativePath: string): Error {
   return new Error(

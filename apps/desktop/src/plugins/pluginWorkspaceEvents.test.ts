@@ -10,6 +10,7 @@ import {
 } from "../testing/localWorkspaceSdkReads";
 import type { CreatedWorkspace } from "../workspaces/createWorkspaceFolder";
 import { createTestScratch } from "../workspaces/testTemp";
+import { until } from "../testing/until";
 import {
   startWorkspaceWatch,
   type WorkspaceWatchHandle,
@@ -902,20 +903,6 @@ afterEach(async () => {
   );
 });
 
-async function until<T>(
-  probe: () => T | undefined | Promise<T | undefined>,
-  label: string,
-  timeoutMs = 10_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
-    await new Promise((settle) => setTimeout(settle, 25));
-  }
-}
-
 interface WatchingPlugin {
   host: PluginHost;
   workspaceRoot: string;
@@ -1112,9 +1099,19 @@ describe("a plugin watching workspace files over the real host protocol", () => 
       stopped: true,
     });
     await writeFile(join(plugin.workspaceRoot, "notes", "second.md"), "two\n");
-    // Long enough for a settle window plus delivery, had the subscription
-    // survived its own unsubscribe.
-    await new Promise((settle) => setTimeout(settle, 1_000));
+    // A probe subscription proves the watcher settled past second.md, so an
+    // unsubscribed feed that still delivered would have delivered by now.
+    const sink = collector();
+    plugin.events.subscribe(
+      { owner: processOwner("probe", "probe-unsubscribe"), emitEvent: sink.emitEvent },
+      { path: "notes" },
+    );
+    await writeFile(join(plugin.workspaceRoot, "notes", "probe.md"), "probe\n");
+    await until(
+      () => (sink.emitted.length > 0 ? true : undefined),
+      "the probe subscription to receive a change",
+      20_000,
+    );
 
     const received = await plugin.received();
     expect(received.map((entry) => entry.data.path)).toEqual(["notes/first.md"]);
@@ -1167,14 +1164,22 @@ describe("a plugin watching workspace files over the real host protocol", () => 
       "the change to reach its own workspace's plugin",
       20_000,
     );
-    // Long enough for the other workspace's settle window to have passed.
-    await new Promise((settle) => setTimeout(settle, 1_000));
+    // The other workspace's watcher settles a probe of its own; by then a
+    // cross-workspace leak of local.md would have been delivered too.
+    await writeFile(join(outside.workspaceRoot, "notes", "probe.md"), "probe\n");
+    await until(
+      async () => ((await outside.received()).length > 0 ? true : undefined),
+      "the probe to reach the other workspace's plugin",
+      20_000,
+    );
 
     expect((await inside.received()).map((entry) => entry.data.path)).toEqual([
       "notes/local.md",
     ]);
-    expect(await outside.received()).toEqual([]);
-    expect(outside.delivered).toEqual([]);
+    expect((await outside.received()).map((entry) => entry.data.path)).toEqual([
+      "notes/probe.md",
+    ]);
+    expect(outside.delivered).toHaveLength(1);
   }, 90_000);
 
   it("refuses a prefix that escapes the workspace, over the real protocol", async () => {

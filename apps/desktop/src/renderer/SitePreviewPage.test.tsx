@@ -11,6 +11,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { DEFAULT_WORKSPACE_SETTINGS } from "../workspaces/workspaceSettings";
 import { shareTargetForSite, SitePreviewPage } from "./SitePreviewPage";
+import { deferred } from "../testing/deferred";
 
 function readyShare(
   entryPath: string,
@@ -65,16 +66,6 @@ const bridgeMock = {
   stopSitePreview: vi.fn(async () => undefined),
   openExternalUrl: vi.fn(async () => undefined),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
 
 describe("SitePreviewPage", () => {
   beforeEach(() => {

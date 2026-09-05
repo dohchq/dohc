@@ -17,16 +17,9 @@ import {
   type EngineYDocSessionCapture,
 } from "./engineYDocSessionIpc";
 import { ENGINE_YDOC_UPDATE_MAX_BYTES } from "../ipc/channels";
+import { deferred } from "../testing/deferred";
 
 const AUTHORITY_ID = Symbol("attachment-a");
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 class FakeSender implements EngineYDocIpcSender {
   readonly sent: Array<{ channel: string; payload: unknown }> = [];

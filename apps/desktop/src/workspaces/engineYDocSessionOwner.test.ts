@@ -5,6 +5,7 @@ import {
   type EngineYDocSessionOutbound,
   type EngineYDocSessionSignals,
 } from "./engineYDocSessionOwner";
+import { deferred } from "../testing/deferred";
 
 interface TestSender {
   readonly id: number;
@@ -21,14 +22,6 @@ type TestOutbound = EngineYDocSessionOutbound<
   string,
   string
 >;
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 interface TestOwnerOptions {
   onReleaseFailed?: (failure: {

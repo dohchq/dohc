@@ -40,6 +40,7 @@ import {
 } from "./workspaceAssets";
 import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaceTextLimits";
 import { createTestScratch } from "./testTemp";
+import { deferred } from "../testing/deferred";
 
 let materializationWriteSchedule: {
   path: string;
@@ -103,14 +104,6 @@ vi.mock("node:fs/promises", async (importOriginal) => {
     }) as typeof rm,
   };
 });
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
 
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("share-view-files-"), "workspace");

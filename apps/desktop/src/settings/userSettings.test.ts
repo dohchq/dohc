@@ -1,7 +1,7 @@
-import { readFile, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { readFile, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   DEFAULT_RUNNER_SETTINGS,
   DEFAULT_USER_SETTINGS,
@@ -18,22 +18,11 @@ import {
   USER_SETTINGS_FILE,
   writeUserSettingsFile,
 } from "./userSettingsStore";
-import { createTestScratch } from "../workspaces/testTemp";
 
-const roots: string[] = [];
+import { createTestScratch } from "../workspaces/testTemp";
 // WSL can expose the Windows temp directory under /mnt, which is slower and
 // more permission-sensitive for symlink tests; use the Linux temp dir there.
 const tempBase = tmpdir().startsWith("/mnt/") ? "/tmp" : tmpdir();
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-user-settings-");
-  roots.push(root);
-  return root;
-}
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
 
 describe("desktop user settings model", () => {
   it("rejects missing, foreign, or future shapes", () => {
@@ -199,7 +188,7 @@ describe("desktop user settings model", () => {
 
 describe("desktop user settings store", () => {
   it("round-trips pretty JSON through the user settings file", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-user-settings-");
     const settings = {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
@@ -214,7 +203,7 @@ describe("desktop user settings store", () => {
   });
 
   it("caches reads until the settings writer invalidates them", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-user-settings-");
     const first = {
       ...DEFAULT_USER_SETTINGS,
       appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
@@ -237,14 +226,14 @@ describe("desktop user settings store", () => {
   });
 
   it("a missing file reads as defaults", async () => {
-    expect(await readUserSettingsFile(await tempRoot())).toEqual({
+    expect(await readUserSettingsFile(await createTestScratch("dohc-user-settings-"))).toEqual({
       settings: DEFAULT_USER_SETTINGS,
       source: "default",
     });
   });
 
   it("hydrates runner defaults when reading a legacy version-one file", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-user-settings-");
     await writeFile(
       join(root, USER_SETTINGS_FILE),
       JSON.stringify({
@@ -272,21 +261,21 @@ describe("desktop user settings store", () => {
   });
 
   it("corrupt, unsupported, and oversized files recover to defaults", async () => {
-    const corrupt = await tempRoot();
+    const corrupt = await createTestScratch("dohc-user-settings-");
     await writeFile(join(corrupt, USER_SETTINGS_FILE), "{not json");
     expect(await readUserSettingsFile(corrupt)).toMatchObject({
       settings: DEFAULT_USER_SETTINGS,
       source: "recovered",
     });
 
-    const future = await tempRoot();
+    const future = await createTestScratch("dohc-user-settings-");
     await writeFile(join(future, USER_SETTINGS_FILE), JSON.stringify({ version: 2 }));
     expect(await readUserSettingsFile(future)).toMatchObject({
       settings: DEFAULT_USER_SETTINGS,
       source: "recovered",
     });
 
-    const huge = await tempRoot();
+    const huge = await createTestScratch("dohc-user-settings-");
     await writeFile(
       join(huge, USER_SETTINGS_FILE),
       JSON.stringify({ padding: "x".repeat(MAX_USER_SETTINGS_FILE_BYTES) }),
@@ -298,8 +287,8 @@ describe("desktop user settings store", () => {
   });
 
   it("refuses to read a symlinked user settings file", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-user-settings-");
+    const outside = await createTestScratch("dohc-user-settings-");
     await writeUserSettingsFile(root, DEFAULT_USER_SETTINGS);
     const outsideSettings = join(outside, USER_SETTINGS_FILE);
     await writeFile(

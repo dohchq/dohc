@@ -10,6 +10,7 @@ import {
 } from "../agents/AgentDriver";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
+import { until } from "../testing/until";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginChildProcessBroker } from "./pluginChildProcessBroker";
 import {
@@ -39,20 +40,6 @@ afterEach(async () => {
   await Promise.allSettled(liveBrokers.splice(0).map((broker) => broker.dispose()));
   await Promise.all(scratchRoots.splice(0).map((root) => removeTestScratch(root)));
 });
-
-async function until<T>(
-  probe: () => T | undefined | Promise<T | undefined>,
-  label: string,
-  timeoutMs = 10_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
-    await new Promise((settle) => setTimeout(settle, 25));
-  }
-}
 
 function isAlive(pid: number): boolean {
   try {
@@ -364,15 +351,22 @@ describe("plugin agent drivers, through the real plugin process", () => {
         () => events.find((event) => event.kind === "permission-request"),
         "the permission request",
       );
-      await new Promise((settle) => setTimeout(settle, 250));
-      expect(events.some((event) => event.kind === "permission-resolved"), "a null policy answers anyway: a resolution arrives that nobody decided.").toBe(false);
-
-      await session.answerPermission("permission-1", "reject_once");
+      // A null policy must not answer. The harness echoes every answer it
+      // receives as a resolution and then completes the turn, so an
+      // automatic answer would show up as a resolution or a completed turn
+      // before the person has said anything.
+      expect(
+        events.some((event) => event.kind === "permission-resolved" || event.kind === "turn-completed"),
+        "a null policy answered the permission itself",
+      ).toBe(false);
+      await session.answerPermission("permission-1", "allow_once");
       const resolved = await until(
         () => events.find((event) => event.kind === "permission-resolved"),
         "the person's answer to reach the harness",
       );
-      expect(resolved).toMatchObject({ decision: "reject_once" });
+      // The one resolution carries the person's decision, not a policy's.
+      expect(events.filter((event) => event.kind === "permission-resolved")).toHaveLength(1);
+      expect(resolved).toMatchObject({ decision: "allow_once" });
 
       await session.dispose();
     },
@@ -460,19 +454,24 @@ describe("plugin agent drivers, through the real plugin process", () => {
       );
       expect(heartbeat.length).toBeGreaterThan(0);
       expect(isAlive(cursor.pid)).toBe(true);
+      const grandchild = JSON.parse(
+        await until(() => textOf(events, "grandchild"), "the harness's grandchild pid"),
+      ) as { pid: number };
+      expect(isAlive(grandchild.pid)).toBe(true);
 
       // dohc stops the plugin. Nothing asks the driver to co-operate.
       await fixture.host.stop("driver-plugin");
 
+      // The spawn teardown goes through the broker, so the harness and the
+      // detached grandchild it started both die with the plugin.
       await until(
         () => (isAlive(cursor.pid) ? undefined : true),
         "the harness process to die with its plugin",
       );
-      const beforeQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
-      await new Promise((settle) => setTimeout(settle, 400));
-      const afterQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
-      expect(afterQuiet, "the spawn teardown skips the broker: the harness keeps running after the plugin that started it is gone.").toBe(beforeQuiet);
-
+      await until(
+        () => (isAlive(grandchild.pid) ? undefined : true),
+        "the harness's grandchild to die with the tree",
+      );
       // The session hears about it as its own failure, not as silence.
       expect(events.at(-1)).toMatchObject({ kind: "error", fatal: true });
       expect(fixture.drivers.list()).toEqual([]);

@@ -13,6 +13,7 @@ import {
 } from "./AgentSessionManager";
 import { AgentPanelSnapshotResult } from "../ipc/bridgeContract";
 
+import { deferred } from "../testing/deferred";
 class FakeSession implements AgentSession {
   readonly sessionId = "fake-session";
   readonly resumeCursor = "fake-session";
@@ -25,16 +26,6 @@ class FakeSession implements AgentSession {
   async answerPermission(): Promise<void> {}
   async stop(): Promise<void> {}
   async dispose(): Promise<void> {}
-}
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
 }
 
 function harness(

@@ -3,6 +3,7 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NewFileDialog } from "./NewFileDialog";
+import { deferred } from "../testing/deferred";
 
 const bridgeMock = {
   createWorkspaceFile: vi.fn(),
@@ -11,14 +12,6 @@ const bridgeMock = {
 vi.mock("./bridge", () => ({
   bridge: () => bridgeMock,
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
 afterEach(() => {
   cleanup();

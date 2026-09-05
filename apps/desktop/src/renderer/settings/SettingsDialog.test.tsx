@@ -15,6 +15,7 @@ import {
 import { pushOverlay, removeOverlay } from "../guestBlockingUi";
 import { Overlay } from "../Overlay";
 import { SettingsDialog } from "./SettingsDialog";
+import { deferred } from "../../testing/deferred";
 
 const config = {
   command: "dohc-mcp",
@@ -162,14 +163,6 @@ const bridge = {
 };
 
 const writeText = vi.fn(async () => {});
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
 
 function stubClipboard() {
   // navigator.clipboard is a getter-only property in jsdom; define it. Call

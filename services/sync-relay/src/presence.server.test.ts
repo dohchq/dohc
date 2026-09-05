@@ -1,36 +1,20 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  claimWorkspace,
+  closeTestStorages,
+  json,
+  testStorage,
+} from "./linkTestHelpers";
 
 // Server-level tests for the ephemeral awareness transport: authenticated,
 // scoped, server-derived identity, and — the load-bearing invariant — never
 // journaled to the durable log.
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-presence-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function makeHandler(
   storage: SyncRelayStorage,
@@ -65,15 +49,6 @@ function post(userId: string, path: string, body: unknown): Request {
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-async function claimWorkspace(h: SyncRelayHandler, userId: string, workspaceId: string) {
-  const r = await h(post(userId, "/sync/workspaces", { workspaceId }));
-  expect(r.status).toBe(200);
 }
 
 // Deterministically wait for a long-poll to park (the request promise offers
