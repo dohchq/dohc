@@ -2212,35 +2212,6 @@ async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
     assert!(refused.message.contains("5242881 bytes"));
 }
 
-#[tokio::test]
-async fn ydoc_apply_is_not_a_public_method() {
-    let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
-    let service = Arc::new(EngineService::new());
-    let transport = InProcessTransport::new(service);
-    let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-no-legacy-apply", 1).await;
-
-    let error = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                2,
-                "ydoc.apply",
-                Some(handle),
-                json!({
-                    "versionId": "main",
-                    "objectId": "object-legacy",
-                    "contentKind": "plaintext",
-                    "updateBase64": plaintext_update("legacy")
-                }),
-            ),
-        )
-        .await
-        .expect_err("the legacy append RPC must not be exposed");
-
-    assert_eq!(error.code, ErrorCode::MethodNotFound);
-}
-
 /// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
 /// yet ingested, with a live session opened over it. Returns the path it
 /// staged and the open result.

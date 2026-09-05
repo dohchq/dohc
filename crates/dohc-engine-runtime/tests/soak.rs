@@ -1,33 +1,13 @@
-//! R14 robustness closure: soak smoke test.
-//!
-//! The plan's "Resource and soak tests -- right-sized" section names the
-//! CUTOVER-BLOCKING target as ~1,000 workspace open/close cycles over a
-//! 30-60 minute soak, asserting threads/handles/queue-depth return exactly
-//! to baseline after every workspace closes and no unbounded growth occurs.
-//! That full-scale soak is post-cutover-window infrastructure and a
-//! deliberate follow-up (see `tools/rust-engine-program/soak-config.json`
-//! for its parameters); this file is the FAST, `cargo test --workspace`-sized
-//! subset that proves the MECHANISM holds at small scale, so it can run in
-//! every PR rather than only nightly.
-//!
-//! What this proves: `WorkspaceSupervisor::actor_count()` returns to exactly
-//! 0 after every single open/close cycle (never leaks an actor slot), for
-//! both the same-identity-reused case and the many-distinct-identities case
-//! closed via `close_all` (the primitive R14's daemon shutdown drain uses).
-//!
-//! What this does NOT prove (explicitly out of scope here, tracked as the
-//! post-cutover soak follow-up): OS thread/handle counts returning to an
-//! exact baseline, RSS/allocator trend bounds, WAL/replication-log growth
-//! bounds, or anything at the ~1,000-cycle / 30-60-minute scale. Those need
-//! OS-level instrumentation and wall-clock time this fast PR-gate test
-//! deliberately does not take on.
+//! Workspace open/close leaks no actor slot: `WorkspaceSupervisor::actor_count()`
+//! returns to exactly 0 after every close, whether one identity is reopened
+//! repeatedly or many distinct identities are released through `close_all`
+//! (the primitive the daemon's shutdown drain uses). Small-scale and fast.
 
 use dohc_engine_runtime::WorkspaceSupervisor;
 use dohc_engine_testkit::ScratchDir;
 
-/// Smoke-scale cycle count -- fast enough for the required `cargo test
-/// --workspace` gate (well under a second). The right-sized cutover-blocking
-/// target (~1,000 cycles) lives in `tools/rust-engine-program/soak-config.json`.
+/// Enough cycles to expose a per-cycle leak, few enough to stay well under a
+/// second.
 const SOAK_SMOKE_CYCLES: usize = 50;
 
 /// Repeatedly open and close the SAME workspace identity. Bounded resource
@@ -62,7 +42,7 @@ fn repeated_open_close_of_one_workspace_returns_to_baseline_every_cycle() {
 }
 
 /// Open many DISTINCT workspace identities, then release them all through
-/// `close_all` -- the exact primitive R14's daemon shutdown drain uses
+/// `close_all` -- the primitive the daemon's shutdown drain uses
 /// (`crates/dohc-workspace-engine/src/bin/dohc-workspace-engine.rs`).
 /// Bounded resource check: no leaked actor slot regardless of how many
 /// distinct identities were ever opened.

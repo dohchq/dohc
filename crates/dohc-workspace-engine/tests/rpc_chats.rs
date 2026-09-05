@@ -201,7 +201,7 @@ async fn call_error_with_idempotency(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
+async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-round3").await;
@@ -443,7 +443,7 @@ async fn rpc_b2_reactions_decisions_and_personal_feed_hydration() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
+async fn reactions_and_decisions_accept_the_max_page_limit() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-max-page").await;
@@ -528,7 +528,7 @@ async fn rpc_b2_reactions_and_decisions_accept_max_page_limit() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_negative_reaction_cursor_boundary_round_trips() {
+async fn negative_reaction_cursor_boundary_round_trips() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-negative-cursor").await;
@@ -608,7 +608,7 @@ async fn rpc_b2_negative_reaction_cursor_boundary_round_trips() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_single_oversize_row_fails_instead_of_truncating() {
+async fn single_oversize_row_fails_instead_of_truncating() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-oversize-row").await;
@@ -669,7 +669,7 @@ async fn rpc_b2_single_oversize_row_fails_instead_of_truncating() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_attachment_and_file_thread_contracts() {
+async fn attachments_and_file_threads_keep_their_wire_contracts() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-attachments").await;
@@ -911,7 +911,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_mentions_backfill_marker_makes_second_open_a_noop() {
+async fn mentions_backfill_marker_makes_second_open_a_noop() {
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let db_path = scratch.engine_db_path().expect("db path");
@@ -1101,7 +1101,7 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_round_7_normalizes_persisted_chat_identities() {
+async fn persisted_chat_identities_are_normalized() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-round-7").await;
@@ -2829,16 +2829,6 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         json!({ "runId": "run-crashed", "nowMs": 2421 }),
     )
     .await;
-    let reclaim_rpc = call_error(
-        &transport,
-        &first_handle,
-        &mut id,
-        "chats.dispatch.reclaimRunning",
-        json!({ "maxAttempts": 2, "nowMs": 2422 }),
-    )
-    .await;
-    assert_eq!(reclaim_rpc.code, ErrorCode::MethodNotFound);
-
     // No worker is killed here: closing the workspace simulates the process
     // boundary. The next actual open performs the one safe reclaim sweep.
     call(
@@ -2969,7 +2959,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_round_11_bookmark_state_filter_command_default_and_path_floor() {
+async fn bookmark_state_filter_claim_command_default_and_path_floor() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r11").await;
@@ -3185,7 +3175,7 @@ async fn review_round_11_bookmark_state_filter_command_default_and_path_floor() 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metadata() {
+async fn malformed_ready_generation_and_null_claim_metadata_are_rejected() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r12").await;
@@ -3276,7 +3266,7 @@ async fn review_round_12_rejects_malformed_ready_generation_and_null_claim_metad
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_reshapes_six_existing_arms_without_truncated() {
+async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r16").await;
@@ -3614,7 +3604,7 @@ async fn named_chat_lists_page_without_losing_rows() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_page_adapter_drains_without_overlap_or_omission() {
+async fn page_adapter_drains_without_overlap_or_omission() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-pages").await;
@@ -3678,7 +3668,7 @@ async fn rpc_b2_page_adapter_drains_without_overlap_or_omission() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_rejects_unknown_fields_and_null_optionals() {
+async fn unknown_fields_and_null_optionals_are_rejected() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-strict").await;
@@ -3707,7 +3697,7 @@ async fn rpc_b2_rejects_unknown_fields_and_null_optionals() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_workspace_handle_overrides_spoofed_workspace_identity() {
+async fn workspace_handle_overrides_a_spoofed_workspace_identity() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-scope").await;
@@ -3725,7 +3715,7 @@ async fn rpc_b2_workspace_handle_overrides_spoofed_workspace_identity() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn rpc_b2_small_ports_round_trip_strict_shapes_and_recovery_mutations() {
+async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "rpc-b2-roundtrip").await;

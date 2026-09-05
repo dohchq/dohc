@@ -36,8 +36,8 @@
 /// Widening this moves the whole path: `blob_ceiling(BlobKind::Ydoc)` reads it,
 /// `MAX_INGEST_BLOB_BYTES` derives from that, and the relay's own
 /// `MAX_BLOB_BYTES` (`services/sync-relay/src/server.ts`) must stay at or above
-/// the result — `the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling`
-/// holds that.
+/// the result. The two are written by hand in different languages and no test
+/// compares them; check both when widening either.
 ///
 /// One number covers deltas and bases on purpose. Nothing measures how big a
 /// single EDIT may be; a delta never exceeds the full state it is a slice of;
