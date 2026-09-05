@@ -173,6 +173,75 @@ describe("plugin workspace runtimes", () => {
     await h.owner.close();
   });
 
+  it("rejects restart waiters when teardown fails and retains failed ownership", async () => {
+    const teardown = deferred();
+    const failure = new Error("host teardown failed");
+    const h = createHarness({
+      create: () => makeParts({ dispose: () => teardown.promise }),
+    });
+    await h.owner.ensure(workspace());
+    const stopped = h.owner.prepareForEngineRestart();
+    const stoppedFailure = expect(stopped).rejects.toBe(failure);
+    const waitingFailure = expect(h.owner.ensure(workspace())).rejects.toBe(failure);
+    teardown.reject(failure);
+    await Promise.all([stoppedFailure, waitingFailure]);
+
+    await expect(h.owner.ensure(workspace())).rejects.toBe(failure);
+    expect(h.owner.prepareForEngineRestart()).toBe(stopped);
+    await expect(h.owner.stop("workspace-1")).rejects.toBe(failure);
+    expect(h.owner.current("workspace-1")).toBeUndefined();
+    expect(h.created).toHaveLength(1);
+    await expect(h.owner.close()).rejects.toBe(failure);
+  });
+
+  it("rejects restart waiters when launch fails terminally after teardown", async () => {
+    const h = createHarness();
+    await h.owner.ensure(workspace());
+    const stopped = h.owner.prepareForEngineRestart();
+    await stopped;
+    const failure = new Error("engine restart limit exceeded");
+    const waitingFailure = expect(h.owner.ensure(workspace())).rejects.toBe(failure);
+    h.owner.failEngineRestart(failure);
+    await waitingFailure;
+
+    await expect(h.owner.ensure(workspace())).rejects.toBe(failure);
+    await expect(h.owner.ensure({
+      workspaceId: "workspace-2",
+      rootPath: "C:\\workspaces\\two",
+    })).rejects.toBe(failure);
+    expect(h.owner.prepareForEngineRestart()).toBe(stopped);
+    expect(h.created).toHaveLength(1);
+    await h.owner.close();
+  });
+
+  it("observes restart failures when no caller is waiting", async () => {
+    for (const retirementFails of [false, true]) {
+      const failure = new Error("engine restart failed");
+      const h = createHarness({
+        create: () => makeParts({
+          dispose: async () => { if (retirementFails) throw failure; },
+        }),
+      });
+      await h.owner.ensure(workspace());
+      const stopped = h.owner.prepareForEngineRestart();
+      if (retirementFails) {
+        await expect(stopped).rejects.toBe(failure);
+      } else {
+        await stopped;
+        h.owner.failEngineRestart(failure);
+      }
+      // Let unhandled rejections surface before attaching a new ensure caller.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await expect(h.owner.ensure(workspace())).rejects.toBe(failure);
+      expect(h.created).toHaveLength(1);
+      if (retirementFails) {
+        await expect(h.owner.close()).rejects.toBe(failure);
+      } else {
+        await h.owner.close();
+      }
+    }
+  });
+
   it("does not recreate a workspace closed while the engine restart was paused", async () => {
     const h = createHarness();
     await h.owner.ensure(workspace());

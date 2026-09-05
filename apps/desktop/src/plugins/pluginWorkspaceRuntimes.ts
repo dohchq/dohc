@@ -187,6 +187,7 @@ export class PluginWorkspaceRuntimes<
   private engineRestart: {
     ready: Promise<void>;
     resume(): void;
+    fail(error: unknown): void;
     stopped: Promise<void>;
     workspaces: TWorkspace[];
   } | undefined;
@@ -276,10 +277,14 @@ export class PluginWorkspaceRuntimes<
     if (this.engineRestart) return this.engineRestart.stopped;
     const paused = Promise.withResolvers<void>();
     const stopped = Promise.withResolvers<void>();
+    // The shared gate can fail before any caller starts waiting on it.
+    void paused.promise.catch(() => undefined);
+    void stopped.promise.catch(paused.reject);
     const slots = [...this.slots.entries()];
     this.engineRestart = {
       ready: paused.promise,
       resume: paused.resolve,
+      fail: paused.reject,
       stopped: stopped.promise,
       workspaces: slots.flatMap(([workspaceId, slot]) => {
         const workspace = this.workspaces.get(workspaceId);
@@ -300,6 +305,10 @@ export class PluginWorkspaceRuntimes<
       stopped.reject(error);
     }
     return stopped.promise;
+  }
+
+  failEngineRestart(error: unknown): void {
+    this.engineRestart?.fail(error);
   }
 
   /** Recreate registered executors only after the replacement engine is reachable. */

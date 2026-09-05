@@ -13607,12 +13607,12 @@ function testEngineRestartOverrides(): {
 }
 
 async function startRustEngineDaemon(): Promise<boolean> {
+  const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
   // Everything, including resolving the binary path, runs inside the try: a
   // throw while building the options would otherwise reject this whenReady
   // callback and leave the user with no dialog, on the one path whose job is
   // to explain that the engine could not start.
   try {
-    const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
     rustEngineDaemon = createRustEngineDaemon({
       ...testEngineRestartOverrides(),
       command: defaultEngineBinaryPath({
@@ -13621,6 +13621,11 @@ async function startRustEngineDaemon(): Promise<boolean> {
         resourcesPath: process.resourcesPath,
       }),
       onFailure: (error, terminal) => {
+        if (terminal) {
+          for (const runtimes of restartingPluginRuntimes) {
+            runtimes.failEngineRestart(error);
+          }
+        }
         // The supervisor's diagnostic is for us: it names engine.ping, probe
         // counts and wedge budgets, which tell a developer or an agent exactly
         // which limit was hit. It goes to the log in full.
@@ -13711,6 +13716,9 @@ async function startRustEngineDaemon(): Promise<boolean> {
     logLaunchMarksOnce();
     return true;
   } catch (error) {
+    for (const runtimes of restartingPluginRuntimes) {
+      runtimes.failEngineRestart(error);
+    }
     const message =
       error instanceof Error ? error.message : "Unknown Rust engine startup error.";
     console.error("[desktop] Rust engine daemon failed to start:", error);

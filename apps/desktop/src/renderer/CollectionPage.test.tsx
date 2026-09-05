@@ -498,6 +498,7 @@ describe("CollectionPage", () => {
     docMock.current = engineDocState({ available: true, doc });
     act(() => retryCollectionFieldWrite(latest.id));
     expect(doc.getMap("frontmatter").get("tags")).toEqual(desired);
+    expect(collectionWriteFailures()).toHaveLength(count === 3 ? 1 : 0);
     expect(collectionWriteFailures().every((failure) => failure.superseded)).toBe(true);
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
   });
