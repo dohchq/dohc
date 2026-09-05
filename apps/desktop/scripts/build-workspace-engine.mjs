@@ -98,5 +98,11 @@ if (
   process.argv[1] &&
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  buildWorkspaceEngine({ target: parseTargetArgument(process.argv.slice(2)) });
+  const { withBuildBudget } = await import("../../../scripts/verification/build.mjs");
+  await withBuildBudget(async (env) => {
+    buildWorkspaceEngine({
+      target: parseTargetArgument(process.argv.slice(2)),
+      runCargo: (command, args, options) => spawnSync(command, args, { ...options, env }),
+    });
+  });
 }

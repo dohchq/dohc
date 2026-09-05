@@ -3,12 +3,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { requireE2eEngine } from "./require-e2e-engine.mjs";
 import {
   currentUiAuditBundles,
   writeUiAuditBuildProvenance,
 } from "./ui-audit-build-provenance.mjs";
-import { pnpmInvocation } from "./pnpm-invocation.mjs";
+import { prepare } from "../../../scripts/verification/build.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDir, "..");
@@ -30,10 +29,6 @@ function run(command, args, env = process.env) {
   }
 }
 
-function runPnpm(args) {
-  const invocation = pnpmInvocation(args);
-  run(invocation.command, invocation.args);
-}
 
 if (!process.env.UI_AUDIT_SHOT_DIR?.trim()) {
   throw new Error("set UI_AUDIT_SHOT_DIR to an empty output directory");
@@ -43,14 +38,7 @@ if (git(["status", "--porcelain"]) !== "") {
   throw new Error("commit the worktree before building UI audit evidence");
 }
 
-runPnpm(["--filter", "@dohc/desktop", "build:engine"]);
-runPnpm(["--filter", "@dohc/desktop", "build"]);
-const stagedEngine = join(
-  desktopRoot,
-  "resources/workspace-engine",
-  `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`,
-);
-requireE2eEngine({ override: stagedEngine });
+await prepare();
 
 if (git(["rev-parse", "HEAD"]) !== commit || git(["status", "--porcelain"]) !== "") {
   throw new Error("the worktree changed while building UI audit evidence");

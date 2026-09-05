@@ -1,11 +1,13 @@
-import { type Page } from "@playwright/test";
+import { test, type Page } from "@playwright/test";
 import {
   _electron as electron,
   type ElectronApplication,
 } from "playwright";
 import { createRequire } from "node:module";
-import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { appendFileSync, existsSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { assertPrepared } from "../../../../scripts/verification/build.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
@@ -34,6 +36,7 @@ const rendererEntry = join(desktopRoot, "dist/renderer/index.html");
 const electronExecutable = require("electron") as string;
 
 function requireBuiltDesktopApp(): void {
+  assertPrepared();
   if (!existsSync(mainEntry) || !existsSync(rendererEntry)) {
     throw new Error(
       "Desktop E2E needs a built Electron app. Run `pnpm --filter @dohc/desktop build` first.",
@@ -87,13 +90,20 @@ export async function launchDesktopApp(input: {
 }): Promise<LaunchedDesktopApp> {
   requireBuiltDesktopApp();
   const userDataDir = await createUserDataDir(input.workspace);
+  const artifacts = test.info().outputPath(`electron-${randomUUID()}`);
+  await mkdir(artifacts, { recursive: true });
 
   const logs: DesktopLogEntry[] = [];
+  const logPath = join(artifacts, "desktop.jsonl");
+  const record = (entry: DesktopLogEntry) => {
+    logs.push(entry);
+    appendFileSync(logPath, JSON.stringify(entry) + "\n");
+  };
   const onStdoutData = (chunk: Buffer) => {
-    logs.push({ source: "main", level: "stdout", text: chunk.toString() });
+    record({ source: "main", level: "stdout", text: chunk.toString() });
   };
   const onStderrData = (chunk: Buffer) => {
-    logs.push({ source: "main", level: "stderr", text: chunk.toString() });
+    record({ source: "main", level: "stderr", text: chunk.toString() });
   };
 
   let app: ElectronApplication | null = null;
@@ -104,6 +114,7 @@ export async function launchDesktopApp(input: {
       args: electronLaunchArgs({ mainEntry, userDataDir }),
       cwd: desktopRoot,
       env: launchEnv(input),
+      artifactsDir: artifacts,
     });
 
     processHandle = app.process();
@@ -112,14 +123,14 @@ export async function launchDesktopApp(input: {
 
     const page = await app.firstWindow({ timeout: 10_000 });
     page.on("console", (message) => {
-      logs.push({
+      record({
         source: "renderer",
         level: message.type(),
         text: message.text(),
       });
     });
     page.on("pageerror", (error) => {
-      logs.push({
+      record({
         source: "renderer",
         level: "pageerror",
         text: error.message,
@@ -128,6 +139,10 @@ export async function launchDesktopApp(input: {
 
     const launchedApp = app;
     const launchedProcess = processHandle;
+    await writeFile(join(artifacts, "instance.json"), JSON.stringify({
+      pid: launchedProcess.pid, root: desktopRoot, userDataDir,
+      workspace: input.workspace.rootPath, build: assertPrepared(),
+    }, null, 2));
     return {
       app: launchedApp,
       page,
@@ -135,6 +150,9 @@ export async function launchDesktopApp(input: {
       close: async () => {
         const abort = new AbortController();
         try {
+          if (!page.isClosed()) {
+            await page.screenshot({ path: join(artifacts, "last-screen.png"), timeout: 5000 }).catch(() => undefined);
+          }
           await Promise.race([
             (async () => {
               if (launchedApp.windows().length > 0) {
@@ -147,10 +165,15 @@ export async function launchDesktopApp(input: {
           abort.abort();
           launchedProcess.stdout?.off("data", onStdoutData);
           launchedProcess.stderr?.off("data", onStderrData);
+          const path = join(artifacts, "desktop.jsonl");
+          await writeFile(path, logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+          await test.info().attach("desktop logs", { path, contentType: "application/x-ndjson" });
         }
       },
     };
   } catch (error) {
+    await writeFile(join(artifacts, "launch-error.txt"), String(error));
+    await writeFile(join(artifacts, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n"));
     processHandle?.stdout?.off("data", onStdoutData);
     processHandle?.stderr?.off("data", onStderrData);
     if (app) {

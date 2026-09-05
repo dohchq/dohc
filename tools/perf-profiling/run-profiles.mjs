@@ -9,6 +9,7 @@ import { cpus, hostname, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { prepare, assertPrepared } from "../../scripts/verification/build.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
@@ -349,22 +350,14 @@ async function main() {
   const fixtures = join(options.output, "fixtures");
   await mkdir(options.output, { recursive: true });
 
-  if (
-    !existsSync(join(desktopRoot, "dist", "main", "main.js")) ||
-    !existsSync(join(desktopRoot, "dist", "renderer", "index.html"))
-  ) {
-    throw new Error(
-      "The desktop build is missing. Run `pnpm build:desktop` before the profiling runner.",
-    );
-  }
+  await prepare();
+  const preparedBuild = assertPrepared();
 
   const seedArgs = [join(scriptDir, "seed-workspaces.mjs"), "--output", fixtures];
   if (options.seed !== null) seedArgs.push("--seed", String(options.seed));
   if (options.tiny) seedArgs.push("--tiny");
   await run(process.execPath, seedArgs);
 
-  // Stages the worktree-root target/debug daemon into the path Electron uses.
-  await run(process.execPath, ["scripts/require-e2e-engine.mjs"], { cwd: desktopRoot });
 
   const seedManifest = JSON.parse(
     await readFile(join(fixtures, "seed-manifest.json"), "utf8"),
@@ -377,6 +370,7 @@ async function main() {
   );
   const gitStatus = await capture("git", ["status", "--short"]);
   const runEnvelope = {
+    preparedBuild,
     schemaVersion: 1,
     capturedAt: new Date().toISOString(),
     scale: options.tiny ? "tiny" : "full",

@@ -4,6 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { withBuildBudget } from "../../../scripts/verification/build.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "../../..");
@@ -136,11 +137,11 @@ function runRequired(command, args, options, action) {
   }
 }
 
-function buildWorkspaceEngine() {
+function buildWorkspaceEngine(environment = process.env) {
   const result = spawnSync("cargo", workspaceEngineBuildArguments(repoRoot), {
     cwd: repoRoot,
     encoding: "utf8",
-    env: workspaceEngineBuildEnvironment(process.env),
+    env: workspaceEngineBuildEnvironment(environment),
     maxBuffer: Infinity,
     stdio: ["inherit", "pipe", "inherit"],
   });
@@ -169,7 +170,7 @@ function buildWorkspaceEngine() {
   }
 }
 
-function run() {
+async function run() {
   runRequired(
     process.execPath,
     [join(import.meta.dirname, "ensure-electron-installed.mjs")],
@@ -188,7 +189,9 @@ function run() {
     "stage the plugin install/build tools",
   );
 
-  buildWorkspaceEngine();
+  await withBuildBudget(async (environment) => {
+    buildWorkspaceEngine(environment);
+  });
 
   const devServer = spawnSync(
     process.execPath,
@@ -204,5 +207,5 @@ const isMain =
   resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (isMain) {
-  run();
+  run().catch((error) => fail("start the development session", error));
 }
