@@ -890,9 +890,15 @@ describe("main-process chat authorization", () => {
     );
 
     // Every received share is refused unconditionally: no cached relay fact
-    // (level, generic-chat capability) may reopen a write.
-    const gateAt = mainSource.indexOf("function assertChatWritable(");
-    const gate = mainSource.slice(gateAt, mainSource.indexOf("\n  }", gateAt));
+    // (level, generic-chat capability) may reopen a write. The gate lives in
+    // mainChatIpcHandlers.ts so main and its tests share one definition.
+    const gateSource = readFileSync(
+      new URL("./mainChatIpcHandlers.ts", import.meta.url),
+      "utf8",
+    );
+    const gateAt = gateSource.indexOf("export function assertChatWritable(");
+    expect(gateAt).toBeGreaterThan(-1);
+    const gate = gateSource.slice(gateAt, gateSource.indexOf("\n}", gateAt));
     expect(gate).toContain(
       'throw new SharedFileReadOnlyError("Chats are read-only in this shared view.")',
     );
