@@ -1,4 +1,4 @@
-//! dohc engine domain — CAL-2 calibration slice.
+//! dohc engine domain: what a version, moment, fork, and restore mean.
 //!
 //! The versioning domain: stable object identity, versioned text write/read,
 //! moment history with keyset pagination, text delete/rename/rollback,
@@ -23,8 +23,6 @@
 //! - **Differential surface.** [`normalize::NormalizedState`] is a deterministic
 //!   projection of the version graph, moment order, active version, and
 //!   snapshot blob hashes for the TS-vs-Rust comparison.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 

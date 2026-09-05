@@ -35,8 +35,8 @@ design, and that row is what proves the workspace's doctests still ran.
 ## What the gate does for you
 
 On a host with a build-slot root (the shared Windows dev machine), the gate
-enforces the machine's build budget itself (WINDOWS_DEV.md, "Build
-economics"). A host with no slot root, such as a CI runner, runs uncapped.
+enforces the machine's build budget itself. A host with no slot root, such
+as a CI runner, runs uncapped.
 You do not set these up:
 
 - It refuses to start below 40 GB free disk. The error names the floor.
@@ -50,9 +50,7 @@ You do not set these up:
 
 Read the `== summary ==` block. Do not trust the exit code alone: the gate
 can exit 0 while its own summary says FAIL. The evidence line under
-`EVIDENCE` is what you paste into
-the program's own record when the program asks
-for evidence.
+`EVIDENCE` is what you paste into the PR body.
 
 Each summary row now carries its wall-clock seconds. If you change the gate
 or the build configuration, compare the step times before and after, and put

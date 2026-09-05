@@ -8,7 +8,8 @@
 //! predicate is factored into [`diff_core`] behind a seam so the seeded-bug
 //! proof (a flipped hash comparison) exercises the real machinery with only the
 //! predicate mutated — the differential harness must be able to catch exactly
-//! this class of bug (`EXECUTION_LOG.md` CAL-2 differential-tautology lesson).
+//! this class of bug; an earlier differential test passed against a flipped
+//! comparison because both sides shared the predicate.
 
 use crate::bounds::ScanBounds;
 use crate::error::FilesError;

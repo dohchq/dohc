@@ -1,10 +1,6 @@
-// Lane D conformance: the create-only collection grant policy handed to the
-// share-links program ("The create-only collection contract" in
-// docs/plans/share-links.md). The policy is share-links Phase 5 work and does
-// not exist on the relay yet. The green tests pin the seam Phase 5 extends:
-// the link-create surface, the public access levels, and the grant wire
-// shape. The todo rows name the assertions the policy must pass; implement
-// them with the policy, in this file.
+// The seam share-links Phase 5 extends with the create-only collection grant
+// policy ("The create-only collection contract" in docs/plans/share-links.md):
+// the link-create surface, the public access levels, and the grant wire shape.
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,15 +153,4 @@ describe("the seam the create-only grant policy extends", () => {
       "url",
     ]);
   });
-});
-
-describe("create-only collection grant policy (share-links Phase 5)", () => {
-  it.todo("a create-only grant accepts a schema-valid record create from a link holder");
-  it.todo("replaying an idempotency key returns the first result and creates nothing");
-  it.todo("a same-key retry with a different payload refuses without creating");
-  it.todo("concurrent same-key retries produce at most one record");
-  it.todo("the relay sets principal and created timestamp; a create body naming either refuses");
-  it.todo("the per-grant create quota holds and a fresh idempotency key does not refill it");
-  it.todo("update, delete, schema write, and out-of-path writes refuse byte-identical to a missing share");
-  it.todo("the owner bulk undo removes one principal's created records with idempotency state cleaned");
 });

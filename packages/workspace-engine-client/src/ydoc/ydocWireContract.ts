@@ -15,8 +15,8 @@ export const YDOC_METHOD = {
   // for a session that may not write its artifact and may not discard its
   // CRDT — see `EngineYdocProviderSession.evict` (#665).
   evict: "ydoc.evict",
-  // R13 OBLIGATION (resync): implement this transport after a stale signal.
-  // R13 OBLIGATION (schema): add Rust serde counterparts for all ydoc.* shapes.
+  // Re-fetches the session's lineage after a stale signal; the daemon serves
+  // it in `EngineService::ydoc_resync`.
   resync: "ydoc.resync",
 } as const;
 

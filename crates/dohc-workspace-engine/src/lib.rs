@@ -1,4 +1,4 @@
-//! Shadow-only composition host for the Rust workspace engine.
+//! The workspace engine daemon: composes the engine crates behind the protocol.
 
 #![forbid(unsafe_code)]
 
@@ -14146,36 +14146,196 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
+    /// Every listed method is registered, and the three retired ones
+    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
+    /// not. A new arm added without a row here is not caught; that needs the
+    /// dispatch table as data.
+    ///
+    /// Without a workspace handle a registered method fails on the missing
+    /// handle or on its params; an unregistered one fails `MethodNotFound`.
+    /// That difference is what makes the list checkable from outside.
     #[tokio::test]
-    async fn share_view_push_is_not_a_registered_method() {
+    async fn listed_methods_are_registered_and_retired_methods_are_rejected() {
+        const METHODS: &[&str] = &[
+            "automations.claimNext",
+            "automations.failures",
+            "automations.settle",
+            "automations.subscribe",
+            "automations.unsubscribe",
+            "capture.flush",
+            "capture.reconcile",
+            "capture.setAuthor",
+            "chats.agentReadState.listUnreadThreads",
+            "chats.agentReadState.markThreadRead",
+            "chats.attachments.listFileMentions",
+            "chats.attachments.listForThread",
+            "chats.bookmarks.archive",
+            "chats.bookmarks.find",
+            "chats.bookmarks.list",
+            "chats.bookmarks.listPending",
+            "chats.bookmarks.markFailed",
+            "chats.bookmarks.markPending",
+            "chats.bookmarks.markReady",
+            "chats.bookmarks.markStale",
+            "chats.bookmarks.save",
+            "chats.channels.create",
+            "chats.channels.ensureAgent",
+            "chats.channels.ensureGeneral",
+            "chats.channels.findBySlug",
+            "chats.channels.getWireId",
+            "chats.channels.list",
+            "chats.decisions.listForThread",
+            "chats.decisions.resolve",
+            "chats.dispatch.claimNextPending",
+            "chats.dispatch.complete",
+            "chats.dispatch.enqueue",
+            "chats.dispatch.fail",
+            "chats.dispatch.failPendingForThread",
+            "chats.dispatch.getRunRecord",
+            "chats.dispatch.getThreadPauseState",
+            "chats.dispatch.isThreadPaused",
+            "chats.dispatch.listAppQuitRecoveries",
+            "chats.dispatch.listPending",
+            "chats.dispatch.listRunMessages",
+            "chats.dispatch.markFailureNotePosted",
+            "chats.dispatch.openRuns",
+            "chats.dispatch.recentCount",
+            "chats.dispatch.recordEligibleTriggers",
+            "chats.dispatch.recordRunMessage",
+            "chats.dispatch.requeueFailedTrigger",
+            "chats.dispatch.runIdForMessage",
+            "chats.dispatch.runRecordsForThread",
+            "chats.dispatch.setThreadPaused",
+            "chats.feed.listPersonal",
+            "chats.feed.markSeen",
+            "chats.follows.ensureDefaults",
+            "chats.follows.list",
+            "chats.follows.set",
+            "chats.mentions.listForHandle",
+            "chats.messages.list",
+            "chats.messages.send",
+            "chats.reactions.list",
+            "chats.reactions.set",
+            "chats.readState.get",
+            "chats.readState.listUnreadFileThreads",
+            "chats.readState.markThreadRead",
+            "chats.threads.create",
+            "chats.threads.findChannelId",
+            "chats.threads.getProjection",
+            "chats.threads.list",
+            "chats.threads.listForChannel",
+            "chats.threads.listForFile",
+            "chats.threads.revision",
+            "chats.threads.start",
+            "collections.get",
+            "collections.getRecord",
+            "collections.list",
+            "collections.listPendingAdoptions",
+            "collections.query",
+            "conflicts.list",
+            "conflicts.open",
+            "conflicts.resolve",
+            "engine.ping",
+            "history.page",
+            "keys.download",
+            "keys.upload",
+            "moments.get",
+            "moments.list",
+            "search.ensureIndex",
+            "search.query",
+            "search.queryChatMessagesGranular",
+            "search.queryPage",
+            "secrets.apply",
+            "secrets.compare",
+            "secrets.delete",
+            "secrets.fork",
+            "secrets.list",
+            "secrets.materialize",
+            "secrets.moments.get",
+            "secrets.moments.list",
+            "secrets.restore",
+            "secrets.stateExists",
+            "secrets.write",
+            "share.channel.pull",
+            "share.channel.push",
+            "share.proposal.submit",
+            "share.view.pull",
+            "share.view.recordIdentity",
+            "sync.adoptJoinIdentity",
+            "sync.claim",
+            "sync.commitCursor",
+            "sync.probe",
+            "sync.pull",
+            "sync.push",
+            "sync.recoverOrigin",
+            "versionedBinary.read",
+            "versionedBinary.readBlob",
+            "versionedBinary.write",
+            "versionedBinary.writeBlob",
+            "versionedText.compare",
+            "versionedText.delete",
+            "versionedText.list",
+            "versionedText.merge",
+            "versionedText.read",
+            "versionedText.readBlob",
+            "versionedText.rename",
+            "versionedText.rollback",
+            "versionedText.write",
+            "versions.active",
+            "versions.compareFiles",
+            "versions.createNamed",
+            "versions.ensureMain",
+            "versions.list",
+            "versions.setActive",
+            "watcher.status",
+            "workspace.close",
+            "workspace.open",
+            "ydoc.applyExternalMarkdownEdit",
+            "ydoc.close",
+            "ydoc.evict",
+            "ydoc.open",
+            "ydoc.recordUpdate",
+            "ydoc.resync",
+            "ydoc.settle",
+        ];
+        async fn registered(service: &EngineService, method: &str) -> bool {
+            service
+                .call(
+                    RequestContext::unbounded(),
+                    Request {
+                        id: 1,
+                        method: method.to_owned(),
+                        workspace: None,
+                        deadline_ms: None,
+                        idempotency_key: None,
+                        params: json!({}),
+                    },
+                )
+                .await
+                .err()
+                .is_none_or(|error| error.code != ErrorCode::MethodNotFound)
+        }
         let service = EngineService::new();
-        let error = service
-            .call(
-                RequestContext::unbounded(),
-                Request {
-                    id: 2,
-                    method: "share.view.push".to_owned(),
-                    workspace: None,
-                    deadline_ms: None,
-                    idempotency_key: None,
-                    params: json!({
-                        "workspaceId": "workspace",
-                        "shareId": "share",
-                        "grantedSelector": {
-                            "paths": ["shared.md"],
-                            "versionId": null,
-                            "access": "comment",
-                        },
-                    }),
-                },
-            )
-            .await
-            .expect_err("share.view.push must be removed from the daemon API");
-        assert_eq!(
-            error.code,
-            ErrorCode::MethodNotFound,
-            "MUTATION: restoring a dispatch arm makes the obsolete push API callable",
+        let mut missing = Vec::new();
+        for method in METHODS {
+            if !registered(&service, method).await {
+                missing.push(*method);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "listed methods absent from dispatch: {missing:?}"
         );
+        for retired in [
+            "share.view.push",
+            "ydoc.apply",
+            "chats.dispatch.reclaimRunning",
+        ] {
+            assert!(
+                !registered(&service, retired).await,
+                "{retired} was retired and must stay out of dispatch"
+            );
+        }
     }
 
     #[test]
