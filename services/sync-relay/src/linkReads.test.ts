@@ -788,6 +788,10 @@ describe("relay capability reads", () => {
     const forward = await json(
       await h(linkRequest(link.capability, "/sync/link/current")),
     );
+    expect(forward.files).toEqual([
+      { path: "docs/first.md", blobSha256: firstSnapshotSha, contentKind: "text" },
+      { path: "docs/pending.md", blobSha256: localWriteSha, contentKind: "text" },
+    ]);
   });
 
   it("refuses contradictory path aliases from current state and startup replay", async () => {

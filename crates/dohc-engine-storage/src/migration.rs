@@ -1733,7 +1733,6 @@ mod tests {
     #[cfg(feature = "fault-injection")]
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     #[cfg(feature = "fault-injection")]
-    #[cfg(feature = "fault-injection")]
     fn two_migrations() -> Vec<Migration> {
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {

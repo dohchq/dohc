@@ -718,13 +718,12 @@ impl<'a> SecretFileStore<'a> {
     /// Fork a version's secret files into `to_version_id`: copies every tip
     /// verbatim as ciphertext (no decryption — the AAD is not version-bound) and
     /// seeds `secret_fork_bases` with the same copy. Existing destination secret
-    /// rows are cleared first. Journals one `secret.version.fork` op.
+    /// rows are cleared first.
     pub fn fork_version(
         &mut self,
         workspace_id: &str,
         from_version_id: &str,
         to_version_id: &str,
-        now_ms: i64,
         faults: &dyn FaultInjector,
     ) -> Result<(), DomainError> {
         fork_version_keyless(
@@ -732,7 +731,6 @@ impl<'a> SecretFileStore<'a> {
             workspace_id,
             from_version_id,
             to_version_id,
-            now_ms,
             faults,
         )
     }
@@ -787,7 +785,6 @@ pub fn fork_version_keyless(
     workspace_id: &str,
     from_version_id: &str,
     to_version_id: &str,
-    now_ms: i64,
     faults: &dyn FaultInjector,
 ) -> Result<(), DomainError> {
     fork_version_keyless_with(
@@ -795,7 +792,6 @@ pub fn fork_version_keyless(
         workspace_id,
         from_version_id,
         to_version_id,
-        now_ms,
         faults,
         |_| Ok(()),
     )
@@ -807,7 +803,6 @@ pub fn fork_version_keyless_with<F>(
     workspace_id: &str,
     from_version_id: &str,
     to_version_id: &str,
-    _now_ms: i64,
     faults: &dyn FaultInjector,
     after: F,
 ) -> Result<(), DomainError>

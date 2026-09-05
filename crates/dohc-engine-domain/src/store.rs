@@ -1,10 +1,9 @@
-//! [`VersionedTextStore`]: the versioning domain over the CAL-1 storage core.
+//! [`VersionedTextStore`]: the versioning domain over the storage core.
 //!
 //! It borrows the actor's single [`EngineStore`] and composes its versioning
 //! SQL through the storage seams — reads via [`EngineStore::read_with`], every
-//! compound mutation via [`EngineStore::write_with`] so the domain write, its
-//! replication-journal entry, and any idempotency-ledger row commit in ONE
-//! transaction (plan §Storage and recovery model; PORTING.md §9). Storage owns
+//! compound mutation via [`EngineStore::write_with`] so the domain write and
+//! any idempotency-ledger row commit in one transaction. Storage owns
 //! the connection, open ritual, transaction boundary, and the crash-injection
 //! fault seam; the domain owns what a version/moment/fork/restore *means*.
 //!
@@ -5723,7 +5722,7 @@ fn lineage_has_independent_object_mutation(
         }
         // TS value 2 is a concrete preimage (reachable for R05 update/delete/
         // rename); Rust's bool represents it as `true`. Rust intentionally
-        // collapses TS legacy-unset (0) and explicit-absent (1) to `false`;
+        // collapses TS unrecorded (0) and explicit-absent (1) to `false`;
         // this dependency check only needs the concrete-preimage distinction.
         if object_moments.iter().any(|candidate| {
             candidate.version_id == version.version_id

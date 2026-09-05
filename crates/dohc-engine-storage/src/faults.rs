@@ -1,5 +1,5 @@
 //! Named fault points for the in-process crash-injection tier (`TEST_ORACLE.md`
-//! §3, tier 1). CAL-1 implements the two highest-leverage storage-lane points;
+//! §3, tier 1). The storage crate implements the two highest-leverage storage-lane points;
 //! the registry grows one row per point as capability shards land.
 //!
 //! The trait seam lives here (not in the testkit) so `dohc-engine-storage`
@@ -94,7 +94,7 @@ pub enum FaultPoint {
     SearchIndexMidRebuild,
 
     // ---- replication (TEST_ORACLE §3.5 points 22-26) --------------------
-    /// Inside the compound domain-mutation + replication-journal transaction.
+    /// Inside the compound domain-mutation transaction.
     /// A crash leaves neither half visible. `sync.during-journal-txn`.
     SyncDuringJournalTxn,
     /// Imported state, applied-op record, and peer ack are staged but not yet

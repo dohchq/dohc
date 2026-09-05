@@ -1765,3 +1765,33 @@ fn the_binary_head_writer_records_payload_provenance() {
         "a binary moment's payload-after digest is its BINARY digest"
     );
 }
+
+#[test]
+fn rollback_of_unrecorded_moment_is_rejected() {
+    let scratch = ScratchDir::new().expect("scratch");
+    let db = scratch.engine_db_path().expect("db");
+    let mut store = EngineStore::open(&db, 1).expect("open");
+    bootstrap(&mut store);
+    {
+        let mut vt = VersionedTextStore::new(&mut store);
+        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
+            .expect("write");
+    }
+    // `before_present = 0` is what a moment applied from a peer records when
+    // the peer sent no preimage; nothing can be rolled back to.
+    store
+        .read_with(|conn| {
+            conn.execute(
+                "UPDATE moments SET before_present = 0 WHERE workspace_id = ?1 AND moment_id = 'm1'",
+                [WS],
+            )
+        })
+        .expect("mark unrecorded");
+    let mut vt = VersionedTextStore::new(&mut store);
+    assert_eq!(
+        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
+            .expect_err("an unrecorded before state has no preimage to restore")
+            .code(),
+        "invalid-input"
+    );
+}

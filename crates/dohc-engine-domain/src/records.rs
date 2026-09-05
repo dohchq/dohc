@@ -242,7 +242,7 @@ pub struct MomentRecord {
     pub after_blob_sha256: Option<String>,
     pub after_binary_sha256: Option<String>,
     /// `true` when a concrete rollback preimage was recorded. This represents
-    /// TS `before_present = 2`; `false` covers both no preimage and legacy-unset.
+    /// TS `before_present = 2`; `false` covers both no preimage and unrecorded.
     pub before_present: bool,
     pub before_blob_sha256: Option<String>,
     pub before_content_kind: String,

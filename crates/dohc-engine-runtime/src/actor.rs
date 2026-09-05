@@ -18,7 +18,7 @@
 //! [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv), so the
 //! blocking SQLite work never occupies a runtime worker. Replies come back on
 //! [`tokio::sync::oneshot`] channels. The tokio channels are runtime-agnostic
-//! for their blocking API, so the CAL-1 synchronous call sites keep working
+//! for their blocking API, so the the synchronous call sites keep working
 //! outside any runtime, while the async methods drive the loop from within one.
 //!
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
@@ -2484,7 +2484,7 @@ impl WorkspaceActor {
     /// the worker drains and exits. From an async runtime that briefly parks the
     /// executor thread; a future `close_async` could yield instead (noted for a
     /// later shard). A worker wedged inside a fault gate must be released by the
-    /// caller before close (same contract as CAL-1).
+    /// caller before close (same contract as the storage writer).
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
             return Ok(());
@@ -8521,7 +8521,6 @@ fn worker_main(
                         &workspace_id,
                         &from_version_id,
                         &to_version_id,
-                        now_ms,
                         faults.as_ref(),
                         |tx| {
                             journal_secret_fork_outbound_in_tx(
