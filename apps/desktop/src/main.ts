@@ -1040,8 +1040,8 @@ function createPluginWorkspaceRuntimeParts(
     workspaceRoot: workspace.rootPath,
   });
   // This workspace's plugin-contributed agent drivers. They join the driver
-  // registry the agent session manager builds, so a plugin driver is chosen,
-  // probed, and stopped exactly like one dohc ships.
+  // registry the agent session manager builds, which chooses, probes, and
+  // stops them.
   let pluginHostRef: PluginHost | null = null;
   const pluginDrivers = createPluginAgentDrivers({
     host: {

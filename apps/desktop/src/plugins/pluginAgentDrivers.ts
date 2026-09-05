@@ -693,8 +693,8 @@ export function createPluginAgentDrivers(options: PluginAgentDriversOptions) {
         return;
       }
       // The permission policy stays in this process — the plugin never sees
-      // it. A policy that decides answers the driver straight away, exactly
-      // as a built-in driver answers its own harness; a policy that declines
+      // it. A policy that decides answers the driver straight away; a policy
+      // that declines
       // to decide leaves the request for the person to answer.
       const decision = state.permissionPolicy?.(event) ?? null;
       state.onEvent(event);

@@ -181,7 +181,7 @@ const PluginWebApp = z.object({
 }).strict();
 
 // An agent driver this plugin contributes: one harness dohc can talk to,
-// registered beside the built-in drivers and shown in the same probe list.
+// registered in the driver registry and shown in the probe list.
 // Core ships three drivers for two harnesses, and a harness plugin declares
 // one — plus, at most, a variant or two of that same harness (an adapter
 // transport beside a native one). Eight leaves that measured shape room and

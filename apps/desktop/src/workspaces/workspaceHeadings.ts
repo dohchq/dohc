@@ -93,10 +93,9 @@ export function allocateWorkspaceHeadingAnchors(
   });
 }
 
-/** Resolve both current canonical targets and targets stored before anchor
- * allocation became globally unique. Literal-base occurrences take priority
- * over interpreting a trailing `-${occurrence}` as the old generated suffix,
- * so a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
+/** Resolve a heading anchor to its heading. A literal-base occurrence takes
+ * priority over reading a trailing `-${occurrence}` as an allocated suffix, so
+ * a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
 export function resolveWorkspaceHeadingAnchorTarget<
   Heading extends WorkspaceHeadingAnchorCandidate,
 >(

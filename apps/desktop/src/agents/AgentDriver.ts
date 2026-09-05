@@ -119,14 +119,6 @@ export interface AgentDriver {
   startSession(input: AgentSessionStartInput): Promise<AgentSession>;
 }
 
-export function selectPermissionOption(
-  options: PermissionOption[],
-  decision: PermissionDecision,
-): PermissionOption | null {
-  if (decision === "cancel") return null;
-  return options.find((option) => option.kind === decision) ?? null;
-}
-
 export function createAgentDriverRegistry(drivers: AgentDriver[]) {
   const byId = new Map<AgentDriverId, AgentDriver>();
   for (const driver of drivers) {

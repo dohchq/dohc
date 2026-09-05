@@ -4,8 +4,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 
 const mode = process.argv[2] ?? "acp";
-const requireMcpEnv = mode.endsWith("-require-mcp-env");
-const protocolMode = requireMcpEnv ? mode.replace("-require-mcp-env", "") : mode;
+const protocolMode = mode;
 if (process.argv.includes("--version")) {
   console.log(`fake-${mode} 1.0.0`);
   process.exit(0);
@@ -147,13 +146,6 @@ input.on("line", (line) => {
       if (message.method === "initialize") {
         respond(message.id, { protocolVersion: 1 });
       } else if (message.method === "session/new") {
-        if (
-          requireMcpEnv &&
-          message.params?.mcpServers?.[0]?.env?.DOHC_MCP_CLOUD_USER_ID !== "user-1"
-        ) {
-          respondError(message.id, "missing MCP env");
-          return;
-        }
         respond(message.id, {
           sessionId: "fake-acp-session",
           models: [{ id: "fake-acp", name: "Fake ACP" }],
@@ -168,11 +160,6 @@ input.on("line", (line) => {
       } else if (hasMessageId(message)) {
         respond(message.id, {});
       }
-      return;
-    }
-    if (protocolMode === "acp-fail-init") {
-      if (message.method === "initialize") respondError(message.id, "fake ACP init failed");
-      else if (hasMessageId(message)) respond(message.id, {});
       return;
     }
     if (hasMessageId(message)) respond(message.id, {});

@@ -520,7 +520,7 @@ describe("the workspace's own agent settings", () => {
     startSession: async () => new FakeSession(),
   });
 
-  it("lists a workspace's plugin drivers beside the drivers dohc ships", async () => {
+  it("lists a workspace's plugin drivers", async () => {
     const { manager } = harness({ pluginDrivers: [pluginDriver("fixture-harness")] });
 
     const drivers = await manager.probeDrivers("workspace-1");

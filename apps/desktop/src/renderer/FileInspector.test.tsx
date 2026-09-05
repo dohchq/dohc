@@ -2374,7 +2374,7 @@ describe("markdown editor unmount flush", () => {
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
   });
 
-  it("navigates a legacy collided occurrence target to the repeated base heading", async () => {
+  it("navigates an allocated-suffix occurrence target to the repeated base heading", async () => {
     bridgeMock.readWorkspaceText.mockResolvedValueOnce({
       text: "# Foo\nfirst\n# Foo-1\nliteral\n# Foo\nthird\n",
       truncated: false,

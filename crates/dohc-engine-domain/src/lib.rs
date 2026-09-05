@@ -116,13 +116,12 @@ pub use merge::{
 };
 pub use normalize::NormalizedState;
 pub use records::{
-    ApplySecretFileFromVersion, BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult,
-    CaptureIngest, CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire,
-    CaptureRetireResult, CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord,
-    InbandBinary, InbandSecret, InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord,
-    RenameResult, RenameTextFile, RollbackTextFileMutation, SnapshotContent, SnapshotMetadata,
-    SnapshotView, TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult,
-    WriteText,
+    ApplySecretFileFromVersion, BinaryBlobRead, BinaryHead, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandSecret,
+    InbandText, ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
+    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotView, TextBlobRead,
+    TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 pub use secrets::{
     CaptureSecret, CaptureSecretRetire, SecretCompareEntry, SecretComparePage, SecretDelete,

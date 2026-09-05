@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createAgentDriverRegistry,
-  selectPermissionOption,
   type AgentDriver,
   type AgentProbe,
 } from "./AgentDriver";
@@ -71,18 +70,3 @@ describe("AgentDriverRegistry", () => {
   });
 });
 
-describe("selectPermissionOption", () => {
-  const options = [
-    { optionId: "agent-random-1", name: "Reject once", kind: "reject_once" as const },
-    { optionId: "agent-random-2", name: "Allow always", kind: "allow_always" as const },
-    { optionId: "agent-random-3", name: "Allow once", kind: "allow_once" as const },
-  ];
-
-  it("selects by ACP option kind rather than hardcoded option ids", () => {
-    expect(selectPermissionOption(options, "allow_once")?.optionId).toBe("agent-random-3");
-    expect(selectPermissionOption(options, "allow_always")?.optionId).toBe("agent-random-2");
-    expect(selectPermissionOption(options, "reject_once")?.optionId).toBe("agent-random-1");
-    expect(selectPermissionOption(options, "reject_always")).toBeNull();
-    expect(selectPermissionOption(options, "cancel")).toBeNull();
-  });
-});

@@ -97,7 +97,7 @@ const bridge = {
         models: [],
       },
       {
-        id: "claude-acp",
+        id: "fixture-driver",
         displayName: "Claude",
         installed: false,
         auth: { status: "unknown" as const },

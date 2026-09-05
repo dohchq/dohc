@@ -130,7 +130,7 @@ pub enum SearchSurface {
     Chat,
 }
 
-/// One line-level search result (`WorkspaceEngineSearchResult`).
+/// One line-level search result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub surface: SearchSurface,
