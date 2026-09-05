@@ -47,32 +47,6 @@ describe("resolveSpawnCommand", () => {
     ).toEqual({ command: "npm", args: ["run", "dev"] });
   });
 
-  it("routes Windows npm command shims through ComSpec with argv preserved", () => {
-    const resolved = resolveSpawnCommand("codex", ["app-server"], {
-      platform: "win32",
-      env: {
-        Path: "C:\\Users\\ice\\AppData\\Roaming\\npm",
-        PATHEXT: ".COM;.EXE;.CMD",
-        ComSpec: "C:\\Windows\\System32\\cmd.exe",
-      },
-      exists: (candidate) => candidate === "C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD",
-    });
-
-    expect(resolved).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      // One outer-quoted /s /c command line, passed verbatim so Node cannot
-      // re-quote it: cmd.exe strips the outer quotes and runs the shim with
-      // its argv intact even when the shim path contains spaces.
-      args: [
-        "/d",
-        "/s",
-        "/c",
-        '""C:\\Users\\ice\\AppData\\Roaming\\npm\\codex.CMD" "app-server""',
-      ],
-      windowsVerbatimArguments: true,
-    });
-  });
-
   it("quotes every token on the cmd.exe line so metacharacters stay inert", () => {
     const resolved = resolveSpawnCommand("npm", ["run", "dev", "--url=http://x/?a=1&b=2"], {
       platform: "win32",

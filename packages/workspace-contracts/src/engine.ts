@@ -39,7 +39,6 @@ export type VersionedTextStoreErrorCode =
   | "file-too-large"
   | "file-not-found"
   | "fork-base-not-found"
-  | "invalid-generated-id"
   | "invalid-input"
   | "invalid-metadata"
   | "invalid-object"
@@ -61,8 +60,7 @@ export type VersionedTextStoreErrorCode =
   | "target-path-exists"
   | "version-name-conflict"
   | "version-not-found"
-  | "workspace-mismatch"
-  | "write-lane-reentry";
+  | "workspace-mismatch";
 
 export class VersionedTextStoreError extends Error {
   readonly code: VersionedTextStoreErrorCode;
@@ -232,32 +230,8 @@ export interface VersionedTextConflictPage {
 export type SyncReplicationOpKind =
   | "workspace.init"
   | "moment.append"
-  | "version.create"
-  // No version rename API exists yet; included so 0P-B/0P-C typings stay stable.
-  | "version.rename"
-  | "conflict.open"
-  | "conflict.resolve"
-  | "secret.file.put"
-  | "secret.file.delete"
-  | "secret.version.fork"
-  | "chat.channel.create"
   | "chat.thread.create"
-  // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
-  | "chat.thread.update"
-  | "chat.message.append"
-  | "chat.decision.set"
-  | "chat.attachment.add"
-  // An emoji reaction on a chat message: a set-membership CRDT keyed by
-  // (messageId, emoji, authorId), so add/remove commute and re-apply is a no-op.
-  | "chat.reaction.set"
-  // Receiver-owned personal Feed state. These ops ride the owner's ordinary
-  // workspace-sync lane and are deliberately excluded from chat-channel
-  // shares; the shared-channel allowlist must never serve them.
-  | "chat.follow.set"
-  | "chat.feed.read.set"
-  // A Yjs CRDT update for a rich-doc object. Unlike moment.append it is a
-  // commutative delta: apply carries no head-check and opens no conflict.
-  | "ydoc.update";
+  | "chat.message.append";
 
 // Wire encoding of "did the origin see a prior state for this object": absent
 // (no before at all), null (origin recorded an explicit no-file preimage), or

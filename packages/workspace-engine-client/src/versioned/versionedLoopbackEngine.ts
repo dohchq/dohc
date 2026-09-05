@@ -769,17 +769,6 @@ function parseSecretDeleteFields(params: JsonObject, request: Request): ParsedSe
   };
 }
 
-// `secrets.restore` only: SecretsRestoreParams takes `origin` as a required,
-// non-nullable field, so JSON `null` is refused here where `requiredOrigin`
-// reads it as absent.
-function restoreOrigin(object: JsonObject): VersionedOrigin {
-  const origin = optionalString(object, "origin");
-  if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
-    throw new Error("invalid-metadata");
-  }
-  return origin as VersionedOrigin;
-}
-
 function requiredOrigin(object: JsonObject): VersionedOrigin {
   const origin = serdeOptionalString(object, "origin");
   if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
@@ -2526,7 +2515,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // to ignore params.origin entirely and hardcode "restore" below, which made it
     // accept requests production rejects while a comment here claimed the ordering
     // was matched.
-    const origin = restoreOrigin(params);
+    const origin = requiredOrigin(params);
     const metadata = this.secretMomentMetadata(params);
     validateSecretMomentId(beforeMomentId);
     validateSecretMomentId(momentId);

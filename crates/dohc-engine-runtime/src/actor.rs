@@ -2641,30 +2641,6 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<String>, RuntimeError> {
-        self.reconcile_collections_blocking_with_guard(
-            workspace_id,
-            version_id,
-            root_dir,
-            leases,
-            self_writes,
-            now_ms,
-            faults,
-            Some(root_guard),
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn reconcile_collections_blocking_with_guard(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-    ) -> Result<Vec<String>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
@@ -2672,7 +2648,7 @@ impl ActorHandle {
                 workspace_id,
                 version_id,
                 root_dir,
-                root_guard,
+                root_guard: Some(root_guard),
                 leases,
                 self_writes,
                 now_ms,
@@ -2719,23 +2695,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.capture_secret_retire_blocking_with_guard(input, faults, Some((root_dir, root_guard)))
-    }
-
-    fn capture_secret_retire_blocking_with_guard(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-        guarded_root: Option<(PathBuf, Arc<dyn WorkspaceRootGuard>)>,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
-        let workspace_root =
-            guarded_root.map(|(root_dir, root_guard)| (root_dir, Some(root_guard)));
         self.tx
             .blocking_send(Command::CaptureSecretRetire {
                 input,
-                workspace_root,
+                workspace_root: Some((root_dir, Some(root_guard))),
                 faults,
                 token: CancellationToken::new(),
                 reply,
@@ -2815,31 +2780,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        self.capture_retire_materialized_blocking_with_guard(
-            input,
-            root_dir,
-            self_writes,
-            leases,
-            faults,
-            Some(root_guard),
-        )
-    }
-
-    fn capture_retire_materialized_blocking_with_guard(
-        &self,
-        input: CaptureRetire,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
         debug_assert_sync_context();
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .blocking_send(Command::CaptureRetire {
                 input,
-                workspace_root: Some((root_dir, root_guard)),
+                workspace_root: Some((root_dir, Some(root_guard))),
                 self_writes: Some(self_writes),
                 leases,
                 faults,
