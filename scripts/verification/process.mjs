@@ -40,8 +40,10 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     let timedOut = false;
     let outputError;
     let escalation;
+    let completed = false;
     const interrupt = () => {
-      if (interrupted || !child.pid || child.exitCode !== null || child.signalCode !== null) return;
+      if (interrupted || !child.pid || completed) return;
+      if (process.platform === "win32" && (child.exitCode !== null || child.signalCode !== null)) return;
       interrupted = true;
       if (process.platform === "win32") {
         const stopper = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
@@ -49,7 +51,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       } else {
         try { process.kill(-child.pid, "SIGTERM"); } catch (error) { if (error.code !== "ESRCH") throw error; }
         escalation = setTimeout(() => {
-          if (child.exitCode !== null || child.signalCode !== null) return;
+          if (completed) return;
           try { process.kill(-child.pid, "SIGKILL"); } catch (error) { if (error.code !== "ESRCH") console.error(error.message); }
         }, 5000);
         escalation.unref();
@@ -60,6 +62,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     const deadline = timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; interrupt(); }, timeoutMs);
     output?.once("error", (error) => { outputError = error; interrupt(); });
     const cleanup = () => {
+      completed = true;
       clearTimeout(escalation);
       clearTimeout(deadline);
       process.off("SIGINT", interrupt);

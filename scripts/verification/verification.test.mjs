@@ -44,45 +44,52 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("desktop source identity tracks root pnpm configuration regardless of Git state", () => {
-  const configurations = [
+for (const [kind, configurations] of Object.entries({
+  desktop: [
     [".npmrc", "shared-workspace-lockfile=true\n", "shared-workspace-lockfile=false\n"],
     [".pnpmfile.cjs", "module.exports = {};\n", "module.exports = { hooks: {} };\n"],
     [".pnpmfile.mjs", "export default {};\n", "export default { hooks: {} };\n"],
-  ];
+  ],
+  engine: [
+    [".cargo/config", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
+    [".cargo/config.toml", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
+  ],
+})) test(`${kind} source identity tracks tool configuration regardless of Git state`, () => {
   for (const ignored of [false, true]) {
-    const root = mkdtempSync(join(tmpdir(), "dohc-pnpm-config-"));
+    const root = mkdtempSync(join(tmpdir(), "dohc-build-config-"));
     const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
     try {
       git(["init"]);
+      mkdirSync(join(root, ".cargo"));
       const excludes = join(root, ".git/info/exclude");
       writeFileSync(excludes, ignored ? configurations.map(([name]) => name).join("\n") + "\n" : "");
       git(["config", "core.excludesFile", excludes]);
       for (const [name, first, second] of configurations) {
         const path = join(root, name);
-        const absent = sourceFingerprint("desktop", root);
+        const fingerprint = () => sourceFingerprint(kind, root);
+        const absent = fingerprint();
         writeFileSync(path, first);
         if (ignored) git(["check-ignore", name]);
         else assert.equal(git(["ls-files", "--others", "--exclude-standard", "--", name]), name);
-        const created = sourceFingerprint("desktop", root);
+        const created = fingerprint();
         assert.notEqual(created, absent, `${name} creation (ignored=${ignored})`);
         writeFileSync(path, second);
-        const edited = sourceFingerprint("desktop", root);
+        const edited = fingerprint();
         assert.notEqual(edited, created, `${name} edit (ignored=${ignored})`);
         rmSync(path);
-        assert.equal(sourceFingerprint("desktop", root), absent, `${name} disappearance (ignored=${ignored})`);
+        assert.equal(fingerprint(), absent, `${name} disappearance (ignored=${ignored})`);
 
         writeFileSync(path, first);
         git(["add", "--force", "--", name]);
-        assert.equal(sourceFingerprint("desktop", root), created, `${name} staged creation`);
+        assert.equal(fingerprint(), created, `${name} staged creation (ignored=${ignored})`);
         writeFileSync(path, second);
-        assert.equal(sourceFingerprint("desktop", root), edited, `${name} unstaged edit`);
+        assert.equal(fingerprint(), edited, `${name} unstaged edit (ignored=${ignored})`);
         git(["add", "--force", "--", name]);
-        assert.equal(sourceFingerprint("desktop", root), edited, `${name} staged edit`);
+        assert.equal(fingerprint(), edited, `${name} staged edit (ignored=${ignored})`);
         rmSync(path);
-        assert.equal(sourceFingerprint("desktop", root), absent, `${name} unstaged deletion`);
+        assert.equal(fingerprint(), absent, `${name} unstaged deletion (ignored=${ignored})`);
         git(["add", "--update", "--", name]);
-        assert.equal(sourceFingerprint("desktop", root), absent, `${name} staged deletion`);
+        assert.equal(fingerprint(), absent, `${name} staged deletion (ignored=${ignored})`);
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
