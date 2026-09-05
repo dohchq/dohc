@@ -717,7 +717,6 @@ import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
-import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
@@ -1057,7 +1056,6 @@ function createPluginWorkspaceRuntimeParts(
         return pluginHostRef.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
@@ -3496,15 +3494,8 @@ async function workspaceAgentDefaults(
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
-    const [{ createAgentDriverRegistry }, { createDesktopAgentDrivers }, { createAgentSessionManager }] =
-      await Promise.all([
-        import("./agents/AgentDriver"),
-        import("./agents/AgentProcessDrivers"),
-        import("./agents/AgentSessionManager"),
-      ]);
+    const { createAgentSessionManager } = await import("./agents/AgentSessionManager");
     cachedAgentSessions = createAgentSessionManager({
-      registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
-      // A workspace's plugin drivers join its registry beside the built-ins.
       pluginDriversFor: (workspaceId) =>
         pluginWorkspaceRuntimes.current(workspaceId)?.agentDrivers.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,

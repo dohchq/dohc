@@ -94,10 +94,8 @@ export interface AgentWorkspaceDefaults {
 }
 
 export interface AgentSessionManagerOptions {
-  /** The drivers dohc ships. */
-  registry: AgentDriverRegistry;
-  /** The drivers this workspace's plugins contribute, if any. */
-  pluginDriversFor?: (workspaceId: string) => AgentDriver[];
+  /** The drivers this workspace's plugins contribute. */
+  pluginDriversFor: (workspaceId: string) => AgentDriver[];
   agentDefaultsFor?: (
     workspaceId: string,
   ) => AgentWorkspaceDefaults | Promise<AgentWorkspaceDefaults>;
@@ -212,19 +210,9 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const cachedDrivers = new Map<string, AgentDriverProbeSummary[]>();
   const selectedDrivers = new Map<string, AgentDriverId | null>();
 
-  /**
-   * The drivers this workspace can use: the ones dohc ships plus the ones its
-   * plugins contribute. Built through the same registry constructor the
-   * built-in list uses, so a duplicate id is refused the same way here as it
-   * is there.
-   */
+  /** The drivers this workspace's plugins contribute; a duplicate id is refused. */
   function registryFor(workspaceId: string): AgentDriverRegistry {
-    const contributed = options.pluginDriversFor?.(workspaceId) ?? [];
-    if (contributed.length === 0) return options.registry;
-    return createAgentDriverRegistry([
-      ...options.registry.list(),
-      ...contributed,
-    ]);
+    return createAgentDriverRegistry(options.pluginDriversFor(workspaceId));
   }
 
   function selectDriver(

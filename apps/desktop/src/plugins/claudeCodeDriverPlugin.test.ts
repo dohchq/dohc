@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BUILT_IN_AGENT_DRIVER_IDS,
   type AgentDriver,
   type AgentEvent,
   type AgentSession,
@@ -84,7 +83,6 @@ async function startClaudePlugin(
         return host.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
 
   const spawnTransport: PluginHostOptions["spawnTransport"] = (params) => {
@@ -207,16 +205,11 @@ async function permissionOf(events: AgentEvent[]): Promise<
 }
 
 describe("dohc's Claude Code driver, as a plugin", () => {
-  it("is a plugin driver, not one dohc ships", async () => {
+  it("registers as a plugin driver", async () => {
     const fixture = await startClaudePlugin();
 
     expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["claude-code"]);
     expect(claudeDriver(fixture).displayName).toBe("Claude Code");
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).not.toContain("claude-code");
-    // The ACP adapter driver dohc still ships keeps its own id. This plugin
-    // drives the `claude` CLI directly and takes an id of its own, so the two
-    // stand side by side rather than one replacing the other.
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).toContain("claude-acp");
   });
 
   it("ships what installing it needs", async () => {

@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BUILT_IN_AGENT_DRIVER_IDS,
   type AgentDriver,
   type AgentEvent,
   type AgentSession,
@@ -85,10 +84,6 @@ async function startCodexPlugin(
         return host.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    // The real list. A driver id dohc still ships is one this plugin could
-    // not take, so the plugin's registration is only proof while this is
-    // honest.
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
 
   const spawnTransport: PluginHostOptions["spawnTransport"] = (params) => {
@@ -203,10 +198,6 @@ describe("dohc's Codex driver, as a plugin", () => {
 
     expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["codex"]);
     expect(codexDriver(fixture).displayName).toBe("Codex");
-    // Nothing in the app reserves this id any more, which is the only reason
-    // the registration above can succeed.
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).not.toContain("codex");
-    expect([...BUILT_IN_AGENT_DRIVER_IDS]).not.toContain("codex-app-server");
   });
 
   it("ships what installing it needs", async () => {
