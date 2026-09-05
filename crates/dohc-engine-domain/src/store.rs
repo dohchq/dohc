@@ -1,10 +1,9 @@
-//! [`VersionedTextStore`]: the versioning domain over the CAL-1 storage core.
+//! [`VersionedTextStore`]: the versioning domain over the storage core.
 //!
 //! It borrows the actor's single [`EngineStore`] and composes its versioning
 //! SQL through the storage seams — reads via [`EngineStore::read_with`], every
-//! compound mutation via [`EngineStore::write_with`] so the domain write, its
-//! replication-journal entry, and any idempotency-ledger row commit in one
-//! transaction. Storage owns
+//! compound mutation via [`EngineStore::write_with`] so the domain write and
+//! any idempotency-ledger row commit in one transaction. Storage owns
 //! the connection, open ritual, transaction boundary, and the crash-injection
 //! fault seam; the domain owns what a version/moment/fork/restore *means*.
 //!
@@ -381,12 +380,6 @@ impl<'a> VersionedTextStore<'a> {
             .map_err(DomainError::sql_persist)?;
             crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
             tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'moment.append', ?2)",
-                params![before.object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
                 "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
                  AND path = ?3 AND object_id = ?4",
                 params![ws, input.version_id, input.from_path, before.object_id],
@@ -466,20 +459,11 @@ impl<'a> VersionedTextStore<'a> {
         let input = &normalized_input;
 
         let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
-        // legacy_before_text determines the restored snapshot when the moment
-        // carries no stored preimage — a different legacy text is a different
-        // rollback, never a replay.
-        let (legacy_kind, legacy_text): (&[u8], &[u8]) = match &input.legacy_before_text {
-            Some(text) => (b"some", text.as_bytes()),
-            None => (b"none", b""),
-        };
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
             input.path.as_bytes(),
             input.mutation_moment_id.as_bytes(),
-            legacy_kind,
-            legacy_text,
             input.metadata_origin.as_bytes(),
             author_kind,
             author_json,
@@ -866,12 +850,6 @@ impl<'a> VersionedTextStore<'a> {
                 ws,
                 restore_generation,
             )?;
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id,op_kind,created_at_ms) \
-                 VALUES (?1,'moment.append',?2)",
-                params![prep.moment.object_id, prep.moment.recorded_at_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             if restored.is_some() {
                 tx.execute(
                     "UPDATE snapshots SET latest_moment_id=?1,metadata_origin=?2, \
@@ -1947,18 +1925,11 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.new_version_id, input.from_version_id],
             )
             .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'version.create', ?2)",
-                params![input.new_version_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             crate::secrets::fork_version_in_tx(
                 tx,
                 ws,
                 &input.from_version_id,
                 &input.new_version_id,
-                input.now_ms,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
             after(tx, &record)?;
@@ -2065,9 +2036,11 @@ struct RollbackPrep {
     before: Option<SnapshotRecord>,
 }
 
+/// `moments.before_present`. A replicated moment whose payload carries no
+/// `before` is `Unrecorded`; it cannot be rolled back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MomentBeforeState {
-    LegacyUnset,
+    Unrecorded,
     Absent,
     Present,
 }
@@ -2075,7 +2048,7 @@ enum MomentBeforeState {
 impl MomentBeforeState {
     fn from_db(value: i64) -> Result<Self, DomainError> {
         match value {
-            0 => Ok(MomentBeforeState::LegacyUnset),
+            0 => Ok(MomentBeforeState::Unrecorded),
             1 => Ok(MomentBeforeState::Absent),
             2 => Ok(MomentBeforeState::Present),
             _ => Err(DomainError::StateCorrupt {
@@ -2627,10 +2600,9 @@ where
         now_ms: input.now_ms,
         request_id: None,
     })?;
-    let result = write_normalized_text_in_tx_with_journal(
+    let result = write_normalized_text_in_tx(
         tx,
         write,
-        true,
         false,
         Some(PreparedTextWrite {
             object_id: resolved.object_id.clone(),
@@ -3364,23 +3336,12 @@ pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, true, false)
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx(tx, input, false, None)
 }
 
-/// Apply a text write inside a caller-owned compound replication transaction.
-/// The compound operation owns the relay-visible moment shadow, so this seam
-/// deliberately skips the legacy payload-free diagnostic journal row.
-pub(crate) fn write_text_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &WriteText,
-) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, false, false)
-}
-
-/// Apply a projected text write without appending `moment.append` to the
-/// replication journal. A Y.Doc settle has already durably recorded the CRDT
-/// edits that produced this projection, so journaling the derived markdown a
-/// second time would create a competing replication mutation.
+/// Apply a projected text write. A Y.Doc settle has already durably recorded
+/// the CRDT edits that produced this projection.
 #[doc(hidden)]
 pub fn write_projected_text_in_tx<'a>(
     tx: &Transaction<'_>,
@@ -3391,23 +3352,12 @@ pub fn write_projected_text_in_tx<'a>(
     // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, false, true, None)
+    write_normalized_text_in_tx(tx, input, true, None)
 }
 
-fn write_text_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &WriteText,
-    journal: bool,
-    allow_preallocated_object: bool,
-) -> Result<WriteResult, DomainError> {
-    let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object, None)
-}
-
-fn write_normalized_text_in_tx_with_journal(
+fn write_normalized_text_in_tx(
     tx: &Transaction<'_>,
     input: ProjectedWriteText<'_>,
-    journal: bool,
     allow_preallocated_object: bool,
     prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
@@ -3624,14 +3574,6 @@ fn write_normalized_text_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![object_id, input.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     record_request(
         tx,
         input.request_id,
@@ -4226,29 +4168,11 @@ fn snapshot_content_from_moment_side(
     }
 }
 
-/// Apply an R05 text delete inside a caller-owned compound transaction.
+/// Apply a text delete inside a caller-owned compound transaction.
 #[doc(hidden)]
 pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
-) -> Result<DeleteResult, DomainError> {
-    delete_text_in_tx_with_journal(tx, input, true)
-}
-
-/// Apply a text delete inside a caller-owned compound replication transaction.
-/// The compound operation owns the relay-visible moment shadow, so this seam
-/// deliberately skips the legacy payload-free diagnostic journal row.
-pub(crate) fn delete_text_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &DeleteTextFile,
-) -> Result<DeleteResult, DomainError> {
-    delete_text_in_tx_with_journal(tx, input, false)
-}
-
-fn delete_text_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &DeleteTextFile,
-    journal: bool,
 ) -> Result<DeleteResult, DomainError> {
     let normalized_input = normalized_delete_input(input)?;
     let input = &normalized_input;
@@ -4326,14 +4250,6 @@ fn delete_text_in_tx_with_journal(
     )
     .map_err(DomainError::sql_persist)?;
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![before.object_id, input.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     tx.execute(
         "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
          AND path = ?3 AND object_id = ?4",
@@ -5547,39 +5463,8 @@ fn resolve_rollback_before(
     if before_state == MomentBeforeState::Absent {
         return Ok(None);
     }
-
-    let previous = previous_object_moment_for_rollback(conn, input, moment)?;
-
-    if let Some(legacy_before_text) = &input.legacy_before_text {
-        validate_text(legacy_before_text)?;
-        let previous = previous
-            .filter(|candidate| candidate.operation != MomentOp::Delete)
-            .ok_or(DomainError::InvalidInput {
-                reason: "legacy mutation has no earlier snapshot to restore",
-            })?;
-        let path = if moment.operation == MomentOp::Rename {
-            previous.path.clone()
-        } else {
-            input.path.clone()
-        };
-        return Ok(Some(SnapshotRecord {
-            workspace_id: input.workspace_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id: moment.object_id.clone(),
-            path,
-            text: legacy_before_text.clone(),
-            blob_sha256: Some(text_blob_sha256(legacy_before_text)),
-            content_kind: "text".to_owned(),
-            binary_sha256: None,
-            updated_at_ms: previous.recorded_at_ms,
-            latest_moment_id: previous.moment_id,
-            metadata_origin: previous.metadata_origin,
-            metadata_summary: previous.metadata_summary,
-            metadata_correlation_id: previous.metadata_correlation_id,
-        }));
-    }
     Err(DomainError::InvalidInput {
-        reason: "legacy mutation is missing a rollback preimage",
+        reason: "mutation has no rollback preimage",
     })
 }
 
@@ -5837,7 +5722,7 @@ fn lineage_has_independent_object_mutation(
         }
         // TS value 2 is a concrete preimage (reachable for R05 update/delete/
         // rename); Rust's bool represents it as `true`. Rust intentionally
-        // collapses TS legacy-unset (0) and explicit-absent (1) to `false`;
+        // collapses TS unrecorded (0) and explicit-absent (1) to `false`;
         // this dependency check only needs the concrete-preimage distinction.
         if object_moments.iter().any(|candidate| {
             candidate.version_id == version.version_id
@@ -6895,8 +6780,7 @@ mod tests {
                        (SELECT COUNT(*) FROM file_objects WHERE workspace_id = 'ws'), \
                        (SELECT COUNT(*) FROM path_aliases WHERE workspace_id = 'ws'), \
                        (SELECT COUNT(*) FROM snapshots WHERE workspace_id = 'ws'), \
-                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws'), \
-                       (SELECT COUNT(*) FROM replication_journal)",
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws')",
                     [],
                     |row| {
                         Ok((
@@ -6904,7 +6788,6 @@ mod tests {
                             row.get::<_, i64>(1)?,
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
                         ))
                     },
                 )
@@ -6912,7 +6795,7 @@ mod tests {
             .expect("inspect rolled-back capture");
         assert_eq!(
             durable_rows,
-            (0, 0, 0, 0, 0),
+            (0, 0, 0, 0),
             "the integrity failure must roll back every capture row"
         );
         let corrupt_blob = store

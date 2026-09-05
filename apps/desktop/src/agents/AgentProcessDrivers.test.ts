@@ -1,40 +1,34 @@
-import { mkdir, readFile, rm } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { AgentEvent } from "./AgentDriver";
 import { createDesktopAgentDrivers } from "./AgentProcessDrivers";
 import { resolveSpawnCommand } from "../process/windowsSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 
 const fakeAgent = fileURLToPath(new URL("../../e2e/fixtures/fakeAgentProcess.mjs", import.meta.url));
-const tempRoots: string[] = [];
 
 async function waitFor(
   predicate: () => boolean,
   message: string,
   timeoutMs = 5000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(message);
+  await vi.waitFor(
+    () => {
+      if (!predicate()) throw new Error(message);
+    },
+    { timeout: timeoutMs, interval: 25 },
+  );
 }
 
 async function workspaceRoot(): Promise<string> {
   const root = join(await createTestScratch("dohc-agent-driver-"), "workspace");
-  tempRoots.push(dirname(root));
   await mkdir(join(root, "notes"), { recursive: true });
   return root;
 }
 
 describe("process-backed agent drivers", () => {
-  afterEach(async () => {
-    await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-  });
-
   it("routes Windows npm command shims through ComSpec with argv preserved", () => {
     const resolved = resolveSpawnCommand("codex", ["app-server"], {
       platform: "win32",

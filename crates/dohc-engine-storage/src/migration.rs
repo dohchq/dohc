@@ -1,55 +1,21 @@
-//! The ordered, idempotent, crash-recoverable migration ledger and runner
-//! (`plan §Post-cutover migration ledger`, `TEST_ORACLE.md` §3.2 points 10/11).
+//! The ordered, idempotent, crash-recoverable migration ledger and runner.
 //!
-//! CAL-1 shipped an `engine_migrations` *skeleton* (id, checksum, applied_at)
-//! and an eager one-shot `CREATE`. R04 promotes it to the real thing:
+//! [`BASELINE_MIGRATIONS`] is the frozen list. The baseline (ordinal 0)
+//! assembles the whole schema and stamps `user_version = 2`. A later schema
+//! change appends a new migration with the next ordinal and flows through the
+//! same runner.
 //!
-//! - **The day-one v2 schema is one ordered migration.** [`BASELINE_MIGRATIONS`]
-//!   is the frozen list; the baseline (ordinal 0) assembles every v2 table and
-//!   stamps the `user_version = 2` fingerprint. Later schema changes append to
-//!   this list and flow through the same runner — never an improvised
-//!   `ALTER`/lazy-DDL dance (`plan §Day-one Rust schema`).
-//! - **The ledger row records everything the plan asks for**: migration id +
-//!   checksum (sha-256 of the DDL), engine build + storage/protocol version,
-//!   started/completed timestamps, transactional-vs-not classification, and the
-//!   integrity-check result.
-//! - **The runner is ordered, idempotent, and crash-recoverable.** It walks the
-//!   list in order; a migration whose completed ledger row matches this build's
-//!   checksum is skipped; a completed row with a *different* checksum fails
-//!   closed (tampered/incompatible ledger); a missing or incomplete row is
-//!   applied. A transactional migration commits its body, its `user_version`
-//!   stamp, its integrity result, and its ledger row in one transaction, so a
-//!   crash mid-apply rolls back to the prior consistent state and restart
-//!   re-runs from the ledger. A partially-applied migration recovers correctly
-//!   on reopen — the point of the two named fault points.
+//! The runner walks the list in order. A migration whose completed ledger row
+//! matches this build's checksum is skipped; a completed row with a different
+//! checksum fails closed; a missing row is applied. Body, `user_version`
+//! stamp, integrity result, and ledger row commit in one transaction, so a
+//! crash mid-apply rolls back to the prior consistent state and the next open
+//! re-runs from the ledger.
 
 use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_STORAGE_PROTOCOL_VERSION};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use sha2::{Digest, Sha256};
-
-/// Whether a migration can run inside a single transaction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MigrationKind {
-    /// Body + ledger row commit atomically. A crash rolls the whole thing back;
-    /// restart re-runs from scratch. The strongest guarantee; the baseline and
-    /// every ordinary DDL migration is this.
-    Transactional,
-    /// Cannot be wrapped in a transaction (e.g. a future `VACUUM`-class step).
-    /// The runner records a *started* row, runs the (idempotent-by-contract)
-    /// body, then records completion. A crash between leaves a started-but-
-    /// incomplete row that restart re-runs idempotently.
-    ///
-    /// No shipped migration is non-transactional yet (the baseline is DDL); the
-    /// apply path and its crash recovery are proven by `tests`. Kept as the
-    /// forward contract later schema changes classify against.
-    #[allow(
-        dead_code,
-        reason = "forward migration classification; apply path is test-covered"
-    )]
-    NonTransactional,
-}
 
 /// One ordered migration. `sql` is applied verbatim; `checksum` is derived from
 /// it so a silently-edited migration is caught rather than skipped.
@@ -57,7 +23,6 @@ pub(crate) enum MigrationKind {
 pub(crate) struct Migration {
     pub ordinal: u32,
     pub id: &'static str,
-    pub kind: MigrationKind,
     pub sql: &'static str,
     /// `Some(v)` when this migration stamps `PRAGMA user_version` (the baseline
     /// stamps the v2 fingerprint). Applied inside the migration transaction so
@@ -95,23 +60,15 @@ pub(crate) enum MigrationOutcome {
     Crashed,
 }
 
-/// The `id` of the frozen v2 baseline migration. `validate_v2` requires this
-/// ledger row as a cheap own-store fingerprint (a foreign db can fake table
-/// names but not this row).
+/// The `id` of the baseline migration. `validate_v2` requires this ledger row
+/// as a cheap own-store fingerprint (a foreign db can fake table names but not
+/// this row).
 pub(crate) const BASELINE_MIGRATION_ID: &str = "v2-baseline";
 
-/// The frozen day-one v2 schema, expressed as the baseline migration. Assembles
-/// every v2 table (CAL-1 ledgers + documents + journal, CAL-2 versioning, R04
-/// `binary_blobs` / `materialization_jobs` / `engine_ownership`) and stamps the
-/// fingerprint. See `schema.rs` for the table-shape rationale carried over from
-/// the calibration slices.
+/// The engine schema: every table, index, and FTS5 virtual table the engine
+/// reads or writes. Notes on individual shapes live with the code that owns
+/// the table.
 const V2_BASELINE_DDL: &str = "\
--- ===========================================================================
--- Migration ledger (promoted at R04). Append-only; one row per migration.
--- `completed_at`/`integrity_ok` are NULL for a started-but-unfinished
--- non-transactional migration and NON-NULL once complete. A crash-recoverable
--- runner reads this to resume exactly where it left off.
--- ===========================================================================
 CREATE TABLE engine_migrations (
     ordinal          INTEGER NOT NULL UNIQUE,
     id               TEXT    NOT NULL PRIMARY KEY,
@@ -124,9 +81,6 @@ CREATE TABLE engine_migrations (
     integrity_ok     INTEGER
 ) STRICT;
 
--- Engine ownership record (`plan §Day-one Rust schema`). A single guarded row
--- carrying an opaque engine UUID stamped at init: proves the store is ours and
--- gives backups/diagnostics a redaction-safe identity that is not a file path.
 CREATE TABLE engine_ownership (
     rowid_guard   INTEGER NOT NULL PRIMARY KEY CHECK (rowid_guard = 1),
     engine_uuid   TEXT    NOT NULL,
@@ -135,32 +89,14 @@ CREATE TABLE engine_ownership (
     schema_version INTEGER NOT NULL
 ) STRICT;
 
--- Request / idempotency ledger (CAL-1). Written in the SAME transaction as the
--- mutation it records, so a crash after commit but before ack replays to the
--- recorded result instead of re-executing (the exactly-once contract).
 CREATE TABLE engine_requests (
     request_id   TEXT    NOT NULL PRIMARY KEY,
     payload_hash TEXT    NOT NULL,
     result_seq   INTEGER NOT NULL,
-    committed_at INTEGER NOT NULL
+    committed_at INTEGER NOT NULL,
+    kind         TEXT
 ) STRICT;
 
--- Minimal domain table exercised by the compound-write API (CAL-1).
-CREATE TABLE documents (
-    doc_id        TEXT    NOT NULL PRIMARY KEY,
-    body          TEXT    NOT NULL,
-    updated_at_ms INTEGER NOT NULL
-) STRICT;
-
--- Replication journal (CAL-1/CAL-2): appended in the same txn as the mutation.
-CREATE TABLE replication_journal (
-    seq           INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    doc_id        TEXT    NOT NULL,
-    op_kind       TEXT    NOT NULL,
-    created_at_ms INTEGER NOT NULL
-) STRICT;
-
--- CAL-2 versioning tables (see schema.rs for shape rationale).
 CREATE TABLE versioned_workspaces (
     workspace_id    TEXT NOT NULL PRIMARY KEY,
     main_version_id TEXT NOT NULL
@@ -193,15 +129,12 @@ CREATE TABLE file_objects (
     FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;
 
--- Content-addressed TEXT blobs (sha256 -> bytes). Dedup by hash.
 CREATE TABLE blobs (
     sha256      TEXT    NOT NULL PRIMARY KEY,
     byte_length INTEGER NOT NULL,
     text        TEXT    NOT NULL
 ) STRICT;
 
--- Content-addressed BINARY blobs (sha256 -> bytes). Dedup by hash; the binary
--- analog of `blobs`, filed under the sha-256 of the exact bytes. R04.
 CREATE TABLE binary_blobs (
     sha256      TEXT NOT NULL PRIMARY KEY,
     byte_length INTEGER NOT NULL,
@@ -218,69 +151,6 @@ CREATE TABLE path_aliases (
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE snapshots (
-    workspace_id     TEXT    NOT NULL,
-    version_id       TEXT    NOT NULL,
-    object_id        TEXT    NOT NULL,
-    path             TEXT    NOT NULL,
-    blob_sha256      TEXT    NOT NULL,
-    updated_at_ms    INTEGER NOT NULL,
-    latest_moment_id TEXT    NOT NULL,
-    metadata_origin  TEXT    NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id),
-    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
-) STRICT;
-
-CREATE TABLE fork_base_snapshots (
-    workspace_id     TEXT    NOT NULL,
-    version_id       TEXT    NOT NULL,
-    object_id        TEXT    NOT NULL,
-    path             TEXT    NOT NULL,
-    blob_sha256      TEXT    NOT NULL,
-    updated_at_ms    INTEGER NOT NULL,
-    latest_moment_id TEXT    NOT NULL,
-    metadata_origin  TEXT    NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id),
-    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
-) STRICT;
-
-CREATE TABLE moments (
-    workspace_id      TEXT    NOT NULL,
-    moment_order      INTEGER NOT NULL,
-    moment_id         TEXT    NOT NULL,
-    version_id        TEXT    NOT NULL,
-    object_id         TEXT    NOT NULL,
-    path              TEXT    NOT NULL,
-    recorded_at_ms    INTEGER NOT NULL,
-    operation         TEXT    NOT NULL,
-    after_blob_sha256 TEXT    NOT NULL,
-    before_present    INTEGER NOT NULL,
-    before_blob_sha256 TEXT,
-    metadata_origin   TEXT    NOT NULL,
-    author_json       TEXT,
-    sync_record_only  INTEGER,
-    PRIMARY KEY (workspace_id, moment_id),
-    UNIQUE (workspace_id, moment_order),
-    FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE,
-    FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256)
-) STRICT;
-
-CREATE INDEX idx_moments_workspace_order ON moments(workspace_id, moment_order DESC);
-CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order DESC);
-CREATE INDEX idx_moments_object_order ON moments(workspace_id, object_id, moment_order DESC);
-
--- Durable materialization jobs (R04, `plan §Filesystem/database crash
--- boundary`). Committed in the SAME transaction as the canonical state they
--- materialize, so a crash never leaves disk intent without a job record. The
--- filesystem pipeline (`dohc-engine-files::materialize`) replays PENDING jobs
--- idempotently at startup and marks them COMPLETE (or CONFLICT for
--- preserve-both). Identity is carried by content hash + generation, never by a
--- torn on-disk file.
 CREATE TABLE materialization_jobs (
     job_id            TEXT    NOT NULL PRIMARY KEY,
     target_path       TEXT    NOT NULL,
@@ -296,26 +166,13 @@ CREATE TABLE materialization_jobs (
     status            TEXT    NOT NULL DEFAULT 'pending',
     created_at_ms     INTEGER NOT NULL,
     completed_at_ms   INTEGER,
+    operation TEXT NOT NULL DEFAULT 'write',
+    workspace_id TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (content_sha256) REFERENCES binary_blobs(sha256)
 ) STRICT;
 
 CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
-";
-// The DDL comment above the `status` column is verbatim in the migration
-// ledger checksum and must stay byte-identical to what shipped, even though
-// `status` now also holds 'cancelled' (see `JobStatus` in `materialize.rs`).
-// Current values: 'pending' | 'complete' | 'conflict' | 'cancelled'.
 
-/// Ordinal 1 (R08 secrets shard, appended via the migration-append capability
-/// contract). Adds the three secret-backed-file tables — encrypted tips, fork
-/// bases, and metadata-only history moments — whose logical shapes match the TS
-/// engine's `secret_files` / `secret_fork_bases` / `secret_moments`
-/// (`engineDbSchema.ts`). Only ciphertext + IV + tag (base64 TEXT) and byte
-/// lengths are stored; plaintext never enters any column. `STRICT` + `INTEGER`
-/// timestamps follow the R04 baseline convention (the TS `REAL` columns are an
-/// engine-internal detail; cross-engine parity rides the AEAD ciphertext, not
-/// the SQLite column affinity).
-const V1_SECRETS_DDL: &str = "\
 CREATE TABLE secret_files (
     workspace_id     TEXT    NOT NULL,
     version_id       TEXT    NOT NULL,
@@ -338,6 +195,7 @@ CREATE TABLE secret_fork_bases (
     auth_tag_base64   TEXT    NOT NULL,
     ciphertext_base64 TEXT    NOT NULL,
     byte_length       INTEGER NOT NULL,
+    updated_at_ms INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, version_id, path),
     FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
@@ -358,6 +216,9 @@ CREATE TABLE secret_moments (
     after_auth_tag_base64   TEXT,
     after_ciphertext_base64 TEXT,
     after_byte_length       INTEGER,
+    capture_owned INTEGER NOT NULL DEFAULT 0,
+    source_origin_id TEXT,
+    source_origin_seq INTEGER,
     PRIMARY KEY (workspace_id, moment_id),
     UNIQUE (workspace_id, moment_order),
     FOREIGN KEY (workspace_id, version_id) REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
@@ -365,152 +226,10 @@ CREATE TABLE secret_moments (
 
 CREATE INDEX idx_secret_moments_version_order
     ON secret_moments(workspace_id, version_id, moment_order);
+
 CREATE INDEX idx_secret_moments_path_order
     ON secret_moments(workspace_id, version_id, path, moment_order);
-";
 
-/// The `id` of the R08 secrets migration.
-pub(crate) const SECRETS_MIGRATION_ID: &str = "v1-secrets";
-
-/// Ordinal 2 (R11a Y.Doc durable cache, appended via the migration-append
-/// capability contract). Adds the three durable-Y.Doc tables — the per-doc
-/// marker with its head pointers, the content-addressed durable update log, and
-/// the folded full-state snapshots — whose logical shapes match the TS engine's
-/// `ydoc_docs` / `ydoc_updates` / `ydoc_snapshots` (`engineDbSchema.ts`
-/// `ENGINE_YDOC_DDL`). Update and snapshot bytes are content-addressed into the
-/// existing `binary_blobs` table; these tables carry only the sha references and
-/// the head pointers. `STRICT` + `INTEGER` timestamps follow the R04 baseline
-/// convention (the TS `REAL` columns are an engine-internal detail; the CRDT
-/// lineage rides the content-addressed blobs, not the SQLite column affinity —
-/// same rationale R08 recorded for its `REAL`→`INTEGER` timestamps).
-///
-/// Two columns extend the TS logical shape and are recorded deltas: `regime`
-/// distinguishes the local-only-prunable cache from the replicated never-prune
-/// durable lineage (the TS driver carries this as a constructor flag, not a
-/// column; making it a column makes each doc's regime durable and inspectable),
-/// and `base_claimed` makes the base-once discipline a durable per-doc fact the
-/// claim transaction re-checks (the TS driver derives it from lineage presence).
-///
-/// The marker's `FOREIGN KEY (workspace_id, object_id) → file_objects` keeps the
-/// GC-root accounting the TS schema documents: a `binary_blob` referenced by a
-/// live `ydoc_updates`/`ydoc_snapshots` row (reachable from a marker head) is a
-/// GC root, and deleting the rich-doc file cascades every ydoc_* row away so its
-/// blobs become collectable.
-const V1_YDOC_DDL: &str = "\
-CREATE TABLE ydoc_docs (
-    workspace_id      TEXT    NOT NULL,
-    version_id        TEXT    NOT NULL,
-    object_id         TEXT    NOT NULL,
-    -- CHECK-constrained so a corrupted/forward value can NEVER be stored and
-    -- later silently downgraded on read (a bad `regime` must not send a
-    -- replicated lineage down the pruning path; a bad `content_kind` must not
-    -- project the wrong root). Fail closed at write.
-    content_kind      TEXT    NOT NULL DEFAULT 'richdoc'
-                              CHECK (content_kind IN ('plaintext', 'richdoc')),
-    regime            TEXT    NOT NULL DEFAULT 'local-only'
-                              CHECK (regime IN ('local-only', 'replicated')),
-    head_update_seq   INTEGER NOT NULL DEFAULT 0,
-    head_snapshot_seq INTEGER NOT NULL DEFAULT 0,
-    base_claimed      INTEGER NOT NULL DEFAULT 0,
-    -- Durable, monotone-forever settle generation (NEVER reset, even by a
-    -- local-only close-prune): makes the settle job id clock-independent so a
-    -- crash-retry with an advanced wall clock still dedups. `last_settled_sha`
-    -- records the content last materialized so an unchanged re-settle is an
-    -- idempotent no-op while a content change bumps the generation.
-    settle_seq        INTEGER NOT NULL DEFAULT 0,
-    last_settled_sha  TEXT,
-    updated_at_ms     INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id),
-    FOREIGN KEY (workspace_id, object_id)
-      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE ydoc_updates (
-    workspace_id       TEXT    NOT NULL,
-    version_id         TEXT    NOT NULL,
-    object_id          TEXT    NOT NULL,
-    seq                INTEGER NOT NULL,
-    update_blob_sha256 TEXT    NOT NULL,
-    actor_origin_id    TEXT,
-    recorded_at_ms     INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, seq),
-    FOREIGN KEY (update_blob_sha256) REFERENCES binary_blobs(sha256),
-    FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE INDEX idx_ydoc_updates_doc_seq
-    ON ydoc_updates(workspace_id, version_id, object_id, seq);
-
--- Content-addressed dedup index: an update blob already present in a doc's log
--- makes a redelivered/echoed remote update an O(1) idempotent no-op.
-CREATE INDEX idx_ydoc_updates_doc_blob
-    ON ydoc_updates(workspace_id, version_id, object_id, update_blob_sha256);
-
-CREATE TABLE ydoc_snapshots (
-    workspace_id             TEXT    NOT NULL,
-    version_id               TEXT    NOT NULL,
-    object_id                TEXT    NOT NULL,
-    up_to_seq                INTEGER NOT NULL,
-    snapshot_blob_sha256     TEXT    NOT NULL,
-    state_vector_blob_sha256 TEXT    NOT NULL,
-    recorded_at_ms           INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
-    FOREIGN KEY (snapshot_blob_sha256) REFERENCES binary_blobs(sha256),
-    FOREIGN KEY (state_vector_blob_sha256) REFERENCES binary_blobs(sha256),
-    FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs(workspace_id, version_id, object_id) ON DELETE CASCADE
-) STRICT;
-
-CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
-    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC);
-";
-
-/// The `id` of the R11a Y.Doc durable-cache migration.
-pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
-
-/// Ordinal 3 (R09 chats domain, appended via the migration-append capability
-/// contract). Adds the chat surface tables — threads/channels/messages,
-/// reactions/decisions/attachments/mentions, read-state, follows/personal-feed/
-/// bookmarks, and the durable dispatch ledger + agent-run records — whose
-/// logical shapes match the TS engine's chat cluster (`engineDbSchema.ts`
-/// `CHAT_CHANNEL_TABLES_DDL` / `CHAT_PHASE_ONE_DDL` / `CHAT_FEED_DDL` /
-/// `CHAT_BOOKMARK_DDL` / `AGENT_DISPATCH_DDL` + the `chat_threads` /
-/// `chat_messages` core). The TS store grows these across a create-path plus
-/// lazy `ensureNullableColumn` upgrades (`chat_threads.channel_id`,
-/// `chat_messages.author_user_id`/`parent_message_id`/`origin`,
-/// `chat_attachments.heading_*`, `chat_bookmark_outbox.projection_object_id`);
-/// the fresh Rust baseline folds every such column into the initial shape so a
-/// day-one Rust store equals a fully-upgraded TS store.
-///
-/// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention. TS stores
-/// some chat timestamps as `REAL` (`chat_threads`/`chat_channels`/read-state/
-/// reactions/follows/feed/bookmarks) and some as `INTEGER`
-/// (`chat_decisions`/`chat_mentions`/`chat_dispatch_*`/`agent_run_records`); the
-/// affinity is an engine-internal detail (semantics matrix §2.4). Cross-engine
-/// parity rides logical row shape and content-addressed identity (channel wire
-/// ids, sha256 projection paths), not the SQLite column affinity — the same
-/// `REAL`→`INTEGER` rationale R08/R11a recorded for their timestamp columns.
-///
-/// CHECK constraints mirror the TS schema's fail-closed enum columns
-/// (`chat_decisions.state`, `chat_attachments.target_kind`, `chat_follows`
-/// target-kind/state, `chat_bookmarks` target-kind/mode/state,
-/// `chat_bookmark_outbox.projection_state`, `chat_dispatch_ledger.state`) so a
-/// corrupt/forward value can never be stored and later silently misread.
-///
-/// The trailing block is the deferred-chat-parent repair: it moves replicated replies whose parent has
-/// not arrived into `chat_pending_message_parents` and NULLs cross-thread/self
-/// parent links. Because this migration CREATEs `chat_messages` empty in the
-/// same transaction immediately before, the repair is always a no-op on a Rust
-/// store (and a foreign/TS `engine.db` never reaches this runner — the v1-vs-v2
-/// fingerprint fence in `schema.rs` rejects it before any migration runs). It is
-/// folded in as a keyed, checksum-gated record of the exact TS repair SQL — the
-/// semantic contract R10 replicated-apply and any future TS→Rust importer must
-/// converge to — not a live data-rewrite path. Kept over dropping it so the
-/// repair semantics live in one auditable place next to the tables they touch.
-const V1_CHATS_DDL: &str = "\
--- Channels + per-thread read cursors (WS-E). Durable rows key on channel_id;
--- the slug UNIQUE index is a collision-safe lookup alias per workspace.
 CREATE TABLE chat_channels (
     workspace_id  TEXT    NOT NULL,
     channel_id    TEXT    NOT NULL,
@@ -521,6 +240,7 @@ CREATE TABLE chat_channels (
     updated_at_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, channel_id)
 ) STRICT;
+
 CREATE UNIQUE INDEX idx_chat_channels_slug ON chat_channels(workspace_id, slug);
 
 CREATE TABLE chat_thread_read_state (
@@ -532,20 +252,16 @@ CREATE TABLE chat_thread_read_state (
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
 
--- (workspace, wire_id) -> channel_id. A locally created channel's wire id is
--- its own channel_id; the auto-created 'general'/'My agent' channels use
--- deterministic well-known wire ids so independently minted rows converge.
 CREATE TABLE chat_channel_wire_ids (
     workspace_id TEXT NOT NULL,
     wire_id      TEXT NOT NULL,
     channel_id   TEXT NOT NULL,
     PRIMARY KEY (workspace_id, wire_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_channel_wire_ids_channel
     ON chat_channel_wire_ids(workspace_id, channel_id);
 
--- Provenance for channels synthesized by a thread that replicated before its
--- channel-create op; the authoritative create later replaces the guess in place.
 CREATE TABLE chat_channel_placeholders (
     workspace_id TEXT NOT NULL,
     channel_id   TEXT NOT NULL,
@@ -566,10 +282,13 @@ CREATE TABLE chat_threads (
     channel_id       TEXT,
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_threads_workspace_created
     ON chat_threads(workspace_id, created_at_ms, thread_id);
+
 CREATE INDEX idx_chat_threads_linked_file
     ON chat_threads(workspace_id, linked_object_id, created_at_ms, thread_id);
+
 CREATE INDEX idx_chat_threads_channel
     ON chat_threads(workspace_id, channel_id, updated_at_ms, thread_id);
 
@@ -590,18 +309,19 @@ CREATE TABLE chat_messages (
     FOREIGN KEY (workspace_id, thread_id)
       REFERENCES chat_threads(workspace_id, thread_id) ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX idx_chat_messages_thread_order
     ON chat_messages(workspace_id, thread_id, message_order);
+
 CREATE INDEX idx_chat_messages_thread_created
     ON chat_messages(workspace_id, thread_id, created_at_ms, message_id);
+
 CREATE INDEX idx_chat_messages_workspace_created
     ON chat_messages(workspace_id, created_at_ms, message_id);
+
 CREATE INDEX idx_chat_messages_author_feed
     ON chat_messages(workspace_id, author_user_id, author_kind, created_at_ms DESC, message_id DESC);
 
--- Reactions (WS-MU-C2): one LWW register per (message, emoji, author) cell.
--- Tombstones ('removed') retained; reads filter state='added'. No FK: a
--- cross-origin reaction op can precede the message it targets.
 CREATE TABLE chat_reactions (
     workspace_id        TEXT    NOT NULL,
     reaction_id         TEXT    NOT NULL,
@@ -617,6 +337,7 @@ CREATE TABLE chat_reactions (
     origin_seq          INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, message_id, emoji, author_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_reactions_thread
     ON chat_reactions(workspace_id, thread_id, message_id);
 
@@ -631,6 +352,7 @@ CREATE TABLE chat_decisions (
     origin_seq             INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, message_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_decisions_thread_state
     ON chat_decisions(workspace_id, thread_id, state, message_id);
 
@@ -648,10 +370,13 @@ CREATE TABLE chat_attachments (
     created_at_ms      INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, attachment_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_attachments_thread_message
     ON chat_attachments(workspace_id, thread_id, message_id, created_at_ms, attachment_id);
+
 CREATE INDEX idx_chat_attachments_file_object
     ON chat_attachments(workspace_id, object_id, created_at_ms DESC, attachment_id DESC);
+
 CREATE INDEX idx_chat_attachments_file_path
     ON chat_attachments(workspace_id, path_hint, created_at_ms DESC, attachment_id DESC);
 
@@ -662,6 +387,7 @@ CREATE TABLE chat_pending_message_parents (
     parent_message_id TEXT NOT NULL,
     PRIMARY KEY (workspace_id, child_message_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_pending_message_parents_parent
     ON chat_pending_message_parents(workspace_id, thread_id, parent_message_id);
 
@@ -684,10 +410,10 @@ CREATE TABLE chat_mentions (
     created_at_ms INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, message_id, handle)
 ) STRICT;
+
 CREATE INDEX idx_chat_mentions_handle
     ON chat_mentions(workspace_id, handle, created_at_ms, message_id);
 
--- Receiver-owned personal Feed state (LWW registers with retained tombstones).
 CREATE TABLE chat_follows (
     workspace_id  TEXT    NOT NULL,
     owner_user_id TEXT    NOT NULL,
@@ -699,6 +425,7 @@ CREATE TABLE chat_follows (
     origin_seq    INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, owner_user_id, target_kind, target_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_follows_active
     ON chat_follows(workspace_id, owner_user_id, state, target_kind, target_id);
 
@@ -729,8 +456,10 @@ CREATE TABLE chat_bookmarks (
     PRIMARY KEY (workspace_id, bookmark_id),
     UNIQUE (workspace_id, owner_user_id, target_kind, target_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_bookmarks_owner_state
     ON chat_bookmarks(workspace_id, owner_user_id, state, updated_at_ms DESC, bookmark_id);
+
 CREATE INDEX idx_chat_bookmarks_live_thread
     ON chat_bookmarks(workspace_id, thread_id, mode, state);
 
@@ -746,11 +475,10 @@ CREATE TABLE chat_bookmark_outbox (
     updated_at_ms        INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, bookmark_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_bookmark_outbox_pending
     ON chat_bookmark_outbox(workspace_id, projection_state, updated_at_ms, bookmark_id);
 
--- Durable agent-dispatch ledger + private run records (single-writer
--- replacement for the desktop's raw second connection, STATE_OWNERSHIP DELETED).
 CREATE TABLE chat_dispatch_ledger (
     workspace_id       TEXT    NOT NULL,
     trigger_message_id TEXT    NOT NULL,
@@ -763,6 +491,7 @@ CREATE TABLE chat_dispatch_ledger (
     updated_at_ms      INTEGER NOT NULL,
     PRIMARY KEY (workspace_id, trigger_message_id)
 ) STRICT;
+
 CREATE INDEX idx_chat_dispatch_ledger_state
     ON chat_dispatch_ledger(workspace_id, state, created_at_ms, trigger_message_id);
 
@@ -787,18 +516,19 @@ CREATE TABLE agent_run_records (
     failure_note_posted INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, run_id)
 ) STRICT;
+
 CREATE INDEX idx_agent_run_records_thread_started
     ON agent_run_records(workspace_id, thread_id, started_at_ms);
+
 CREATE UNIQUE INDEX idx_agent_run_records_run_id ON agent_run_records(run_id);
 
--- Local-only provenance from agent-authored chat reports to their private
--- runner trace. Deliberately absent from every replication/projection/export.
 CREATE TABLE run_message_links (
     workspace_id TEXT NOT NULL,
     message_id   TEXT NOT NULL,
     run_id       TEXT NOT NULL,
     PRIMARY KEY (workspace_id, message_id)
 ) STRICT;
+
 CREATE INDEX idx_run_message_links_run
     ON run_message_links(workspace_id, run_id, message_id);
 
@@ -811,68 +541,6 @@ CREATE TABLE chat_dispatch_pause (
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
 
--- Deferred-chat-parent repair. No-op on a fresh store;
--- keyed to the `v1-chats` ledger row so it runs exactly once per database.
-INSERT OR IGNORE INTO chat_pending_message_parents (
-    workspace_id, child_message_id, thread_id, parent_message_id
-)
-SELECT child.workspace_id, child.message_id, child.thread_id, child.parent_message_id
-FROM chat_messages child
-WHERE child.parent_message_id IS NOT NULL
-  AND child.parent_message_id <> child.message_id
-  AND NOT EXISTS (
-    SELECT 1 FROM chat_messages parent
-    WHERE parent.workspace_id = child.workspace_id
-      AND parent.message_id = child.parent_message_id
-  );
-UPDATE chat_messages AS child
-SET parent_message_id = NULL
-WHERE child.parent_message_id IS NOT NULL
-  AND (
-    child.parent_message_id = child.message_id
-    OR NOT EXISTS (
-      SELECT 1 FROM chat_messages parent
-      WHERE parent.workspace_id = child.workspace_id
-        AND parent.thread_id = child.thread_id
-        AND parent.message_id = child.parent_message_id
-    )
-  );
-";
-
-/// The `id` of the R09 chats-domain migration.
-pub(crate) const CHATS_MIGRATION_ID: &str = "v1-chats";
-
-/// Ordinal 4 (R12 search shard, appended via the migration-append capability
-/// contract). Adds the full-text search surface — two FTS5 virtual tables over
-/// file text and chat-message text, plus the durable per-version index-state
-/// marker — whose logical shapes match the TS engine's `engine_search_files_fts`
-/// / `engine_search_chat_messages_fts` / `engine_search_index_state`
-/// (`engineDbSchema.ts` `ENGINE_SEARCH_INDEX_DDL`).
-///
-/// **FTS5 config is pinned byte-for-byte to the TS oracle**: the column list
-/// (UNINDEXED metadata columns + one indexed `text` column) and
-/// `tokenize='trigram'` (no options) are reproduced verbatim so the trigram
-/// prefilter and the `rowid`-ordered candidate stream behave identically on
-/// both engines. FTS5 + the trigram tokenizer are compiled into the bundled
-/// SQLite unconditionally (`libsqlite3-sys` 0.35 `build.rs` sets
-/// `-DSQLITE_ENABLE_FTS5`; the trigram tokenizer ships since SQLite 3.34 and the
-/// bundle is 3.50.2) — no extra `rusqlite` feature is required, and the
-/// migration's own `quick_check` gate proves the CREATE VIRTUAL TABLE succeeded
-/// on this build before the ledger row is written. A build lacking FTS5 would
-/// fail this migration closed rather than silently ship a searchless store.
-///
-/// `engine_search_index_state.indexed_at_ms` is `INTEGER` here where TS uses
-/// `REAL`; the value is an engine-internal repair marker (never cross-engine
-/// compared), so the affinity follows the R04/R08/R11a/R09 `INTEGER`-timestamp
-/// convention. Unlike the TS engine's lazy-additive search tables (created on
-/// open, absent = "no search yet"), the Rust migration ledger always creates
-/// them, so their presence is a hard v2 invariant enforced in `schema.rs`.
-const V1_SEARCH_DDL: &str = "\
--- File-text FTS index. One row per (workspace, version, object) currently
--- searchable text file; UNINDEXED metadata columns are stored-but-not-tokenized
--- so a policy re-check and dedup can read them back without a join. A regular
--- (non-external-content) FTS5 table, so ordinary DELETE ... WHERE on the
--- UNINDEXED keys removes a row. Trigram tokenizer, no options — matches TS.
 CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(
     workspace_id UNINDEXED,
     version_id UNINDEXED,
@@ -882,9 +550,6 @@ CREATE VIRTUAL TABLE engine_search_files_fts USING fts5(
     tokenize='trigram'
 );
 
--- Chat-message FTS index. One row per (workspace, thread, message); the
--- per-thread header row uses the sentinel message id '__thread__'. Chat is not
--- versioned, so rows are workspace-scoped (no version_id column).
 CREATE VIRTUAL TABLE engine_search_chat_messages_fts USING fts5(
     workspace_id UNINDEXED,
     thread_id UNINDEXED,
@@ -893,21 +558,6 @@ CREATE VIRTUAL TABLE engine_search_chat_messages_fts USING fts5(
     tokenize='trigram'
 );
 
--- Durable per-version index generation. A committed row for (workspace,
--- version) names a fully-built index generation; its ABSENCE forces
--- ensure_search_index_for_version to (re)build. Committed in the SAME
--- transaction as the FTS rows it certifies, so a query never observes a torn
--- mid-index state.
---
--- `file_policy_degraded` extends the TS logical shape (a recorded Rust delta):
--- 1 marks a generation built while the FILE policy was broken (file index
--- FROZEN, chat index authoritative). Recording it durably means a stable
--- degraded window does NOT re-index chat on every query (the TS engine, which
--- leaves NO state row while degraded, re-wipes+rebuilds chat per query), and a
--- degraded↔healthy TRANSITION is what triggers the file rebuild — not the
--- mere absence of a row. The timestamp affinity is INTEGER per the
--- R04/R08/R09/R11a convention (an engine-internal repair marker, never
--- cross-engine compared).
 CREATE TABLE engine_search_index_state (
     workspace_id         TEXT    NOT NULL,
     version_id           TEXT    NOT NULL,
@@ -915,52 +565,7 @@ CREATE TABLE engine_search_index_state (
     file_policy_degraded INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (workspace_id, version_id)
 ) STRICT;
-";
 
-/// The `id` of the R12 search migration.
-pub(crate) const SEARCH_MIGRATION_ID: &str = "v1-search";
-
-/// Ordinal 5 (R05 versioning residual). Adds the durable pointer from a moment
-/// to the moment that produced its concrete rollback preimage.
-const V1_MOMENT_BEFORE_LINK_DDL: &str = "\
-ALTER TABLE moments ADD COLUMN before_latest_moment_id TEXT;
--- Rust originally encoded no-preimage/concrete-preimage as 0/1. Normalize to
--- the TS tri-state: 0 legacy-unset, 1 explicit-absent, 2 concrete-preimage.
-UPDATE moments SET before_present = before_present + 1 WHERE before_present IN (0, 1);
--- Resolve concrete preimages produced by an earlier materialized moment in the
--- same version.
-UPDATE moments AS m
-SET before_latest_moment_id = (
-    SELECT prev.moment_id FROM moments AS prev
-    WHERE prev.workspace_id = m.workspace_id
-      AND prev.version_id  = m.version_id
-      AND prev.object_id   = m.object_id
-      AND prev.moment_order < m.moment_order
-      AND (prev.sync_record_only IS NULL OR prev.sync_record_only = 0)
-    ORDER BY prev.moment_order DESC
-    LIMIT 1
-)
-WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
--- Resolve the remaining first-write-after-fork preimages from the frozen base.
-UPDATE moments AS m
-SET before_latest_moment_id = (
-    SELECT fb.latest_moment_id FROM fork_base_snapshots AS fb
-    WHERE fb.workspace_id = m.workspace_id
-      AND fb.version_id   = m.version_id
-      AND fb.object_id    = m.object_id
-)
-WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
-";
-
-/// The `id` of the R05 moment-preimage-link migration.
-pub(crate) const MOMENT_BEFORE_LINK_MIGRATION_ID: &str = "v1-moment-before-link";
-
-/// Ordinal 6. R10's durable replication substrate. Cursor advancement is
-/// deliberately separate from imported-op application: `replication_log` plus
-/// `replication_peers` commit with the domain mutation, while relay/share
-/// cursors advance only after downstream materialization succeeds. Appended
-/// strictly after R05's ordinal-5 `v1-moment-before-link`.
-const V1_SYNC_DDL: &str = "\
 CREATE TABLE sync_identity (
     workspace_id       TEXT    NOT NULL PRIMARY KEY,
     origin_id          TEXT    NOT NULL,
@@ -977,8 +582,11 @@ CREATE TABLE replication_log (
     payload_json   TEXT    NOT NULL,
     recorded_at_ms INTEGER NOT NULL,
     imported       INTEGER NOT NULL CHECK (imported IN (0, 1)),
+    apply_disposition TEXT NOT NULL DEFAULT 'applied'
+      CHECK (apply_disposition IN ('applied', 'refused')),
     PRIMARY KEY (workspace_id, origin_id, origin_seq)
 ) STRICT;
+
 CREATE INDEX idx_replication_log_order
     ON replication_log(workspace_id, recorded_at_ms, origin_id, origin_seq);
 
@@ -986,6 +594,10 @@ CREATE TABLE replication_peers (
     workspace_id TEXT    NOT NULL,
     origin_id    TEXT    NOT NULL,
     acked_seq    INTEGER NOT NULL CHECK (acked_seq >= -1),
+    retry_origin_seq INTEGER
+    CHECK (retry_origin_seq IS NULL OR retry_origin_seq >= 0),
+    retry_count INTEGER NOT NULL DEFAULT 0
+    CHECK (retry_count >= 0),
     PRIMARY KEY (workspace_id, origin_id)
 ) STRICT;
 
@@ -1023,6 +635,8 @@ CREATE TABLE shared_channel_push_state (
     workspace_id TEXT    NOT NULL,
     share_id     TEXT    NOT NULL,
     pushed_seq   INTEGER NOT NULL CHECK (pushed_seq >= -1),
+    dense_seq INTEGER
+    CHECK (dense_seq IS NULL OR dense_seq >= -1),
     PRIMARY KEY (workspace_id, share_id)
 ) STRICT;
 
@@ -1032,93 +646,13 @@ CREATE TABLE share_view_cursors (
     cursor       TEXT NOT NULL,
     PRIMARY KEY (workspace_id, share_id)
 ) STRICT;
-";
 
-/// The `id` of the R10 sync migration.
-pub(crate) const SYNC_MIGRATION_ID: &str = "v1-sync";
-
-/// Ordinal 7. Adds durable conflict objects
-/// plus the materialization operation needed by merge and resolution deletes.
-/// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention; TS
-/// `REAL` affinity is internal because conflict rows are never cross-engine
-/// compared by affinity, matching the R08/R09/R11a/R12 precedent.
-const V1_CONFLICTS_DDL: &str = "\
-CREATE TABLE conflicts (
-    workspace_id TEXT NOT NULL,
-    conflict_id TEXT NOT NULL,
-    path TEXT NOT NULL,
-    target_version_id TEXT NOT NULL,
-    source_version_id TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    updated_at_ms INTEGER NOT NULL,
-    status TEXT NOT NULL,
-    chosen_from TEXT NOT NULL,
-    resolution TEXT,
-    metadata_origin TEXT NOT NULL,
-    metadata_summary TEXT,
-    metadata_correlation_id TEXT,
-    base_exists INTEGER NOT NULL,
-    base_path TEXT NOT NULL,
-    base_object_id TEXT,
-    base_content_kind TEXT DEFAULT 'text',
-    base_blob_sha256 TEXT,
-    base_updated_at_ms INTEGER,
-    base_latest_moment_id TEXT,
-    base_metadata_origin TEXT,
-    base_metadata_summary TEXT,
-    base_metadata_correlation_id TEXT,
-    current_exists INTEGER NOT NULL,
-    current_path TEXT NOT NULL,
-    current_object_id TEXT,
-    current_content_kind TEXT DEFAULT 'text',
-    current_blob_sha256 TEXT,
-    current_updated_at_ms INTEGER,
-    current_latest_moment_id TEXT,
-    current_metadata_origin TEXT,
-    current_metadata_summary TEXT,
-    current_metadata_correlation_id TEXT,
-    incoming_exists INTEGER NOT NULL,
-    incoming_path TEXT NOT NULL,
-    incoming_object_id TEXT,
-    incoming_content_kind TEXT DEFAULT 'text',
-    incoming_blob_sha256 TEXT,
-    incoming_updated_at_ms INTEGER,
-    incoming_latest_moment_id TEXT,
-    incoming_metadata_origin TEXT,
-    incoming_metadata_summary TEXT,
-    incoming_metadata_correlation_id TEXT,
-    PRIMARY KEY (workspace_id, conflict_id),
-    FOREIGN KEY (workspace_id) REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (base_blob_sha256) REFERENCES blobs(sha256),
-    FOREIGN KEY (current_blob_sha256) REFERENCES blobs(sha256),
-    FOREIGN KEY (incoming_blob_sha256) REFERENCES blobs(sha256)
-) STRICT;
-CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
-ALTER TABLE materialization_jobs ADD COLUMN operation TEXT NOT NULL DEFAULT 'write';
-";
-
-/// The `id` of the R06 conflict-object migration.
-pub(crate) const CONFLICTS_MIGRATION_ID: &str = "v1-conflicts";
-
-const V1_SHADOW_CLONE_DDL: &str = "
 CREATE TABLE shadow_clone (
     rowid_guard INTEGER NOT NULL PRIMARY KEY CHECK (rowid_guard = 1),
     token TEXT NOT NULL
 ) STRICT;
-";
 
-pub(crate) const SHADOW_CLONE_MIGRATION_ID: &str = "v1-shadow-clone";
-
-/// Ordinal 9. Adds content-addressed binary-blob references to each conflict
-/// side while preserving the existing text-blob references. SQLite keeps this
-/// schema change declarative through a transactional table rebuild. Unlike the
-/// prior additive migrations, the rebuild's `INSERT ... SELECT` runs with
-/// foreign keys ON and therefore RE-VALIDATES every historical row's FKs — a
-/// store carrying a latent dangling reference becomes unopenable at upgrade
-/// (fail-closed with a clean rollback to v8, remediable by restoring the
-/// missing referent).
-const V1_BINARY_CONFLICT_SIDES_DDL: &str = "\
-CREATE TABLE conflicts_v9 (
+CREATE TABLE conflicts (
     workspace_id TEXT NOT NULL,
     conflict_id TEXT NOT NULL,
     path TEXT NOT NULL,
@@ -1174,59 +708,10 @@ CREATE TABLE conflicts_v9 (
     FOREIGN KEY (current_binary_sha256) REFERENCES binary_blobs(sha256),
     FOREIGN KEY (incoming_binary_sha256) REFERENCES binary_blobs(sha256)
 ) STRICT;
-INSERT INTO conflicts_v9 (
-    workspace_id, conflict_id, path, target_version_id, source_version_id,
-    created_at_ms, updated_at_ms, status, chosen_from, resolution,
-    metadata_origin, metadata_summary, metadata_correlation_id,
-    base_exists, base_path, base_object_id, base_content_kind, base_blob_sha256,
-    base_updated_at_ms, base_latest_moment_id, base_metadata_origin,
-    base_metadata_summary, base_metadata_correlation_id,
-    current_exists, current_path, current_object_id, current_content_kind,
-    current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
-    current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
-    incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
-    incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
-    incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id,
-    base_binary_sha256, current_binary_sha256, incoming_binary_sha256
-)
-SELECT
-    workspace_id, conflict_id, path, target_version_id, source_version_id,
-    created_at_ms, updated_at_ms, status, chosen_from, resolution,
-    metadata_origin, metadata_summary, metadata_correlation_id,
-    base_exists, base_path, base_object_id, base_content_kind, base_blob_sha256,
-    base_updated_at_ms, base_latest_moment_id, base_metadata_origin,
-    base_metadata_summary, base_metadata_correlation_id,
-    current_exists, current_path, current_object_id, current_content_kind,
-    current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
-    current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
-    incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
-    incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
-    incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id,
-    NULL, NULL, NULL
-FROM conflicts;
-DROP TABLE conflicts;
-ALTER TABLE conflicts_v9 RENAME TO conflicts;
+
 CREATE INDEX idx_conflicts_workspace_status ON conflicts(workspace_id, status, created_at_ms, conflict_id);
-";
 
-/// The `id` of the binary conflict-side migration.
-pub(crate) const BINARY_CONFLICT_SIDES_MIGRATION_ID: &str = "v1-binary-conflict-sides";
-
-/// Ordinal 10. Gives binary content the same durable head shape as text by
-/// adding discriminated binary references to moments and both snapshot tables.
-/// The rebuild copies every v9 column explicitly. With foreign keys enabled,
-/// those copies also re-validate historical references and fail closed by
-/// rolling the whole migration back when a referent is missing.
-///
-/// INVARIANT: the fail-closed FK re-validation depends on the caller having set
-/// `PRAGMA foreign_keys=ON` before the runner opens the migration transaction
-/// (`schema.rs:181`), not on this migration. The migration deliberately does not
-/// toggle the pragma itself — a `PRAGMA foreign_keys` inside the active
-/// transactional rebuild is a silent no-op in SQLite and would break the
-/// transactional-rebuild semantics. Holds today because every open path enables
-/// it before migrating.
-const V1_BINARY_HEAD_DDL: &str = "\
-CREATE TABLE snapshots_v10 (
+CREATE TABLE snapshots (
     workspace_id     TEXT    NOT NULL,
     version_id       TEXT    NOT NULL,
     object_id        TEXT    NOT NULL,
@@ -1238,6 +723,8 @@ CREATE TABLE snapshots_v10 (
     content_kind     TEXT    NOT NULL DEFAULT 'text'
                              CHECK (content_kind IN ('text', 'binary')),
     binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
     -- A head carries EXACTLY the digest for its kind: a text head has its text
     -- blob and no binary ref; a binary head has its binary ref and no text blob.
     -- Fail-closed at the DB level so a malformed dual/absent-digest union can
@@ -1251,18 +738,8 @@ CREATE TABLE snapshots_v10 (
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
     FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
 ) STRICT;
-INSERT INTO snapshots_v10 (
-    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
-    latest_moment_id, metadata_origin, content_kind, binary_sha256
-)
-SELECT
-    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
-    latest_moment_id, metadata_origin, 'text', NULL
-FROM snapshots;
-DROP TABLE snapshots;
-ALTER TABLE snapshots_v10 RENAME TO snapshots;
 
-CREATE TABLE fork_base_snapshots_v10 (
+CREATE TABLE fork_base_snapshots (
     workspace_id     TEXT    NOT NULL,
     version_id       TEXT    NOT NULL,
     object_id        TEXT    NOT NULL,
@@ -1274,6 +751,8 @@ CREATE TABLE fork_base_snapshots_v10 (
     content_kind     TEXT    NOT NULL DEFAULT 'text'
                              CHECK (content_kind IN ('text', 'binary')),
     binary_sha256    TEXT    REFERENCES binary_blobs(sha256),
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
     CHECK (
         (content_kind = 'text'   AND blob_sha256   IS NOT NULL AND binary_sha256 IS NULL)
      OR (content_kind = 'binary' AND binary_sha256 IS NOT NULL AND blob_sha256   IS NULL)
@@ -1283,18 +762,8 @@ CREATE TABLE fork_base_snapshots_v10 (
     FOREIGN KEY (workspace_id, object_id) REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
     FOREIGN KEY (blob_sha256) REFERENCES blobs(sha256)
 ) STRICT;
-INSERT INTO fork_base_snapshots_v10 (
-    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
-    latest_moment_id, metadata_origin, content_kind, binary_sha256
-)
-SELECT
-    workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms,
-    latest_moment_id, metadata_origin, 'text', NULL
-FROM fork_base_snapshots;
-DROP TABLE fork_base_snapshots;
-ALTER TABLE fork_base_snapshots_v10 RENAME TO fork_base_snapshots;
 
-CREATE TABLE moments_v10 (
+CREATE TABLE moments (
     workspace_id      TEXT    NOT NULL,
     moment_order      INTEGER NOT NULL,
     moment_id         TEXT    NOT NULL,
@@ -1316,6 +785,21 @@ CREATE TABLE moments_v10 (
     before_content_kind TEXT NOT NULL DEFAULT 'text'
                         CHECK (before_content_kind IN ('text', 'binary')),
     before_binary_sha256 TEXT REFERENCES binary_blobs(sha256),
+    payload_before_path TEXT,
+    payload_before_content_kind TEXT,
+    payload_before_blob_sha256 TEXT,
+    payload_after_path TEXT,
+    payload_after_content_kind TEXT,
+    payload_after_blob_sha256 TEXT,
+    metadata_summary TEXT,
+    metadata_correlation_id TEXT,
+    before_object_id TEXT,
+    before_version_id TEXT,
+    before_path TEXT,
+    before_updated_at_ms INTEGER,
+    before_metadata_origin TEXT,
+    before_metadata_summary TEXT,
+    before_metadata_correlation_id TEXT,
     -- The AFTER content of every moment carries exactly the digest matching its
     -- kind (a text moment its text blob, a binary moment its binary ref) and
     -- never the other kind's digest.
@@ -1337,410 +821,15 @@ CREATE TABLE moments_v10 (
     FOREIGN KEY (after_blob_sha256) REFERENCES blobs(sha256),
     FOREIGN KEY (before_blob_sha256) REFERENCES blobs(sha256)
 ) STRICT;
-INSERT INTO moments_v10 (
-    workspace_id, moment_order, moment_id, version_id, object_id, path,
-    recorded_at_ms, operation, after_blob_sha256, before_present,
-    before_blob_sha256, metadata_origin, author_json, sync_record_only,
-    before_latest_moment_id, after_content_kind, after_binary_sha256,
-    before_content_kind, before_binary_sha256
-)
-SELECT
-    workspace_id, moment_order, moment_id, version_id, object_id, path,
-    recorded_at_ms, operation, after_blob_sha256, before_present,
-    before_blob_sha256, metadata_origin, author_json, sync_record_only,
-    before_latest_moment_id, 'text', NULL, 'text', NULL
-FROM moments;
-DROP TABLE moments;
-ALTER TABLE moments_v10 RENAME TO moments;
+
 CREATE INDEX idx_moments_workspace_order ON moments(workspace_id, moment_order DESC);
+
 CREATE INDEX idx_moments_version_order ON moments(workspace_id, version_id, moment_order DESC);
+
 CREATE INDEX idx_moments_object_order ON moments(workspace_id, object_id, moment_order DESC);
-";
 
-/// The `id` of the binary-head migration.
-pub(crate) const BINARY_HEAD_MIGRATION_ID: &str = "v1-binary-head";
-
-/// Ordinal 11. Supports capture reconciliation's reverse alias lookup without
-/// scanning every alias in the workspace for each newly discovered file.
-const V1_PATH_ALIASES_OBJECT_INDEX_DDL: &str = "\
 CREATE INDEX idx_path_aliases_workspace_object ON path_aliases(workspace_id, object_id);
-";
 
-/// The `id` of the reverse path-alias lookup migration.
-pub(crate) const PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID: &str = "v1-path-aliases-object-index";
-
-/// Deferred replicated Y.Doc coordinates: rows acked while a live lease held
-/// the doc, pending replay into `ydoc_updates`. The imported replication log
-/// keeps the payload; this table records which coordinates are actually
-/// pending, so drains replay only genuinely-deferred rows (never the whole
-/// history, which after compaction would re-append non-dedupable updates).
-const V1_YDOC_DEFERRED_DDL: &str = "CREATE TABLE ydoc_deferred_updates (
-    workspace_id   TEXT    NOT NULL,
-    version_id     TEXT    NOT NULL,
-    object_id      TEXT    NOT NULL,
-    origin_id      TEXT    NOT NULL,
-    origin_seq     INTEGER NOT NULL,
-    recorded_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, origin_id, origin_seq),
-    FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
-      ON DELETE CASCADE
-) STRICT;
-CREATE INDEX ydoc_deferred_updates_by_doc
-    ON ydoc_deferred_updates (workspace_id, version_id, object_id);
-";
-
-/// The `id` of the deferred Y.Doc coordinates migration.
-pub(crate) const YDOC_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-deferred-updates";
-
-/// Classifies rows in the shared request ledger so mutation-specific cleanup
-/// cannot evict an unrelated subsystem's idempotency record. Nullable by
-/// design: legacy `result_seq = -1` is ambiguous between chats and the first
-/// Y.Doc update, while zero is shared by chats and versioned no-op results, so
-/// raw-hash rows at either sentinel remain fail-safe unclassified. Positive
-/// raw-hash rows are versioned only when the database has no `documents` rows:
-/// every CAL-1 compound commit creates one, so their presence makes positive
-/// legacy request rows ambiguous and the fail-safe classification is `NULL`.
-const V1_ENGINE_REQUEST_KIND_DDL: &str = "\
-ALTER TABLE engine_requests ADD COLUMN kind TEXT;
-UPDATE engine_requests SET kind = 'ydoc' WHERE result_seq < -1;
-UPDATE engine_requests SET kind = 'merge' WHERE payload_hash LIKE '{%';
-UPDATE engine_requests SET kind = 'versioned'
- WHERE result_seq > 0
-   AND kind IS NULL
-   AND NOT EXISTS (SELECT 1 FROM documents);
-";
-
-/// The `id` of the request-ledger kind migration.
-pub(crate) const ENGINE_REQUEST_KIND_MIGRATION_ID: &str = "v1-engine-request-kind";
-
-/// Ordinal 14. Records secret-plaintext disk ownership in a column the engine
-/// stamps itself, replacing the `metadata_origin = 'local-file'` test three
-/// capture decisions used to key on. `local-file` is a member of the closed
-/// origin set an RPC caller or a replication peer may supply, so that test both
-/// let a remote writer claim ownership it never had and denied it to an
-/// API-written secret the materializer really did put on disk.
-///
-/// The backfill uses the same disk truth the writers now stamp: a write moment
-/// owns its plaintext exactly when its materialization job completed — either
-/// because capture recorded the completed marker for plaintext it read off the
-/// workspace file, or because the materializer wrote that file. That
-/// reclassifies existing rows instead of carrying the origin-string rule
-/// forward.
-const V1_SECRET_CAPTURE_OWNERSHIP_DDL: &str = "\
-ALTER TABLE secret_moments ADD COLUMN capture_owned INTEGER NOT NULL DEFAULT 0;
-UPDATE secret_moments SET capture_owned = 1
- WHERE after_present = 1
-   AND EXISTS (
-     SELECT 1 FROM materialization_jobs j
-      WHERE j.job_id = 'secret-mat_' || secret_moments.moment_id
-        AND j.status = 'complete'
-   );
-";
-
-/// The `id` of the secret capture-ownership migration.
-pub(crate) const SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID: &str = "v1-secret-capture-ownership";
-
-/// Ordinal 15. Ports the TS oracle's moment PAYLOAD provenance, which is a
-/// different thing from the rollback preimage Rust already stores. The oracle
-/// records what the OPERATION carried (`payload.before` / `payload.after`)
-/// alongside what this store can roll back to (`before_*`); the two coincide
-/// for every locally authored operation but diverge on a content-convergent
-/// replication adoption, where the oracle keeps the imported payload and
-/// localizes only the rollback preimage
-/// (`versionedTextStore.ts` `contentFastForward && !headFastForward`).
-///
-/// Rust has no inbound `moment.append` apply path yet — that is RPC-E — so no
-/// row can diverge today and the backfill below is exact. The columns land
-/// before the R15 reset because adding them afterwards means migrating live
-/// data instead of empty tables.
-///
-/// The payload-AFTER content columns are exactly derivable —
-/// `payload_after_content_kind` is `after_content_kind` and
-/// `payload_after_blob_sha256` is the after digest that kind selects — but they
-/// are stored anyway, because the shared `moment.append` contract requires
-/// `payloadAfterBlobSha256` and several TS readers join `moments` to `blobs`
-/// on the physical column. A derivable column that every consumer expects to
-/// exist is not worth deriving.
-///
-/// `payload_after_path` IS added: it equals `path` for every locally authored
-/// operation, but the oracle accepts a replication envelope whose `path` and
-/// `payloadAfterPath` differ and preserves both, and nothing else in the
-/// schema can reconstruct that.
-const V1_MOMENT_PAYLOAD_PROVENANCE_DDL: &str =
-    "ALTER TABLE moments ADD COLUMN payload_before_path TEXT;
-ALTER TABLE moments ADD COLUMN payload_before_content_kind TEXT;
--- ONE digest per side, selected by the sibling content-kind column — the
--- oracle's shape, not Rust's usual text/binary split. `momentSelectSql` joins
--- BOTH `blobs` and `binary_blobs` on this single column and discriminates by
--- kind, and the shared `moment.append` contract carries one
--- `payloadBeforeBlobSha256`. Splitting it would leave every binary payload
--- reading as absent to those consumers.
---
--- No FK, for the same reason as the payload-after digest: a binary moment's
--- value is a `binary_blobs` digest, so `REFERENCES blobs(sha256)` would reject
--- it and the column cannot reference two tables.
-ALTER TABLE moments ADD COLUMN payload_before_blob_sha256 TEXT;
-ALTER TABLE moments ADD COLUMN payload_after_path TEXT;
-ALTER TABLE moments ADD COLUMN payload_after_content_kind TEXT;
--- No FK here, unlike the payload-BEFORE digests: for a binary moment this
--- column carries the BINARY digest, which is not a row in `blobs`. The oracle
--- reconciles that with empty-text anchor rows in `blobs`; Rust does not create
--- those, so declaring the oracle's `REFERENCES blobs(sha256)` would reject
--- every binary moment.
-ALTER TABLE moments ADD COLUMN payload_after_blob_sha256 TEXT;
-UPDATE moments SET
-    payload_after_path = path,
-    payload_after_content_kind = after_content_kind,
-    payload_after_blob_sha256 = CASE after_content_kind
-        WHEN 'binary' THEN after_binary_sha256
-        ELSE after_blob_sha256
-    END;
-UPDATE moments SET
-    payload_before_path = CASE operation
-        WHEN 'rename' THEN (
-            SELECT producer.path FROM moments producer
-             WHERE producer.workspace_id = moments.workspace_id
-               AND producer.moment_id = moments.before_latest_moment_id
-        )
-        ELSE path
-    END,
-    payload_before_content_kind = before_content_kind,
-    payload_before_blob_sha256 = CASE before_content_kind
-        WHEN 'binary' THEN before_binary_sha256
-        ELSE before_blob_sha256
-    END
- WHERE before_present = 2
-   -- A rename whose producer link never resolved cannot say where its payload
-   -- came from. Ordinal 5's link backfill is best-effort and does leave NULLs,
-   -- and the oracle keys payload-before PRESENCE on the path column alone, so
-   -- filling the digest without the path would read as 'carried no before
-   -- payload' while holding one. Leave the whole group unset instead.
-   AND (operation <> 'rename' OR EXISTS (
-       SELECT 1 FROM moments producer
-        WHERE producer.workspace_id = moments.workspace_id
-          AND producer.moment_id = moments.before_latest_moment_id
-   ));
-";
-
-/// The `id` of the moment payload-provenance migration.
-pub(crate) const MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID: &str = "v1-moment-payload-provenance";
-
-/// Ordinal 16. Persists the structured outcome of a replicated
-/// `conflict.resolve` that was deliberately acknowledged without being
-/// applied. Relay cursor advancement is intentionally later than envelope
-/// application, so a later envelope can fail after this coordinate's imported
-/// log row and peer ack have committed. The coordinate-keyed sidecar lets an
-/// idempotent retry surface the exact original decision instead of trying to
-/// infer it from conflict state that later envelopes may have changed.
-///
-/// The deferred foreign key permits the conflict applier to record the outcome
-/// before the generic envelope wrapper inserts the matching replication-log
-/// row; both happen in one transaction and the relationship is checked at
-/// commit.
-const V1_REPLICATION_PENDING_RESOLVES_DDL: &str = "\
-CREATE TABLE replication_pending_resolves (
-    workspace_id       TEXT    NOT NULL,
-    origin_id          TEXT    NOT NULL,
-    origin_seq         INTEGER NOT NULL CHECK (origin_seq >= 0),
-    remote_conflict_id TEXT    NOT NULL,
-    local_conflict_id  TEXT,
-    path               TEXT,
-    reason             TEXT    NOT NULL CHECK (reason IN (
-        'path-change',
-        'merged',
-        'stale-head',
-        'binary-unhydrated',
-        'binary-apply-failed',
-        'text-apply-rejected',
-        'unmatched-target'
-    )),
-    PRIMARY KEY (workspace_id, origin_id, origin_seq),
-    FOREIGN KEY (workspace_id, origin_id, origin_seq)
-      REFERENCES replication_log(workspace_id, origin_id, origin_seq)
-      ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
-) STRICT;
-";
-
-/// The `id` of the replication pending-resolve migration.
-pub(crate) const REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
-    "v1-replication-pending-resolves";
-
-/// Durable coordinates whose chat target has not replicated yet.
-const V1_CHAT_PENDING_REPLICATION_DDL: &str = "\
-CREATE TABLE chat_pending_replication (
-    workspace_id   TEXT NOT NULL,
-    origin_id      TEXT NOT NULL,
-    origin_seq     INTEGER NOT NULL,
-    dependency_kind TEXT NOT NULL CHECK (
-      dependency_kind IN ('follow-target', 'feed-message', 'attachment-message')
-    ),
-    dependency_id  TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, origin_id, origin_seq)
-) STRICT;
-CREATE INDEX chat_pending_replication_by_dependency
-    ON chat_pending_replication (workspace_id, dependency_kind, dependency_id);
-";
-
-/// The `id` of the deferred chat-coordinate migration.
-pub(crate) const CHAT_PENDING_REPLICATION_MIGRATION_ID: &str = "v1-chat-pending-replication";
-
-/// Ordinal 18. Completes the write-metadata tuple on plaintext moments and
-/// snapshots. The TypeScript schema stores origin, summary, and correlationId
-/// together; the first Rust schema slice retained only origin.
-const V1_MOMENT_METADATA_DDL: &str = "\
-ALTER TABLE moments ADD COLUMN metadata_summary TEXT;
-ALTER TABLE moments ADD COLUMN metadata_correlation_id TEXT;
-ALTER TABLE snapshots ADD COLUMN metadata_summary TEXT;
-ALTER TABLE snapshots ADD COLUMN metadata_correlation_id TEXT;
-ALTER TABLE fork_base_snapshots ADD COLUMN metadata_summary TEXT;
-ALTER TABLE fork_base_snapshots ADD COLUMN metadata_correlation_id TEXT;
-";
-
-pub(crate) const MOMENT_METADATA_MIGRATION_ID: &str = "v1-moment-metadata";
-
-/// Ordinal 19. Completes the durable rollback preimage on plaintext moments.
-/// The content digest and producer id alone cannot restore a shipped fork
-/// snapshot because `version.create` deliberately materializes that head
-/// without importing its producing moment.
-const V1_MOMENT_ROLLBACK_PREIMAGE_DDL: &str = "\
-ALTER TABLE moments ADD COLUMN before_object_id TEXT;
-ALTER TABLE moments ADD COLUMN before_version_id TEXT;
-ALTER TABLE moments ADD COLUMN before_path TEXT;
-ALTER TABLE moments ADD COLUMN before_updated_at_ms INTEGER;
-ALTER TABLE moments ADD COLUMN before_metadata_origin TEXT;
-ALTER TABLE moments ADD COLUMN before_metadata_summary TEXT;
-ALTER TABLE moments ADD COLUMN before_metadata_correlation_id TEXT;
-
--- Existing materialized moments normally resolve through their producer. A
--- shipped fork head has no producer row, so recover its frozen identity from
--- the fork base when upgrading a store that already applied its first edit.
-UPDATE moments SET
-    before_object_id = object_id,
-    before_version_id = version_id,
-    before_path = COALESCE(
-        (SELECT producer.path FROM moments producer
-          WHERE producer.workspace_id = moments.workspace_id
-            AND producer.moment_id = moments.before_latest_moment_id),
-        (SELECT fork.path FROM fork_base_snapshots fork
-          WHERE fork.workspace_id = moments.workspace_id
-            AND fork.version_id = moments.version_id
-            AND fork.object_id = moments.object_id
-            AND fork.latest_moment_id = moments.before_latest_moment_id)
-    ),
-    before_updated_at_ms = COALESCE(
-        (SELECT producer.recorded_at_ms FROM moments producer
-          WHERE producer.workspace_id = moments.workspace_id
-            AND producer.moment_id = moments.before_latest_moment_id),
-        (SELECT fork.updated_at_ms FROM fork_base_snapshots fork
-          WHERE fork.workspace_id = moments.workspace_id
-            AND fork.version_id = moments.version_id
-            AND fork.object_id = moments.object_id
-            AND fork.latest_moment_id = moments.before_latest_moment_id)
-    ),
-    before_metadata_origin = COALESCE(
-        (SELECT producer.metadata_origin FROM moments producer
-          WHERE producer.workspace_id = moments.workspace_id
-            AND producer.moment_id = moments.before_latest_moment_id),
-        (SELECT fork.metadata_origin FROM fork_base_snapshots fork
-          WHERE fork.workspace_id = moments.workspace_id
-            AND fork.version_id = moments.version_id
-            AND fork.object_id = moments.object_id
-            AND fork.latest_moment_id = moments.before_latest_moment_id)
-    ),
-    before_metadata_summary = CASE
-        WHEN EXISTS (
-            SELECT 1 FROM moments producer
-             WHERE producer.workspace_id = moments.workspace_id
-               AND producer.moment_id = moments.before_latest_moment_id
-        ) THEN (
-            SELECT producer.metadata_summary FROM moments producer
-             WHERE producer.workspace_id = moments.workspace_id
-               AND producer.moment_id = moments.before_latest_moment_id
-        )
-        ELSE (
-            SELECT fork.metadata_summary FROM fork_base_snapshots fork
-             WHERE fork.workspace_id = moments.workspace_id
-               AND fork.version_id = moments.version_id
-               AND fork.object_id = moments.object_id
-               AND fork.latest_moment_id = moments.before_latest_moment_id
-        )
-    END,
-    before_metadata_correlation_id = CASE
-        WHEN EXISTS (
-            SELECT 1 FROM moments producer
-             WHERE producer.workspace_id = moments.workspace_id
-               AND producer.moment_id = moments.before_latest_moment_id
-        ) THEN (
-            SELECT producer.metadata_correlation_id FROM moments producer
-             WHERE producer.workspace_id = moments.workspace_id
-               AND producer.moment_id = moments.before_latest_moment_id
-        )
-        ELSE (
-            SELECT fork.metadata_correlation_id FROM fork_base_snapshots fork
-             WHERE fork.workspace_id = moments.workspace_id
-               AND fork.version_id = moments.version_id
-               AND fork.object_id = moments.object_id
-               AND fork.latest_moment_id = moments.before_latest_moment_id
-        )
-    END
- WHERE before_present = 2;
-";
-
-pub(crate) const MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID: &str = "v1-moment-rollback-preimage";
-
-/// Ordinal 20. Shared-channel pushes previously retained only the last physical
-/// journal coordinate. New writes pair it with the corresponding dense shared
-/// coordinate; existing rows remain NULL and bootstrap once on their next push.
-const V1_SHARED_CHANNEL_DENSE_PUSH_DDL: &str = "\
-ALTER TABLE shared_channel_push_state ADD COLUMN dense_seq INTEGER
-    CHECK (dense_seq IS NULL OR dense_seq >= -1);
-";
-
-pub(crate) const SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID: &str = "v1-shared-channel-dense-push";
-
-/// Ordinal 21. An update from one origin can precede the base-state envelope
-/// from another origin. Such a coordinate must be durably parked without
-/// inventing a Y.Doc lineage, so the queue is rooted by the file object rather
-/// than by `ydoc_docs`. Existing leased-lineage rows already have that parent
-/// through the marker's own foreign key and copy across unchanged.
-const V1_YDOC_PREBASE_DEFERRED_DDL: &str = "\
-ALTER TABLE ydoc_deferred_updates RENAME TO ydoc_deferred_updates_old;
-DROP INDEX ydoc_deferred_updates_by_doc;
-CREATE TABLE ydoc_deferred_updates (
-    workspace_id   TEXT    NOT NULL,
-    version_id     TEXT    NOT NULL,
-    object_id      TEXT    NOT NULL,
-    origin_id      TEXT    NOT NULL,
-    origin_seq     INTEGER NOT NULL,
-    recorded_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, origin_id, origin_seq),
-    FOREIGN KEY (workspace_id, object_id)
-      REFERENCES file_objects(workspace_id, object_id)
-      ON DELETE CASCADE
-) STRICT;
-INSERT INTO ydoc_deferred_updates
-    (workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms)
-SELECT workspace_id, version_id, object_id, origin_id, origin_seq, recorded_at_ms
-  FROM ydoc_deferred_updates_old;
-DROP TABLE ydoc_deferred_updates_old;
-CREATE INDEX ydoc_deferred_updates_by_doc
-    ON ydoc_deferred_updates (workspace_id, version_id, object_id);
-";
-
-/// The `id` of the pre-base Y.Doc deferral migration.
-pub(crate) const YDOC_PREBASE_DEFERRED_MIGRATION_ID: &str = "v1-ydoc-prebase-deferred-updates";
-
-/// Ordinal 22. Persists every structured refusal until the relay pull cursor
-/// commits. Envelope application and peer ACK happen before cursor commit, so
-/// a later hard failure in the same batch otherwise makes the already-ACKed
-/// refusal unobservable on retry. The retry columns bound receiver-state
-/// secret-fork mismatches without prematurely retiring a short ordering race.
-const V1_REPLICATION_PENDING_REFUSALS_DDL: &str = "\
-ALTER TABLE replication_peers ADD COLUMN retry_origin_seq INTEGER
-    CHECK (retry_origin_seq IS NULL OR retry_origin_seq >= 0);
-ALTER TABLE replication_peers ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0
-    CHECK (retry_count >= 0);
 CREATE TABLE replication_pending_refusals (
     workspace_id   TEXT    NOT NULL,
     origin_id      TEXT    NOT NULL,
@@ -1756,19 +845,10 @@ CREATE TABLE replication_pending_refusals (
       REFERENCES replication_log(workspace_id, origin_id, origin_seq)
       ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED
 ) STRICT;
+
 CREATE INDEX replication_pending_refusals_by_report
     ON replication_pending_refusals (workspace_id, report_id);
-";
 
-/// The `id` of the persisted replication-refusal migration.
-pub(crate) const REPLICATION_PENDING_REFUSALS_MIGRATION_ID: &str =
-    "v1-replication-pending-refusals";
-
-/// Ordinal 23. A replicated message may arrive before its thread. Preserve
-/// that coordinate in the same durable dependency queue used by the other
-/// cross-origin chat references.
-const V1_CHAT_PENDING_MESSAGE_THREAD_DDL: &str = "\
-ALTER TABLE chat_pending_replication RENAME TO chat_pending_replication_old;
 CREATE TABLE chat_pending_replication (
     workspace_id    TEXT    NOT NULL,
     origin_id       TEXT    NOT NULL,
@@ -1784,93 +864,9 @@ CREATE TABLE chat_pending_replication (
     dependency_id   TEXT    NOT NULL,
     PRIMARY KEY (workspace_id, origin_id, origin_seq)
 ) STRICT;
-INSERT INTO chat_pending_replication
-    (workspace_id, origin_id, origin_seq, dependency_kind, dependency_id)
-SELECT workspace_id, origin_id, origin_seq, dependency_kind, dependency_id
-  FROM chat_pending_replication_old;
-DROP TABLE chat_pending_replication_old;
+
 CREATE INDEX chat_pending_replication_by_dependency
     ON chat_pending_replication (workspace_id, dependency_kind, dependency_id);
-";
-
-pub(crate) const CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID: &str = "v1-chat-pending-message-thread";
-
-/// Ordinal 24. Materialization generations are path-local within a workspace,
-/// not global across every workspace that happens to share an engine database.
-/// New writers always persist this coordinate. The backfill recovers it from
-/// durable identities where possible. An unmatched row remains empty: consumers
-/// treat that sentinel with the pre-migration global replay/fence semantics so
-/// an opaque legacy intent can never be stranded.
-const V1_MATERIALIZATION_WORKSPACE_DDL: &str = "\
-ALTER TABLE materialization_jobs
-    ADD COLUMN workspace_id TEXT NOT NULL DEFAULT '';
-
-UPDATE materialization_jobs AS job
-   SET workspace_id = (
-       SELECT moment.workspace_id
-         FROM moments AS moment
-        WHERE job.job_id NOT GLOB 'secret-mat_*'
-          AND (job.job_id = moment.moment_id
-           OR job.job_id = 'ydoc-mat_' || moment.moment_id
-           OR job.job_id = 'binary-delete-mat_' || moment.moment_id
-           OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
-           OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
-           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
-                   '-mat_' || moment.moment_id)
-          AND job.target_generation = moment.moment_order
-        ORDER BY moment.moment_order DESC
-        LIMIT 1
-   )
- WHERE workspace_id = ''
-   AND EXISTS (
-       SELECT 1
-         FROM moments AS moment
-        WHERE job.job_id NOT GLOB 'secret-mat_*'
-          AND (job.job_id = moment.moment_id
-           OR job.job_id = 'ydoc-mat_' || moment.moment_id
-           OR job.job_id = 'binary-delete-mat_' || moment.moment_id
-           OR job.job_id = 'binary-rename-0-write-mat_' || moment.moment_id
-           OR job.job_id = 'binary-rename-1-delete-mat_' || moment.moment_id
-           OR substr(job.job_id, -length('-mat_' || moment.moment_id)) =
-                   '-mat_' || moment.moment_id)
-          AND job.target_generation = moment.moment_order
-   );
-
-UPDATE materialization_jobs AS job
-   SET workspace_id = (
-       SELECT moment.workspace_id
-         FROM secret_moments AS moment
-        WHERE job.job_id = 'secret-mat_' || moment.moment_id
-          AND job.target_generation = moment.moment_order
-        ORDER BY moment.moment_order DESC
-        LIMIT 1
-   )
- WHERE workspace_id = ''
-   AND EXISTS (
-       SELECT 1
-         FROM secret_moments AS moment
-        WHERE job.job_id = 'secret-mat_' || moment.moment_id
-          AND job.target_generation = moment.moment_order
-   );
-
-UPDATE materialization_jobs AS job
-   SET workspace_id = (
-       SELECT workspace.workspace_id
-         FROM versioned_workspaces AS workspace
-        WHERE instr(
-            job.job_id,
-            char(31) || length(workspace.workspace_id) || ':' || workspace.workspace_id
-        ) > 0
-        ORDER BY workspace.workspace_id
-        LIMIT 1
-   )
- WHERE workspace_id = ''
-   AND instr(job.job_id, char(31)) > 0;
-
-UPDATE materialization_jobs
-   SET workspace_id = (SELECT workspace_id FROM versioned_workspaces LIMIT 1)
- WHERE workspace_id = ''
-   AND (SELECT COUNT(*) FROM versioned_workspaces) = 1;
 
 CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
     ON materialization_jobs (
@@ -1879,194 +875,8 @@ CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
         status,
         target_generation
     );
-";
 
-pub(crate) const MATERIALIZATION_WORKSPACE_MIGRATION_ID: &str = "v1-materialization-workspace";
-
-/// The local bootstrap wrote the main version's display name as 'main'
-/// while the TS engine and the replication applier write 'Main'. New stores
-/// are fixed in `dohc-engine-domain`; this renames rows bootstrapped by older
-/// builds. Scoped to `kind = 'main'` so user-named versions — even one
-/// literally named 'main' — are untouched, and guarded so a workspace where a
-/// USER version already took the name 'Main' (legal while bootstrap was
-/// lowercase) keeps its lowercase bootstrap name rather than gaining two
-/// versions displaying 'Main'.
-const V1_MAIN_VERSION_NAME_DDL: &str = "\
-UPDATE versions SET name = 'Main'
- WHERE kind = 'main' AND name = 'main'
-   AND NOT EXISTS (
-       SELECT 1 FROM versions AS other
-        WHERE other.workspace_id = versions.workspace_id
-          AND other.name = 'Main'
-   );
-";
-
-pub(crate) const MAIN_VERSION_NAME_MIGRATION_ID: &str = "v1-main-version-name";
-
-/// Preserve the source tip's last-edit time with the ciphertext frozen for a
-/// secret version fork. Older rows cannot recover that time exactly, so the
-/// append migration uses zero for pre-MVP stores; every new fork writes it.
-const V1_SECRET_FORK_BASE_TIMESTAMP_DDL: &str = "\
-ALTER TABLE secret_fork_bases
-    ADD COLUMN updated_at_ms INTEGER NOT NULL DEFAULT 0;
-";
-
-pub(crate) const SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID: &str = "v1-secret-fork-base-timestamp";
-
-/// Persist the path for a live Y.Doc lineage before its first snapshot.
-/// Enrollment reads an existing snapshot's current path directly; copying it
-/// here would become stale after a closed-document rename.
-const V1_YDOC_PATH_DDL: &str = "\
-ALTER TABLE ydoc_docs ADD COLUMN path TEXT;
-";
-
-pub(crate) const YDOC_PATH_MIGRATION_ID: &str = "v1-ydoc-path";
-
-/// Record the exact relay coordinate that created an imported secret moment.
-/// Local secret moments keep both fields NULL.
-const V1_SECRET_MOMENT_SOURCE_DDL: &str = "\
-ALTER TABLE secret_moments ADD COLUMN source_origin_id TEXT;
-ALTER TABLE secret_moments ADD COLUMN source_origin_seq INTEGER;
-UPDATE secret_moments
-   SET source_origin_id = (
-         SELECT r.origin_id FROM replication_log r
-          WHERE r.workspace_id = secret_moments.workspace_id
-            AND r.imported = 1
-            AND r.op_kind IN ('secret.file.put', 'secret.file.delete')
-            AND ('secret-sync-' || r.origin_id || '-' || r.origin_seq) = secret_moments.moment_id
-       ),
-       source_origin_seq = (
-         SELECT r.origin_seq FROM replication_log r
-          WHERE r.workspace_id = secret_moments.workspace_id
-            AND r.imported = 1
-            AND r.op_kind IN ('secret.file.put', 'secret.file.delete')
-            AND ('secret-sync-' || r.origin_id || '-' || r.origin_seq) = secret_moments.moment_id
-       )
- WHERE source_origin_id IS NULL;
-";
-
-pub(crate) const SECRET_MOMENT_SOURCE_MIGRATION_ID: &str = "v1-secret-moment-source";
-
-/// Ordinal 29. Replace the legacy base-claimed bit with one typed lineage
-/// state. A surviving seq-0 snapshot proves the exact base claim. Once
-/// compaction removes that snapshot, a matching base envelope in the
-/// replication log is evidence only that a candidate existed: a refused
-/// envelope can name a different base from the active lineage. Such rows are
-/// `ambiguous`; compacted rows with no candidate are `missing`.
-///
-/// The migration rebuilds the marker and every child table in one transaction.
-/// This removes the obsolete column, re-validates all foreign keys, and keeps
-/// every path, settle field, update, snapshot, and deferred coordinate.
-/// Inactive lineages are compact roots under the stable file object. Their
-/// RESTRICT references prevent GC or file deletion from silently discarding a
-/// retained branch.
-const V1_YDOC_LINEAGE_CLAIMS_DDL: &str = "\
-CREATE TABLE ydoc_docs_v29 (
-    workspace_id            TEXT    NOT NULL,
-    version_id              TEXT    NOT NULL,
-    object_id               TEXT    NOT NULL,
-    content_kind            TEXT    NOT NULL DEFAULT 'richdoc'
-                                    CHECK (content_kind IN ('plaintext', 'richdoc')),
-    regime                  TEXT    NOT NULL DEFAULT 'local-only'
-                                    CHECK (regime IN ('local-only', 'replicated')),
-    head_update_seq         INTEGER NOT NULL DEFAULT 0
-                                    CHECK (head_update_seq >= 0),
-    head_snapshot_seq       INTEGER NOT NULL DEFAULT 0
-                                    CHECK (head_snapshot_seq >= 0),
-    settle_seq              INTEGER NOT NULL DEFAULT 0
-                                    CHECK (settle_seq >= 0),
-    last_settled_sha        TEXT,
-    updated_at_ms           INTEGER NOT NULL,
-    path                    TEXT,
-    lineage_claim_status    TEXT    NOT NULL DEFAULT 'unclaimed'
-                                    CHECK (lineage_claim_status IN (
-                                      'unclaimed', 'exact', 'missing', 'ambiguous'
-                                    )),
-    lineage_claim_id        TEXT
-      CHECK (lineage_claim_id IS NULL OR (
-        length(lineage_claim_id) = 64
-        AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
-      )),
-    lineage_parent_claim_id TEXT
-      CHECK (lineage_parent_claim_id IS NULL OR (
-        length(lineage_parent_claim_id) = 64
-        AND lineage_parent_claim_id NOT GLOB '*[^0-9a-f]*'
-      )),
-    lineage_epoch_tag       TEXT
-      CHECK (lineage_epoch_tag IS NULL OR (
-        length(lineage_epoch_tag) = 64
-        AND lineage_epoch_tag NOT GLOB '*[^0-9a-f]*'
-      )),
-    PRIMARY KEY (workspace_id, version_id, object_id),
-    CHECK (head_snapshot_seq <= head_update_seq),
-    CHECK (
-      (lineage_claim_status = 'unclaimed'
-       AND lineage_claim_id IS NULL
-       AND lineage_parent_claim_id IS NULL
-       AND lineage_epoch_tag IS NULL)
-      OR
-      (regime = 'replicated'
-       AND lineage_claim_status IN ('missing', 'ambiguous')
-       AND lineage_claim_id IS NULL
-       AND lineage_parent_claim_id IS NULL
-       AND lineage_epoch_tag IS NULL)
-      OR
-      (regime = 'replicated'
-       AND lineage_claim_status = 'exact'
-       AND lineage_claim_id IS NOT NULL
-       AND (
-         (lineage_parent_claim_id IS NULL AND lineage_epoch_tag IS NULL)
-         OR
-         (lineage_parent_claim_id IS NOT NULL AND lineage_epoch_tag IS NOT NULL)
-       ))
-    ),
-    CHECK (
-      lineage_parent_claim_id IS NULL
-      OR lineage_parent_claim_id <> lineage_claim_id
-    ),
-    FOREIGN KEY (workspace_id, object_id)
-      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (lineage_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (lineage_parent_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
-) STRICT;
-
-CREATE TABLE ydoc_updates_v29 (
-    workspace_id       TEXT    NOT NULL,
-    version_id         TEXT    NOT NULL,
-    object_id          TEXT    NOT NULL,
-    seq                INTEGER NOT NULL CHECK (seq > 0),
-    update_blob_sha256 TEXT    NOT NULL,
-    actor_origin_id    TEXT,
-    recorded_at_ms     INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, seq),
-    FOREIGN KEY (update_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs_v29(workspace_id, version_id, object_id)
-      ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE ydoc_snapshots_v29 (
-    workspace_id             TEXT    NOT NULL,
-    version_id               TEXT    NOT NULL,
-    object_id                TEXT    NOT NULL,
-    up_to_seq                INTEGER NOT NULL CHECK (up_to_seq >= 0),
-    snapshot_blob_sha256     TEXT    NOT NULL,
-    state_vector_blob_sha256 TEXT    NOT NULL,
-    recorded_at_ms           INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, up_to_seq),
-    FOREIGN KEY (snapshot_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (state_vector_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs_v29(workspace_id, version_id, object_id)
-      ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE ydoc_deferred_updates_v29 (
+CREATE TABLE ydoc_deferred_updates (
     workspace_id     TEXT    NOT NULL,
     version_id       TEXT    NOT NULL,
     object_id        TEXT    NOT NULL,
@@ -2078,188 +888,22 @@ CREATE TABLE ydoc_deferred_updates_v29 (
         length(lineage_claim_id) = 64
         AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'
       )),
+    relay_seq INTEGER
+      CHECK (relay_seq IS NULL OR relay_seq >= 0),
+    record_facts_json TEXT,
     PRIMARY KEY (workspace_id, origin_id, origin_seq),
     FOREIGN KEY (workspace_id, object_id)
       REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
 ) STRICT;
 
-INSERT INTO ydoc_docs_v29 (
-    workspace_id, version_id, object_id, content_kind, regime,
-    head_update_seq, head_snapshot_seq, settle_seq, last_settled_sha,
-    updated_at_ms, path, lineage_claim_status, lineage_claim_id,
-    lineage_parent_claim_id, lineage_epoch_tag
-)
-SELECT
-    d.workspace_id, d.version_id, d.object_id, d.content_kind,
-    CASE WHEN d.base_claimed <> 0 OR EXISTS (
-      SELECT 1 FROM ydoc_snapshots s
-       WHERE s.workspace_id = d.workspace_id
-         AND s.version_id = d.version_id
-         AND s.object_id = d.object_id
-         AND s.up_to_seq = 0
-    ) THEN 'replicated' ELSE d.regime END,
-    d.head_update_seq, d.head_snapshot_seq, d.settle_seq, d.last_settled_sha,
-    d.updated_at_ms, d.path,
-    CASE
-      WHEN EXISTS (
-        SELECT 1 FROM ydoc_snapshots s
-         WHERE s.workspace_id = d.workspace_id
-           AND s.version_id = d.version_id
-           AND s.object_id = d.object_id
-           AND s.up_to_seq = 0
-      ) THEN 'exact'
-      WHEN d.base_claimed = 0 THEN 'unclaimed'
-      WHEN EXISTS (
-        SELECT 1 FROM replication_log r
-         WHERE r.workspace_id = d.workspace_id
-           AND r.op_kind = 'ydoc.update'
-           AND CASE WHEN json_valid(r.payload_json) THEN
-             COALESCE(
-               json_type(r.payload_json, '$.versionId') = 'text'
-               AND json_extract(r.payload_json, '$.versionId') = d.version_id
-               AND json_type(r.payload_json, '$.objectId') = 'text'
-               AND json_extract(r.payload_json, '$.objectId') = d.object_id
-               AND json_type(r.payload_json, '$.updateBlobSha256') = 'text'
-               AND length(json_extract(r.payload_json, '$.updateBlobSha256')) = 64
-               AND json_extract(r.payload_json, '$.updateBlobSha256')
-                     NOT GLOB '*[^0-9a-f]*'
-               AND json_type(r.payload_json, '$.isBaseState') = 'true',
-               0
-             )
-           ELSE 0 END
-      ) THEN 'ambiguous'
-      ELSE 'missing'
-    END,
-    (
-      SELECT s.snapshot_blob_sha256 FROM ydoc_snapshots s
-       WHERE s.workspace_id = d.workspace_id
-         AND s.version_id = d.version_id
-         AND s.object_id = d.object_id
-         AND s.up_to_seq = 0
-    ),
-    NULL,
-    NULL
-  FROM ydoc_docs d;
-
-INSERT INTO ydoc_updates_v29 (
-    workspace_id, version_id, object_id, seq, update_blob_sha256,
-    actor_origin_id, recorded_at_ms
-)
-SELECT workspace_id, version_id, object_id, seq, update_blob_sha256,
-       actor_origin_id, recorded_at_ms
-  FROM ydoc_updates;
-
-INSERT INTO ydoc_snapshots_v29 (
-    workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
-    state_vector_blob_sha256, recorded_at_ms
-)
-SELECT workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
-       state_vector_blob_sha256, recorded_at_ms
-  FROM ydoc_snapshots;
-
-INSERT INTO ydoc_deferred_updates_v29 (
-    workspace_id, version_id, object_id, origin_id, origin_seq,
-    recorded_at_ms, lineage_claim_id
-)
-SELECT workspace_id, version_id, object_id, origin_id, origin_seq,
-       recorded_at_ms, NULL
-  FROM ydoc_deferred_updates;
-
-DROP TABLE ydoc_updates;
-DROP TABLE ydoc_snapshots;
-DROP TABLE ydoc_deferred_updates;
-DROP TABLE ydoc_docs;
-
-ALTER TABLE ydoc_docs_v29 RENAME TO ydoc_docs;
-ALTER TABLE ydoc_updates_v29 RENAME TO ydoc_updates;
-ALTER TABLE ydoc_snapshots_v29 RENAME TO ydoc_snapshots;
-ALTER TABLE ydoc_deferred_updates_v29 RENAME TO ydoc_deferred_updates;
-
-CREATE INDEX idx_ydoc_updates_doc_seq
-    ON ydoc_updates(workspace_id, version_id, object_id, seq);
-CREATE INDEX idx_ydoc_updates_doc_blob
-    ON ydoc_updates(workspace_id, version_id, object_id, update_blob_sha256);
-CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
-    ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC);
 CREATE INDEX ydoc_deferred_updates_by_doc
     ON ydoc_deferred_updates(workspace_id, version_id, object_id);
+
 CREATE INDEX ydoc_deferred_updates_by_lineage
     ON ydoc_deferred_updates(
       workspace_id, version_id, object_id, lineage_claim_id, origin_id, origin_seq
     ) WHERE lineage_claim_id IS NOT NULL;
 
-CREATE TABLE ydoc_inactive_lineages (
-    workspace_id                           TEXT    NOT NULL,
-    version_id                             TEXT    NOT NULL,
-    object_id                              TEXT    NOT NULL,
-    lineage_claim_id                       TEXT    NOT NULL
-      CHECK (length(lineage_claim_id) = 64
-             AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
-    parent_claim_id                        TEXT
-      CHECK (parent_claim_id IS NULL OR (
-        length(parent_claim_id) = 64
-        AND parent_claim_id NOT GLOB '*[^0-9a-f]*'
-      )),
-    disposition                            TEXT    NOT NULL CHECK (disposition IN (
-      'superseded-predecessor', 'conflicting-successor', 'rejected-base'
-    )),
-    content_kind                           TEXT    NOT NULL
-      CHECK (content_kind IN ('plaintext', 'richdoc')),
-    path                                   TEXT,
-    epoch_tag                              TEXT
-      CHECK (epoch_tag IS NULL OR (
-        length(epoch_tag) = 64 AND epoch_tag NOT GLOB '*[^0-9a-f]*'
-      )),
-    full_state_blob_sha256                 TEXT    NOT NULL,
-    state_vector_blob_sha256               TEXT    NOT NULL,
-    last_surfaced_state_vector_blob_sha256 TEXT,
-    last_surfaced_projection_sha256        TEXT
-      CHECK (last_surfaced_projection_sha256 IS NULL OR (
-        length(last_surfaced_projection_sha256) = 64
-        AND last_surfaced_projection_sha256 NOT GLOB '*[^0-9a-f]*'
-      )),
-    open_conflict_id                       TEXT,
-    recorded_at_ms                         INTEGER NOT NULL,
-    updated_at_ms                          INTEGER NOT NULL,
-    PRIMARY KEY (workspace_id, version_id, object_id, lineage_claim_id),
-    CHECK (parent_claim_id IS NULL OR parent_claim_id <> lineage_claim_id),
-    CHECK (
-      (parent_claim_id IS NULL AND epoch_tag IS NULL)
-      OR (parent_claim_id IS NOT NULL AND epoch_tag IS NOT NULL)
-    ),
-    FOREIGN KEY (workspace_id, object_id)
-      REFERENCES file_objects(workspace_id, object_id) ON DELETE RESTRICT,
-    FOREIGN KEY (lineage_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (parent_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (full_state_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (state_vector_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (last_surfaced_state_vector_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (last_surfaced_projection_sha256)
-      REFERENCES blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (workspace_id, open_conflict_id)
-      REFERENCES conflicts(workspace_id, conflict_id) ON DELETE RESTRICT
-) STRICT;
-CREATE INDEX ydoc_inactive_lineages_by_disposition
-    ON ydoc_inactive_lineages(
-      workspace_id, version_id, object_id, disposition, lineage_claim_id
-    );
-CREATE INDEX ydoc_inactive_lineages_by_parent
-    ON ydoc_inactive_lineages(
-      workspace_id, version_id, object_id, parent_claim_id, lineage_claim_id
-    ) WHERE parent_claim_id IS NOT NULL;
-CREATE INDEX ydoc_inactive_lineages_by_open_conflict
-    ON ydoc_inactive_lineages(workspace_id, open_conflict_id)
-    WHERE open_conflict_id IS NOT NULL;
-
--- A local reviewed resolution must retain one exact, ordered wire bundle until
--- the workspace has a relay position. The parent stores its causal cut. Child
--- rows preserve raw payload bytes, emitted moment identities, and every blob
--- that the pending envelopes reference.
 CREATE TABLE replication_pending_conflict_bundles (
     bundle_order            INTEGER PRIMARY KEY AUTOINCREMENT,
     workspace_id            TEXT    NOT NULL,
@@ -2272,6 +916,7 @@ CREATE TABLE replication_pending_conflict_bundles (
     FOREIGN KEY (workspace_id)
       REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX replication_pending_conflict_bundles_by_cut
     ON replication_pending_conflict_bundles(
       workspace_id, pre_effect_moment_order, bundle_order
@@ -2308,6 +953,7 @@ CREATE TABLE replication_pending_conflict_moments (
       REFERENCES replication_pending_conflict_ops(bundle_order, op_index)
       ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX replication_pending_conflict_moments_by_bundle
     ON replication_pending_conflict_moments(bundle_order, op_index);
 
@@ -2332,34 +978,26 @@ CREATE TABLE replication_pending_conflict_binary_blobs (
     FOREIGN KEY (blob_sha256)
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
-";
 
-pub(crate) const YDOC_LINEAGE_CLAIMS_MIGRATION_ID: &str = "v1-ydoc-lineage-claims";
+CREATE TABLE ydoc_base_relay_candidates (
+    workspace_id     TEXT    NOT NULL,
+    version_id       TEXT    NOT NULL,
+    object_id        TEXT    NOT NULL,
+    lineage_claim_id TEXT    NOT NULL
+      CHECK (length(lineage_claim_id) = 64
+             AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
+    origin_id        TEXT    NOT NULL CHECK (length(origin_id) > 0),
+    origin_seq       INTEGER NOT NULL CHECK (origin_seq >= 0),
+    PRIMARY KEY (workspace_id, version_id, object_id, origin_id, origin_seq),
+    FOREIGN KEY (workspace_id, object_id)
+      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
+    FOREIGN KEY (lineage_claim_id)
+      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
+) STRICT;
 
-/// Ordinal 30. Strict `conflict.resolve` v1 no longer defers or surfaces the
-/// legacy mirrored-resolution outcomes stored in this table. Delete the dead
-/// rows and schema instead of retaining a second, unreachable settlement path.
-const V1_DROP_REPLICATION_PENDING_RESOLVES_DDL: &str = "\
-DROP TABLE replication_pending_resolves;
-";
+CREATE INDEX ydoc_base_relay_candidates_by_doc
+    ON ydoc_base_relay_candidates(workspace_id, version_id, object_id);
 
-pub(crate) const DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID: &str =
-    "v1-drop-replication-pending-resolves";
-
-/// Ordinal 31. A compound parent and its adjacent shadows can cross a relay
-/// page boundary. Keep the parent's apply disposition on its append-only log
-/// row so a later shadow can distinguish a refused parent from an accepted
-/// parent whose owned moment history is corrupt.
-const V1_REPLICATION_LOG_DISPOSITION_DDL: &str = "\
-ALTER TABLE replication_log
-ADD COLUMN apply_disposition TEXT NOT NULL DEFAULT 'applied'
-  CHECK (apply_disposition IN ('applied', 'refused'));
-";
-
-pub(crate) const REPLICATION_LOG_DISPOSITION_MIGRATION_ID: &str = "v1-replication-log-disposition";
-
-/// Ordinal 33. Immutable engine-owned authority for drawing asset lifecycle work.
-const V1_SCENE_ASSET_DELETE_AUTHORITY_DDL: &str = "\
 CREATE TABLE scene_asset_delete_authorities (
     workspace_id             TEXT NOT NULL,
     version_id               TEXT NOT NULL,
@@ -2395,16 +1033,8 @@ CREATE INDEX idx_scene_asset_delete_authority_parent
         version_id,
         drawing_delete_moment_id
     );
-";
 
-pub(crate) const SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID: &str =
-    "v1-scene-asset-delete-authority";
-
-/// Ordinal 34. Permit scene documents without changing either shipped Y.Doc migration.
-/// SQLite cannot alter a CHECK constraint in place, so this rebuild preserves
-/// the live marker, its two dependent tables, and every inactive lineage.
-const V1_YDOC_SCENE_CONTENT_KIND_DDL: &str = "\
-CREATE TABLE ydoc_docs_v34 (
+CREATE TABLE ydoc_docs (
     workspace_id            TEXT    NOT NULL,
     version_id              TEXT    NOT NULL,
     object_id               TEXT    NOT NULL,
@@ -2422,9 +1052,7 @@ CREATE TABLE ydoc_docs_v34 (
     updated_at_ms           INTEGER NOT NULL,
     path                    TEXT,
     lineage_claim_status    TEXT    NOT NULL DEFAULT 'unclaimed'
-                                    CHECK (lineage_claim_status IN (
-                                      'unclaimed', 'exact', 'missing', 'ambiguous'
-                                    )),
+                                    CHECK (lineage_claim_status IN ('unclaimed', 'exact')),
     lineage_claim_id        TEXT
       CHECK (lineage_claim_id IS NULL OR (
         length(lineage_claim_id) = 64
@@ -2446,17 +1074,11 @@ CREATE TABLE ydoc_docs_v34 (
     base_relay_seq          INTEGER
       CHECK (base_relay_seq IS NULL OR base_relay_seq >= 0),
     base_relay_confirmed_absent INTEGER NOT NULL DEFAULT 0
-      CHECK (base_relay_confirmed_absent IN (0, 1)),
+      CHECK (base_relay_confirmed_absent IN (0, 1)), seed_source_sha256 TEXT,
     PRIMARY KEY (workspace_id, version_id, object_id),
     CHECK (head_snapshot_seq <= head_update_seq),
     CHECK (
       (lineage_claim_status = 'unclaimed'
-       AND lineage_claim_id IS NULL
-       AND lineage_parent_claim_id IS NULL
-       AND lineage_epoch_tag IS NULL)
-      OR
-      (regime = 'replicated'
-       AND lineage_claim_status IN ('missing', 'ambiguous')
        AND lineage_claim_id IS NULL
        AND lineage_parent_claim_id IS NULL
        AND lineage_epoch_tag IS NULL)
@@ -2482,7 +1104,7 @@ CREATE TABLE ydoc_docs_v34 (
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
-CREATE TABLE ydoc_updates_v34 (
+CREATE TABLE ydoc_updates (
     workspace_id       TEXT    NOT NULL,
     version_id         TEXT    NOT NULL,
     object_id          TEXT    NOT NULL,
@@ -2490,15 +1112,20 @@ CREATE TABLE ydoc_updates_v34 (
     update_blob_sha256 TEXT    NOT NULL,
     actor_origin_id    TEXT,
     recorded_at_ms     INTEGER NOT NULL,
+    actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation')),
+    on_behalf_of TEXT,
+    chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0),
     PRIMARY KEY (workspace_id, version_id, object_id, seq),
     FOREIGN KEY (update_blob_sha256)
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs_v34(workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
       ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE ydoc_snapshots_v34 (
+CREATE TABLE ydoc_snapshots (
     workspace_id             TEXT    NOT NULL,
     version_id               TEXT    NOT NULL,
     object_id                TEXT    NOT NULL,
@@ -2512,11 +1139,11 @@ CREATE TABLE ydoc_snapshots_v34 (
     FOREIGN KEY (state_vector_blob_sha256)
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
     FOREIGN KEY (workspace_id, version_id, object_id)
-      REFERENCES ydoc_docs_v34(workspace_id, version_id, object_id)
+      REFERENCES ydoc_docs(workspace_id, version_id, object_id)
       ON DELETE CASCADE
 ) STRICT;
 
-CREATE TABLE ydoc_inactive_lineages_v34 (
+CREATE TABLE ydoc_inactive_lineages (
     workspace_id                           TEXT    NOT NULL,
     version_id                             TEXT    NOT NULL,
     object_id                              TEXT    NOT NULL,
@@ -2573,87 +1200,30 @@ CREATE TABLE ydoc_inactive_lineages_v34 (
       REFERENCES conflicts(workspace_id, conflict_id) ON DELETE RESTRICT
 ) STRICT;
 
-INSERT INTO ydoc_docs_v34 (
-    workspace_id, version_id, object_id, content_kind, regime,
-    head_update_seq, head_snapshot_seq, settle_seq, last_settled_sha,
-    updated_at_ms, path, lineage_claim_status, lineage_claim_id,
-    lineage_parent_claim_id, lineage_epoch_tag, base_origin_id,
-    base_origin_seq, base_relay_seq, base_relay_confirmed_absent
-)
-SELECT workspace_id, version_id, object_id, content_kind, regime,
-       head_update_seq, head_snapshot_seq, settle_seq, last_settled_sha,
-       updated_at_ms, path, lineage_claim_status, lineage_claim_id,
-       lineage_parent_claim_id, lineage_epoch_tag, base_origin_id,
-       base_origin_seq, base_relay_seq, base_relay_confirmed_absent
-  FROM ydoc_docs;
-
-INSERT INTO ydoc_updates_v34 (
-    workspace_id, version_id, object_id, seq, update_blob_sha256,
-    actor_origin_id, recorded_at_ms
-)
-SELECT workspace_id, version_id, object_id, seq, update_blob_sha256,
-       actor_origin_id, recorded_at_ms
-  FROM ydoc_updates;
-
-INSERT INTO ydoc_snapshots_v34 (
-    workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
-    state_vector_blob_sha256, recorded_at_ms
-)
-SELECT workspace_id, version_id, object_id, up_to_seq, snapshot_blob_sha256,
-       state_vector_blob_sha256, recorded_at_ms
-  FROM ydoc_snapshots;
-
-INSERT INTO ydoc_inactive_lineages_v34 (
-    workspace_id, version_id, object_id, lineage_claim_id, parent_claim_id,
-    disposition, content_kind, path, epoch_tag, full_state_blob_sha256,
-    state_vector_blob_sha256, last_surfaced_state_vector_blob_sha256,
-    last_surfaced_projection_sha256, open_conflict_id, recorded_at_ms,
-    updated_at_ms
-)
-SELECT workspace_id, version_id, object_id, lineage_claim_id, parent_claim_id,
-       disposition, content_kind, path, epoch_tag, full_state_blob_sha256,
-       state_vector_blob_sha256, last_surfaced_state_vector_blob_sha256,
-       last_surfaced_projection_sha256, open_conflict_id, recorded_at_ms,
-       updated_at_ms
-  FROM ydoc_inactive_lineages;
-
-DROP TABLE ydoc_updates;
-DROP TABLE ydoc_snapshots;
-DROP TABLE ydoc_docs;
-DROP TABLE ydoc_inactive_lineages;
-
-ALTER TABLE ydoc_docs_v34 RENAME TO ydoc_docs;
-ALTER TABLE ydoc_updates_v34 RENAME TO ydoc_updates;
-ALTER TABLE ydoc_snapshots_v34 RENAME TO ydoc_snapshots;
-ALTER TABLE ydoc_inactive_lineages_v34 RENAME TO ydoc_inactive_lineages;
-
 CREATE INDEX idx_ydoc_updates_doc_seq
     ON ydoc_updates(workspace_id, version_id, object_id, seq);
+
 CREATE INDEX idx_ydoc_updates_doc_blob
     ON ydoc_updates(workspace_id, version_id, object_id, update_blob_sha256);
+
 CREATE INDEX idx_ydoc_snapshots_doc_uptoseq
     ON ydoc_snapshots(workspace_id, version_id, object_id, up_to_seq DESC);
+
 CREATE INDEX ydoc_inactive_lineages_by_disposition
     ON ydoc_inactive_lineages(
       workspace_id, version_id, object_id, disposition, lineage_claim_id
     );
+
 CREATE INDEX ydoc_inactive_lineages_by_parent
     ON ydoc_inactive_lineages(
       workspace_id, version_id, object_id, parent_claim_id, lineage_claim_id
     ) WHERE parent_claim_id IS NOT NULL;
+
 CREATE INDEX ydoc_inactive_lineages_by_open_conflict
     ON ydoc_inactive_lineages(workspace_id, open_conflict_id)
     WHERE open_conflict_id IS NOT NULL;
-";
 
-pub(crate) const YDOC_SCENE_CONTENT_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-content-kind";
-
-/// Ordinal 35. Recovery decisions are durable relay-arbitration records, so a
-/// scene base must survive the same crash/retry path as plaintext and richdoc.
-/// Ordinal 32 is already shipped on main; widen its content-kind constraint in
-/// an appended rebuild instead of changing that migration's recorded checksum.
-const V1_YDOC_SCENE_RECOVERY_KIND_DDL: &str = "\
-CREATE TABLE ydoc_recovery_decisions_v35 (
+CREATE TABLE ydoc_recovery_decisions (
     workspace_id                    TEXT    NOT NULL,
     origin_id                       TEXT    NOT NULL CHECK (length(origin_id) > 0),
     origin_seq                      INTEGER NOT NULL CHECK (origin_seq >= 0),
@@ -2693,211 +1263,28 @@ CREATE TABLE ydoc_recovery_decisions_v35 (
       REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
 ) STRICT;
 
-INSERT INTO ydoc_recovery_decisions_v35 (
-    workspace_id, origin_id, origin_seq, version_id, object_id, original_path,
-    incoming_content_kind, incoming_update_blob_sha256,
-    incoming_lineage_claim_id, incoming_is_base_state, losing_claim_id,
-    recovered_path, recovery_collision_ordinal, recovery_object_id,
-    recovery_moment_id, recorded_at_ms
-)
-SELECT workspace_id, origin_id, origin_seq, version_id, object_id, original_path,
-       incoming_content_kind, incoming_update_blob_sha256,
-       incoming_lineage_claim_id, incoming_is_base_state, losing_claim_id,
-       recovered_path, recovery_collision_ordinal, recovery_object_id,
-       recovery_moment_id, recorded_at_ms
-  FROM ydoc_recovery_decisions;
-
-DROP TABLE ydoc_recovery_decisions;
-ALTER TABLE ydoc_recovery_decisions_v35 RENAME TO ydoc_recovery_decisions;
-";
-
-pub(crate) const YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-recovery-kind";
-
-/// Ordinal 36. Which share views may drain a FILE MOMENT through their share.
-/// A row here is written only by `record_share_view_identity`,
-/// and only for an `edit` grant, in the same transaction as the identity it
-/// records — so the row's existence means both "this is a share view that may
-/// send file changes" and "it has the identity such a journal append needs".
-///
-/// It is a fact, not a proxy. The obvious shortcut — reading
-/// `EXISTS(sync_identity)` — is wrong, and `journal.rs` says why: ordinary
-/// chat activity mints an identity unconditionally, so that row cannot tell a
-/// share view that may send file changes from one that may not.
-const V1_SHARE_VIEW_FILE_LANE_DDL: &str = "\
 CREATE TABLE share_view_file_lane (
     workspace_id  TEXT    NOT NULL PRIMARY KEY,
     recorded_at_ms INTEGER NOT NULL
 ) STRICT;
-";
 
-pub(crate) const SHARE_VIEW_FILE_LANE_MIGRATION_ID: &str = "v1-share-view-file-lane";
-
-/// Ordinal 32. Persist the relay arbitration coordinate for Y.Doc bases.
-/// Candidate coordinates are only hints recovered from the local append-only
-/// log; sync must authenticate each exact
-/// `(origin_id, origin_seq)` lookup with the relay before it stamps an order.
-const V1_YDOC_RELAY_ARBITRATION_DDL: &str = "\
-ALTER TABLE ydoc_docs ADD COLUMN base_origin_id TEXT;
-ALTER TABLE ydoc_docs ADD COLUMN base_origin_seq INTEGER
-    CHECK (base_origin_seq IS NULL OR base_origin_seq >= 0);
-ALTER TABLE ydoc_docs ADD COLUMN base_relay_seq INTEGER
-    CHECK (base_relay_seq IS NULL OR base_relay_seq >= 0);
-ALTER TABLE ydoc_docs ADD COLUMN base_relay_confirmed_absent INTEGER NOT NULL DEFAULT 0
-    CHECK (base_relay_confirmed_absent IN (0, 1));
-ALTER TABLE ydoc_deferred_updates ADD COLUMN relay_seq INTEGER
-    CHECK (relay_seq IS NULL OR relay_seq >= 0);
-
-CREATE TABLE ydoc_base_relay_candidates (
-    workspace_id     TEXT    NOT NULL,
-    version_id       TEXT    NOT NULL,
-    object_id        TEXT    NOT NULL,
-    lineage_claim_id TEXT    NOT NULL
-      CHECK (length(lineage_claim_id) = 64
-             AND lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
-    origin_id        TEXT    NOT NULL CHECK (length(origin_id) > 0),
-    origin_seq       INTEGER NOT NULL CHECK (origin_seq >= 0),
-    PRIMARY KEY (workspace_id, version_id, object_id, origin_id, origin_seq),
-    FOREIGN KEY (workspace_id, object_id)
-      REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE,
-    FOREIGN KEY (lineage_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
-) STRICT;
-CREATE INDEX ydoc_base_relay_candidates_by_doc
-    ON ydoc_base_relay_candidates(workspace_id, version_id, object_id);
-
--- A losing base is recovered as an ordinary sibling file. This decision row
--- makes the generated path, object, and moment stable across crash-retry.
-CREATE TABLE ydoc_recovery_decisions (
-    workspace_id                    TEXT    NOT NULL,
-    origin_id                       TEXT    NOT NULL CHECK (length(origin_id) > 0),
-    origin_seq                      INTEGER NOT NULL CHECK (origin_seq >= 0),
-    version_id                      TEXT    NOT NULL CHECK (length(version_id) > 0),
-    object_id                       TEXT    NOT NULL CHECK (length(object_id) > 0),
-    original_path                   TEXT    NOT NULL CHECK (length(original_path) > 0),
-    incoming_content_kind           TEXT    NOT NULL
-      CHECK (incoming_content_kind IN ('plaintext', 'richdoc')),
-    incoming_update_blob_sha256     TEXT    NOT NULL
-      CHECK (length(incoming_update_blob_sha256) = 64
-             AND incoming_update_blob_sha256 NOT GLOB '*[^0-9a-f]*'),
-    incoming_lineage_claim_id       TEXT    NOT NULL
-      CHECK (length(incoming_lineage_claim_id) = 64
-             AND incoming_lineage_claim_id NOT GLOB '*[^0-9a-f]*'),
-    incoming_is_base_state          INTEGER NOT NULL
-      CHECK (incoming_is_base_state = 1),
-    losing_claim_id                 TEXT    NOT NULL
-      CHECK (length(losing_claim_id) = 64
-             AND losing_claim_id NOT GLOB '*[^0-9a-f]*'),
-    recovered_path                  TEXT    NOT NULL CHECK (length(recovered_path) > 0),
-    recovery_collision_ordinal      TEXT    NOT NULL
-      CHECK (length(recovery_collision_ordinal) > 0
-             AND recovery_collision_ordinal NOT GLOB '*[^0-9]*'),
-    recovery_object_id              TEXT    NOT NULL CHECK (length(recovery_object_id) > 0),
-    recovery_moment_id              TEXT    NOT NULL CHECK (length(recovery_moment_id) > 0),
-    recorded_at_ms                  INTEGER NOT NULL CHECK (recorded_at_ms >= 0),
-    PRIMARY KEY (workspace_id, origin_id, origin_seq),
-    UNIQUE (workspace_id, recovery_object_id),
-    UNIQUE (workspace_id, recovery_moment_id),
-    FOREIGN KEY (workspace_id)
-      REFERENCES versioned_workspaces(workspace_id) ON DELETE CASCADE,
-    FOREIGN KEY (incoming_update_blob_sha256)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (incoming_lineage_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT,
-    FOREIGN KEY (losing_claim_id)
-      REFERENCES binary_blobs(sha256) ON DELETE RESTRICT
-) STRICT;
-
--- Extract only structurally valid base coordinates whose blob is durable.
--- A local row is not authority for relay presence or order; it is merely the
--- exact coordinate that the authenticated lookup endpoint must answer.
-INSERT OR IGNORE INTO ydoc_base_relay_candidates (
-    workspace_id, version_id, object_id, lineage_claim_id, origin_id, origin_seq
-)
-SELECT d.workspace_id, d.version_id, d.object_id,
-       json_extract(r.payload_json, '$.updateBlobSha256'),
-       r.origin_id, r.origin_seq
-  FROM ydoc_docs AS d
-  JOIN replication_log AS r
-    ON r.workspace_id = d.workspace_id
-   AND r.op_kind = 'ydoc.update'
-   AND r.apply_disposition = 'applied'
- WHERE json_valid(r.payload_json)
-   AND json_type(r.payload_json, '$.versionId') = 'text'
-   AND json_extract(r.payload_json, '$.versionId') = d.version_id
-   AND json_type(r.payload_json, '$.objectId') = 'text'
-   AND json_extract(r.payload_json, '$.objectId') = d.object_id
-   AND json_type(r.payload_json, '$.isBaseState') = 'true'
-   AND json_type(r.payload_json, '$.updateBlobSha256') = 'text'
-   AND length(json_extract(r.payload_json, '$.updateBlobSha256')) = 64
-   AND json_extract(r.payload_json, '$.updateBlobSha256') NOT GLOB '*[^0-9a-f]*'
-   AND json_type(r.payload_json, '$.lineageClaimId') = 'text'
-   AND json_extract(r.payload_json, '$.lineageClaimId') =
-       json_extract(r.payload_json, '$.updateBlobSha256')
-   AND d.lineage_claim_status = 'exact'
-   AND d.lineage_claim_id = json_extract(r.payload_json, '$.updateBlobSha256')
-   AND EXISTS (
-       SELECT 1 FROM binary_blobs AS b
-        WHERE b.sha256 = json_extract(r.payload_json, '$.updateBlobSha256')
-   );
-";
-
-pub(crate) const YDOC_RELAY_ARBITRATION_MIGRATION_ID: &str = "v1-ydoc-relay-arbitration";
-
-/// Ordinal 37. A recipient of an edit-level file share submits its own changes
-/// to the granter as a proposal, and a submit must know where the
-/// last one stopped reading the local journal. That position is its own fact:
-/// `shared_channel_push_state` records what a share has pushed, and a proposal
-/// pushes nothing until the recipient decides to submit.
-const V1_SHARE_PROPOSAL_PUSH_STATE_DDL: &str = "\
 CREATE TABLE share_proposal_push_state (
     workspace_id TEXT    NOT NULL,
     share_id     TEXT    NOT NULL,
     scanned_seq  INTEGER NOT NULL CHECK (scanned_seq >= -1),
     PRIMARY KEY (workspace_id, share_id)
 ) STRICT;
-";
 
-pub(crate) const SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID: &str = "v1-share-proposal-push-state";
-
-/// Ordinal 38. The captured head a lineage's seed update imported.
-/// Set only when the client's declared seed append commits; a lineage whose
-/// entire durable history is that one seed, with the recorded source still
-/// the captured head, settles and prunes without writing the file.
-const V1_YDOC_SEED_SOURCE_DDL: &str = "\
-ALTER TABLE ydoc_docs ADD COLUMN seed_source_sha256 TEXT;
-";
-
-pub(crate) const YDOC_SEED_SOURCE_MIGRATION_ID: &str = "v1-ydoc-seed-source";
-
-/// Ordinal 39. History pages bound protected moments by their recording-time
-/// window. This index makes that read proportional to the requested window
-/// instead of sorting every protected moment in the version.
-const V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL: &str = "\
 CREATE INDEX idx_secret_moments_history_time
     ON secret_moments(workspace_id, version_id, recorded_at_ms DESC, moment_order DESC);
-";
 
-pub(crate) const SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID: &str =
-    "v1-secret-moment-history-time-index";
-
-/// Ordinal 40. A receiver-local content revision for each chat conversation.
-/// Rows are created lazily: an absent row is revision zero and the first
-/// visible mutation inserts revision one.
-const V1_CHAT_CONVERSATION_REVISIONS_DDL: &str = "\
 CREATE TABLE chat_conversation_revisions (
     workspace_id     TEXT    NOT NULL,
     thread_id        TEXT    NOT NULL,
     content_revision INTEGER NOT NULL CHECK (content_revision > 0),
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
-";
 
-pub(crate) const CHAT_CONVERSATION_REVISIONS_MIGRATION_ID: &str = "v1-chat-conversation-revisions";
-
-/// Ordinal 41. Local collection detection and record bindings. Collection
-/// state is derived from active-version file heads, but persists so record ids
-/// survive renames and copied-file collisions have an existing owner.
-const V1_COLLECTION_ADOPTION_DDL: &str = "\
 CREATE TABLE collections (
     workspace_id             TEXT NOT NULL,
     version_id               TEXT NOT NULL,
@@ -2922,6 +1309,8 @@ CREATE TABLE collection_records (
       CHECK (adoption_state IN (
         'pending', 'pending-lossless', 'deferred-conflict', 'deferred-conflict-lossless', 'adopted'
       )),
+    index_initialized INTEGER NOT NULL DEFAULT 0
+      CHECK (index_initialized IN (0, 1)),
     PRIMARY KEY (workspace_id, version_id, file_path),
     UNIQUE (workspace_id, version_id, record_id),
     FOREIGN KEY (workspace_id, version_id, collection_path)
@@ -2929,18 +1318,9 @@ CREATE TABLE collection_records (
     FOREIGN KEY (workspace_id, object_id)
       REFERENCES file_objects(workspace_id, object_id) ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX collection_records_by_collection
     ON collection_records(workspace_id, version_id, collection_path, file_path);
-";
-
-pub(crate) const COLLECTION_ADOPTION_MIGRATION_ID: &str = "v1-collection-adoption";
-
-/// Ordinal 42. The local collection projection derived from applied record
-/// frontmatter: current values with validation, per-field history, and
-/// relation edges used for referential cleanup.
-const V1_COLLECTION_INDEX_DDL: &str = "\
-ALTER TABLE collection_records ADD COLUMN index_initialized INTEGER NOT NULL DEFAULT 0
-  CHECK (index_initialized IN (0, 1));
 
 CREATE TABLE collection_record_fields (
     workspace_id          TEXT NOT NULL,
@@ -2976,6 +1356,11 @@ CREATE TABLE collection_field_history (
       source_origin_seq IS NULL OR source_origin_seq >= 0
     ),
     recorded_at_ms         INTEGER NOT NULL,
+    actor_kind TEXT
+    CHECK (actor_kind IN ('human','agent','automation')),
+    on_behalf_of TEXT,
+    chain_depth INTEGER
+    CHECK (chain_depth IS NULL OR chain_depth >= 0),
     CHECK (
       (source_origin_id IS NULL AND source_origin_seq IS NULL) OR
       (source_origin_id IS NOT NULL AND source_origin_seq IS NOT NULL)
@@ -2983,10 +1368,12 @@ CREATE TABLE collection_field_history (
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX collection_field_history_by_record
     ON collection_field_history(
       workspace_id, version_id, record_id, recorded_at_ms DESC, history_id DESC
     );
+
 CREATE UNIQUE INDEX collection_field_history_by_source
     ON collection_field_history(
       workspace_id, version_id, record_id, field_name,
@@ -3007,14 +1394,7 @@ CREATE TABLE collection_relation_edges (
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
-";
 
-pub(crate) const COLLECTION_INDEX_MIGRATION_ID: &str = "v1-collection-index";
-
-/// Ordinal 43. Cache record-id ownership observed in text moments. Reconciliation
-/// backfills each version once, then every new text moment appends to this table
-/// inside the moment transaction.
-const V1_COLLECTION_HISTORICAL_OWNERS_DDL: &str = "\
 CREATE TABLE collection_historical_record_owners (
     workspace_id          TEXT NOT NULL,
     version_id            TEXT NOT NULL,
@@ -3028,10 +1408,12 @@ CREATE TABLE collection_historical_record_owners (
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
+
 CREATE INDEX collection_historical_record_owners_by_record
     ON collection_historical_record_owners(
       workspace_id, version_id, record_id, object_id
     );
+
 CREATE INDEX collection_historical_record_owners_by_object
     ON collection_historical_record_owners(
       workspace_id, version_id, object_id, moment_order DESC
@@ -3045,57 +1427,15 @@ CREATE TABLE collection_historical_record_owner_backfills (
     FOREIGN KEY (workspace_id, version_id)
       REFERENCES versions(workspace_id, version_id) ON DELETE CASCADE
 ) STRICT;
-";
 
-pub(crate) const COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID: &str =
-    "v1-collection-historical-owners";
-
-/// Ordinal 44. Global generation-first indexes for the mutation high-water
-/// query. Moment order is global across workspaces. Ordinary materialization
-/// jobs also reserve generations after rollback removes their source moment;
-/// version-switch projections belong to a separate timestamp domain.
-const V1_GLOBAL_GENERATION_INDEXES_DDL: &str = "\
 CREATE INDEX idx_moments_global_order
     ON moments(moment_order DESC);
+
 CREATE INDEX idx_materialization_jobs_mutation_generation
     ON materialization_jobs(target_generation DESC)
     WHERE job_id NOT GLOB 'version-switch-mat_*'
       AND job_id NOT GLOB 'version-switch-secret-mat_*';
-";
 
-pub(crate) const GLOBAL_GENERATION_INDEXES_MIGRATION_ID: &str = "v1-global-generation-indexes";
-
-/// Ordinal 45. Declared write attribution beside the author origin: the actor
-/// kind, the `onBehalfOf` principal, and the automation-chain depth, on both
-/// the update log and the field history it derives. The update log keeps them
-/// beside `actor_origin_id` as the journal of record for a write's provenance
-/// (capture reads provenance from `ydoc_updates`); field history is what the
-/// events and the automation claims read today. All three are NULL for an
-/// unattributed write; a NULL `actor_kind` passes the CHECK by SQL semantics.
-const V1_CHANGE_ATTRIBUTION_DDL: &str = "\
-ALTER TABLE ydoc_updates ADD COLUMN actor_kind TEXT
-    CHECK (actor_kind IN ('human','agent','automation'));
-ALTER TABLE ydoc_updates ADD COLUMN on_behalf_of TEXT;
-ALTER TABLE ydoc_updates ADD COLUMN chain_depth INTEGER
-    CHECK (chain_depth IS NULL OR chain_depth >= 0);
-ALTER TABLE collection_field_history ADD COLUMN actor_kind TEXT
-    CHECK (actor_kind IN ('human','agent','automation'));
-ALTER TABLE collection_field_history ADD COLUMN on_behalf_of TEXT;
-ALTER TABLE collection_field_history ADD COLUMN chain_depth INTEGER
-    CHECK (chain_depth IS NULL OR chain_depth >= 0);
-";
-
-pub(crate) const CHANGE_ATTRIBUTION_MIGRATION_ID: &str = "v1-change-attribution";
-
-/// Ordinal 46. The origin-device automation trigger (ADR 0008), shaped like
-/// the chat dispatch ledger: local state in engine.db, never replicated.
-/// `automation_subscriptions` is the registered interest set; a committed
-/// local record change inserts one `automation_claims` row per subscribed
-/// automation, keyed by the change's replication coordinate — or, on a
-/// lineage no other device can see, by the device-local history row id. The
-/// key CHECK makes the two shapes exclusive; the partial unique indexes make
-/// a re-insert of the same trigger a no-op.
-const V1_AUTOMATION_CLAIMS_DDL: &str = "\
 CREATE TABLE automation_subscriptions (
     workspace_id  TEXT    NOT NULL,
     automation_id TEXT    NOT NULL,
@@ -3123,388 +1463,31 @@ CREATE TABLE automation_claims (
     CHECK ((trigger_origin_id IS NULL) = (trigger_origin_seq IS NULL)),
     CHECK ((trigger_origin_id IS NOT NULL) <> (trigger_history_id IS NOT NULL))
 ) STRICT;
+
 CREATE UNIQUE INDEX idx_automation_claims_trigger_coordinate
     ON automation_claims(workspace_id, automation_id, trigger_origin_id, trigger_origin_seq)
     WHERE trigger_origin_id IS NOT NULL;
+
 CREATE UNIQUE INDEX idx_automation_claims_trigger_history
     ON automation_claims(workspace_id, automation_id, trigger_history_id)
     WHERE trigger_history_id IS NOT NULL;
+
 CREATE INDEX idx_automation_claims_state
     ON automation_claims(workspace_id, state, created_at_ms, claim_id);
 ";
 
-pub(crate) const AUTOMATION_CLAIMS_MIGRATION_ID: &str = "v1-automation-claims";
-
-/// Ordinal 47. The record-event decision a drained parked `ydoc.update`
-/// committed, persisted on its still-parked coordinate. The drain
-/// derives a parked update's collection record facts inside the same
-/// transaction that commits the update and its field history; if the drain's
-/// final projection then fails, those facts would otherwise vanish — the
-/// retry dedupes the committed update and derives nothing. Storing the
-/// decision on the deferred row (device-local, never replicated) lets the
-/// retry return it; the existing queue cleanup consumes it, so the facts
-/// surface exactly once.
-const V1_DEFERRED_RECORD_FACTS_DDL: &str = "\
-ALTER TABLE ydoc_deferred_updates ADD COLUMN record_facts_json TEXT;
-";
-
-pub(crate) const DEFERRED_RECORD_FACTS_MIGRATION_ID: &str = "v1-deferred-record-facts";
-
-/// The frozen, ordered list of migrations this build knows. The baseline (0) is
-/// the day-one v2 schema; future schema changes append with a monotone ordinal.
-pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
-    Migration {
-        ordinal: 0,
-        id: BASELINE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V2_BASELINE_DDL,
-        sets_user_version: Some(ENGINE_SCHEMA_VERSION),
-    },
-    Migration {
-        ordinal: 1,
-        id: SECRETS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SECRETS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 2,
-        id: YDOC_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 3,
-        id: CHATS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CHATS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 4,
-        id: SEARCH_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SEARCH_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 5,
-        id: MOMENT_BEFORE_LINK_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MOMENT_BEFORE_LINK_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 6,
-        id: SYNC_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SYNC_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 7,
-        id: CONFLICTS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CONFLICTS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 8,
-        id: SHADOW_CLONE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SHADOW_CLONE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 9,
-        id: BINARY_CONFLICT_SIDES_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_BINARY_CONFLICT_SIDES_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 10,
-        id: BINARY_HEAD_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_BINARY_HEAD_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 11,
-        id: PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_PATH_ALIASES_OBJECT_INDEX_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 12,
-        id: YDOC_DEFERRED_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_DEFERRED_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 13,
-        id: ENGINE_REQUEST_KIND_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_ENGINE_REQUEST_KIND_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 14,
-        id: SECRET_CAPTURE_OWNERSHIP_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SECRET_CAPTURE_OWNERSHIP_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 15,
-        id: MOMENT_PAYLOAD_PROVENANCE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MOMENT_PAYLOAD_PROVENANCE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 16,
-        id: REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_REPLICATION_PENDING_RESOLVES_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        // Ordinal 16 is taken by v1-replication-pending-resolves.
-        // Schema shards serialize through this list; this one appends at 17.
-        ordinal: 17,
-        id: CHAT_PENDING_REPLICATION_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CHAT_PENDING_REPLICATION_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        // Ordinal 17 is taken by v1-chat-pending-replication. Schema
-        // shards serialize through this list; this one appends at 18.
-        ordinal: 18,
-        id: MOMENT_METADATA_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MOMENT_METADATA_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 19,
-        id: MOMENT_ROLLBACK_PREIMAGE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MOMENT_ROLLBACK_PREIMAGE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 20,
-        id: SHARED_CHANNEL_DENSE_PUSH_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SHARED_CHANNEL_DENSE_PUSH_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 21,
-        id: YDOC_PREBASE_DEFERRED_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_PREBASE_DEFERRED_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 22,
-        id: REPLICATION_PENDING_REFUSALS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_REPLICATION_PENDING_REFUSALS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 23,
-        id: CHAT_PENDING_MESSAGE_THREAD_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CHAT_PENDING_MESSAGE_THREAD_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 24,
-        id: MATERIALIZATION_WORKSPACE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MATERIALIZATION_WORKSPACE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 25,
-        id: MAIN_VERSION_NAME_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_MAIN_VERSION_NAME_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 26,
-        id: SECRET_FORK_BASE_TIMESTAMP_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SECRET_FORK_BASE_TIMESTAMP_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 27,
-        id: YDOC_PATH_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_PATH_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 28,
-        id: SECRET_MOMENT_SOURCE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SECRET_MOMENT_SOURCE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 29,
-        id: YDOC_LINEAGE_CLAIMS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_LINEAGE_CLAIMS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 30,
-        id: DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_DROP_REPLICATION_PENDING_RESOLVES_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 31,
-        id: REPLICATION_LOG_DISPOSITION_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_REPLICATION_LOG_DISPOSITION_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 32,
-        id: YDOC_RELAY_ARBITRATION_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_RELAY_ARBITRATION_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 33,
-        id: SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SCENE_ASSET_DELETE_AUTHORITY_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 34,
-        id: YDOC_SCENE_CONTENT_KIND_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_SCENE_CONTENT_KIND_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 35,
-        id: YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_SCENE_RECOVERY_KIND_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 36,
-        id: SHARE_VIEW_FILE_LANE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SHARE_VIEW_FILE_LANE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 37,
-        id: SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SHARE_PROPOSAL_PUSH_STATE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 38,
-        id: YDOC_SEED_SOURCE_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_YDOC_SEED_SOURCE_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 39,
-        id: SECRET_MOMENT_HISTORY_TIME_INDEX_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_SECRET_MOMENT_HISTORY_TIME_INDEX_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 40,
-        id: CHAT_CONVERSATION_REVISIONS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CHAT_CONVERSATION_REVISIONS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 41,
-        id: COLLECTION_ADOPTION_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_COLLECTION_ADOPTION_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 42,
-        id: COLLECTION_INDEX_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_COLLECTION_INDEX_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 43,
-        id: COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_COLLECTION_HISTORICAL_OWNERS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 44,
-        id: GLOBAL_GENERATION_INDEXES_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_GLOBAL_GENERATION_INDEXES_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 45,
-        id: CHANGE_ATTRIBUTION_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_CHANGE_ATTRIBUTION_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 46,
-        id: AUTOMATION_CLAIMS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_AUTOMATION_CLAIMS_DDL,
-        sets_user_version: None,
-    },
-    Migration {
-        ordinal: 47,
-        id: DEFERRED_RECORD_FACTS_MIGRATION_ID,
-        kind: MigrationKind::Transactional,
-        sql: V1_DEFERRED_RECORD_FACTS_DDL,
-        sets_user_version: None,
-    },
-];
+/// The frozen, ordered list of migrations this build knows.
+pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[Migration {
+    ordinal: 0,
+    id: BASELINE_MIGRATION_ID,
+    sql: V2_BASELINE_DDL,
+    sets_user_version: Some(ENGINE_SCHEMA_VERSION),
+}];
 
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
 pub(crate) fn migration_checksum(sql: &str) -> String {
-    let digest = Sha256::digest(sql.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    crate::blob::hex_sha256(sql.as_bytes())
 }
 
 #[cfg(feature = "fault-injection")]
@@ -3521,11 +1504,8 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 
 /// A migration's ledger state on the current store.
 enum LedgerStatus {
-    /// No row (or the ledger table does not exist yet — a fresh store).
+    /// No completed row (or the ledger table does not exist yet — a fresh store).
     Missing,
-    /// A started-but-incomplete non-transactional migration: re-run idempotently
-    /// — but only if its recorded checksum still matches this build's definition.
-    Incomplete { checksum: String },
     /// Completed; carries the recorded checksum for the compatibility check.
     Complete { checksum: String },
 }
@@ -3533,14 +1513,13 @@ enum LedgerStatus {
 fn ledger_status(conn: &Connection, id: &str) -> Result<LedgerStatus, StorageError> {
     let row = conn
         .query_row(
-            "SELECT checksum, completed_at FROM engine_migrations WHERE id = ?1",
+            "SELECT checksum FROM engine_migrations WHERE id = ?1 AND completed_at IS NOT NULL",
             [id],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+            |r| r.get::<_, String>(0),
         )
         .optional();
     match row {
-        Ok(Some((checksum, Some(_completed)))) => Ok(LedgerStatus::Complete { checksum }),
-        Ok(Some((checksum, None))) => Ok(LedgerStatus::Incomplete { checksum }),
+        Ok(Some(checksum)) => Ok(LedgerStatus::Complete { checksum }),
         Ok(None) => Ok(LedgerStatus::Missing),
         // A fresh store has no `engine_migrations` table until the baseline
         // creates it; that is 'missing', not an error.
@@ -3559,14 +1538,10 @@ fn quick_check_ok(conn: &Connection) -> Result<bool, StorageError> {
     Ok(result.eq_ignore_ascii_case("ok"))
 }
 
-/// Run every pending migration in `migrations` (ordered) against `conn`,
-/// idempotently and crash-recoverably. Safe to call on every open: already-
-/// applied migrations are skipped after a checksum check.
 /// Assert the migration list is well-formed: strictly increasing ordinals and
-/// unique ids. The runner trusts *slice order* to be *ordinal order*, so a dev
-/// appending out of order (`[0, 2, 1]`) would otherwise apply DDL out of order
-/// with no other trip (distinct ids/ordinals pass the checksum gate). Fail
-/// closed instead.
+/// unique ids. The runner trusts slice order to be ordinal order, so a list
+/// appended out of order would otherwise apply DDL out of order with no other
+/// trip. Fail closed instead.
 fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError> {
     let mut seen_ids = std::collections::HashSet::new();
     let mut prev_ordinal: Option<u32> = None;
@@ -3584,6 +1559,9 @@ fn validate_migration_order(migrations: &[Migration]) -> Result<(), StorageError
     Ok(())
 }
 
+/// Run every pending migration in `migrations` (ordered) against `conn`,
+/// idempotently and crash-recoverably. Safe to call on every open: already-
+/// applied migrations are skipped after a checksum check.
 pub(crate) fn run_migrations(
     conn: &mut Connection,
     migrations: &[Migration],
@@ -3611,25 +1589,10 @@ pub(crate) fn run_migrations(
                 }
                 continue;
             }
-            LedgerStatus::Incomplete { checksum } => {
-                // A started-but-unfinished migration whose DDL changed between
-                // builds must not be re-run: the new body would apply over the
-                // partial effects of the old one. Fail closed; only a
-                // checksum-matching incomplete row is resumed.
-                if checksum != migration_checksum(migration.sql) {
-                    return Err(StorageError::MigrationFailed { source: None });
-                }
-            }
             LedgerStatus::Missing => {}
         }
 
-        let outcome = match migration.kind {
-            MigrationKind::Transactional => apply_transactional(conn, migration, ctx, faults)?,
-            MigrationKind::NonTransactional => {
-                apply_non_transactional(conn, migration, ctx, faults)?
-            }
-        };
-        match outcome {
+        match apply_transactional(conn, migration, ctx, faults)? {
             MigrationOutcome::Crashed => return Ok(MigrationOutcome::Crashed),
             MigrationOutcome::Applied { .. } => newly_applied += 1,
         }
@@ -3706,82 +1669,22 @@ fn apply_transactional(
     Ok(MigrationOutcome::Applied { newly_applied: 1 })
 }
 
-fn apply_non_transactional(
-    conn: &mut Connection,
-    migration: &Migration,
-    ctx: &MigrationContext,
-    faults: &dyn FaultInjector,
-) -> Result<MigrationOutcome, StorageError> {
-    let checksum = migration_checksum(migration.sql);
-
-    // Record a started row in its own commit so a crash mid-body leaves a
-    // durable 'incomplete' marker restart can resume from. Idempotent: a
-    // re-run after a crash finds the row already present.
-    conn.execute(
-        "INSERT INTO engine_migrations \
-         (ordinal, id, checksum, engine_build, protocol_version, transactional, \
-          started_at, completed_at, integrity_ok) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, NULL, NULL) \
-         ON CONFLICT(id) DO NOTHING",
-        rusqlite::params![
-            migration.ordinal,
-            migration.id,
-            checksum,
-            ctx.engine_build,
-            ctx.protocol_version,
-            ctx.now_ms,
-        ],
-    )
-    .map_err(StorageError::migration)?;
-
-    // The body must be idempotent (e.g. `CREATE TABLE IF NOT EXISTS`) because a
-    // crash-and-resume re-runs it against a partially-applied store.
-    conn.execute_batch(migration.sql)
-        .map_err(StorageError::migration)?;
-
-    // `migrate.before-ledger-commit` (non-transactional flavor): the started
-    // row is durable but completion is not recorded. Restart re-runs the body.
-    if should_crash(faults, FaultPoint::MigrateBeforeLedgerCommit) {
-        return Ok(MigrationOutcome::Crashed);
-    }
-
-    let integrity_ok = quick_check_ok(conn)?;
-    if !integrity_ok {
-        return Err(StorageError::MigrationFailed { source: None });
-    }
-
-    conn.execute(
-        "UPDATE engine_migrations SET completed_at = ?1, integrity_ok = 1 WHERE id = ?2",
-        rusqlite::params![ctx.now_ms, migration.id],
-    )
-    .map_err(StorageError::migration)?;
-    Ok(MigrationOutcome::Applied { newly_applied: 1 })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The real ledger is well-formed. `validate_migration_order` runs before
-    /// every migration, so a malformed list already fails closed at runtime —
-    /// but nothing asserted it against `BASELINE_MIGRATIONS` itself, so a
-    /// duplicate ordinal would first be seen by whoever opened a store.
-    ///
-    /// Two branches taking the same ordinal is not hypothetical: #646 PR3-1
-    /// and PR3a both wrote ordinal 36, and the collision was caught by hand at
-    /// rebase. This is the check that would have caught it either way.
-    #[test]
-    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
-        validate_migration_order(BASELINE_MIGRATIONS).expect(
-            "the shipped migration list must have strictly increasing ordinals \
-             and unique ids, or a migration never applies and DDL runs out of order",
-        );
-    }
     #[cfg(feature = "fault-injection")]
     use crate::faults::FaultAction;
     use crate::faults::NoFaults;
     #[cfg(feature = "fault-injection")]
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The shipped list is well-formed. `validate_migration_order` runs before
+    /// every migration, so a malformed list already fails closed at runtime,
+    /// but that failure would first be seen by whoever opened a store.
+    #[test]
+    fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
+        validate_migration_order(BASELINE_MIGRATIONS).expect("well-formed migration list");
+    }
 
     /// A one-shot crash injector local to the storage crate's tests (the
     /// testkit's `ScriptedFaults` cannot be used here without a dependency
@@ -3824,27 +1727,15 @@ mod tests {
     const M2_SQL: &str = "CREATE TABLE r04_probe (x INTEGER NOT NULL);";
     #[cfg(feature = "fault-injection")]
     fn two_migrations() -> Vec<Migration> {
-        // A synthetic probe always appends immediately after the frozen list.
         let mut v = BASELINE_MIGRATIONS.to_vec();
         v.push(Migration {
-            ordinal: NEXT_FREE_ORDINAL,
+            ordinal: 1,
             id: "r04-probe",
-            kind: MigrationKind::Transactional,
             sql: M2_SQL,
             sets_user_version: None,
         });
         v
     }
-
-    /// Count of frozen baseline migrations.
-    const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
-
-    /// One past the last ordinal, which is what a synthetic test migration must
-    /// use. Ordinals only have to strictly increase — they are not required to
-    /// be contiguous — so `BASELINE_COUNT` stops equalling "next free ordinal"
-    /// the moment a shard lands a gap (as one did, appending at 16 because 15
-    /// was already claimed by another in-flight shard).
-    const NEXT_FREE_ORDINAL: u32 = BASELINE_MIGRATIONS[BASELINE_MIGRATIONS.len() - 1].ordinal + 1;
 
     #[test]
     fn baseline_applies_once_and_is_idempotent() {
@@ -3854,12 +1745,7 @@ mod tests {
 
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run");
-        assert_eq!(
-            out,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT
-            }
-        );
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
         // Second run is a no-op: already applied, checksum matches.
         let out2 = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("run2");
         assert_eq!(out2, MigrationOutcome::Applied { newly_applied: 0 });
@@ -3882,8 +1768,7 @@ mod tests {
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true)
             .expect("enable foreign keys");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply collection index migration");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
 
         conn.execute_batch(
             "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
@@ -3948,77 +1833,12 @@ mod tests {
     }
 
     #[test]
-    fn historical_record_owner_migration_upgrades_and_cascades_with_versions() {
-        let dir = tempdir();
-        let path = dir.join("collection-historical-owner-upgrade.db");
-        let ctx = MigrationContext::current(1_101);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == COLLECTION_HISTORICAL_OWNERS_MIGRATION_ID)
-            .expect("historical owner migration is registered");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("apply migrations before the historical owner index");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'Main', 'main', 1),
-                        ('ws', 'feature', 'Feature', 'named', 2);",
-        )
-        .expect("seed an existing store");
-
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply the historical owner migration");
-        conn.execute_batch(
-            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'object', 3);
-             INSERT INTO blobs (sha256, byte_length, text)
-                 VALUES ('sha', 49, '---\nid: rec_aaaaaaaaaaaaaaaaaaaaaaaaaa\n---\n');
-             INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin
-             ) VALUES ('ws', 7, 'moment', 'feature', 'object', 'tasks/item.md',
-                       4, 'write', 'sha', 1, 'test');
-             INSERT INTO collection_historical_record_owners (
-                 workspace_id, version_id, object_id, moment_order, record_id, collection_path
-             ) VALUES ('ws', 'feature', 'object', 7,
-                       'rec_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'tasks');
-             INSERT INTO collection_historical_record_owner_backfills (
-                 workspace_id, version_id, index_version
-             ) VALUES ('ws', 'feature', 1);
-             DELETE FROM versions WHERE workspace_id='ws' AND version_id='feature';",
-        )
-        .expect("seed and delete version-scoped historical ownership");
-
-        for table in [
-            "collection_historical_record_owners",
-            "collection_historical_record_owner_backfills",
-        ] {
-            let rows: i64 = conn
-                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get(0)
-                })
-                .expect("count historical owner rows");
-            assert_eq!(rows, 0, "{table} must cascade with its version");
-        }
-    }
-
-    #[test]
     fn collection_history_index_serves_newest_first_record_reads() {
         let dir = tempdir();
         let path = dir.join("collection-history-index.db");
         let ctx = MigrationContext::current(1_100);
         let mut conn = open_bare(&path);
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply collection index migration");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
 
         let plan: Vec<String> = conn
             .prepare(
@@ -4056,8 +1876,7 @@ mod tests {
         let ctx = MigrationContext::current(1_100);
         let mut conn = open_bare(&path);
 
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply global generation indexes");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
 
         let index_sql = |name: &str| -> String {
             conn.query_row(
@@ -4080,2032 +1899,6 @@ mod tests {
     }
 
     #[test]
-    fn main_version_name_migration_renames_only_bootstrap_main_rows() {
-        let dir = tempdir();
-        let path = dir.join("main-version-name.db");
-        let ctx = MigrationContext::current(1_400);
-        let mut conn = open_bare(&path);
-        // Everything before the rename, so these rows model a store
-        // bootstrapped by a pre-#325 build.
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|m| m.id == MAIN_VERSION_NAME_MIGRATION_ID)
-            .expect("main-version-name migration is registered");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("pre-rename migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main'), ('ws-new', 'main'), ('ws-collide', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES
-                 ('ws', 'main', 'main', 'main', 1),
-                 ('ws', 'v-user', 'main', 'named', 2),
-                 ('ws-new', 'main', 'Main', 'main', 3),
-                 ('ws-collide', 'main', 'main', 'main', 4),
-                 ('ws-collide', 'v-taken', 'Main', 'named', 5);",
-        )
-        .expect("legacy version rows");
-
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("rename and remaining migrations");
-
-        let name = |workspace_id: &str, version_id: &str| -> String {
-            conn.query_row(
-                "SELECT name FROM versions WHERE workspace_id = ?1 AND version_id = ?2",
-                [workspace_id, version_id],
-                |row| row.get(0),
-            )
-            .expect("version name")
-        };
-        // The old-build bootstrap row is renamed to match TS + replication.
-        assert_eq!(name("ws", "main"), "Main");
-        // A USER version literally named 'main' (kind 'named') is untouched.
-        assert_eq!(name("ws", "v-user"), "main");
-        // An already-correct main row is left as-is.
-        assert_eq!(name("ws-new", "main"), "Main");
-        // A workspace where a USER version already took 'Main' keeps its
-        // lowercase bootstrap name — never two versions displaying 'Main'.
-        assert_eq!(name("ws-collide", "main"), "main");
-        assert_eq!(name("ws-collide", "v-taken"), "Main");
-        let collide_main_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM versions WHERE workspace_id = 'ws-collide' AND name = 'Main'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("collision count");
-        assert_eq!(collide_main_count, 1);
-    }
-
-    #[test]
-    fn scene_asset_delete_authority_migration_is_strict_and_appended() {
-        let dir = tempdir();
-        let path = dir.join("scene-asset-delete-authority.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == SCENE_ASSET_DELETE_AUTHORITY_MIGRATION_ID)
-            .expect("scene authority migration is registered");
-        assert_eq!(BASELINE_MIGRATIONS[migration_index].ordinal, 33);
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply authority migration");
-        for table in [
-            "scene_asset_delete_authorities",
-            "scene_asset_delete_authority_items",
-        ] {
-            let sql: String = conn
-                .query_row(
-                    "SELECT sql FROM sqlite_schema WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .expect("scene authority table");
-            assert!(sql.to_uppercase().contains("STRICT"));
-        }
-        let scene_checks: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' \
-                 AND name IN ('ydoc_docs','ydoc_inactive_lineages') \
-                 AND sql LIKE '%''scene''%'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("scene lineage checks");
-        assert_eq!(scene_checks, 2);
-    }
-
-    #[test]
-    fn ydoc_scene_content_kind_upgrades_a_completed_store() {
-        let dir = tempdir();
-        let path = dir.join("ydoc-scene-content-kind.db");
-        let ctx = MigrationContext::current(1_600);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == YDOC_SCENE_CONTENT_KIND_MIGRATION_ID)
-            .expect("scene content-kind migration is registered");
-        assert_eq!(BASELINE_MIGRATIONS[migration_index].ordinal, 34);
-
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("apply the previously shipped migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'Main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'live', 2), ('ws', 'inactive', 3),
-                        ('ws', 'scene', 4), ('ws', 'invalid', 5);
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-                 VALUES (
-                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                   1,
-                   X'01'
-                 ), (
-                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                   1,
-                   X'02'
-                 );
-             INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, settle_seq, updated_at_ms,
-                 path, base_origin_id, base_origin_seq, base_relay_seq,
-                 base_relay_confirmed_absent
-             ) VALUES (
-                 'ws', 'main', 'live', 'plaintext', 'local-only', 1, 0, 2, 10,
-                 'live.md', 'local', 7, 9, 0
-             );
-             INSERT INTO ydoc_updates (
-                 workspace_id, version_id, object_id, seq, update_blob_sha256,
-                 actor_origin_id, recorded_at_ms
-             ) VALUES (
-                 'ws', 'main', 'live', 1,
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'local', 11
-             );
-             INSERT INTO ydoc_snapshots (
-                 workspace_id, version_id, object_id, up_to_seq,
-                 snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms
-             ) VALUES (
-                 'ws', 'main', 'live', 0,
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 12
-             );
-             INSERT INTO ydoc_inactive_lineages (
-                 workspace_id, version_id, object_id, lineage_claim_id,
-                 disposition, content_kind, path, full_state_blob_sha256,
-                 state_vector_blob_sha256, recorded_at_ms, updated_at_ms
-             ) VALUES (
-                 'ws', 'main', 'inactive',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'rejected-base', 'richdoc', 'inactive.md',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 13, 14
-             );
-             INSERT INTO ydoc_deferred_updates (
-                 workspace_id, version_id, object_id, origin_id, origin_seq,
-                 recorded_at_ms, lineage_claim_id
-             ) VALUES (
-                 'ws', 'main', 'inactive', 'peer', 17, 15,
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
-             );
-             INSERT INTO ydoc_recovery_decisions (
-                 workspace_id, origin_id, origin_seq, version_id, object_id,
-                 original_path, incoming_content_kind,
-                 incoming_update_blob_sha256, incoming_lineage_claim_id,
-                 incoming_is_base_state, losing_claim_id, recovered_path,
-                 recovery_collision_ordinal, recovery_object_id,
-                 recovery_moment_id, recorded_at_ms
-             ) VALUES (
-                 'ws', 'peer', 18, 'main', 'live', 'live.md', 'richdoc',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 1,
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'live (recovered).md', '1', 'recovered-object',
-                 'recovered-moment', 16
-             );",
-        )
-        .expect("seed a completed pre-scene store");
-        let docs_before = dump_table_rows(&conn, "ydoc_docs");
-        let updates_before = dump_table_rows(&conn, "ydoc_updates");
-        let snapshots_before = dump_table_rows(&conn, "ydoc_snapshots");
-        let inactive_before = dump_table_rows(&conn, "ydoc_inactive_lineages");
-        let deferred_before = dump_table_rows(&conn, "ydoc_deferred_updates");
-        let recovery_before = dump_table_rows(&conn, "ydoc_recovery_decisions");
-
-        drop(conn);
-        let store =
-            crate::EngineStore::open(&path, 1_601).expect("open and upgrade the completed store");
-        assert!(!store.was_freshly_created());
-        drop(store);
-        let conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys after reopen");
-        let scene_migration: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_migrations WHERE id=?1 AND completed_at IS NOT NULL",
-                [YDOC_SCENE_CONTENT_KIND_MIGRATION_ID],
-                |row| row.get(0),
-            )
-            .expect("scene migration ledger row");
-        assert_eq!(scene_migration, 1);
-        let scene_recovery_migration: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_migrations WHERE id=?1 AND completed_at IS NOT NULL",
-                [YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID],
-                |row| row.get(0),
-            )
-            .expect("scene recovery migration ledger row");
-        assert_eq!(scene_recovery_migration, 1);
-        // The upgrade runs every later migration too: ordinal 38 adds
-        // `seed_source_sha256`, which a pre-38 row gains as NULL. The
-        // scene migration itself must still preserve every pre-existing value.
-        let docs_expected: Vec<Vec<(String, rusqlite::types::Value)>> = docs_before
-            .into_iter()
-            .map(|mut row| {
-                row.push((
-                    "seed_source_sha256".to_owned(),
-                    rusqlite::types::Value::Null,
-                ));
-                row
-            })
-            .collect();
-        assert_eq!(dump_table_rows(&conn, "ydoc_docs"), docs_expected);
-        // Likewise the attribution migration adds three columns to
-        // `ydoc_updates`, which a pre-existing row gains as NULL.
-        let updates_expected: Vec<Vec<(String, rusqlite::types::Value)>> = updates_before
-            .into_iter()
-            .map(|mut row| {
-                for column in ["actor_kind", "on_behalf_of", "chain_depth"] {
-                    row.push((column.to_owned(), rusqlite::types::Value::Null));
-                }
-                row
-            })
-            .collect();
-        assert_eq!(dump_table_rows(&conn, "ydoc_updates"), updates_expected);
-        assert_eq!(dump_table_rows(&conn, "ydoc_snapshots"), snapshots_before);
-        assert_eq!(
-            dump_table_rows(&conn, "ydoc_inactive_lineages"),
-            inactive_before
-        );
-        // The drained record-event decision adds one column to
-        // `ydoc_deferred_updates`, which a pre-existing parked row gains as NULL.
-        let deferred_expected: Vec<Vec<(String, rusqlite::types::Value)>> = deferred_before
-            .into_iter()
-            .map(|mut row| {
-                row.push(("record_facts_json".to_owned(), rusqlite::types::Value::Null));
-                row
-            })
-            .collect();
-        assert_eq!(
-            dump_table_rows(&conn, "ydoc_deferred_updates"),
-            deferred_expected
-        );
-        assert_eq!(
-            dump_table_rows(&conn, "ydoc_recovery_decisions"),
-            recovery_before
-        );
-
-        let index_columns = |name: &str| -> Vec<String> {
-            conn.prepare(&format!(
-                "SELECT name FROM pragma_index_info('{name}') ORDER BY seqno"
-            ))
-            .expect("prepare index columns")
-            .query_map([], |row| row.get(0))
-            .expect("query index columns")
-            .collect::<rusqlite::Result<_>>()
-            .expect("collect index columns")
-        };
-        for (name, expected) in [
-            (
-                "idx_ydoc_updates_doc_seq",
-                &["workspace_id", "version_id", "object_id", "seq"][..],
-            ),
-            (
-                "idx_ydoc_updates_doc_blob",
-                &[
-                    "workspace_id",
-                    "version_id",
-                    "object_id",
-                    "update_blob_sha256",
-                ][..],
-            ),
-            (
-                "idx_ydoc_snapshots_doc_uptoseq",
-                &["workspace_id", "version_id", "object_id", "up_to_seq"][..],
-            ),
-            (
-                "ydoc_inactive_lineages_by_disposition",
-                &[
-                    "workspace_id",
-                    "version_id",
-                    "object_id",
-                    "disposition",
-                    "lineage_claim_id",
-                ][..],
-            ),
-            (
-                "ydoc_inactive_lineages_by_parent",
-                &[
-                    "workspace_id",
-                    "version_id",
-                    "object_id",
-                    "parent_claim_id",
-                    "lineage_claim_id",
-                ][..],
-            ),
-            (
-                "ydoc_inactive_lineages_by_open_conflict",
-                &["workspace_id", "open_conflict_id"][..],
-            ),
-        ] {
-            assert_eq!(index_columns(name), expected);
-        }
-
-        conn.execute(
-            "INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, settle_seq, updated_at_ms,
-                 path
-             ) VALUES ('ws','main','scene','scene','local-only',0,0,0,20,'scene.excalidraw')",
-            [],
-        )
-        .expect("scene live marker");
-        conn.execute(
-            "INSERT INTO ydoc_inactive_lineages (
-                 workspace_id, version_id, object_id, lineage_claim_id,
-                 disposition, content_kind, path, full_state_blob_sha256,
-                 state_vector_blob_sha256, recorded_at_ms, updated_at_ms
-             ) VALUES (
-                 'ws','main','scene',
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'rejected-base','scene','scene.excalidraw',
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 21,22
-             )",
-            [],
-        )
-        .expect("scene inactive lineage");
-        conn.execute(
-            "INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, settle_seq, updated_at_ms
-             ) VALUES ('ws','main','invalid','unknown','local-only',0,0,0,23)",
-            [],
-        )
-        .expect_err("unknown document kinds stay constrained");
-        conn.execute(
-            "INSERT INTO ydoc_recovery_decisions (
-                 workspace_id, origin_id, origin_seq, version_id, object_id,
-                 original_path, incoming_content_kind,
-                 incoming_update_blob_sha256, incoming_lineage_claim_id,
-                 incoming_is_base_state, losing_claim_id, recovered_path,
-                 recovery_collision_ordinal, recovery_object_id,
-                 recovery_moment_id, recorded_at_ms
-             ) VALUES (
-                 'ws', 'peer', 19, 'main', 'scene', 'scene.excalidraw', 'scene',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 1,
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'scene (recovered).excalidraw', '1', 'scene-recovered-object',
-                 'scene-recovered-moment', 24
-             )",
-            [],
-        )
-        .expect("scene recovery decision");
-        conn.execute(
-            "INSERT INTO ydoc_recovery_decisions (
-                 workspace_id, origin_id, origin_seq, version_id, object_id,
-                 original_path, incoming_content_kind,
-                 incoming_update_blob_sha256, incoming_lineage_claim_id,
-                 incoming_is_base_state, losing_claim_id, recovered_path,
-                 recovery_collision_ordinal, recovery_object_id,
-                 recovery_moment_id, recorded_at_ms
-             ) VALUES (
-                 'ws', 'peer', 20, 'main', 'invalid', 'invalid.bin', 'unknown',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 1,
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 'invalid (recovered).bin', '1', 'invalid-recovered-object',
-                 'invalid-recovered-moment', 25
-             )",
-            [],
-        )
-        .expect_err("unknown recovery document kinds stay constrained");
-    }
-
-    #[test]
-    fn secret_capture_ownership_migration_backfills_only_completed_present_rows() {
-        let dir = tempdir();
-        let path = dir.join("capture-ownership.db");
-        let ctx = MigrationContext::current(1_300);
-        let mut conn = open_bare(&path);
-        // Everything before ordinal 14, so these rows model an existing store
-        // at the exact point where the ownership backfill first runs.
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..14], &ctx, &NoFaults)
-            .expect("pre-ownership migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-                 VALUES ('ciphertext', 1, x'00');
-
-             INSERT INTO materialization_jobs
-                 (job_id, target_path, content_sha256, preimage_present,
-                  preimage_sha256, target_generation, status, created_at_ms,
-                  completed_at_ms, operation)
-                 VALUES
-                 ('secret-mat_complete-present', 'complete-present', 'ciphertext',
-                  0, NULL, 1, 'complete', 1, 2, 'write'),
-                 ('secret-mat_pending-present', 'pending-present', 'ciphertext',
-                  0, NULL, 1, 'pending', 1, NULL, 'write'),
-                 ('secret-mat_complete-absent', 'complete-absent', 'ciphertext',
-                  0, NULL, 1, 'complete', 1, 2, 'write'),
-                 ('secret-mat_pending-absent', 'pending-absent', 'ciphertext',
-                  0, NULL, 1, 'pending', 1, NULL, 'write');
-
-             INSERT INTO secret_moments
-                 (workspace_id, moment_order, moment_id, version_id, path,
-                  recorded_at_ms, operation, metadata_origin, after_present)
-                 VALUES
-                 ('ws', 1, 'complete-present', 'main', 'complete-present', 1,
-                  'write', 'api', 1),
-                 ('ws', 2, 'pending-present', 'main', 'pending-present', 2,
-                  'write', 'api', 1),
-                 ('ws', 3, 'complete-absent', 'main', 'complete-absent', 3,
-                  'delete', 'api', 0),
-                 ('ws', 4, 'pending-absent', 'main', 'pending-absent', 4,
-                  'delete', 'api', 0);",
-        )
-        .expect("legacy secret moments and materialization jobs");
-
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("ownership and remaining migrations");
-
-        let capture_owned = |moment_id: &str| -> i64 {
-            conn.query_row(
-                "SELECT capture_owned FROM secret_moments WHERE moment_id = ?1",
-                [moment_id],
-                |row| row.get(0),
-            )
-            .expect("capture ownership")
-        };
-        assert_eq!(
-            capture_owned("complete-present"),
-            1,
-            "a present secret with a completed materialization job owns its capture"
-        );
-        assert_eq!(
-            capture_owned("pending-present"),
-            0,
-            "an incomplete job is not proof of plaintext disk ownership"
-        );
-        assert_eq!(
-            capture_owned("complete-absent"),
-            0,
-            "a completed job cannot make an absent after-state own plaintext"
-        );
-        assert_eq!(
-            capture_owned("pending-absent"),
-            0,
-            "an absent after-state with an incomplete job owns no plaintext"
-        );
-    }
-
-    #[test]
-    fn secret_fork_base_timestamp_migration_upgrades_a_prior_shape_row() {
-        let dir = tempdir();
-        let path = dir.join("secret-fork-base-timestamp.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        // Everything before ordinal 26, so this row models a fork base an
-        // existing store already holds, in its pre-migration shape (no
-        // `updated_at_ms` column yet).
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..26], &ctx, &NoFaults)
-            .expect("pre-timestamp migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO secret_fork_bases
-                 (workspace_id, version_id, path, iv_base64, auth_tag_base64,
-                  ciphertext_base64, byte_length)
-                 VALUES ('ws', 'main', '.env', 'iv', 'tag', 'ciphertext', 3);",
-        )
-        .expect("legacy secret fork base");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..27], &ctx, &NoFaults)
-            .expect("timestamp migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let updated_at_ms: i64 = conn
-            .query_row(
-                "SELECT updated_at_ms FROM secret_fork_bases
-                 WHERE workspace_id = 'ws' AND version_id = 'main' AND path = '.env'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("upgraded fork base row");
-        assert_eq!(
-            updated_at_ms, 0,
-            "a pre-migration row cannot recover its original edit time, so it \
-             upgrades to the documented zero default rather than losing the row"
-        );
-    }
-
-    #[test]
-    fn ydoc_path_migration_adds_a_live_path_without_freezing_snapshot_state() {
-        let dir = tempdir();
-        let path = dir.join("ydoc-path.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..27], &ctx, &NoFaults)
-            .expect("pre-path migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'matched', 2), ('ws', 'orphaned', 3);
-             INSERT INTO blobs (sha256, byte_length, text)
-                 VALUES ('snapshot-sha', 8, 'snapshot');
-             INSERT INTO snapshots
-                 (workspace_id, version_id, object_id, path, blob_sha256,
-                  updated_at_ms, latest_moment_id, metadata_origin)
-                 VALUES ('ws', 'main', 'matched', 'docs/matched.md',
-                         'snapshot-sha', 4, 'moment-matched', 'api');
-             INSERT INTO ydoc_docs
-                 (workspace_id, version_id, object_id, content_kind, regime,
-                  head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms)
-                 VALUES
-                 ('ws', 'main', 'matched', 'richdoc', 'local-only', 1, 0, 0, 5),
-                 ('ws', 'main', 'orphaned', 'richdoc', 'local-only', 1, 0, 0, 6);",
-        )
-        .expect("legacy Y.Doc rows");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
-            .expect("Y.Doc path migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let matched_path: Option<String> = conn
-            .query_row(
-                "SELECT path FROM ydoc_docs WHERE object_id = 'matched'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("matched Y.Doc path");
-        assert_eq!(
-            matched_path, None,
-            "enrollment reads the snapshot's current path instead of freezing a copy"
-        );
-        let orphaned_path: Option<String> = conn
-            .query_row(
-                "SELECT path FROM ydoc_docs WHERE object_id = 'orphaned'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("orphaned Y.Doc path");
-        assert_eq!(
-            orphaned_path, None,
-            "a legacy Y.Doc with no matching snapshot has no path to recover"
-        );
-    }
-
-    #[test]
-    fn secret_moment_source_migration_backfills_imported_rows() {
-        let dir = tempdir();
-        let path = dir.join("secret-moment-import-source.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
-            .expect("pre-source migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO replication_log
-                 (workspace_id, origin_id, origin_seq, op_kind, payload_json,
-                  recorded_at_ms, imported)
-                 VALUES ('ws', 'peer-with-hyphen', 42, 'secret.file.put', '{}', 2, 1);
-             INSERT INTO secret_moments
-                 (workspace_id, moment_order, moment_id, version_id, path,
-                  recorded_at_ms, operation, metadata_origin, after_present,
-                  after_iv_base64, after_auth_tag_base64,
-                  after_ciphertext_base64, after_byte_length)
-                 VALUES ('ws', 1, 'secret-sync-peer-with-hyphen-42', 'main', '.env',
-                         3, 'write', 'sync', 1, 'iv', 'tag', 'ciphertext', 10);",
-        )
-        .expect("legacy imported secret moment");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..29], &ctx, &NoFaults)
-            .expect("secret moment source migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let source: (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT source_origin_id, source_origin_seq FROM secret_moments
-                 WHERE moment_id = 'secret-sync-peer-with-hyphen-42'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("imported secret source");
-        assert_eq!(
-            source,
-            (Some("peer-with-hyphen".to_owned()), Some(42)),
-            "the migration must preserve the imported relay coordinate"
-        );
-    }
-
-    #[test]
-    fn secret_moment_source_migration_leaves_existing_rows_null() {
-        let dir = tempdir();
-        let path = dir.join("secret-moment-local-source.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..28], &ctx, &NoFaults)
-            .expect("pre-source migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO secret_moments
-                 (workspace_id, moment_order, moment_id, version_id, path,
-                  recorded_at_ms, operation, metadata_origin, after_present,
-                  after_iv_base64, after_auth_tag_base64,
-                  after_ciphertext_base64, after_byte_length)
-                 VALUES ('ws', 1, 'local-moment', 'main', '.env', 2, 'write',
-                         'api', 1, 'iv', 'tag', 'ciphertext', 10);",
-        )
-        .expect("legacy local secret moment");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..29], &ctx, &NoFaults)
-            .expect("secret moment source migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let source: (Option<String>, Option<i64>) = conn
-            .query_row(
-                "SELECT source_origin_id, source_origin_seq FROM secret_moments
-                 WHERE moment_id = 'local-moment'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("local secret source");
-        assert_eq!(
-            source,
-            (None, None),
-            "a local secret moment has no imported relay coordinate"
-        );
-    }
-
-    #[test]
-    fn payload_provenance_migration_backfills_from_existing_rows() {
-        let dir = tempdir();
-        let path = dir.join("provenance.db");
-        let ctx = MigrationContext::current(1_400);
-        let mut conn = open_bare(&path);
-        // Everything before the provenance migration, so the rows below are
-        // exactly what an existing store holds when it upgrades.
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..15], &ctx, &NoFaults)
-            .expect("pre-provenance migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'obj', 1);
-             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-one', 3, 'one');
-             INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-two', 3, 'two');
-             -- A first write: no preimage, so no payload-before.
-             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
-                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, metadata_origin)
-                 VALUES ('ws', 1, 'm1', 'main', 'obj', 'a.md', 10, 'write', 'sha-one',
-                         1, 'user');
-             -- An overwrite: preimage at the SAME path.
-             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
-                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, before_blob_sha256, before_latest_moment_id,
-                 metadata_origin)
-                 VALUES ('ws', 2, 'm2', 'main', 'obj', 'a.md', 20, 'write', 'sha-two',
-                         2, 'sha-one', 'm1', 'user');
-             -- A rename: the payload came from the PRODUCER's path, not this row's.
-             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
-                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, before_blob_sha256, before_latest_moment_id,
-                 metadata_origin)
-                 VALUES ('ws', 3, 'm3', 'main', 'obj', 'b.md', 30, 'rename', 'sha-two',
-                         2, 'sha-two', 'm2', 'user');
-             -- A BINARY preimage: its digest must backfill into the BINARY
-             -- column, never the text one.
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-                 VALUES ('bin-one', 3, x'010203');
-             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
-                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
-                 after_content_kind, after_binary_sha256, before_present,
-                 before_content_kind, before_binary_sha256, before_latest_moment_id,
-                 metadata_origin)
-                 VALUES ('ws', 4, 'm4', 'main', 'obj', 'c.bin', 40, 'write', NULL,
-                         'binary', 'bin-one', 2, 'binary', 'bin-one', 'm3', 'user');
-             -- A rename whose producer link never resolved: ordinal 5's backfill
-             -- is best-effort, so this row really occurs.
-             INSERT INTO moments (workspace_id, moment_order, moment_id, version_id,
-                 object_id, path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, before_blob_sha256, before_latest_moment_id,
-                 metadata_origin)
-                 VALUES ('ws', 5, 'm5', 'main', 'obj', 'd.md', 50, 'rename', 'sha-two',
-                         2, 'sha-two', NULL, 'user');",
-        )
-        .expect("legacy moment rows");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..16], &ctx, &NoFaults)
-            .expect("provenance migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        type Row = (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let row = |moment_id: &str| -> Row {
-            conn.query_row(
-                "SELECT payload_before_path, payload_before_content_kind, \
-                 payload_before_blob_sha256, \
-                 payload_after_path FROM moments WHERE moment_id = ?1",
-                [moment_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            )
-            .expect("provenance row")
-        };
-        let some = |v: &str| Some(v.to_owned());
-
-        assert_eq!(
-            row("m1"),
-            (None, None, None, some("a.md")),
-            "drop the `before_present = 2` guard -> a first write gains a payload-before it never had."
-        );
-        assert_eq!(
-            row("m2"),
-            (some("a.md"), some("text"), some("sha-one"), some("a.md"))
-        );
-        assert_eq!(
-            row("m3"),
-            (some("a.md"), some("text"), some("sha-two"), some("b.md")),
-            "backfill the rename's payload-before path from `path` -> the source path is lost and this reads 'b.md'.",
-        );
-        // A binary preimage's digest belongs in the binary column.
-        assert_eq!(
-            row("m4"),
-            // The binary preimage digest lands in the shared column, tagged by
-            // kind — the oracle's shape.
-            (
-                some("c.bin"),
-                some("binary"),
-                some("bin-one"),
-                some("c.bin")
-            )
-        );
-        // An unresolvable rename link cannot say where the payload came from,
-        // so the whole payload-before group stays unset rather than claiming a
-        // digest with no path — the oracle keys presence on the path alone.
-        assert_eq!(row("m5"), (None, None, None, some("d.md")));
-
-        // The payload-AFTER pair backfills to one digest selected by kind.
-        let after = |moment_id: &str| -> (Option<String>, Option<String>) {
-            conn.query_row(
-                "SELECT payload_after_content_kind, payload_after_blob_sha256 \
-                 FROM moments WHERE moment_id = ?1",
-                [moment_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .expect("payload-after pair")
-        };
-        assert_eq!(after("m2"), (some("text"), some("sha-two")));
-        assert_eq!(
-            after("m4"),
-            (some("binary"), some("bin-one")),
-            "a binary moment backfills its BINARY digest, not the text one"
-        );
-    }
-
-    #[test]
-    fn rollback_preimage_migration_backfills_a_shipped_fork_head() {
-        let dir = tempdir();
-        let path = dir.join("rollback-preimage.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..19], &ctx, &NoFaults)
-            .expect("pre-rollback-preimage migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO versions
-                 (workspace_id, version_id, name, kind, created_at_ms)
-                 VALUES ('ws', 'main', 'main', 'main', 1);
-             INSERT INTO versions
-                 (workspace_id, version_id, name, kind, created_at_ms,
-                  fork_version_id, fork_moment_id)
-                 VALUES ('ws', 'feature', 'feature', 'named', 2, 'main', 'fork');
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'obj', 1);
-             INSERT INTO blobs (sha256, byte_length, text) VALUES
-                 ('before-sha', 6, 'before'),
-                 ('after-sha', 5, 'after');
-             INSERT INTO fork_base_snapshots
-                 (workspace_id, version_id, object_id, path, blob_sha256,
-                  updated_at_ms, latest_moment_id, metadata_origin,
-                  metadata_summary, metadata_correlation_id)
-                 VALUES ('ws', 'feature', 'obj', 'a.md', 'before-sha',
-                         20, 'shipped-head', 'sync', 'shipped summary',
-                         'shipped correlation');
-             INSERT INTO moments
-                 (workspace_id, moment_order, moment_id, version_id, object_id,
-                  path, recorded_at_ms, operation, after_blob_sha256,
-                  before_present, before_blob_sha256, before_latest_moment_id,
-                  metadata_origin)
-                 VALUES ('ws', 0, 'remote-edit', 'feature', 'obj', 'a.md', 30,
-                         'write', 'after-sha', 2, 'before-sha', 'shipped-head',
-                         'sync');",
-        )
-        .expect("pre-migration shipped head");
-
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("rollback preimage migration");
-        assert_eq!(
-            outcome,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT - 19
-            },
-            "the fixture seeds exactly the first 19 migration entries"
-        );
-
-        type Preimage = (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<i64>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        );
-        let preimage: Preimage = conn
-            .query_row(
-                "SELECT before_object_id, before_version_id, before_path,
-                        before_updated_at_ms, before_metadata_origin,
-                        before_metadata_summary, before_metadata_correlation_id
-                   FROM moments WHERE workspace_id = 'ws' AND moment_id = 'remote-edit'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                    ))
-                },
-            )
-            .expect("backfilled rollback preimage");
-        assert_eq!(
-            preimage,
-            (
-                Some("obj".to_owned()),
-                Some("feature".to_owned()),
-                Some("a.md".to_owned()),
-                Some(20),
-                Some("sync".to_owned()),
-                Some("shipped summary".to_owned()),
-                Some("shipped correlation".to_owned()),
-            ),
-            "remove the fork-base fallback from the ordinal-19 copier and the shipped identity can no longer be reconstructed.",
-        );
-    }
-
-    #[test]
-    fn request_kind_migration_backfills_provable_legacy_rows() {
-        let ctx = MigrationContext::current(1_250);
-        let migrate = |name: &str, seed_document: bool| {
-            let dir = tempdir();
-            let path = dir.join(format!("{name}.db"));
-            let mut conn = open_bare(&path);
-            run_migrations(&mut conn, &BASELINE_MIGRATIONS[..13], &ctx, &NoFaults)
-                .expect("pre-kind migrations");
-            conn.execute_batch(
-                "INSERT INTO engine_requests
-                 (request_id, payload_hash, result_seq, committed_at) VALUES
-                 ('ydoc', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', -2, 1),
-                 ('merge', '{\"payload_hash\":\"hash\",\"outcome\":{\"kind\":\"unchanged\",\"reason\":\"already-same\"}}', 9, 2),
-                 ('chat-or-versioned-noop', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 0, 3),
-                 ('chat-or-first-ydoc', 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc', -1, 4),
-                 ('positive', 'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd', 7, 5);",
-            )
-            .expect("legacy request rows");
-            if seed_document {
-                conn.execute(
-                    "INSERT INTO documents (doc_id, body, updated_at_ms) VALUES ('cal-1', 'body', 6)",
-                    [],
-                )
-                .expect("CAL-1 document discriminator");
-            }
-            // Bounded at the kind migration so appending later ordinals cannot
-            // change what this asserts.
-            let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..14], &ctx, &NoFaults)
-                .expect("kind migration");
-            assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-            let kind = |request_id: &str| {
-                conn.query_row(
-                    "SELECT kind FROM engine_requests WHERE request_id = ?1",
-                    [request_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .expect("legacy kind")
-            };
-            assert_eq!(
-                kind("ydoc").as_deref(),
-                Some("ydoc"),
-                "remove the negative-sequence classification -> fails."
-            );
-            assert_eq!(
-                kind("merge").as_deref(),
-                Some("merge"),
-                "classify by positive result_seq before JSON shape -> fails."
-            );
-            assert_eq!(
-                kind("chat-or-versioned-noop"),
-                None,
-                "guess that zero belongs to chats or versioning -> fails."
-            );
-            assert_eq!(
-                kind("chat-or-first-ydoc"),
-                None,
-                "guess that -1 belongs to chats or Y.Doc -> fails."
-            );
-            kind("positive")
-        };
-
-        assert_eq!(
-            migrate("with-documents", true),
-            None,
-            "ignore the documents-table discriminator -> this becomes `versioned` and can later evict an ambiguous compound ledger row."
-        );
-        assert_eq!(
-            migrate("without-documents", false).as_deref(),
-            Some("versioned"),
-            "invert the zero-documents branch -> the provably versioned positive row remains unclassified.",
-        );
-    }
-
-    #[test]
-    fn moment_before_link_backfill_resolves_like_fresh() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_500);
-        let mut conn = open_bare(&path);
-
-        let pre_r05 = BASELINE_MIGRATIONS[..5].to_vec();
-        run_migrations(&mut conn, &pre_r05, &ctx, &NoFaults).expect("pre-R05 migrations");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
-             VALUES ('ws', 'main');
-             INSERT INTO versions \
-             (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
-             VALUES ('ws', 'main', 'main', 'main', 1, NULL, NULL);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-             VALUES ('ws', 'o1', 1);
-             INSERT INTO blobs (sha256, byte_length, text) VALUES
-             ('b1', 3, 'one'), ('b2', 3, 'two'), ('b3', 5, 'three');
-             INSERT INTO moments \
-             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-              recorded_at_ms, operation, after_blob_sha256, before_present, \
-              before_blob_sha256, metadata_origin, author_json, sync_record_only) \
-             VALUES ('ws', 1, 'm1', 'main', 'o1', 'a.md', 10, 'write', 'b1', 0, \
-                     NULL, 'user', NULL, NULL);
-             INSERT INTO versions \
-             (workspace_id, version_id, kind, name, created_at_ms, fork_version_id, fork_moment_id) \
-             VALUES ('ws', 'feat', 'named', 'feature', 20, 'main', 'm1');
-             INSERT INTO fork_base_snapshots \
-             (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-              latest_moment_id, metadata_origin) \
-             VALUES ('ws', 'feat', 'o1', 'a.md', 'b1', 10, 'm1', 'user');
-             INSERT INTO moments \
-             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-              recorded_at_ms, operation, after_blob_sha256, before_present, \
-              before_blob_sha256, metadata_origin, author_json, sync_record_only) \
-             VALUES ('ws', 2, 'm2', 'feat', 'o1', 'a.md', 30, 'write', 'b2', 1, \
-                     'b1', 'user', NULL, NULL),
-                    ('ws', 3, 'm3', 'main', 'o1', 'a.md', 40, 'write', 'b3', 1, \
-                     'b1', 'user', NULL, NULL);
-             INSERT INTO path_aliases (workspace_id, version_id, path, object_id) VALUES
-             ('ws', 'main', 'a.md', 'o1'), ('ws', 'feat', 'a.md', 'o1');
-             INSERT INTO snapshots \
-             (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, \
-              latest_moment_id, metadata_origin) VALUES
-             ('ws', 'main', 'o1', 'a.md', 'b3', 40, 'm3', 'user'),
-             ('ws', 'feat', 'o1', 'a.md', 'b2', 30, 'm2', 'user');",
-        )
-        .expect("seed pre-R05 version history");
-
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("resume through R05");
-
-        let m1: (i64, Option<String>) = conn
-            .query_row(
-                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm1'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("m1");
-        let m2: (i64, Option<String>) = conn
-            .query_row(
-                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm2'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("m2");
-        let m3: (i64, Option<String>) = conn
-            .query_row(
-                "SELECT before_present, before_latest_moment_id FROM moments WHERE moment_id = 'm3'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("m3");
-        assert_eq!(m1, (1, None));
-        assert_eq!(m2, (2, Some("m1".to_owned())));
-        assert_eq!(m3, (2, Some("m1".to_owned())));
-    }
-
-    #[test]
-    fn r06_conflicts_migration_upgrades_existing_store_and_creates_index() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_750);
-        let mut conn = open_bare(&path);
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..7], &ctx, &NoFaults)
-            .expect("pre-R06 migrations");
-        let before: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'conflicts'",
-                [],
-                |row| row.get(0),
-            )
-            .optional()
-            .expect("pre-R06 table probe");
-        assert!(before.is_none());
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("apply R06, shadow fence, binary conflict sides, and binary head");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 4 });
-        let objects: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE \
-                 (type = 'table' AND name = 'conflicts') OR \
-                 (type = 'index' AND name = 'idx_conflicts_workspace_status')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("R06 objects");
-        assert_eq!(objects, 2);
-        let strict: i64 = conn
-            .query_row(
-                "SELECT strict FROM pragma_table_list('conflicts') WHERE name = 'conflicts'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("strict conflicts table");
-        assert_eq!(strict, 1);
-        let integer_timestamps: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('conflicts') WHERE type = 'INTEGER' AND \
-                 name IN ('created_at_ms', 'updated_at_ms', 'base_updated_at_ms', \
-                 'current_updated_at_ms', 'incoming_updated_at_ms')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("integer conflict timestamps");
-        assert_eq!(integer_timestamps, 5);
-        let operation_column: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('materialization_jobs') \
-                 WHERE name = 'operation' AND dflt_value = '''write'''",
-                [],
-                |row| row.get(0),
-            )
-            .expect("operation column");
-        assert_eq!(operation_column, 1);
-        let ledger: i64 = conn
-            .query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("ledger");
-        assert_eq!(ledger, 11);
-    }
-
-    /// Every `conflicts` column, dumped by name, for value-for-value rebuild
-    /// comparison. Ordered by conflict_id so before/after rows pair up.
-    fn dump_conflict_rows(conn: &Connection) -> Vec<Vec<(String, rusqlite::types::Value)>> {
-        let mut stmt = conn
-            .prepare("SELECT * FROM conflicts ORDER BY conflict_id")
-            .expect("prepare conflicts dump");
-        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
-        stmt.query_map([], |row| {
-            names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| Ok((name.clone(), row.get::<_, rusqlite::types::Value>(i)?)))
-                .collect()
-        })
-        .expect("query conflicts dump")
-        .collect::<Result<_, _>>()
-        .expect("collect conflicts dump")
-    }
-
-    fn dump_table_rows(
-        conn: &Connection,
-        table: &str,
-    ) -> Vec<Vec<(String, rusqlite::types::Value)>> {
-        let sql = format!("SELECT * FROM {table} ORDER BY rowid");
-        let mut stmt = conn.prepare(&sql).expect("prepare table dump");
-        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
-        stmt.query_map([], |row| {
-            names
-                .iter()
-                .enumerate()
-                .map(|(i, name)| Ok((name.clone(), row.get::<_, rusqlite::types::Value>(i)?)))
-                .collect()
-        })
-        .expect("query table dump")
-        .collect::<Result<_, _>>()
-        .expect("collect table dump")
-    }
-
-    #[test]
-    fn ydoc_prebase_deferred_migration_preserves_every_column_and_changes_only_the_parent() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(2_100);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == YDOC_PREBASE_DEFERRED_MIGRATION_ID)
-            .expect("pre-base queue migration");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate up to the pre-base queue rebuild");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'object-one', 101), ('ws', 'object-two', 102);
-             INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, base_claimed, settle_seq,
-                 last_settled_sha, updated_at_ms
-             ) VALUES
-                 ('ws', 'main', 'object-one', 'plaintext', 'replicated',
-                  7, 6, 1, 5, 'settled-one', 103),
-                 ('ws', 'feature', 'object-two', 'richdoc', 'replicated',
-                  17, 16, 1, 15, NULL, 104);
-             INSERT INTO ydoc_deferred_updates (
-                 workspace_id, version_id, object_id, origin_id, origin_seq,
-                 recorded_at_ms
-             ) VALUES
-                 ('ws', 'main', 'object-one', 'origin-one', 11, 1001),
-                 ('ws', 'feature', 'object-two', 'origin-two', 22, 2002);",
-        )
-        .expect("seed every deferred column");
-        let before = dump_table_rows(&conn, "ydoc_deferred_updates");
-
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("apply pre-base queue rebuild");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        assert_eq!(
-            dump_table_rows(&conn, "ydoc_deferred_updates"),
-            before,
-            "every value and column must survive the rebuild"
-        );
-
-        let fk_parent: String = conn
-            .query_row(
-                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("rebuilt FK parent");
-        assert_eq!(fk_parent, "file_objects");
-        let index_columns: Vec<String> = conn
-            .prepare(
-                "SELECT name FROM pragma_index_info('ydoc_deferred_updates_by_doc')
-                 ORDER BY seqno",
-            )
-            .expect("prepare rebuilt index")
-            .query_map([], |row| row.get(0))
-            .expect("query rebuilt index")
-            .collect::<rusqlite::Result<_>>()
-            .expect("collect rebuilt index");
-        assert_eq!(index_columns, ["workspace_id", "version_id", "object_id"]);
-    }
-
-    #[test]
-    fn ydoc_prebase_deferred_migration_rolls_back_when_fk_revalidation_fails() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(2_100);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == YDOC_PREBASE_DEFERRED_MIGRATION_ID)
-            .expect("pre-base queue migration");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate up to the pre-base queue rebuild");
-        conn.execute(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main')",
-            [],
-        )
-        .expect("seed workspace");
-        conn.pragma_update(None, "foreign_keys", false)
-            .expect("disable foreign keys");
-        conn.execute_batch(
-            "INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, base_claimed, updated_at_ms
-             ) VALUES (
-                 'ws', 'main', 'missing-object', 'plaintext', 'replicated',
-                 0, 0, 1, 10
-             );
-             INSERT INTO ydoc_deferred_updates (
-                 workspace_id, version_id, object_id, origin_id, origin_seq,
-                 recorded_at_ms
-             ) VALUES (
-                 'ws', 'main', 'missing-object', 'origin', 4, 11
-             );",
-        )
-        .expect("seed latent missing file-object parent");
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("re-enable foreign keys");
-
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect_err("new file_objects FK must revalidate historical rows");
-        let fk_parent: String = conn
-            .query_row(
-                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("rolled-back FK parent");
-        assert_eq!(
-            fk_parent, "ydoc_docs",
-            "rollback must restore the old table"
-        );
-        let row_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ydoc_deferred_updates
-                 WHERE workspace_id='ws' AND origin_id='origin' AND origin_seq=4",
-                [],
-                |row| row.get(0),
-            )
-            .expect("seed row survives");
-        assert_eq!(row_present, 1);
-        let orphan_table: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema
-                 WHERE name='ydoc_deferred_updates_old'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("no orphan rebuild table");
-        assert_eq!(orphan_table, 0);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("ledger after rollback");
-        assert_eq!(max_ordinal, 20);
-
-        conn.execute(
-            "INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-             VALUES ('ws', 'missing-object', 9)",
-            [],
-        )
-        .expect("restore missing parent");
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("remediated rebuild");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let repaired_parent: String = conn
-            .query_row(
-                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("repaired FK parent");
-        assert_eq!(repaired_parent, "file_objects");
-    }
-
-    fn ydoc_lineage_claim_migration_index() -> usize {
-        BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == YDOC_LINEAGE_CLAIMS_MIGRATION_ID)
-            .expect("Y.Doc lineage claim migration is registered")
-    }
-
-    #[test]
-    fn strict_conflict_resolve_migration_deletes_the_legacy_pending_table() {
-        let dir = tempdir();
-        let path = dir.join("drop-pending-resolves.db");
-        let ctx = MigrationContext::current(2_899);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == DROP_REPLICATION_PENDING_RESOLVES_MIGRATION_ID)
-            .expect("pending-resolve drop migration is registered");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate through ordinal 29");
-
-        conn.execute_batch(
-            "INSERT INTO replication_log (
-                 workspace_id, origin_id, origin_seq, op_kind, payload_json,
-                 recorded_at_ms, imported
-             ) VALUES ('ws','peer',7,'conflict.resolve','{}',100,1);
-             INSERT INTO replication_pending_resolves (
-                 workspace_id, origin_id, origin_seq, remote_conflict_id,
-                 local_conflict_id, path, reason
-             ) VALUES ('ws','peer',7,'remote','local','doc.md','merged');",
-        )
-        .expect("seed obsolete pending resolution");
-
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("drop obsolete pending-resolution state");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let table_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema \
-                 WHERE type='table' AND name='replication_pending_resolves'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("inspect current schema");
-        assert_eq!(table_count, 0);
-        let retained_log: i64 = conn
-            .query_row("SELECT COUNT(*) FROM replication_log", [], |row| row.get(0))
-            .expect("read retained replication log");
-        assert_eq!(
-            retained_log, 1,
-            "the migration deletes only the dead sidecar"
-        );
-
-        let disposition = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply the later replication-log disposition migration");
-        assert_eq!(
-            disposition,
-            MigrationOutcome::Applied {
-                // Every migration registered after this one. A literal here is
-                // a count that goes stale the next time the ledger grows.
-                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
-                    .expect("the ledger length fits a migration count")
-            }
-        );
-        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("rerun current migrations");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
-    }
-
-    #[test]
-    fn replication_log_disposition_migration_preserves_existing_rows_and_constrains_new_rows() {
-        let dir = tempdir();
-        let path = dir.join("replication-log-disposition.db");
-        let ctx = MigrationContext::current(2_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == REPLICATION_LOG_DISPOSITION_MIGRATION_ID)
-            .expect("replication-log disposition migration is registered");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate through ordinal 30");
-        conn.execute(
-            "INSERT INTO replication_log (
-                 workspace_id,origin_id,origin_seq,op_kind,payload_json,recorded_at_ms,imported
-             ) VALUES ('ws','peer',0,'workspace.init','{}',1,1)",
-            [],
-        )
-        .expect("seed pre-migration replication row");
-
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("add durable apply disposition");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let disposition: String = conn
-            .query_row(
-                "SELECT apply_disposition FROM replication_log \
-                 WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=0",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read backfilled disposition");
-        assert_eq!(disposition, "applied");
-        conn.execute(
-            "UPDATE replication_log SET apply_disposition='unknown' \
-             WHERE workspace_id='ws' AND origin_id='peer' AND origin_seq=0",
-            [],
-        )
-        .expect_err("unknown apply dispositions must fail closed");
-        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("rerun current migrations");
-        assert_eq!(
-            rerun,
-            MigrationOutcome::Applied {
-                // Every migration registered after this one. A literal here is
-                // a count that goes stale the next time the ledger grows.
-                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
-                    .expect("the ledger length fits a migration count")
-            }
-        );
-    }
-
-    #[test]
-    fn ydoc_relay_arbitration_migration_preserves_only_exact_repair_candidates() {
-        let dir = tempdir();
-        let path = dir.join("ydoc-relay-arbitration.db");
-        let ctx = MigrationContext::current(3_000);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = BASELINE_MIGRATIONS
-            .iter()
-            .position(|migration| migration.id == YDOC_RELAY_ARBITRATION_MIGRATION_ID)
-            .expect("Y.Doc relay arbitration migration is registered");
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate through ordinal 31");
-
-        let claim_id = "a".repeat(64);
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id,main_version_id)
-             VALUES ('ws','main');
-             INSERT INTO file_objects (workspace_id,object_id,created_at_ms)
-             VALUES ('ws','object-a',1);",
-        )
-        .expect("seed lineage parents");
-        conn.execute(
-            "INSERT INTO binary_blobs (sha256,byte_length,bytes) VALUES (?1,1,X'01')",
-            [&claim_id],
-        )
-        .expect("seed lineage blob");
-        conn.execute(
-            "INSERT INTO ydoc_docs (
-                 workspace_id,version_id,object_id,content_kind,regime,
-                 head_update_seq,head_snapshot_seq,settle_seq,updated_at_ms,path,
-                 lineage_claim_status,lineage_claim_id
-             ) VALUES ('ws','main','object-a','plaintext','replicated',0,0,0,2,
-                       'notes/a.md','exact',?1)",
-            [&claim_id],
-        )
-        .expect("seed exact active lineage");
-        let exact_payload = serde_json::json!({
-            "versionId": "main",
-            "objectId": "object-a",
-            "path": "notes/a.md",
-            "contentKind": "plaintext",
-            "updateBlobSha256": claim_id,
-            "lineageClaimId": claim_id,
-            "isBaseState": true,
-        })
-        .to_string();
-        conn.execute(
-            "INSERT INTO replication_log (
-                 workspace_id,origin_id,origin_seq,op_kind,payload_json,
-                 recorded_at_ms,imported,apply_disposition
-             ) VALUES ('ws','peer',4,'ydoc.update',?1,3,1,'applied')",
-            [&exact_payload],
-        )
-        .expect("seed exact legacy coordinate");
-        conn.execute(
-            "INSERT INTO replication_log (
-                 workspace_id,origin_id,origin_seq,op_kind,payload_json,
-                 recorded_at_ms,imported,apply_disposition
-             ) VALUES ('ws','refused-peer',5,'ydoc.update',?1,4,1,'refused')",
-            [&exact_payload],
-        )
-        .expect("seed refused coordinate");
-
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("add relay arbitration schema");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let candidate: (String, i64, String) = conn
-            .query_row(
-                "SELECT origin_id,origin_seq,lineage_claim_id
-                   FROM ydoc_base_relay_candidates",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read exact repair candidate");
-        assert_eq!(candidate, ("peer".to_owned(), 4, claim_id.clone()));
-        let marker: (Option<i64>, i64) = conn
-            .query_row(
-                "SELECT base_relay_seq,base_relay_confirmed_absent
-                   FROM ydoc_docs WHERE workspace_id='ws' AND object_id='object-a'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("read migrated marker");
-        assert_eq!(marker, (None, 0));
-        conn.execute(
-            "INSERT INTO versioned_workspaces (workspace_id,main_version_id)
-             VALUES ('ws-recovery-cascade','main')",
-            [],
-        )
-        .expect("seed recovery workspace");
-        conn.execute(
-            "INSERT INTO ydoc_recovery_decisions (
-                 workspace_id,origin_id,origin_seq,version_id,object_id,original_path,
-                 incoming_content_kind,incoming_update_blob_sha256,
-                 incoming_lineage_claim_id,incoming_is_base_state,losing_claim_id,
-                 recovered_path,recovery_collision_ordinal,recovery_object_id,
-                 recovery_moment_id,recorded_at_ms
-             ) VALUES (
-                 'ws-recovery-cascade','peer',4,'main','object-a','notes/a.md',
-                 'plaintext',?1,?1,1,?1,'notes/a.recovered.md','0',
-                 'recovery-object','recovery-moment',3
-             )",
-            [&claim_id],
-        )
-        .expect("seed recovery decision");
-        let workspace_fk: (String, String) = conn
-            .query_row(
-                "SELECT \"table\",on_delete
-                   FROM pragma_foreign_key_list('ydoc_recovery_decisions')
-                  WHERE \"from\"='workspace_id'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("recovery workspace foreign key");
-        assert_eq!(
-            workspace_fk,
-            ("versioned_workspaces".to_owned(), "CASCADE".to_owned())
-        );
-        conn.execute(
-            "DELETE FROM versioned_workspaces WHERE workspace_id='ws-recovery-cascade'",
-            [],
-        )
-        .expect("delete recovery workspace");
-        let decisions: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM ydoc_recovery_decisions
-                  WHERE workspace_id='ws-recovery-cascade'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("recovery decisions after workspace deletion");
-        assert_eq!(
-            decisions, 0,
-            "workspace deletion must release recovery decisions"
-        );
-        let rerun = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("rerun current migrations");
-        assert_eq!(
-            rerun,
-            MigrationOutcome::Applied {
-                // Every migration registered after this one. A literal here is
-                // a count that goes stale the next time the ledger grows.
-                newly_applied: u32::try_from(BASELINE_MIGRATIONS.len() - (migration_index + 1))
-                    .expect("the ledger length fits a migration count")
-            }
-        );
-    }
-
-    fn seed_hex_binary_blobs(conn: &Connection) {
-        for digit in b"0123456789abcdef" {
-            let digest = char::from(*digit).to_string().repeat(64);
-            conn.execute(
-                "INSERT INTO binary_blobs (sha256, byte_length, bytes) VALUES (?1, 1, ?2)",
-                rusqlite::params![digest, vec![*digit]],
-            )
-            .expect("seed binary blob");
-        }
-    }
-
-    fn legacy_base_payload(object_id: &str, digest: &str, is_base_state: &str) -> String {
-        format!(
-            "{{\"versionId\":\"main\",\"objectId\":\"{object_id}\",\
-             \"updateBlobSha256\":\"{digest}\",\"isBaseState\":{is_base_state}}}"
-        )
-    }
-
-    #[test]
-    fn ydoc_lineage_claim_migration_classifies_strict_candidates_and_preserves_rows() {
-        let dir = tempdir();
-        let path = dir.join("ydoc-lineage-matrix.db");
-        let ctx = MigrationContext::current(2_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = ydoc_lineage_claim_migration_index();
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate through ordinal 28");
-
-        conn.execute(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
-             VALUES ('ws', 'main')",
-            [],
-        )
-        .expect("seed workspace");
-        for (offset, object_id) in [
-            "unclaimed",
-            "exact",
-            "exact-false-bit",
-            "missing",
-            "ambiguous-refused",
-            "ambiguous-multiple",
-            "malformed-only",
-            "prebase-only",
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            conn.execute(
-                "INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES ('ws', ?1, ?2)",
-                rusqlite::params![object_id, 100 + offset as i64],
-            )
-            .expect("seed file object");
-        }
-        seed_hex_binary_blobs(&conn);
-        conn.execute_batch(
-            "INSERT INTO ydoc_docs (
-                 workspace_id, version_id, object_id, content_kind, regime,
-                 head_update_seq, head_snapshot_seq, base_claimed, settle_seq,
-                 last_settled_sha, updated_at_ms, path
-             ) VALUES
-                 ('ws','main','unclaimed','plaintext','local-only',
-                  1,0,0,7,'settled-unclaimed',201,'unclaimed.md'),
-                 ('ws','main','exact','richdoc','replicated',
-                  0,0,1,8,'settled-exact',202,'exact.md'),
-                 ('ws','main','exact-false-bit','plaintext','local-only',
-                  0,0,0,9,NULL,203,'exact-false.md'),
-                 ('ws','main','missing','plaintext','replicated',
-                  4,4,1,10,'settled-missing',204,'missing.md'),
-                 ('ws','main','ambiguous-refused','plaintext','replicated',
-                  5,5,1,11,NULL,205,'refused.md'),
-                 ('ws','main','ambiguous-multiple','richdoc','replicated',
-                  6,6,1,12,NULL,206,'multiple.md'),
-                 ('ws','main','malformed-only','plaintext','replicated',
-                  7,7,1,13,NULL,207,'malformed.md');
-
-             INSERT INTO ydoc_updates (
-                 workspace_id, version_id, object_id, seq, update_blob_sha256,
-                 actor_origin_id, recorded_at_ms
-             ) VALUES
-                 ('ws','main','unclaimed',1,
-                  'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
-                  'local-origin',301);
-
-             INSERT INTO ydoc_snapshots (
-                 workspace_id, version_id, object_id, up_to_seq,
-                 snapshot_blob_sha256, state_vector_blob_sha256, recorded_at_ms
-             ) VALUES
-                 ('ws','main','exact',0,
-                  'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                  'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',401),
-                 ('ws','main','exact-false-bit',0,
-                  'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-                  'dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',402),
-                 ('ws','main','missing',4,
-                  'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff',
-                  '0000000000000000000000000000000000000000000000000000000000000000',403),
-                 ('ws','main','ambiguous-refused',5,
-                  '1111111111111111111111111111111111111111111111111111111111111111',
-                  '2222222222222222222222222222222222222222222222222222222222222222',404),
-                 ('ws','main','ambiguous-multiple',6,
-                  '3333333333333333333333333333333333333333333333333333333333333333',
-                  '4444444444444444444444444444444444444444444444444444444444444444',405),
-                 ('ws','main','malformed-only',7,
-                  '5555555555555555555555555555555555555555555555555555555555555555',
-                  '6666666666666666666666666666666666666666666666666666666666666666',406);
-
-             INSERT INTO ydoc_deferred_updates (
-                 workspace_id, version_id, object_id, origin_id, origin_seq,
-                 recorded_at_ms
-             ) VALUES
-                 ('ws','main','exact','deferred-active',1,501),
-                 ('ws','main','prebase-only','deferred-prebase',2,502);",
-        )
-        .expect("seed legacy Y.Doc rows");
-
-        let strict_refused_digest = "7".repeat(64);
-        conn.execute(
-            "INSERT INTO replication_log (
-                 workspace_id, origin_id, origin_seq, op_kind, payload_json,
-                 recorded_at_ms, imported
-             ) VALUES ('ws','peer-refused',1,'ydoc.update',?1,601,1)",
-            [legacy_base_payload(
-                "ambiguous-refused",
-                &strict_refused_digest,
-                "true",
-            )],
-        )
-        .expect("seed refused base candidate");
-        conn.execute(
-            "INSERT INTO replication_pending_refusals (
-                 workspace_id, origin_id, origin_seq, op_kind, reason_code,
-                 reason_message, report_id
-             ) VALUES (
-                 'ws','peer-refused',1,'ydoc.update','invalid-input',
-                 'base was refused','report-refused'
-             )",
-            [],
-        )
-        .expect("mark candidate refused");
-        for (seq, digit) in [(2_i64, '8'), (3_i64, '9')] {
-            conn.execute(
-                "INSERT INTO replication_log (
-                     workspace_id, origin_id, origin_seq, op_kind, payload_json,
-                     recorded_at_ms, imported
-                 ) VALUES ('ws','peer-multiple',?1,'ydoc.update',?2,?3,1)",
-                rusqlite::params![
-                    seq,
-                    legacy_base_payload(
-                        "ambiguous-multiple",
-                        &digit.to_string().repeat(64),
-                        "true",
-                    ),
-                    610 + seq,
-                ],
-            )
-            .expect("seed multiple base candidates");
-        }
-        for (seq, payload) in [
-            (4_i64, "{".to_owned()),
-            (
-                5_i64,
-                legacy_base_payload("malformed-only", &"7".repeat(64), "1"),
-            ),
-            (
-                6_i64,
-                legacy_base_payload("malformed-only", &"A".repeat(64), "true"),
-            ),
-            (
-                7_i64,
-                format!(
-                    "{{\"versionId\":1,\"objectId\":\"malformed-only\",\
-                     \"updateBlobSha256\":\"{}\",\"isBaseState\":true}}",
-                    "7".repeat(64)
-                ),
-            ),
-        ] {
-            conn.execute(
-                "INSERT INTO replication_log (
-                     workspace_id, origin_id, origin_seq, op_kind, payload_json,
-                     recorded_at_ms, imported
-                 ) VALUES ('ws','peer-malformed',?1,'ydoc.update',?2,?3,1)",
-                rusqlite::params![seq, payload, 620 + seq],
-            )
-            .expect("seed non-candidate payload");
-        }
-
-        let child_counts_before: (i64, i64, i64) = (
-            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
-                .expect("update count"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_snapshots", [], |row| row.get(0))
-                .expect("snapshot count"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
-                row.get(0)
-            })
-            .expect("deferred count"),
-        );
-
-        let outcome = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("apply typed lineage migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let claim = |object_id: &str| -> (String, Option<String>, String) {
-            conn.query_row(
-                "SELECT lineage_claim_status, lineage_claim_id, regime \
-                 FROM ydoc_docs WHERE workspace_id='ws' AND object_id=?1",
-                [object_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read migrated claim")
-        };
-        assert_eq!(
-            claim("unclaimed"),
-            ("unclaimed".to_owned(), None, "local-only".to_owned())
-        );
-        assert_eq!(
-            claim("exact"),
-            (
-                "exact".to_owned(),
-                Some("a".repeat(64)),
-                "replicated".to_owned()
-            )
-        );
-        assert_eq!(
-            claim("exact-false-bit"),
-            (
-                "exact".to_owned(),
-                Some("c".repeat(64)),
-                "replicated".to_owned()
-            ),
-            "the surviving seq-0 snapshot is stronger evidence than the false legacy bit"
-        );
-        assert_eq!(
-            claim("missing"),
-            ("missing".to_owned(), None, "replicated".to_owned())
-        );
-        assert_eq!(
-            claim("ambiguous-refused"),
-            ("ambiguous".to_owned(), None, "replicated".to_owned()),
-            "a refused envelope is a candidate, never proof of the active base"
-        );
-        assert_eq!(
-            claim("ambiguous-multiple"),
-            ("ambiguous".to_owned(), None, "replicated".to_owned())
-        );
-        assert_eq!(
-            claim("malformed-only"),
-            ("missing".to_owned(), None, "replicated".to_owned()),
-            "malformed JSON, wrong JSON types, and non-lowerhex digests are not candidates"
-        );
-
-        let preserved: (i64, i64, i64, Option<String>, i64, String) = conn
-            .query_row(
-                "SELECT head_update_seq, head_snapshot_seq, settle_seq,
-                        last_settled_sha, updated_at_ms, path
-                 FROM ydoc_docs WHERE workspace_id='ws' AND object_id='unclaimed'",
-                [],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                        row.get(5)?,
-                    ))
-                },
-            )
-            .expect("read preserved marker fields");
-        assert_eq!(
-            preserved,
-            (
-                1,
-                0,
-                7,
-                Some("settled-unclaimed".to_owned()),
-                201,
-                "unclaimed.md".to_owned()
-            )
-        );
-        let child_counts_after: (i64, i64, i64) = (
-            conn.query_row("SELECT COUNT(*) FROM ydoc_updates", [], |row| row.get(0))
-                .expect("update count after"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_snapshots", [], |row| row.get(0))
-                .expect("snapshot count after"),
-            conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
-                row.get(0)
-            })
-            .expect("deferred count after"),
-        );
-        assert_eq!(child_counts_after, child_counts_before);
-        let prebase: (String, Option<String>) = conn
-            .query_row(
-                "SELECT object_id, lineage_claim_id FROM ydoc_deferred_updates \
-                 WHERE origin_id='deferred-prebase'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("pre-base deferred row survives");
-        assert_eq!(prebase, ("prebase-only".to_owned(), None));
-
-        let legacy_column_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') \
-                 WHERE name='base_claimed'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("inspect marker columns");
-        assert_eq!(legacy_column_count, 0, "the dual-truth bit is removed");
-        let deferred_parent: String = conn
-            .query_row(
-                "SELECT \"table\" FROM pragma_foreign_key_list('ydoc_deferred_updates')",
-                [],
-                |row| row.get(0),
-            )
-            .expect("deferred root");
-        assert_eq!(deferred_parent, "file_objects");
-        let fk_violations: i64 = conn
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
-                row.get(0)
-            })
-            .expect("foreign key check");
-        assert_eq!(fk_violations, 0);
-
-        let fingerprint = (
-            dump_table_rows(&conn, "ydoc_docs"),
-            dump_table_rows(&conn, "ydoc_updates"),
-            dump_table_rows(&conn, "ydoc_snapshots"),
-            dump_table_rows(&conn, "ydoc_deferred_updates"),
-        );
-        let rerun = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("rerun typed lineage migration");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
-        assert_eq!(
-            fingerprint,
-            (
-                dump_table_rows(&conn, "ydoc_docs"),
-                dump_table_rows(&conn, "ydoc_updates"),
-                dump_table_rows(&conn, "ydoc_snapshots"),
-                dump_table_rows(&conn, "ydoc_deferred_updates"),
-            ),
-            "a checksum-matching rerun is a strict no-op"
-        );
-    }
-
-    #[test]
     fn ydoc_lineage_claim_schema_enforces_roots_constraints_and_indexes() {
         let dir = tempdir();
         let path = dir.join("ydoc-lineage-constraints.db");
@@ -6113,8 +1906,7 @@ mod tests {
         let mut conn = open_bare(&path);
         conn.pragma_update(None, "foreign_keys", true)
             .expect("enable foreign keys");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("migrate fresh store");
+        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("apply baseline");
         conn.execute_batch(
             "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
                  VALUES ('ws', 'main');
@@ -6260,1107 +2052,6 @@ mod tests {
         assert_eq!(fk_violations, 0);
     }
 
-    #[test]
-    fn ydoc_lineage_claim_migration_rolls_back_atomically_on_invalid_legacy_rows() {
-        let dir = tempdir();
-        let path = dir.join("ydoc-lineage-rollback.db");
-        let ctx = MigrationContext::current(2_902);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        let migration_index = ydoc_lineage_claim_migration_index();
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("migrate through ordinal 28");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-                 VALUES ('ws', 'object', 1);
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-                 VALUES (
-                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                   1,x'01'
-                 );
-             INSERT INTO ydoc_docs (
-                 workspace_id,version_id,object_id,content_kind,regime,
-                 head_update_seq,head_snapshot_seq,base_claimed,updated_at_ms,path
-             ) VALUES ('ws','main','object','plaintext','local-only',0,0,0,2,'a.md');
-             INSERT INTO ydoc_updates (
-                 workspace_id,version_id,object_id,seq,update_blob_sha256,recorded_at_ms
-             ) VALUES (
-                 'ws','main','object',-1,
-                 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',3
-             );",
-        )
-        .expect("seed legacy row rejected by the new checks");
-
-        run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect_err("invalid legacy child must roll back the rebuild");
-        let old_column_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('ydoc_docs') \
-                 WHERE name='base_claimed'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("inspect rolled-back marker");
-        assert_eq!(old_column_present, 1);
-        let staged_tables: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema \
-                 WHERE name GLOB 'ydoc_*_v29'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("inspect staged rebuild tables");
-        assert_eq!(staged_tables, 0);
-        let legacy_row: i64 = conn
-            .query_row(
-                "SELECT seq FROM ydoc_updates WHERE object_id='object'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("legacy child survives rollback");
-        assert_eq!(legacy_row, -1);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("ledger remains at ordinal 28");
-        assert_eq!(max_ordinal, 28);
-
-        conn.execute("DELETE FROM ydoc_updates WHERE object_id='object'", [])
-            .expect("remove invalid legacy child");
-        let repaired = run_migrations(
-            &mut conn,
-            &BASELINE_MIGRATIONS[..=migration_index],
-            &ctx,
-            &NoFaults,
-        )
-        .expect("retry clean rebuild");
-        assert_eq!(repaired, MigrationOutcome::Applied { newly_applied: 1 });
-        let status: String = conn
-            .query_row(
-                "SELECT lineage_claim_status FROM ydoc_docs WHERE object_id='object'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("read repaired marker");
-        assert_eq!(status, "unclaimed");
-    }
-
-    #[test]
-    fn ydoc_lineage_claim_migration_adds_a_rooted_pending_conflict_bundle() {
-        let dir = tempdir();
-        let path = dir.join("pending-conflict-bundle.db");
-        let ctx = MigrationContext::current(2_903);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("current migrations");
-
-        const TEXT_BLOB: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        const BINARY_BLOB: &str =
-            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-        conn.execute_batch(&format!(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-                 VALUES ('ws', 'main');
-             INSERT INTO blobs (sha256, byte_length, text)
-                 VALUES ('{TEXT_BLOB}', 4, 'text');
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-                 VALUES ('{BINARY_BLOB}', 1, x'01');"
-        ))
-        .expect("bundle roots");
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_bundles
-                 (workspace_id, conflict_id, format_version,
-                  pre_effect_moment_order, created_at_ms)
-             VALUES ('ws', 'conflict-1', 1, 7, 20)",
-            [],
-        )
-        .expect("pending conflict bundle");
-        let bundle_order = conn.last_insert_rowid();
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_ops
-                 (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
-             VALUES (?1, 0, 'conflict.resolve',
-                     '{\"formatVersion\":1,\"conflictId\":\"conflict-1\"}', 20)",
-            [bundle_order],
-        )
-        .expect("resolve op");
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_ops
-                 (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
-             VALUES (?1, 1, 'moment.append',
-                     '{\"momentId\":\"moment-1\"}', 21)",
-            [bundle_order],
-        )
-        .expect("moment op");
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_moments
-                 (workspace_id, bundle_order, op_index, moment_id)
-             VALUES ('ws', ?1, 1, 'moment-1')",
-            [bundle_order],
-        )
-        .expect("moment identity");
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_text_blobs
-                 (bundle_order, blob_sha256) VALUES (?1, ?2)",
-            rusqlite::params![bundle_order, TEXT_BLOB],
-        )
-        .expect("text blob root");
-        conn.execute(
-            "INSERT INTO replication_pending_conflict_binary_blobs
-                 (bundle_order, blob_sha256) VALUES (?1, ?2)",
-            rusqlite::params![bundle_order, BINARY_BLOB],
-        )
-        .expect("binary blob root");
-
-        assert!(
-            conn.execute("DELETE FROM blobs WHERE sha256=?1", [TEXT_BLOB])
-                .is_err(),
-            "the pending bundle must keep text blobs alive"
-        );
-        assert!(
-            conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [BINARY_BLOB])
-                .is_err(),
-            "the pending bundle must keep binary and Y.Doc blobs alive"
-        );
-        assert!(
-            conn.execute(
-                "INSERT INTO replication_pending_conflict_ops
-                     (bundle_order, op_index, op_kind, payload_json, recorded_at_ms)
-                 VALUES (?1, 2, 'conflict.resolve', '{}', 22)",
-                [bundle_order],
-            )
-            .is_err(),
-            "only op zero may be conflict.resolve"
-        );
-
-        conn.execute(
-            "DELETE FROM replication_pending_conflict_bundles WHERE bundle_order=?1",
-            [bundle_order],
-        )
-        .expect("delete pending bundle");
-        for table in [
-            "replication_pending_conflict_ops",
-            "replication_pending_conflict_moments",
-            "replication_pending_conflict_text_blobs",
-            "replication_pending_conflict_binary_blobs",
-        ] {
-            assert_eq!(
-                conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                    row.get::<_, i64>(0)
-                })
-                .expect("pending child count"),
-                0,
-                "{table} must cascade with its bundle"
-            );
-        }
-        conn.execute("DELETE FROM blobs WHERE sha256=?1", [TEXT_BLOB])
-            .expect("text root released");
-        conn.execute("DELETE FROM binary_blobs WHERE sha256=?1", [BINARY_BLOB])
-            .expect("binary root released");
-    }
-
-    #[test]
-    fn binary_conflict_sides_migration_preserves_every_v8_column() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_800);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..9], &ctx, &NoFaults)
-            .expect("migrate through ordinal 8");
-        // Row 'a-full': every v8 column carries a distinct non-default value —
-        // including resolution = '' (the NULL-vs-empty trap) and non-default
-        // *_content_kind — so any dropped, swapped, or re-defaulted column in
-        // the rebuild's INSERT..SELECT shows up as a value mismatch.
-        // Row 'b-null-kinds': all three *_content_kind explicitly NULL; the
-        // copy must not re-default them to 'text'.
-        // Row 'c-defaults': omits the *_content_kind columns, relying on the
-        // v8 DEFAULT 'text'.
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main');
-             INSERT INTO blobs (sha256, byte_length, text) VALUES
-                 ('sha-base', 9, 'base text'),
-                 ('sha-cur', 12, 'current text'),
-                 ('sha-inc', 13, 'incoming text');
-             INSERT INTO conflicts (
-                 workspace_id, conflict_id, path, target_version_id, source_version_id,
-                 created_at_ms, updated_at_ms, status, chosen_from, resolution,
-                 metadata_origin, metadata_summary, metadata_correlation_id,
-                 base_exists, base_path, base_object_id, base_content_kind,
-                 base_blob_sha256, base_updated_at_ms, base_latest_moment_id,
-                 base_metadata_origin, base_metadata_summary, base_metadata_correlation_id,
-                 current_exists, current_path, current_object_id, current_content_kind,
-                 current_blob_sha256, current_updated_at_ms, current_latest_moment_id,
-                 current_metadata_origin, current_metadata_summary, current_metadata_correlation_id,
-                 incoming_exists, incoming_path, incoming_object_id, incoming_content_kind,
-                 incoming_blob_sha256, incoming_updated_at_ms, incoming_latest_moment_id,
-                 incoming_metadata_origin, incoming_metadata_summary, incoming_metadata_correlation_id
-             ) VALUES (
-                 'ws', 'a-full', 'full.md', 'main', 'feature',
-                 101, 102, 'resolved', 'incoming', '',
-                 'merge', 'summary-full', 'corr-full',
-                 1, 'base.md', 'obj-base', 'binary',
-                 'sha-base', 103, 'moment-base',
-                 'sync', 'base-summary', 'base-corr',
-                 1, 'cur.md', 'obj-cur', 'binary',
-                 'sha-cur', 104, 'moment-cur',
-                 'user', 'cur-summary', 'cur-corr',
-                 1, 'inc.md', 'obj-inc', 'binary',
-                 'sha-inc', 105, 'moment-inc',
-                 'agent', 'inc-summary', 'inc-corr'
-             );
-             INSERT INTO conflicts (
-                 workspace_id, conflict_id, path, target_version_id, source_version_id,
-                 created_at_ms, updated_at_ms, status, chosen_from, resolution,
-                 metadata_origin,
-                 base_exists, base_path, base_content_kind,
-                 current_exists, current_path, current_content_kind,
-                 incoming_exists, incoming_path, incoming_content_kind
-             ) VALUES (
-                 'ws', 'b-null-kinds', 'nulls.md', 'main', 'feature',
-                 201, 202, 'open', 'current', NULL,
-                 'sync',
-                 0, 'nulls.md', NULL,
-                 0, 'nulls.md', NULL,
-                 0, 'nulls.md', NULL
-             );
-             INSERT INTO conflicts (
-                 workspace_id, conflict_id, path, target_version_id, source_version_id,
-                 created_at_ms, updated_at_ms, status, chosen_from, resolution,
-                 metadata_origin,
-                 base_exists, base_path, current_exists, current_path,
-                 incoming_exists, incoming_path
-             ) VALUES (
-                 'ws', 'c-defaults', 'defaults.md', 'main', 'feature',
-                 301, 302, 'open', 'current', NULL,
-                 'sync',
-                 0, 'defaults.md', 0, 'defaults.md', 0, 'defaults.md'
-             );",
-        )
-        .expect("seed ordinal-8 conflicts");
-        let before = dump_conflict_rows(&conn);
-        assert_eq!(before.len(), 3);
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("apply binary conflict-side migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let after = dump_conflict_rows(&conn);
-        assert_eq!(after.len(), before.len());
-        let new_columns = [
-            "base_binary_sha256",
-            "current_binary_sha256",
-            "incoming_binary_sha256",
-        ];
-        for (before_row, after_row) in before.iter().zip(&after) {
-            assert_eq!(
-                after_row.len(),
-                before_row.len() + new_columns.len(),
-                "rebuild must add exactly the three binary columns"
-            );
-            for (name, value) in before_row {
-                let migrated = after_row
-                    .iter()
-                    .find(|(after_name, _)| after_name == name)
-                    .map(|(_, after_value)| after_value);
-                assert_eq!(
-                    migrated,
-                    Some(value),
-                    "column {name} must survive the rebuild value-for-value"
-                );
-            }
-            for name in new_columns {
-                let added = after_row
-                    .iter()
-                    .find(|(after_name, _)| after_name == name)
-                    .map(|(_, after_value)| after_value);
-                assert_eq!(
-                    added,
-                    Some(&rusqlite::types::Value::Null),
-                    "new column {name} must initialize NULL"
-                );
-            }
-        }
-        // The re-default trap, stated explicitly: row b's explicit NULL kinds
-        // stay NULL instead of picking up the column DEFAULT during the copy.
-        let null_kinds: (
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        ) = conn
-            .query_row(
-                "SELECT base_content_kind, current_content_kind, incoming_content_kind,
-                        resolution
-                 FROM conflicts WHERE conflict_id = 'b-null-kinds'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .expect("null-kind row");
-        assert_eq!(null_kinds, (None, None, None, None));
-        let empty_resolution: Option<String> = conn
-            .query_row(
-                "SELECT resolution FROM conflicts WHERE conflict_id = 'a-full'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("empty resolution");
-        assert_eq!(empty_resolution, Some(String::new()));
-
-        let binary_fks: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_foreign_key_list('conflicts')
-                 WHERE \"table\" = 'binary_blobs'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("binary conflict foreign keys");
-        assert_eq!(binary_fks, 3);
-        let index_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
-                 AND name = 'idx_conflicts_workspace_status'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("conflicts index");
-        assert_eq!(index_present, 1);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, 9);
-
-        // Idempotency: a second run has nothing to apply and changes nothing.
-        let rerun = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("rerun is a no-op");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
-        assert_eq!(dump_conflict_rows(&conn), after);
-    }
-
-    #[test]
-    fn binary_conflict_sides_migration_rolls_back_when_fk_revalidation_fails() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_800);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..9], &ctx, &NoFaults)
-            .expect("migrate through ordinal 8");
-        // Seed a latent dangling text-blob reference the way a corrupted store
-        // would carry one: written while FK enforcement was off.
-        conn.pragma_update(None, "foreign_keys", false)
-            .expect("disable foreign keys");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main');
-             INSERT INTO conflicts (
-                 workspace_id, conflict_id, path, target_version_id, source_version_id,
-                 created_at_ms, updated_at_ms, status, chosen_from, resolution,
-                 metadata_origin,
-                 base_exists, base_path, base_blob_sha256,
-                 current_exists, current_path, incoming_exists, incoming_path
-             ) VALUES (
-                 'ws', 'dangling', 'note.md', 'main', 'feature',
-                 10, 11, 'open', 'current', NULL,
-                 'sync',
-                 1, 'note.md', 'sha-missing',
-                 0, 'note.md', 0, 'note.md'
-             );",
-        )
-        .expect("seed dangling ordinal-8 conflict");
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("re-enable foreign keys");
-
-        // The ordinal-9 rebuild re-validates the row's FKs and must fail
-        // closed, rolling the store back to intact v8.
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect_err("dangling blob reference must abort the rebuild");
-        let has_new_column: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('conflicts')
-                 WHERE name = 'base_binary_sha256'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("v8 conflicts schema");
-        assert_eq!(has_new_column, 0, "rollback must restore the v8 table");
-        let orphan_table: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name = 'conflicts_v9'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("no orphan rebuild table");
-        assert_eq!(orphan_table, 0);
-        let index_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index'
-                 AND name = 'idx_conflicts_workspace_status'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("v8 conflicts index");
-        assert_eq!(index_present, 1);
-        let row_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM conflicts WHERE conflict_id = 'dangling'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("seeded row survives rollback");
-        assert_eq!(row_present, 1);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("ledger after rollback");
-        assert_eq!(max_ordinal, 8);
-
-        // Remediation: restore the missing blob and the upgrade goes through.
-        conn.execute(
-            "INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-missing', 4, 'body')",
-            [],
-        )
-        .expect("restore missing blob");
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("remediated store migrates cleanly");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-        let migrated: (String, Option<String>) = conn
-            .query_row(
-                "SELECT base_blob_sha256, base_binary_sha256
-                 FROM conflicts WHERE conflict_id = 'dangling'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .expect("migrated row");
-        assert_eq!(migrated, ("sha-missing".to_owned(), None));
-    }
-
-    #[test]
-    fn fresh_store_reaches_path_aliases_object_index_migration() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply baseline through the deferred Y.Doc coordinates table");
-        assert_eq!(
-            outcome,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT
-            }
-        );
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, i64::from(NEXT_FREE_ORDINAL - 1));
-        let index_present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
-                 AND name = 'idx_path_aliases_workspace_object'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("reverse alias index");
-        assert_eq!(index_present, 1);
-    }
-
-    #[test]
-    fn path_aliases_object_index_migration_upgrades_existing_store() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("migrate through ordinal 10");
-        let before: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'index' \
-                 AND name = 'idx_path_aliases_workspace_object'",
-                [],
-                |row| row.get(0),
-            )
-            .expect("index absent before ordinal 11");
-        assert_eq!(before, 0);
-
-        let outcome = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults)
-            .expect("apply reverse alias index migration");
-        assert_eq!(
-            outcome,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT - 11
-            }
-        );
-        let columns: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_index_info('idx_path_aliases_workspace_object') ORDER BY seqno")
-            .expect("prepare reverse alias index columns")
-            .query_map([], |row| row.get(0))
-            .expect("query reverse alias index columns")
-            .collect::<rusqlite::Result<_>>()
-            .expect("collect reverse alias index columns");
-        assert_eq!(columns, ["workspace_id", "object_id"]);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("latest migration ordinal");
-        assert_eq!(max_ordinal, i64::from(NEXT_FREE_ORDINAL - 1));
-    }
-
-    #[test]
-    fn binary_head_migration_preserves_every_v9_column() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("migrate through ordinal 9");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main');
-             INSERT INTO versions (
-                 workspace_id, version_id, kind, name, created_at_ms,
-                 fork_version_id, fork_moment_id
-             ) VALUES ('ws', 'main', 'main', 'Main', 101, NULL, NULL);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-             VALUES ('ws', 'object-full', 102), ('ws', 'object-null', 103);
-             INSERT INTO blobs (sha256, byte_length, text)
-             VALUES ('sha-after', 10, 'after text'), ('sha-before', 11, 'before text');
-             INSERT INTO snapshots (
-                 workspace_id, version_id, object_id, path, blob_sha256,
-                 updated_at_ms, latest_moment_id, metadata_origin
-             ) VALUES (
-                 'ws', 'main', 'object-full', 'snapshot.md', 'sha-after',
-                 201, 'moment-full', 'user'
-             );
-             INSERT INTO fork_base_snapshots (
-                 workspace_id, version_id, object_id, path, blob_sha256,
-                 updated_at_ms, latest_moment_id, metadata_origin
-             ) VALUES (
-                 'ws', 'main', 'object-null', 'fork.md', 'sha-before',
-                 202, 'moment-fork', 'sync'
-             );
-             INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id,
-                 path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, before_blob_sha256, metadata_origin,
-                 author_json, sync_record_only, before_latest_moment_id
-             ) VALUES (
-                 'ws', 7, 'moment-full', 'main', 'object-full',
-                 'moment.md', 203, 'write', 'sha-after',
-                 2, 'sha-before', 'agent',
-                 '{\"name\":\"Ada\"}', 1, 'moment-before'
-             );",
-        )
-        .expect("seed ordinal-9 head rows");
-
-        let before_snapshots = dump_table_rows(&conn, "snapshots");
-        let before_fork_bases = dump_table_rows(&conn, "fork_base_snapshots");
-        let before_moments = dump_table_rows(&conn, "moments");
-
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("apply binary-head migration");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-
-        let cases = [
-            (
-                "snapshots",
-                before_snapshots,
-                vec![("content_kind", "text"), ("binary_sha256", "")],
-            ),
-            (
-                "fork_base_snapshots",
-                before_fork_bases,
-                vec![("content_kind", "text"), ("binary_sha256", "")],
-            ),
-            (
-                "moments",
-                before_moments,
-                vec![
-                    ("after_content_kind", "text"),
-                    ("after_binary_sha256", ""),
-                    ("before_content_kind", "text"),
-                    ("before_binary_sha256", ""),
-                ],
-            ),
-        ];
-        for (table, before, added_columns) in cases {
-            let after = dump_table_rows(&conn, table);
-            assert_eq!(after.len(), before.len());
-            for (before_row, after_row) in before.iter().zip(&after) {
-                assert_eq!(
-                    after_row.len(),
-                    before_row.len() + added_columns.len(),
-                    "{table} rebuild must add only its binary-head columns"
-                );
-                for (name, value) in before_row {
-                    let migrated = after_row
-                        .iter()
-                        .find(|(after_name, _)| after_name == name)
-                        .map(|(_, after_value)| after_value);
-                    assert_eq!(
-                        migrated,
-                        Some(value),
-                        "{table}.{name} must survive value-for-value"
-                    );
-                }
-                for (name, expected) in &added_columns {
-                    let added = after_row
-                        .iter()
-                        .find(|(after_name, _)| after_name == name)
-                        .map(|(_, value)| value);
-                    let expected = if expected.is_empty() {
-                        rusqlite::types::Value::Null
-                    } else {
-                        rusqlite::types::Value::Text((*expected).to_owned())
-                    };
-                    assert_eq!(added, Some(&expected), "unexpected {table}.{name}");
-                }
-            }
-        }
-
-        let moment_indexes: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index' AND name IN (
-                     'idx_moments_workspace_order',
-                     'idx_moments_version_order',
-                     'idx_moments_object_order'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("moments indexes");
-        assert_eq!(moment_indexes, 3);
-    }
-
-    #[test]
-    fn binary_head_migration_rolls_back_when_fk_revalidation_fails() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("migrate through ordinal 9");
-        conn.pragma_update(None, "foreign_keys", false)
-            .expect("disable foreign keys");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
-             VALUES ('ws', 'main', 'main', 'Main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-             VALUES ('ws', 'object', 2);
-             INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id,
-                 path, recorded_at_ms, operation, after_blob_sha256,
-                 before_present, metadata_origin
-             ) VALUES (
-                 'ws', 1, 'moment', 'main', 'object', 'note.md', 3,
-                 'write', 'sha-missing', 1, 'user'
-             );",
-        )
-        .expect("seed dangling ordinal-9 moment");
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("re-enable foreign keys");
-
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect_err("dangling blob reference must abort all three rebuilds");
-        for (table, column) in [
-            ("snapshots", "content_kind"),
-            ("fork_base_snapshots", "content_kind"),
-            ("moments", "after_content_kind"),
-        ] {
-            let has_new_column: i64 = conn
-                .query_row(
-                    "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
-                    rusqlite::params![table, column],
-                    |row| row.get(0),
-                )
-                .expect("v9 table schema");
-            assert_eq!(has_new_column, 0, "rollback must restore v9 {table}");
-        }
-        let orphan_tables: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE name IN (
-                    'snapshots_v10', 'fork_base_snapshots_v10', 'moments_v10'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("no orphan rebuild tables");
-        assert_eq!(orphan_tables, 0);
-        let moment_indexes: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'index' AND name IN (
-                     'idx_moments_workspace_order',
-                     'idx_moments_version_order',
-                     'idx_moments_object_order'
-                 )",
-                [],
-                |row| row.get(0),
-            )
-            .expect("v9 moments indexes");
-        assert_eq!(moment_indexes, 3);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |row| {
-                row.get(0)
-            })
-            .expect("ledger after rollback");
-        assert_eq!(max_ordinal, 9);
-
-        conn.execute(
-            "INSERT INTO blobs (sha256, byte_length, text) VALUES ('sha-missing', 4, 'body')",
-            [],
-        )
-        .expect("restore missing blob");
-        let outcome = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("remediated store migrates cleanly");
-        assert_eq!(outcome, MigrationOutcome::Applied { newly_applied: 1 });
-    }
-
-    // ===================== ADVERSARIAL REVIEW PROBES (BINHEAD) =====================
-    // Ported verbatim from the migration reviewer's worktree as permanent
-    // regressions for the ordinal-10 binary-head migration.
-
-    /// Helper: open + migrate a fresh store all the way to ordinal 10 with FKs on.
-    fn open_migrated_v10(path: &std::path::Path) -> Connection {
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("enable foreign keys");
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("migrate to ordinal 10");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id)
-             VALUES ('ws', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
-             VALUES ('ws', 'main', 'main', 'Main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms)
-             VALUES ('ws', 'obj', 2);
-             INSERT INTO binary_blobs (sha256, byte_length, bytes)
-             VALUES ('bin-real', 3, x'aabbcc');",
-        )
-        .expect("seed parents");
-        conn
-    }
-
-    /// PROBE: after v10 the NOT-NULL was actually lifted — a binary snapshot
-    /// with NULL text blob but a real binary_sha256 must INSERT cleanly.
-    #[test]
-    fn probe_v10_permits_null_text_blob_for_binary_rows() {
-        let dir = tempdir();
-        let conn = open_migrated_v10(&dir.join("engine.db"));
-
-        conn.execute(
-            "INSERT INTO snapshots (
-                 workspace_id, version_id, object_id, path, blob_sha256,
-                 updated_at_ms, latest_moment_id, metadata_origin,
-                 content_kind, binary_sha256
-             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'bin-real')",
-            [],
-        )
-        .expect("binary snapshot with NULL text blob must be accepted post-v10");
-
-        conn.execute(
-            "INSERT INTO fork_base_snapshots (
-                 workspace_id, version_id, object_id, path, blob_sha256,
-                 updated_at_ms, latest_moment_id, metadata_origin,
-                 content_kind, binary_sha256
-             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'bin-real')",
-            [],
-        )
-        .expect("binary fork_base with NULL text blob must be accepted post-v10");
-
-        conn.execute(
-            "INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present,
-                 metadata_origin, after_content_kind, after_binary_sha256
-             ) VALUES ('ws', 1, 'mm', 'main', 'obj', 'p.png', 3, 'write',
-                 NULL, 1, 'user', 'binary', 'bin-real')",
-            [],
-        )
-        .expect("binary moment with NULL after_blob_sha256 must be accepted post-v10");
-    }
-
-    /// PROBE: the new binary_sha256 -> binary_blobs FKs are actually enforced
-    /// (a dangling reference is rejected) and a valid one is accepted.
-    #[test]
-    fn probe_v10_binary_sha256_fk_is_enforced() {
-        let dir = tempdir();
-        let conn = open_migrated_v10(&dir.join("engine.db"));
-
-        // Dangling binary ref on snapshots -> rejected.
-        let err = conn.execute(
-            "INSERT INTO snapshots (
-                 workspace_id, version_id, object_id, path, blob_sha256,
-                 updated_at_ms, latest_moment_id, metadata_origin,
-                 content_kind, binary_sha256
-             ) VALUES ('ws','main','obj','p.png', NULL, 9, 'm', 'user', 'binary', 'ghost')",
-            [],
-        );
-        assert!(
-            err.is_err(),
-            "dangling snapshots.binary_sha256 must be rejected"
-        );
-
-        // Dangling binary ref on moments (both after + before) -> rejected.
-        let err = conn.execute(
-            "INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present,
-                 metadata_origin, after_binary_sha256
-             ) VALUES ('ws', 1, 'mm', 'main', 'obj', 'p.png', 3, 'write',
-                 NULL, 1, 'user', 'ghost')",
-            [],
-        );
-        assert!(
-            err.is_err(),
-            "dangling moments.after_binary_sha256 must be rejected"
-        );
-
-        let err = conn.execute(
-            "INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present,
-                 metadata_origin, before_binary_sha256
-             ) VALUES ('ws', 2, 'mm2', 'main', 'obj', 'p.png', 3, 'write',
-                 NULL, 1, 'user', 'ghost')",
-            [],
-        );
-        assert!(
-            err.is_err(),
-            "dangling moments.before_binary_sha256 must be rejected"
-        );
-
-        // Valid binary ref -> accepted.
-        conn.execute(
-            "INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present,
-                 metadata_origin, after_content_kind, after_binary_sha256
-             ) VALUES ('ws', 3, 'mm3', 'main', 'obj', 'p.png', 3, 'write',
-                 NULL, 1, 'user', 'binary', 'bin-real')",
-            [],
-        )
-        .expect("valid binary ref must be accepted");
-    }
-
-    /// PROBE: foreign_key_check is clean after the whole rebuild, and the
-    /// migrated schema is byte-identical to a freshly created v10 store for
-    /// all three tables (column defs + indexes + strict).
-    #[test]
-    fn probe_v10_schema_matches_fresh_and_fk_check_clean() {
-        // Migrated store: through v9, seed a row, then to v10.
-        let dir_m = tempdir();
-        let ctx = MigrationContext::current(1_900);
-        let mut migrated = open_bare(&dir_m.join("m.db"));
-        migrated
-            .pragma_update(None, "foreign_keys", true)
-            .expect("fk on");
-        run_migrations(&mut migrated, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults)
-            .expect("through v9");
-        migrated
-            .execute_batch(
-                "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','main');
-                 INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
-                 VALUES ('ws','main','main','Main',1);
-                 INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws','obj',2);
-                 INSERT INTO blobs (sha256, byte_length, text) VALUES ('b', 1, 'x');
-                 INSERT INTO snapshots (workspace_id, version_id, object_id, path, blob_sha256, updated_at_ms, latest_moment_id, metadata_origin)
-                 VALUES ('ws','main','obj','p', 'b', 3, 'm', 'user');
-                 INSERT INTO moments (workspace_id, moment_order, moment_id, version_id, object_id, path, recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin)
-                 VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
-            )
-            .expect("seed v9");
-        run_migrations(&mut migrated, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("to v10");
-
-        // foreign_key_check must be clean.
-        let fk_violations: i64 = migrated
-            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
-                r.get(0)
-            })
-            .expect("fk check");
-        assert_eq!(
-            fk_violations, 0,
-            "foreign_key_check must be clean after rebuild"
-        );
-
-        // Fresh store straight to v10.
-        let dir_f = tempdir();
-        let mut fresh = open_bare(&dir_f.join("f.db"));
-        fresh
-            .pragma_update(None, "foreign_keys", true)
-            .expect("fk on");
-        run_migrations(&mut fresh, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("fresh v10");
-
-        for table in ["snapshots", "fork_base_snapshots", "moments"] {
-            // Column definitions (name, type, notnull, dflt, pk) must match.
-            let cols = |c: &Connection| -> Vec<(i64, String, String, i64, Option<String>, i64)> {
-                let mut stmt = c
-                    .prepare(&format!("SELECT cid, name, type, \"notnull\", dflt_value, pk FROM pragma_table_info('{table}') ORDER BY cid"))
-                    .unwrap();
-                stmt.query_map([], |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get(4)?,
-                        r.get(5)?,
-                    ))
-                })
-                .unwrap()
-                .collect::<Result<_, _>>()
-                .unwrap()
-            };
-            assert_eq!(
-                cols(&migrated),
-                cols(&fresh),
-                "{table} column defs must match fresh"
-            );
-
-            // FK list must match.
-            let fks = |c: &Connection| -> Vec<(String, String, String)> {
-                let mut stmt = c
-                    .prepare(&format!("SELECT \"table\", \"from\", \"to\" FROM pragma_foreign_key_list('{table}') ORDER BY \"table\", \"from\""))
-                    .unwrap();
-                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                    .unwrap()
-                    .collect::<Result<_, _>>()
-                    .unwrap()
-            };
-            assert_eq!(
-                fks(&migrated),
-                fks(&fresh),
-                "{table} FK list must match fresh"
-            );
-
-            // Index list (name + unique + origin) must match.
-            let idx = |c: &Connection| -> Vec<(String, i64, String)> {
-                let mut stmt = c
-                    .prepare(&format!("SELECT name, \"unique\", origin FROM pragma_index_list('{table}') ORDER BY name"))
-                    .unwrap();
-                stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-                    .unwrap()
-                    .collect::<Result<_, _>>()
-                    .unwrap()
-            };
-            assert_eq!(
-                idx(&migrated),
-                idx(&fresh),
-                "{table} index list must match fresh"
-            );
-
-            // Strict flag must match (sqlite_schema.sql retains the keyword).
-            let sql: String = migrated
-                .query_row(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
-                    [table],
-                    |r| r.get(0),
-                )
-                .unwrap();
-            assert!(
-                sql.to_uppercase().contains("STRICT"),
-                "{table} must remain STRICT"
-            );
-        }
-    }
-
-    /// PROBE: v9 -> v10 is idempotent — re-running the full baseline is a no-op
-    /// that changes no rows.
-    #[test]
-    fn probe_v10_is_idempotent() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("fk on");
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("to v10");
-        let before = dump_table_rows(&conn, "moments");
-        let rerun = run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults)
-            .expect("rerun no-op");
-        assert_eq!(rerun, MigrationOutcome::Applied { newly_applied: 0 });
-        assert_eq!(dump_table_rows(&conn, "moments"), before);
-        let max_ordinal: i64 = conn
-            .query_row("SELECT MAX(ordinal) FROM engine_migrations", [], |r| {
-                r.get(0)
-            })
-            .expect("ordinal");
-        assert_eq!(max_ordinal, 10);
-    }
-
-    /// PROBE: NULL nullable columns (author_json, sync_record_only,
-    /// before_blob_sha256) round-trip as NULL, not defaulted/dropped.
-    #[test]
-    fn probe_v10_null_nullable_columns_round_trip() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(1_900);
-        let mut conn = open_bare(&path);
-        conn.pragma_update(None, "foreign_keys", true)
-            .expect("fk on");
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..10], &ctx, &NoFaults).expect("v9");
-        conn.execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) VALUES ('ws','main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms)
-             VALUES ('ws','main','main','Main',1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) VALUES ('ws','obj',2);
-             INSERT INTO blobs (sha256, byte_length, text) VALUES ('b', 1, 'x');
-             INSERT INTO moments (
-                 workspace_id, moment_order, moment_id, version_id, object_id, path,
-                 recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin
-             ) VALUES ('ws', 1, 'm', 'main', 'obj', 'p', 3, 'write', 'b', 1, 'user');",
-        )
-        .expect("seed moment with NULL author_json/sync_record_only/before_blob_sha256");
-        run_migrations(&mut conn, &BASELINE_MIGRATIONS[..11], &ctx, &NoFaults).expect("v10");
-        let (author, sync_only, before_blob): (Option<String>, Option<i64>, Option<String>) = conn
-            .query_row(
-                "SELECT author_json, sync_record_only, before_blob_sha256 FROM moments WHERE moment_id='m'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )
-            .expect("read back");
-        assert_eq!(author, None, "NULL author_json must stay NULL");
-        assert_eq!(sync_only, None, "NULL sync_record_only must stay NULL");
-        assert_eq!(before_blob, None, "NULL before_blob_sha256 must stay NULL");
-    }
-
     #[cfg(feature = "fault-injection")]
     #[test]
     fn crash_before_ledger_commit_rolls_back_and_reopen_recovers() {
@@ -7387,16 +2078,10 @@ mod tests {
             // simulated process death:
         }
 
-        // Reopen and re-run with no fault: recovers cleanly, applying the whole
-        // frozen list (baseline + secrets).
+        // Reopen and re-run with no fault: recovers cleanly and applies the baseline.
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("recover");
-        assert_eq!(
-            out,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT
-            }
-        );
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
     }
 
     #[cfg(feature = "fault-injection")]
@@ -7435,23 +2120,10 @@ mod tests {
             assert_eq!(base, 1, "baseline must be durably recorded");
         }
 
-        // Resume: baseline is skipped (idempotent); the between-steps crash
-        // fired before the secrets migration (ordinal 1), so resume applies the
-        // secrets migration (1), the Y.Doc migration (2), the chats migration
-        // (3), the search migration (4), the moment-link migration (5), the
-        // sync migration (6), conflicts migration (7), shadow-clone migration
-        // (8), binary-conflict-sides migration (9), binary-head migration (10),
-        // reverse alias index migration (11), deferred Y.Doc coordinates
-        // migration (12), request-ledger kind migration (13), and the probe
-        // (14).
+        // Resume: the baseline is skipped (idempotent) and only the probe applies.
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(
-            out,
-            MigrationOutcome::Applied {
-                newly_applied: BASELINE_COUNT
-            }
-        );
+        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
         let probe: i64 = conn
             .query_row(
                 "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -7473,14 +2145,12 @@ mod tests {
         let a = Migration {
             ordinal: 1,
             id: "a",
-            kind: MigrationKind::Transactional,
             sql: "CREATE TABLE a (x INTEGER);",
             sets_user_version: None,
         };
         let b = Migration {
             ordinal: 2,
             id: "b",
-            kind: MigrationKind::Transactional,
             sql: "CREATE TABLE b (x INTEGER);",
             sets_user_version: None,
         };
@@ -7532,105 +2202,6 @@ mod tests {
         }];
         let err = run_migrations(&mut conn, tampered, &ctx, &NoFaults).unwrap_err();
         assert_eq!(err.code(), "migration-failed");
-    }
-
-    #[cfg(feature = "fault-injection")]
-    #[test]
-    fn incomplete_migration_with_changed_checksum_fails_closed() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(4_500);
-
-        // Establish the baseline, then leave a non-transactional migration in a
-        // started-but-incomplete state via a crash before completion.
-        {
-            let mut conn = open_bare(&path);
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("baseline");
-        }
-        let mut migrations = BASELINE_MIGRATIONS.to_vec();
-        migrations.push(Migration {
-            ordinal: NEXT_FREE_ORDINAL,
-            id: "r04-nontx",
-            kind: MigrationKind::NonTransactional,
-            sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
-            sets_user_version: None,
-        });
-        let faults = OneShotCrash::at(FaultPoint::MigrateBeforeLedgerCommit);
-        {
-            let mut conn = open_bare(&path);
-            let out = run_migrations(&mut conn, &migrations, &ctx, &faults).expect("run");
-            assert_eq!(out, MigrationOutcome::Crashed);
-        }
-
-        // A later build defines the same migration id with different DDL. The
-        // incomplete row's checksum no longer matches: re-running would apply
-        // the new body over the old body's partial effects, so fail closed.
-        let mut changed = BASELINE_MIGRATIONS.to_vec();
-        changed.push(Migration {
-            ordinal: NEXT_FREE_ORDINAL,
-            id: "r04-nontx",
-            kind: MigrationKind::NonTransactional,
-            sql: "CREATE TABLE IF NOT EXISTS r04_nontx_DIFFERENT (x INTEGER);",
-            sets_user_version: None,
-        });
-        let mut conn = open_bare(&path);
-        let err = run_migrations(&mut conn, &changed, &ctx, &NoFaults).unwrap_err();
-        assert_eq!(err.code(), "migration-failed");
-    }
-
-    #[cfg(feature = "fault-injection")]
-    #[test]
-    fn non_transactional_started_then_resumes() {
-        let dir = tempdir();
-        let path = dir.join("engine.db");
-        let ctx = MigrationContext::current(4_000);
-
-        // baseline first (transactional), then a non-transactional idempotent step.
-        let mut migrations = BASELINE_MIGRATIONS.to_vec();
-        migrations.push(Migration {
-            ordinal: NEXT_FREE_ORDINAL,
-            id: "r04-nontx",
-            kind: MigrationKind::NonTransactional,
-            sql: "CREATE TABLE IF NOT EXISTS r04_nontx (x INTEGER);",
-            sets_user_version: None,
-        });
-
-        // Establish the (transactional) baseline first so the one-shot crash
-        // lands on the non-transactional migration, not the baseline.
-        {
-            let mut conn = open_bare(&path);
-            run_migrations(&mut conn, BASELINE_MIGRATIONS, &ctx, &NoFaults).expect("baseline");
-        }
-
-        // Crash after the started row + body, before completion is recorded.
-        let faults = OneShotCrash::at(FaultPoint::MigrateBeforeLedgerCommit);
-        {
-            let mut conn = open_bare(&path);
-            let out = run_migrations(&mut conn, &migrations, &ctx, &faults).expect("run");
-            assert_eq!(out, MigrationOutcome::Crashed);
-            // The started row is durable but incomplete.
-            let completed: Option<i64> = conn
-                .query_row(
-                    "SELECT completed_at FROM engine_migrations WHERE id='r04-nontx'",
-                    [],
-                    |r| r.get(0),
-                )
-                .expect("row");
-            assert!(completed.is_none(), "must be started-but-incomplete");
-        }
-
-        // Resume: the incomplete row is re-run and completed.
-        let mut conn = open_bare(&path);
-        let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
-        assert_eq!(out, MigrationOutcome::Applied { newly_applied: 1 });
-        let completed: Option<i64> = conn
-            .query_row(
-                "SELECT completed_at FROM engine_migrations WHERE id='r04-nontx'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("row2");
-        assert_eq!(completed, Some(4_000));
     }
 
     fn tempdir() -> dohc_test_scratch::ScratchDir {

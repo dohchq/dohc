@@ -270,11 +270,11 @@ function stubStore(
   } as unknown as Parameters<typeof materializeSharedViewPaths>[3];
 }
 
-let roots: string[] = [];
+let outsideLinks: string[] = [];
 let harnesses: ShareViewDaemonHarness[] = [];
 
 beforeEach(() => {
-  roots = [];
+  outsideLinks = [];
   harnesses = [];
   observeRealpath = null;
   realpathOverride = null;
@@ -292,15 +292,9 @@ afterEach(async () => {
   collisionRecordRenameTargets = [];
   await Promise.all(harnesses.map((harness) => harness.closeAll()));
   await Promise.all(
-    roots.map((root) => rm(root, { recursive: true, force: true })),
+    outsideLinks.map((link) => rm(link, { recursive: true, force: true })),
   );
 });
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-shared-view-desktop-");
-  roots.push(root);
-  return root;
-}
 
 function daemonHarness(relay: FakeShareRelay): ShareViewDaemonHarness {
   const harness = createShareViewDaemonHarness(relay.connection());
@@ -673,7 +667,7 @@ describe("shared view refresh", () => {
       });
 
     it("refuses relay bytes that land in the view's own metadata", async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       await mkdir(join(rootDir, ".dohc"), { recursive: true });
       await symlink(join(rootDir, ".dohc"), join(rootDir, "meta"), "dir");
       await expect(write(rootDir, "meta/owned.md")).rejects.toThrow(
@@ -687,8 +681,8 @@ describe("shared view refresh", () => {
     it.each(["dangling", "metadata", "outside"] as const)(
       "heals a %s leaf link without following it",
       async (shape) => {
-        const rootDir = await tempRoot();
-        const outsideDir = await tempRoot();
+        const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+        const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
         await mkdir(join(rootDir, ".dohc"), { recursive: true });
         await writeFile(join(rootDir, ".dohc", "settings.json"), "settings");
         const target =
@@ -721,13 +715,13 @@ describe("shared view refresh", () => {
   });
 
   it("does not heal a malformed canonical path outside the projection", async () => {
-    const rootDir = await tempRoot();
-    const outside = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const outside = await createTestScratch("dohc-shared-view-desktop-");
     const outsideLink = join(
       dirname(rootDir),
       `${basename(rootDir)}-outside-link`,
     );
-    roots.push(outsideLink);
+    outsideLinks.push(outsideLink);
     await symlink(outside, outsideLink, "dir");
     const maliciousPath = `../${basename(outsideLink)}/child.md`;
     const harness = daemonHarness(new FakeShareRelay());
@@ -773,7 +767,7 @@ describe("shared view refresh", () => {
   });
 
   it("refuses a folder delete when its projection cannot be read", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/plans/one.md";
@@ -820,7 +814,7 @@ describe("shared view refresh", () => {
   });
 
   it("captures an out-of-app modification through the standalone refresh", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/a.md";
@@ -906,7 +900,7 @@ describe("shared view refresh", () => {
   });
 
   it("repairs an interrupted pull for a view-level share without journaling", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/view-only-refresh.md";
@@ -956,7 +950,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not journal an out-of-app edit from submit capture on a view share", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/view-only-submit.md";
@@ -997,7 +991,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not journal an out-of-app edit after the share ended", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/ended.md";
@@ -1038,7 +1032,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a save queued behind capture as the journal head", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/ordered.md";
@@ -1131,7 +1125,7 @@ describe("shared view refresh", () => {
   });
 
   it("compares disk with the snapshot current after an in-app save", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/fresh-head.md";
@@ -1213,7 +1207,7 @@ describe("shared view refresh", () => {
   });
 
   it("queues a pending-path repair behind an in-app save on the same target", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/pending-ordered.md";
@@ -1305,7 +1299,7 @@ describe("shared view refresh", () => {
   });
 
   it("handles a tracked file deleted before its ordered admission", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "body a");
@@ -1346,7 +1340,7 @@ describe("shared view refresh", () => {
   });
 
   it("leaves unjournalable local content in place when the pull changes its path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/oversized.md";
@@ -1416,7 +1410,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "leaves an unreadable tracked file untouched when the pull changes its path",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = "docs/locked.md";
@@ -1464,7 +1458,7 @@ describe("shared view refresh", () => {
   );
 
   it("reports oversized binary and non-UTF-8 causes separately", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const binaryPath = "docs/huge.png";
@@ -1508,7 +1502,7 @@ describe("shared view refresh", () => {
   });
 
   it("refuses to submit when an oversized tracked edit cannot enter the journal", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/too-large.md";
@@ -1581,7 +1575,7 @@ describe("shared view refresh", () => {
   });
 
   it("leaves a directory that replaced a tracked file untouched during refresh", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/notes.md";
@@ -1625,7 +1619,7 @@ describe("shared view refresh", () => {
   });
 
   it("captures a deliberate out-of-app revert to an earlier body", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/reverted.md";
@@ -1679,7 +1673,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears a pending marker when disk already matches the current head", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/lagging.md";
@@ -1746,7 +1740,7 @@ describe("shared view refresh", () => {
   });
 
   it("uses the current moment preimage when a pending path advances after listing", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/advanced-pending.md";
@@ -1828,7 +1822,7 @@ describe("shared view refresh", () => {
   });
 
   it("reports a repair-only standalone refresh as updated", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/repaint-after-repair.md";
@@ -1872,7 +1866,7 @@ describe("shared view refresh", () => {
   });
 
   it("returns a repair count when the following pull fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/repaint-after-failed-pull.md";
@@ -1922,7 +1916,7 @@ describe("shared view refresh", () => {
   });
 
   it("returns a repair count when the post-capture metadata read fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/repaint-after-failed-metadata-read.md";
@@ -1971,7 +1965,7 @@ describe("shared view refresh", () => {
   });
 
   it("repairs pending debris only when disk matches the recorded preimage", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/debris.md";
@@ -2021,7 +2015,7 @@ describe("shared view refresh", () => {
   });
 
   it("repairs an absent pending overwrite without journaling a delete", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/interrupted-overwrite.md";
@@ -2078,7 +2072,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "keeps a pending marker while its tracked file is unreadable",
     async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/pending-locked.md";
@@ -2123,7 +2117,7 @@ describe("shared view refresh", () => {
   );
 
   it("journals a third body that landed after an interrupted materialization", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/third-body.md";
@@ -2179,7 +2173,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves a real edit made after materialization completed with a stale marker", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/a.md";
@@ -2223,7 +2217,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not guess that bytes written after a failed pull are journalable", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/a.md";
@@ -2285,7 +2279,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears a repaired submit marker before the next local edit", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/submit-repair.md";
@@ -2347,8 +2341,8 @@ describe("shared view refresh", () => {
   });
 
   it("serializes refresh lifecycle callers per view without blocking other views", async () => {
-    const firstRoot = await tempRoot();
-    const secondRoot = await tempRoot();
+    const firstRoot = await createTestScratch("dohc-shared-view-desktop-");
+    const secondRoot = await createTestScratch("dohc-shared-view-desktop-");
     const order: string[] = [];
     let releaseFirst!: () => void;
     let signalFirstEntered!: () => void;
@@ -2390,7 +2384,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears repaired debt before an in-app save records its own", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const savedPath = "docs/saved.md";
@@ -2424,7 +2418,7 @@ describe("shared view refresh", () => {
   });
 
   it("uses the same written error for an invalid pending shape and malformed JSON", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     await mkdir(join(rootDir, ".dohc"), { recursive: true });
     const pendingPath = join(rootDir, ".dohc", "pending-materialization.json");
     await writeFile(pendingPath, JSON.stringify({ counts: [] }), "utf8");
@@ -2439,7 +2433,7 @@ describe("shared view refresh", () => {
   });
 
   it("quarantines a corrupt pending record and verifies every tracked path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/corrupt-sidecar.md";
@@ -2508,7 +2502,7 @@ describe("shared view refresh", () => {
   it.each(["../outside", ".dohc/whatever"])(
     "quarantines a pending record with the invalid path %s",
     async (invalidPath) => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = "docs/valid-sidecar-neighbor.md";
@@ -2560,7 +2554,7 @@ describe("shared view refresh", () => {
   );
 
   it("preserves an untracked directory when the granter adds a file at its path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-directory.md";
@@ -2602,7 +2596,7 @@ describe("shared view refresh", () => {
   });
 
   it("reports an untracked file that blocks a newly shared path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-file.md";
@@ -2643,7 +2637,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not adopt a recorded local collision on a later refresh", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-file.md";
@@ -2701,7 +2695,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a recorded local collision excluded from a later delete", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-delete-collision.md";
@@ -2792,7 +2786,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not process a collision-recorded pending path twice", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/collision-pending.md";
@@ -2842,7 +2836,7 @@ describe("shared view refresh", () => {
   });
 
   it("records a non-final pull page collision before fetching the next page", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     relay.pageSize = 1;
     const harness = daemonHarness(relay);
@@ -2892,7 +2886,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a recorded collision protected for a view-access share", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/view-access-collision.md";
@@ -2959,8 +2953,8 @@ describe("shared view refresh", () => {
   ] as const)(
     "reports an unreadable escaped ancestor for a %s without aborting capture",
     async (_case, tracked, collisionRecorded) => {
-      const rootDir = await tempRoot();
-      const outsideRoot = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+      const outsideRoot = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = "docs/escaped.md";
@@ -3015,7 +3009,7 @@ describe("shared view refresh", () => {
   );
 
   it("resolves a recorded local collision without journaling a delete", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-resolution.md";
@@ -3095,7 +3089,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears all resolved collision paths with one record publish", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const paths = ["docs/one.md", "docs/two.md", "docs/three.md"];
@@ -3142,7 +3136,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a collision record when the store loses the tracked path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/lost-collision-path.md";
@@ -3196,7 +3190,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a tracked collision as durable debt when reading canonical content fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/unreadable-collision-head.md";
@@ -3245,7 +3239,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps a tracked collision as durable debt when repair materialization fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/failed-collision-repair.md";
@@ -3293,7 +3287,7 @@ describe("shared view refresh", () => {
   });
 
   it("settles absent untracked pending and collision debt once", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/resolved-dual-debt.md";
@@ -3342,7 +3336,7 @@ describe("shared view refresh", () => {
   });
 
   it("gives collision debt precedence over a matching delete preimage", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/untracked-dual-debt.md";
@@ -3397,7 +3391,7 @@ describe("shared view refresh", () => {
   it.each(["write", "delete"] as const)(
     "consults the collision record at the materialization boundary for a later %s",
     async (operation) => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = `docs/boundary-${operation}-collision.md`;
@@ -3461,7 +3455,7 @@ describe("shared view refresh", () => {
   );
 
   it("catches a collision that appears after the page recording pass, before materialization", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/late-collision.md";
@@ -3511,7 +3505,7 @@ describe("shared view refresh", () => {
   });
 
   it("publishes a durable collision record without leaving a temp file", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const paths = ["docs/b.md", "docs/a.md"];
 
     await recordCollisionPaths(rootDir, SHARE_ID, paths);
@@ -3527,7 +3521,7 @@ describe("shared view refresh", () => {
   });
 
   it("ignores a stale collision-record temp file beside the intact target", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const paths = ["docs/a.md", "docs/b.md"];
     await recordCollisionPaths(rootDir, SHARE_ID, paths);
     await writeFile(
@@ -3546,7 +3540,7 @@ describe("shared view refresh", () => {
   });
 
   it("quarantines a corrupt collision record and accepts a clean write", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/corrupt-collision.md";
@@ -3616,7 +3610,7 @@ describe("shared view refresh", () => {
   });
 
   it("does no capture work until after reporting a quarantined collision record", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/view-quarantined-collision.md";
@@ -3684,7 +3678,7 @@ describe("shared view refresh", () => {
   });
 
   it("reports a quarantined collision record before repairing a view-share path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/view-quarantined-collision.md";
@@ -3772,7 +3766,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps an intact collision ahead of corrupt pending verification", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/pending-quarantine-collision.md";
@@ -3841,7 +3835,7 @@ describe("shared view refresh", () => {
   });
 
   it("quarantines another share's collision record before recording fresh collisions", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const stalePath = "docs/stale-share-path.md";
@@ -3906,7 +3900,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves an untracked file when a same-pull create and delete coalesce", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/recipient-delete-collision.md";
@@ -3948,7 +3942,7 @@ describe("shared view refresh", () => {
   });
 
   it("repairs a share-view create whose projection fails without journaling a delete", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/seed.md", "seed");
@@ -4041,7 +4035,7 @@ describe("shared view refresh", () => {
   });
 
   it("journals a direct delete after a successful share-view create", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/seed.md", "seed");
@@ -4105,7 +4099,7 @@ describe("shared view refresh", () => {
   // The gate returns false for every access level except edit, so view and
   // comment cannot reach distinct branches through this seam.
   it("repairs a direct delete after a successful share-view create for a non-edit access level", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/seed.md", "seed");
@@ -4155,7 +4149,7 @@ describe("shared view refresh", () => {
   });
 
   it("marks every move path until its projection is materialized", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const from = "docs/before.md";
@@ -4219,7 +4213,7 @@ describe("shared view refresh", () => {
   });
 
   it("marks every delete target until its projection is materialized", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const first = "docs/remove/a.md";
@@ -4287,8 +4281,8 @@ describe("shared view refresh", () => {
   });
 
   it("marks each import path until its projection is materialized", async () => {
-    const rootDir = await tempRoot();
-    const sourceRoot = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const sourceRoot = await createTestScratch("dohc-shared-view-desktop-");
     const source = join(sourceRoot, "picked.md");
     await writeFile(source, "import me\n", "utf8");
     const relay = new FakeShareRelay();
@@ -4358,7 +4352,7 @@ describe("shared view refresh", () => {
   });
 
   it("finishes a pending delete that no longer appears in tracked metadata", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/delete-debris.md";
@@ -4432,7 +4426,7 @@ describe("shared view refresh", () => {
   // directory removal, so the emptied `docs/plans` stays on disk after
   // recovery where an uninterrupted delete would have removed it too.
   it("recovers a crashed folder delete's children, but leaves the emptied folder until something prunes it", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const paths = ["docs/plans/one.md", "docs/plans/two.md"];
@@ -4524,7 +4518,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "keeps an unreadable pending delete marker for the next pass",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = "docs/unreadable-delete.md";
@@ -4576,7 +4570,7 @@ describe("shared view refresh", () => {
   );
 
   it("pages past 500 newer moments to finish a pending delete", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/old-delete.md";
@@ -4652,7 +4646,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps the recipient's own new file at a pending untracked path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/gone.md";
@@ -4752,7 +4746,7 @@ describe("shared view refresh", () => {
   });
 
   it("logs tracked metadata that has no readable store snapshot", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/inconsistent.md";
@@ -4803,7 +4797,7 @@ describe("shared view refresh", () => {
   });
 
   it("counts local changes captured before the pull discovers the share ended", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/ended.md";
@@ -4843,7 +4837,7 @@ describe("shared view refresh", () => {
   });
 
   it("records per-path debt before post-pull classification fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/pull-window.md";
@@ -4932,7 +4926,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears every retry count after materializing the latest canonical value", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const path = "docs/retried.md";
     const pendingRecord = join(
       rootDir,
@@ -4979,8 +4973,8 @@ describe("shared view refresh", () => {
   });
 
   it("replaces a pull marker symlink without writing through it", async () => {
-    const rootDir = await tempRoot();
-    const outsideDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
     const externalPath = join(outsideDir, "external.txt");
     const markerPath = join(rootDir, ".dohc", "pull-in-flight.marker");
     const original = Buffer.from("outside authority stays unchanged", "utf8");
@@ -5024,7 +5018,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears an absent pull marker without creating metadata", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const metadataDir = join(rootDir, ".dohc");
 
     await expect(clearPullInFlightMarker(rootDir)).resolves.toBeUndefined();
@@ -5033,7 +5027,7 @@ describe("shared view refresh", () => {
   });
 
   it("clears a stale pull marker only after a full successful capture", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "notes/recovered.md";
@@ -5097,8 +5091,8 @@ describe("shared view refresh", () => {
   });
 
   it("leaves a substituted pull-marker directory untouched", async () => {
-    const rootDir = await tempRoot();
-    const outsideDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
     const metadataDir = join(rootDir, ".dohc");
     const markerName = "pull-in-flight.marker";
     const markerPath = join(metadataDir, markerName);
@@ -5137,8 +5131,8 @@ describe("shared view refresh", () => {
   });
 
   it("reports an ended share when pull-marker cleanup finds a metadata symlink", async () => {
-    const rootDir = await tempRoot();
-    const outsideDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const outsideDir = await createTestScratch("dohc-shared-view-desktop-");
     const metadataDir = join(rootDir, ".dohc");
 
     const outcome = refreshSharedViewOnceWithPull({
@@ -5167,7 +5161,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves an ambiguous edit while recovering an interrupted pull", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const stalePath = "docs/stale-projection.md";
@@ -5272,7 +5266,7 @@ describe("shared view refresh", () => {
   });
 
   it("leaves a pending record after refresh materialization throws and repairs it later", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/interrupted.md";
@@ -5366,7 +5360,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves an older disk body after two writes and a failed materialization", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/twice.md";
@@ -5473,7 +5467,7 @@ describe("shared view refresh", () => {
   });
 
   it("issues zero readdir calls when a tracked view sits beside an untracked subtree", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/tracked.md";
@@ -5518,7 +5512,7 @@ describe("shared view refresh", () => {
   });
 
   it("captures an out-of-app delete as a local-file moment", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/deleted.md";
@@ -5583,7 +5577,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "reports a tracked path below an unreadable directory and still captures an absent directory",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const path = "locked/tracked.md";
@@ -5644,7 +5638,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "preserves an earlier repair count when pending path resolution finds an unreadable directory",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const repairedPath = "docs/a-repaired-first.md";
@@ -5696,7 +5690,7 @@ describe("shared view refresh", () => {
   );
 
   it("preserves a repair count when clearing its pending marker fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/already-correct.md";
@@ -5742,7 +5736,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves an earlier captured edit when the next store write fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const firstPath = "docs/a-captured-first.md";
@@ -5802,7 +5796,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves resolved collision repairs when clearing durable debt fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/resolved-collision.md";
@@ -5848,7 +5842,7 @@ describe("shared view refresh", () => {
   });
 
   it("preserves captured deletions when clearing the pull marker fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/captured-before-marker-cleanup.md";
@@ -5889,7 +5883,7 @@ describe("shared view refresh", () => {
   });
 
   it("keeps an engine failure inside pending repair distinct from an unreadable path", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/engine-failure.md";
@@ -5951,7 +5945,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "preserves a leftover repair before pending path resolution finds an unreadable directory",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const repairedPath = "docs/a-repaired-first.md";
@@ -6015,7 +6009,7 @@ describe("shared view refresh", () => {
   itNonRoot(
     "reports a pending path below an unreadable directory and recovers when access returns",
     async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       const repairedPath = "docs/a-repaired-first.md";
@@ -6125,8 +6119,8 @@ describe("shared view refresh", () => {
   );
 
   it("reports and preserves a symlink that replaced a tracked file", async () => {
-    const rootDir = await tempRoot();
-    const outsideRoot = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
+    const outsideRoot = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const path = "docs/linked.md";
@@ -6205,7 +6199,7 @@ describe("shared view refresh", () => {
   });
 
   it("does not echo a freshly materialized file into another moment", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "fresh projection");
@@ -6251,7 +6245,7 @@ describe("shared view refresh", () => {
   });
 
   it("refuses to track a secret-classified path in the engine store", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/seed.md", "seed");
@@ -6282,7 +6276,7 @@ describe("shared view refresh", () => {
   });
 
   it("pulls, materializes to disk, and reports honest statuses across refreshes", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "first body");
@@ -6427,7 +6421,7 @@ describe("shared view refresh", () => {
 
   for (const [label, pinnedSelector] of damagedPins) {
     it(`refuses to pull when the pinned selector is ${label}`, async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const relay = new FakeShareRelay();
       const harness = daemonHarness(relay);
       relay.addWrite("docs/a.md", "body the relay must not get to send");
@@ -6467,7 +6461,7 @@ describe("shared view refresh", () => {
   }
 
   it("rejects a damaged pin through the standalone refresh wrapper", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     const target = { workspaceId: WORKSPACE, rootPath: rootDir };
@@ -6495,7 +6489,7 @@ describe("shared view refresh", () => {
   // The refusal names the constraint, so the handler above it can tell the
   // user what to do instead of reporting "refreshed, nothing new" forever.
   it("names the damaged record in the refusal", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
 
@@ -6532,7 +6526,7 @@ describe("shared view refresh", () => {
   // implementation of the boundary rule in a test double, which is how a
   // double starts certifying fiction.
   it("reports the refusals its pull returned instead of swallowing them", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const errors: string[] = [];
     const logged = vi
       .spyOn(console, "error")
@@ -6588,7 +6582,7 @@ describe("shared view refresh", () => {
   });
 
   it("pulls with the pinned selector and never asks the relay for another", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const relay = new FakeShareRelay();
     const harness = daemonHarness(relay);
     relay.addWrite("docs/a.md", "first body");
@@ -6642,7 +6636,7 @@ describe("shared view refresh", () => {
   // would leave a hole — and because the cursor is only committed after a
   // clean pass, every later refresh would replay into the same hole.
   it("leaves the existing projection intact when the content read fails", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     const target = join(rootDir, "docs/a.md");
     await materializeSharedViewPaths(
       rootDir,
@@ -6667,7 +6661,7 @@ describe("shared view refresh", () => {
   });
 
   it("refuses to materialize a path that escapes the workspace root", async () => {
-    const rootDir = await tempRoot();
+    const rootDir = await createTestScratch("dohc-shared-view-desktop-");
     await expect(
       materializeSharedViewPaths(
         rootDir,
@@ -6687,7 +6681,7 @@ describe("shared view refresh", () => {
 
   if (process.platform === "win32") {
     it("refuses a parent that resolves under a case-distinct sibling", async () => {
-      const rootDir = await tempRoot();
+      const rootDir = await createTestScratch("dohc-shared-view-desktop-");
       const parent = join(rootDir, "docs");
       await mkdir(parent);
       const siblingRoot = join(

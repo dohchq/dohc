@@ -128,6 +128,17 @@ function createDriver(ctx, options = {}) {
           input.onEvent({ kind: "session-state", state: "ready" });
           return;
         }
+        if (message.type === "grandchild") {
+          // The harness's detached descendant. A test proves dohc takes the
+          // whole tree down by waiting for this pid, not only the harness.
+          input.onEvent({
+            kind: "text-delta",
+            stream: "reasoning",
+            itemId: "grandchild",
+            text: JSON.stringify({ pid: message.pid }),
+          });
+          return;
+        }
         if (message.type === "done") {
           input.onEvent({
             kind: "turn-completed",

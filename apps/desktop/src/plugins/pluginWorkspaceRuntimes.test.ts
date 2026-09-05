@@ -7,6 +7,7 @@ import {
   PluginWorkspaceRuntimes,
   type PluginWorkspaceRuntimeParts,
 } from "./pluginWorkspaceRuntimes";
+import { deferred } from "../testing/deferred";
 
 interface TestWorkspace {
   workspaceId: string;
@@ -34,24 +35,6 @@ interface TestParts {
   automations: {
     dispose: ReturnType<typeof vi.fn>;
     stopForEngineRestart: ReturnType<typeof vi.fn>;
-  };
-}
-
-function deferred(): {
-  promise: Promise<void>;
-  resolve(): void;
-  reject(error: Error): void;
-} {
-  let resolvePromise!: () => void;
-  let rejectPromise!: (error: Error) => void;
-  const promise = new Promise<void>((resolve, reject) => {
-    resolvePromise = resolve;
-    rejectPromise = reject;
-  });
-  return {
-    promise,
-    resolve: resolvePromise,
-    reject: rejectPromise,
   };
 }
 

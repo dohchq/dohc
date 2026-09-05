@@ -1010,7 +1010,6 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     mutationMomentId: VersionedTextMomentId;
-    legacyBeforeText?: string;
   }): Promise<void>;
   getObject(input: {
     workspaceId: WorkspaceId;

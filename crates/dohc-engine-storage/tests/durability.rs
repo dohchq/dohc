@@ -11,7 +11,7 @@ use dohc_engine_storage::{
     enqueue_job, hex_sha256, load_valid_backup,
 };
 use dohc_test_scratch::ScratchDir;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
@@ -43,15 +43,38 @@ impl FreeSpaceProbe for FakeSpace {
     }
 }
 
-fn write_doc(store: &mut EngineStore, req: &str, doc: &str, body: &str, now: i64) {
-    let write = dohc_engine_storage::CompoundWrite {
-        request_id: req.to_owned(),
-        doc_id: doc.to_owned(),
-        body: body.to_owned(),
-        op_kind: "text.write".to_owned(),
-        now_ms: now,
-    };
-    store.commit_compound(&write, &NoFaults).expect("write");
+/// Store `text` under `name` in the text blob table (keyed by the sha of the
+/// name so a test can read it back by name).
+fn write_doc(store: &mut EngineStore, name: &str, text: &str) {
+    let key = hex_sha256(name.as_bytes());
+    let outcome = store
+        .write_with(&NoFaults, |tx| {
+            tx.execute(
+                "INSERT INTO blobs (sha256, byte_length, text) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(sha256) DO UPDATE SET text = excluded.text, \
+                 byte_length = excluded.byte_length",
+                rusqlite::params![key, text.len() as i64, text],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("write");
+    assert!(matches!(
+        outcome,
+        dohc_engine_storage::TxnOutcome::Committed(())
+    ));
+}
+
+fn read_doc(store: &EngineStore, name: &str) -> Option<String> {
+    let key = hex_sha256(name.as_bytes());
+    store
+        .read_with(|conn| {
+            conn.query_row("SELECT text FROM blobs WHERE sha256 = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+        })
+        .expect("read")
 }
 
 // ---------------------------------------------------------------------------
@@ -116,8 +139,8 @@ fn verified_backup_restore_roundtrips_the_data() {
     let recovery = scratch.sub("recovery"); // outside the (nonexistent) workspace root
     {
         let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        write_doc(&mut store, "r1", "doc-a", "alpha", 10);
-        write_doc(&mut store, "r2", "doc-b", "beta", 20);
+        write_doc(&mut store, "doc-a", "alpha");
+        write_doc(&mut store, "doc-b", "beta");
         store.put_binary_blob(b"blobby").expect("blob");
 
         let outcome = create_verified_backup(
@@ -142,14 +165,8 @@ fn verified_backup_restore_roundtrips_the_data() {
     // Open the backup copy as a full engine store and prove the data survived.
     let backup_db = recovery.join("snapshot.db");
     let restored = EngineStore::open(&backup_db, 1000).expect("open backup as store");
-    assert_eq!(
-        restored.read_document("doc-a").expect("a").map(|d| d.body),
-        Some("alpha".to_owned())
-    );
-    assert_eq!(
-        restored.read_document("doc-b").expect("b").map(|d| d.body),
-        Some("beta".to_owned())
-    );
+    assert_eq!(read_doc(&restored, "doc-a"), Some("alpha".to_owned()));
+    assert_eq!(read_doc(&restored, "doc-b"), Some("beta".to_owned()));
 }
 
 #[test]
@@ -157,7 +174,7 @@ fn backup_disk_full_fails_closed_and_never_touches_source() {
     let scratch = Scratch::new("backup-full");
     let recovery = scratch.sub("recovery");
     let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-    write_doc(&mut store, "r1", "doc-a", "important", 10);
+    write_doc(&mut store, "doc-a", "important");
 
     // A probe reporting almost no space forces disk-full before any copy.
     let err = create_verified_backup(
@@ -172,10 +189,7 @@ fn backup_disk_full_fails_closed_and_never_touches_source() {
     .unwrap_err();
     assert_eq!(err.code(), "disk-full");
     // The only valid source is untouched and still readable.
-    assert_eq!(
-        store.read_document("doc-a").expect("a").map(|d| d.body),
-        Some("important".to_owned())
-    );
+    assert_eq!(read_doc(&store, "doc-a"), Some("important".to_owned()));
     assert!(
         !recovery.join("snapshot.db").exists(),
         "no partial backup left"
@@ -215,7 +229,7 @@ mod backup_crash {
         let scratch = Scratch::new("backup-crash-copy");
         let recovery = scratch.sub("recovery");
         let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        write_doc(&mut store, "r1", "doc-a", "data", 10);
+        write_doc(&mut store, "doc-a", "data");
 
         let faults = OneShot::at(FaultPoint::BackupAfterCopyBeforeManifest);
         let outcome = create_verified_backup(
@@ -238,10 +252,7 @@ mod backup_crash {
             "no manifest"
         );
         // Source intact.
-        assert_eq!(
-            store.read_document("doc-a").expect("a").map(|d| d.body),
-            Some("data".to_owned())
-        );
+        assert_eq!(read_doc(&store, "doc-a"), Some("data".to_owned()));
 
         // Retry produces a fresh verified backup.
         let retry = create_verified_backup(
@@ -266,7 +277,7 @@ mod backup_crash {
         let scratch = Scratch::new("backup-crash-verify");
         let recovery = scratch.sub("recovery");
         let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        write_doc(&mut store, "r1", "doc-a", "data", 10);
+        write_doc(&mut store, "doc-a", "data");
 
         let faults = OneShot::at(FaultPoint::BackupDuringRestoreVerify);
         let outcome = create_verified_backup(
@@ -284,10 +295,7 @@ mod backup_crash {
             !recovery.join("snapshot.manifest.json").exists(),
             "verified flag never persisted"
         );
-        assert_eq!(
-            store.read_document("doc-a").expect("a").map(|d| d.body),
-            Some("data".to_owned())
-        );
+        assert_eq!(read_doc(&store, "doc-a"), Some("data".to_owned()));
     }
 }
 
@@ -382,7 +390,7 @@ fn corrupt_page1_header_classifies_as_corruption_not_unsupported() {
     // A real store with data, then a garbage user_version stamped on top.
     {
         let mut store = EngineStore::open(&db, 1).expect("open");
-        write_doc(&mut store, "r1", "doc-a", "payload-for-pages", 10);
+        write_doc(&mut store, "doc-a", "payload-for-pages");
         drop(store);
     }
     {
@@ -427,7 +435,7 @@ fn load_valid_backup_enforces_manifest_presence_and_checksum() {
     let recovery = scratch.sub("recovery");
     {
         let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
-        write_doc(&mut store, "r1", "doc-a", "payload", 10);
+        write_doc(&mut store, "doc-a", "payload");
         let outcome = create_verified_backup(
             &store,
             &recovery,
@@ -625,7 +633,7 @@ fn job_and_canonical_state_commit_atomically() {
         let outcome = store
             .write_with(&faults, |tx| {
                 tx.execute(
-                    "INSERT INTO documents (doc_id, body, updated_at_ms) VALUES ('d','x',1)",
+                    "INSERT INTO blobs (sha256, byte_length, text) VALUES ('d', 1, 'x')",
                     [],
                 )
                 .map_err(StorageError::persist_public)?;
@@ -638,10 +646,14 @@ fn job_and_canonical_state_commit_atomically() {
     }
     // Reopen: neither the document nor the job survived the rolled-back txn.
     let store = EngineStore::open(&db, 2).expect("reopen");
-    assert!(
-        store.read_document("d").expect("doc").is_none(),
-        "doc rolled back"
-    );
+    let rows: i64 = store
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM blobs WHERE sha256 = 'd'", [], |row| {
+                row.get(0)
+            })
+        })
+        .expect("count");
+    assert_eq!(rows, 0, "row rolled back");
     assert_eq!(
         store.pending_materialization_count().expect("jobs"),
         0,

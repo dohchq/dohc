@@ -1,28 +1,16 @@
-import { mkdirSync, symlinkSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, symlinkSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { requireE2eEngine } from "../../scripts/require-e2e-engine.mjs";
-import { createTestScratchSync } from "./testTemp";
 
+import { createTestScratchSync } from "./testTemp";
 // The guard that keeps a fresh checkout from running the whole e2e suite
 // against an app that cannot launch (every spec failing inside
 // electron.launch, with the real cause buried in Playwright's log).
 
-const roots: string[] = [];
-
-function tempRoot(): string {
-  const dir = createTestScratchSync("dohc-e2e-engine-guard-");
-  roots.push(dir);
-  return dir;
-}
-
-afterEach(() => {
-  for (const dir of roots.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
-
 describe("requireE2eEngine", () => {
   it("refuses with the build command when no daemon exists anywhere", () => {
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     expect(() =>
       requireE2eEngine({
         desktopTargetDir: join(root, "desktop"),
@@ -34,7 +22,7 @@ describe("requireE2eEngine", () => {
   });
 
   it("stages a cargo-built daemon into the path the app actually resolves", () => {
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     mkdirSync(cargoTargetDir, { recursive: true });
@@ -52,7 +40,7 @@ describe("requireE2eEngine", () => {
   });
 
   it("leaves an already-staged daemon alone", () => {
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const desktopTargetDir = join(root, "desktop");
     mkdirSync(desktopTargetDir, { recursive: true });
     writeFileSync(join(desktopTargetDir, "dohc-workspace-engine"), "binary");
@@ -72,7 +60,7 @@ describe("requireE2eEngine", () => {
     // Electron keeps launching the stale staged copy — while the seed helper
     // picks the newest candidate. The specs then seed with one daemon version
     // and exercise another.
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     mkdirSync(cargoTargetDir, { recursive: true });
@@ -102,7 +90,7 @@ describe("requireE2eEngine", () => {
     // while the seed helper used another. A previous run's override can be
     // newer than a fresh build, so mtime is the wrong test — the supported way
     // to pin a custom artifact is the override, asserted below.
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     mkdirSync(cargoTargetDir, { recursive: true });
@@ -131,7 +119,7 @@ describe("requireE2eEngine", () => {
     // the seed helper would leave Playwright seeding with the override and
     // exercising the staged file — the skew this refresh exists to remove,
     // arriving from the other direction.
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     const overrideDir = join(root, "custom");
@@ -162,7 +150,7 @@ describe("requireE2eEngine", () => {
   });
 
   it("refuses an override that does not exist rather than launching without one", () => {
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     expect(() =>
       requireE2eEngine({
         desktopTargetDir: join(root, "desktop"),
@@ -175,7 +163,7 @@ describe("requireE2eEngine", () => {
   it("does not destroy the source when it is a symlink AT the staged path", () => {
     // The inverse alias. Unlinking the destination first would delete the very
     // file the copy is about to read, failing ENOENT and leaving no daemon.
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     mkdirSync(cargoTargetDir, { recursive: true });
@@ -202,7 +190,7 @@ describe("requireE2eEngine", () => {
   });
 
   it("replaces a symlinked staged path without touching its target", () => {
-    const root = tempRoot();
+    const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
     const desktopTargetDir = join(root, "desktop");
     const elsewhere = join(root, "precious");

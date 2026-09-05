@@ -16,6 +16,7 @@ import type {
 } from "../ipc/bridgeContract";
 import { rendererMarks } from "../performance/rendererMarks";
 import { DatabaseStudioView } from "./DatabaseStudioView";
+import { deferred } from "../testing/deferred";
 
 const baseSnapshot: DatabaseSnapshotResult = {
   path: "imports/wallet.sqlite",
@@ -48,16 +49,6 @@ const baseSnapshot: DatabaseSnapshotResult = {
 
 function cloneSnapshot(snapshot = baseSnapshot): DatabaseSnapshotResult {
   return JSON.parse(JSON.stringify(snapshot)) as DatabaseSnapshotResult;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
 }
 
 const bridgeMock = {

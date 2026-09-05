@@ -2377,7 +2377,6 @@ fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerp
             ("binary_blobs", false),
             ("snapshots", true),
             ("moments", true),
-            ("replication_journal", false),
             ("replication_log", true),
             ("engine_search_files_fts", true),
             ("materialization_jobs", true),

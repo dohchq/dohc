@@ -995,7 +995,6 @@ export function createCaptureLiveStores(
       versionId: string;
       path: string;
       mutationMomentId: string;
-      legacyBeforeText?: string;
     }) =>
       runMutation(
         async (adapter) => await adapter.rollbackTextFileMutation(input),

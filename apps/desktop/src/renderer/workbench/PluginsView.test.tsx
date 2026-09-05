@@ -8,6 +8,7 @@ import type {
   PluginStatusRecord,
 } from "../../ipc/bridgeContract";
 import { PluginsView } from "./PluginsView";
+import { deferred } from "../../testing/deferred";
 
 let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
@@ -72,14 +73,6 @@ function plugin(
     error: null,
     ...overrides,
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
 }
 
 const noop = () => undefined;

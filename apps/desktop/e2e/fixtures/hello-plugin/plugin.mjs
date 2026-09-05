@@ -453,6 +453,9 @@ switch (mode) {
           stdio: "ignore",
         });
         child.unref();
+        // The test waits on this pid to prove dohc took the whole tree down.
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(join(ctx.workspaceRoot, "grandchild-heartbeat.pid"), String(child.pid));
       },
     };
     break;

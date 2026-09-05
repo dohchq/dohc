@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "SQLite storage for the workspace engine: one writable connection per workspace, the engine schema and migrations, and the compound transactional write API."
+description = "SQLite storage for the workspace engine: one writable connection per workspace, the engine schema and migrations, and the transactional write seam."
 
 [features]
 # The crash-injection seam. OFF by default so a release build that links this

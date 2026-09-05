@@ -7,6 +7,7 @@ import type {
   SetPluginWebAppBoundsPayload,
 } from "../ipc/bridgeContract";
 import { PluginWebAppPage } from "./PluginWebAppPage";
+import { deferred } from "../testing/deferred";
 
 const failedListeners = new Set<(event: PluginWebAppFailedEvent) => void>();
 
@@ -31,14 +32,6 @@ async function reportFailed(event: PluginWebAppFailedEvent): Promise<void> {
     for (const listener of [...failedListeners]) listener(event);
     await Promise.resolve();
   });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
 }
 
 class FakeResizeObserver {

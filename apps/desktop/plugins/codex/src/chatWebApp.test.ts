@@ -13,6 +13,7 @@ import type {
 } from "@dohc/sdk/node";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createChatWebApp, type ChatWebApp } from "./chatWebApp.ts";
+import { deferred } from "../../../src/testing/deferred";
 
 // The plugin's real ui/ folder. Once installed, the built plugin root serves
 // this same content from pluginRoot/snapshot/ui (main.ts computes that join;
@@ -26,20 +27,6 @@ function uiRootMissingScript(): string {
   cpSync(join(PLUGIN_UI_ROOT, "index.html"), join(dir, "index.html"));
   cpSync(join(PLUGIN_UI_ROOT, "chat.css"), join(dir, "chat.css"));
   return dir;
-}
-
-function deferred<T = void>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 }
 
 /** Races a promise against a bounded wait, for proving a negative -- "this

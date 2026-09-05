@@ -33,10 +33,27 @@ import {
   noteSettleStart,
 } from "./engineYDocSaveSeq";
 
+// The close-retry ladders run at test speed: a rung is 20 ms and the cap
+// 100 ms. A test that prices the production ladder passes its own
+// `teardownRetryMs`.
+const TEST_TEARDOWN_RETRY_MS = { initial: 20, cap: 100 };
+
+// The capture exposes no retry hook, so a test that asserts a retry did NOT
+// fire waits past every rung the ladder could have scheduled (initial, then
+// doubling to the cap: 20 + 40 + 80 + 100 ms) and then some. This is the one
+// place a fixed wait remains; it is a bound on the ladder, not a guess.
+async function pastRetryRungs(): Promise<void> {
+  const { initial, cap } = TEST_TEARDOWN_RETRY_MS;
+  let total = 0;
+  for (let rung = initial; rung < cap; rung *= 2) total += rung;
+  await new Promise((resolve) => setTimeout(resolve, total + cap + 50));
+}
+
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
 ) {
   return createAttachedWorkspaceEngineCapture({
+    teardownRetryMs: TEST_TEARDOWN_RETRY_MS,
     ...options,
     attachmentId: Symbol(`test-workspace-attachment:${options.workspaceId}`),
   });
@@ -2792,6 +2809,7 @@ async function lockedRebindCapture(
   options?: {
     daemonOwnsCapture?: boolean;
     now?: () => number;
+    teardownRetryMs?: WorkspaceEngineCaptureOptions["teardownRetryMs"];
     // Wraps the base provider open for one test's own generation, so it
     // can override a single method (e.g. `settleNow`'s timing) while
     // reusing everything else — the shared `state`'s locking, failure
@@ -3067,6 +3085,7 @@ async function lockedRebindCapture(
     },
     ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
     ...(options?.now ? { now: options.now } : {}),
+    ...(options?.teardownRetryMs ? { teardownRetryMs: options.teardownRetryMs } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
 }
@@ -3298,7 +3317,7 @@ it("a close that fails for a non-lock cause is not retried by the capture layer"
   // The invariant this test owns: only a lock is worth polling. Past the
   // first retry delay, no timer has re-run the teardown — no new settle, no
   // new generation.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.settleCalls).toHaveLength(settlesAtFailure);
   expect(state.generation).toBe(1);
   await capture.stop();
@@ -3400,7 +3419,7 @@ it("a replicated release with a non-lock settle failure arms no detached retry",
   state.closeSettleFailure = null;
 
   // Past the first retry delay: no reopen, nothing settled.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -3627,7 +3646,7 @@ it("a destructive delete cancels the detached locked debt instead of recreating 
       { timeout: 5_000 },
     )
     .toHaveLength(1);
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -3681,7 +3700,7 @@ it("an external delete observed before a debt registers cancels it at the door i
 
   // And the ladder never armed: no reopen, no settle, ever — the deleted
   // path stays deleted.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -3781,7 +3800,7 @@ it("a stale session's late debt still cancels at the door despite a later recrea
       { timeout: 15_000 },
     )
     .not.toHaveLength(0);
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -3932,7 +3951,7 @@ it("a retry whose own opts already carry settle:false still consults the tombsto
   // the tombstone check and the retry's escalated settle re-wrote the doc
   // onto the path the user just deleted — a second entry lands in
   // `settledContents` after the delete.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.settledContents).toEqual(["would resurrect via escalation"]);
   expect(
     state.errorMessages.some((message) =>
@@ -4004,8 +4023,11 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   // work takes, and a retry firing inside that window used to find no
   // tombstone at all and resurrect the file. No `flush()` runs here before
   // the retry fires — the chain stays occupied the whole time.
+  // One rung, long enough that the parked open below is in place before
+  // the retry fires off-chain.
   const { capture, state } = await lockedRebindCapture(
     "dohc-ydoc-close-retry-chain-busy-",
+    { teardownRetryMs: { initial: 300, cap: 300 } },
   );
   const { session } = await openWithOneEdit(
     capture,
@@ -4042,14 +4064,18 @@ it("a delete delivered while the capture chain is busy still suppresses a retry 
   // RED before the fix: the enqueued cleanup that used to be the only
   // place recording the tombstone is still queued behind the parked open,
   // so the retry (which fires here, off-chain) finds nothing and
-  // resettles the doc onto the path the user just deleted.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  // resettles the doc onto the path the user just deleted. The retry's own
+  // stand-down trace is the signal that it fired and met the tombstone.
+  await expect
+    .poll(
+      () =>
+        state.errorMessages.some((message) =>
+          message.includes("an external delete of note.md removed the path"),
+        ),
+      { timeout: 5_000 },
+    )
+    .toBe(true);
   expect(state.settledContents).toEqual([]);
-  expect(
-    state.errorMessages.some((message) =>
-      message.includes("an external delete of note.md removed the path"),
-    ),
-  ).toBe(true);
 
   releaseOpen();
   await (await parked).close({ settle: false });
@@ -4104,7 +4130,7 @@ it("a delete landing past the tombstone's own TTL still suppresses an active ret
   // RED before the fix: the retry's only door was the TTL-bounded map,
   // already expired by virtual time, so the retry re-settled the doc onto
   // the path the user just deleted.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.settledContents).toEqual([]);
   expect(
     state.errorMessages.some((message) =>
@@ -4191,7 +4217,7 @@ it("a delete landing after a settle's write but before its late onSettled callba
   state.locked = true;
   await expect(session.close()).rejects.toThrow("file-locked");
   state.locked = false;
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.settledContents).toEqual(["first version"]);
   expect(
     state.errorMessages.some((message) =>
@@ -4265,7 +4291,7 @@ it("a suppressed close-retry ladder stands down once, honestly, instead of resur
 
   // Let several retry windows pass — the ladder's own doubling delay,
   // twice over.
-  await new Promise((resolve) => setTimeout(resolve, 3_500));
+  await pastRetryRungs();
 
   // The close result stays truthful: no artifact ever landed...
   expect(state.settledContents).toEqual([]);
@@ -4388,7 +4414,7 @@ it("a delete refuses the open that could register a debt while disk work is in f
   state.locked = false;
 
   // The fact: the deleted path is not reopened and nothing is settled onto it.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
   // The one debt that existed before the window said so out loud.
@@ -4428,7 +4454,7 @@ it("a moved-away directory cancels detached locked debts under its prefix", asyn
       { timeout: 5_000 },
     )
     .toHaveLength(1);
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(1);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -4658,7 +4684,7 @@ it("a move refuses the open that could register a debt while disk work is in fli
 
   // The fact: the moved-from path is never reopened and nothing is settled
   // back onto it.
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(generationAtMove);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -4749,7 +4775,7 @@ it("a failed folder move's vacated child session needs no debt to keep its edit"
   // debt ladder ever had anything to pay, so a full retry interval passes
   // with nothing left to settle.
   await finishMove(false);
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   await capture.flush();
   expect(state.settledContents).toHaveLength(settledAtWindow);
   await capture.stop();
@@ -4770,7 +4796,7 @@ it("a delete window refuses a debt's payment while the disk delete is unfinished
   const attemptsAtWindow = state.openAttempts;
   const settlesAtWindow = state.settledContents.length;
   state.locked = false;
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   await capture.flush();
 
   expect(state.openAttempts).toBe(attemptsAtWindow);
@@ -4817,7 +4843,7 @@ it("a debt's ladder settles nothing while its path's delete is in flight", async
   const generationAtDelete = state.generation;
 
   state.locked = false;
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   await capture.flush();
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
@@ -5056,7 +5082,7 @@ it("a folder move fences late live opens on the no-op finisher path", async () =
 
   await finishMove(true);
 
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(generationAtMove);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -5068,8 +5094,11 @@ it("refused renames never stack more than one retry ladder", async () => {
   // attempt an independent ladder, each opening and settling its own
   // temporary session once it hit the cap — engine load proportional to how
   // often someone tried to rename. One debt, one timer.
+  // Priced against the production ladder: the window below counts wakes of
+  // a 1 s / 2 s / 4 s doubling delay.
   const { capture, state, rootPath } = await lockedRebindCapture(
     "dohc-ydoc-one-timer-",
+    { teardownRetryMs: { initial: 1_000, cap: 10_000 } },
   );
   await writeFile(join(rootPath, "note.md"), "stale artifact\n", "utf8");
   const { session } = await openWithOneEdit(capture, "one ladder only");
@@ -5418,7 +5447,7 @@ it("a cancelled debt whose release is refused keeps retrying that release", asyn
   // it — but only since the fake models the escalation; before that it
   // passed while the real provider recreated the file.
   // Long enough for two more rungs of the ladder.
-  await new Promise((resolve) => setTimeout(resolve, 12_000));
+  await pastRetryRungs();
   expect(state.generation).toBe(generationBeforeCancel);
   expect(state.settledContents).toHaveLength(settlesBeforeCancel);
   await capture.stop();
@@ -5466,7 +5495,7 @@ it("a settle the engine refuses for good stops the ladder and says why", async (
   // permanent refusal.
   const settlesAtStandDown = state.settleCalls.length;
   const generationAtStandDown = state.generation;
-  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  await pastRetryRungs();
   expect(state.settleCalls.length).toBe(settlesAtStandDown);
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();
@@ -5572,7 +5601,7 @@ it("a settle that committed but wrote nothing stops the ladder and names the sym
   // permanent condition.
   const settlesAtStandDown = state.settleCalls.length;
   const generationAtStandDown = state.generation;
-  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  await pastRetryRungs();
   expect(state.settleCalls.length).toBe(settlesAtStandDown);
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();
@@ -6061,7 +6090,7 @@ it("a watcher-captured external delete cancels a stood-down debt instead of leav
 
   // And it stays cancelled: no reopen, no resurrection.
   const generationAtDelete = state.generation;
-  await new Promise((resolve) => setTimeout(resolve, 1_600));
+  await pastRetryRungs();
   expect(state.generation).toBe(generationAtDelete);
   expect(state.settledContents).toEqual([]);
   await capture.stop();
@@ -6532,7 +6561,7 @@ it("a materialization the engine refuses for good stops the ladder and says why"
 
   const settlesAtStandDown = state.settleCalls.length;
   const generationAtStandDown = state.generation;
-  await new Promise((resolve) => setTimeout(resolve, 8_000));
+  await pastRetryRungs();
   expect(state.settleCalls.length).toBe(settlesAtStandDown);
   expect(state.generation).toBe(generationAtStandDown);
   await capture.stop();

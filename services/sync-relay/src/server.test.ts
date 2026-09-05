@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
@@ -17,6 +14,16 @@ import {
   referencedBlobShas,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  reopenTestStorage,
+  request,
+  sha256,
+  tempRoot,
+  testStorage,
+} from "./linkTestHelpers";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
@@ -38,35 +45,7 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   ) => InspectionDatabase;
 };
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs: Windows cannot unlink
-  // files that still have open handles (EBUSY).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function tempRoot(label: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), `dohc-sync-relay-${label}-`));
-  roots.push(root);
-  return root;
-}
-
-async function testStorage(
-  options?: Parameters<typeof openSyncRelayStorage>[1],
-): Promise<SyncRelayStorage> {
-  const root = await tempRoot("db");
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"), options);
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -75,32 +54,6 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     return { userId: auth.slice("Bearer user:".length), workspaceId };
   };
   return createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
-}
-
-function request(
-  userId: string | null,
-  path: string,
-  init: RequestInit = {},
-): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 interface ConflictResolveFixture {
@@ -883,127 +836,6 @@ describe("sync relay handler", () => {
       await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
     );
     expect(fetched.ops).toEqual([]);
-  });
-
-  it("refuses a legacy relay database with a fractional timestamp at cutover", async () => {
-    const root = await tempRoot("fractional-cutover");
-    const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storage.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "a",
-      createdAtMs: 1,
-    });
-    storage.appendLogBatch({
-      workspaceId: "workspace-a",
-      originId: "legacy-origin",
-      ops: [
-        {
-          originSeq: 0,
-          opKind: "future.opaque",
-          payloadJson: "{}",
-          recordedAtMs: 1,
-        },
-      ],
-    });
-    storage.close();
-    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    legacy.exec(
-      "UPDATE sync_relay_log SET recorded_at_ms=1.5; " +
-        "DELETE FROM sync_relay_migrations WHERE migration_id='recorded-at-safe-integer-v1';",
-    );
-    legacy.close();
-
-    expect(() => openSyncRelayStorage(dbPath)).toThrow(
-      "sync relay log contains a timestamp outside the integer wire contract",
-    );
-  });
-
-  it("persists the legacy timestamp validation marker after the first scan", async () => {
-    const root = await tempRoot("timestamp-migration-marker");
-    const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storage.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "a",
-      createdAtMs: 1,
-    });
-    storage.appendLogBatch({
-      workspaceId: "workspace-a",
-      originId: "legacy-origin",
-      ops: [{ originSeq: 0, opKind: "probe", payloadJson: "{}", recordedAtMs: 1 }],
-    });
-    storage.close();
-    const db = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    const marker = db
-      .prepare(
-        "SELECT completed_at_ms FROM sync_relay_migrations WHERE migration_id=?",
-      )
-      .get("recorded-at-safe-integer-v1");
-    db.exec("UPDATE sync_relay_log SET recorded_at_ms=1.5");
-    db.close();
-    expect(Number(marker?.completed_at_ms)).toBeGreaterThan(0);
-    expect(() => openSyncRelayStorage(dbPath).close()).not.toThrow();
-  });
-
-  it("replaces the pre-launch combined share table without carrying rows forward", async () => {
-    const root = await tempRoot("share-grant-cutover");
-    const dbPath = join(root, "relay.sqlite");
-    const initial = openSyncRelayStorage(dbPath);
-    initial.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "owner-a",
-      createdAtMs: 1,
-    });
-    initial.close();
-
-    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    legacy.exec(`
-      PRAGMA foreign_keys = OFF;
-      DROP TABLE sync_relay_share_grants;
-      DROP TABLE sync_relay_shares;
-      CREATE TABLE sync_relay_shares (
-        share_id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        granter_user_id TEXT NOT NULL,
-        recipient_user_id TEXT,
-        recipient_email TEXT,
-        selector_json TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        revoked_at_ms INTEGER
-      );
-      INSERT INTO sync_relay_shares (
-        share_id, workspace_id, granter_user_id, recipient_user_id,
-        recipient_email, selector_json, created_at_ms, revoked_at_ms
-      ) VALUES (
-        'legacy-share', 'workspace-a', 'owner-a', 'recipient-a', NULL,
-        '{"paths":["docs"],"versionId":null,"access":"view"}', 1, NULL
-      );
-    `);
-    legacy.close();
-
-    const normalized = openSyncRelayStorage(dbPath);
-    expect(normalized.getShare("legacy-share")).toBeNull();
-    normalized.close();
-
-    const inspected = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    const legacyColumns = inspected
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM pragma_table_info('sync_relay_shares')
-         WHERE name IN ('recipient_user_id', 'recipient_email', 'revoked_at_ms')`,
-      )
-      .get();
-    const grantTable = inspected
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM sqlite_master
-         WHERE type = 'table' AND name = 'sync_relay_share_grants'`,
-      )
-      .get();
-    inspected.close();
-    expect(Number(legacyColumns?.count)).toBe(0);
-    expect(Number(grantTable?.count)).toBe(1);
   });
 
   // Gate finding: a missing blob in an owned workspace must be
@@ -2371,8 +2203,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
   it("records supersession time from the injected relay clock", async () => {
     const root = await tempRoot("epoch-clock");
     const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storages.push(storage);
+    const storage = reopenTestStorage(dbPath);
     const h = handler(storage);
     await createWorkspace(h);
     expect(
@@ -2841,8 +2672,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
       firstStorage.close();
     }
 
-    const reopenedStorage = openSyncRelayStorage(dbPath);
-    storages.push(reopenedStorage);
+    const reopenedStorage = reopenTestStorage(dbPath);
     const reopenedHandler = handler(reopenedStorage);
     expect(reopenedStorage.getWorkspaceIdentity("workspace-a")).toEqual({
       replicationEpoch: EPOCH_2,

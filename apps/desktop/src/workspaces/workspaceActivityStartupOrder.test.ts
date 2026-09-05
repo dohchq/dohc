@@ -1,16 +1,16 @@
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
-import { rm, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { createTestScratch } from "./testTemp";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
+import { createTestScratch } from "./testTemp";
 // The watch handle is the one collaborator faked here, because the window
 // under test is its timing: a batch that settles while the initial scan is
 // still running. That window is real — watchWorkspaceEvents arms its settle
@@ -24,22 +24,13 @@ vi.mock("./workspaceWatcher", async (importOriginal) => ({
 }));
 
 const WORKSPACE_ID = "activity-startup-order";
-const roots: string[] = [];
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-activity-order-");
-  roots.push(root);
-  return root;
-}
-
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 describe("workspaceActivity startup ordering", () => {
   it("gives startup reconciliation the chain slot ahead of a batch that settles inside the ready window", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-activity-order-");
     await writeFile(join(root, "offline.md"), "offline edit\n");
 
     const order: string[] = [];

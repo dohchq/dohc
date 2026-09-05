@@ -2,7 +2,7 @@
 //! boundaries (CAL-2). Durability is proven by reopening, never by trusting an
 //! in-process flag (`TEST_ORACLE.md` §3). The named storage fault points
 //! (`storage.before-persist`, `storage.after-commit-before-ack`) are the same
-//! seam CAL-1 pins; the versioning compound commits ride it via
+//! seam the storage crate pins; the versioning compound commits ride it via
 //! `EngineStore::write_with`.
 
 use dohc_engine_domain::{
@@ -83,7 +83,6 @@ fn rollback_input() -> RollbackTextFileMutation {
         path: "a.md".to_owned(),
         mutation_moment_id: "m2".to_owned(),
         request_id: None,
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     }

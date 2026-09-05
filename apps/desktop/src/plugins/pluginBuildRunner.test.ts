@@ -41,6 +41,7 @@ import {
   pluginIdToSafePath,
 } from "./pluginSourceSnapshot";
 
+import { deferred } from "../testing/deferred";
 interface BuildFixture {
   root: string;
   dohcDir: string;
@@ -51,28 +52,9 @@ interface BuildFixture {
   input: BuildPluginBundleInput;
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-}
-
 const roots: string[] = [];
 let stagedResourcesRoot: string;
 let stagedResourcesParent: string;
-
-function deferred<T>(): Deferred<T> {
-  let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolveValue) => {
-    resolvePromise = resolveValue;
-  });
-  return {
-    promise,
-    resolve: (value) => {
-      if (!resolvePromise) throw new Error("Deferred promise was not initialized.");
-      resolvePromise(value);
-    },
-  };
-}
 
 async function stageCurrentEsbuildBinary(resourcesRoot: string): Promise<void> {
   const platformKey = `${process.platform}-${process.arch}`;

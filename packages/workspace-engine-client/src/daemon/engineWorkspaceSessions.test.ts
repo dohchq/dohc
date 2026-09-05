@@ -60,17 +60,8 @@ async function tempWorkspace(workspaceId = "workspace-sessions-test") {
   return { workspaceId, rootPath: await tempRoot() };
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+function deferred<T>() {
+  return Promise.withResolvers<T>();
 }
 
 class MockClient implements EngineDaemonClient {

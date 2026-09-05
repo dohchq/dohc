@@ -26,6 +26,7 @@ import {
   createWorkspaceFileMutationOwner,
   type WorkspaceFileMutationYDocPort,
 } from "./workspaceFileMutationOwner";
+import { deferred } from "../testing/deferred";
 
 interface TestEvent {
   trusted: boolean;
@@ -53,14 +54,6 @@ afterEach(async () => {
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
 });
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
 
 function hash(text: string): string {
   return createHash("sha256").update(text).digest("hex");

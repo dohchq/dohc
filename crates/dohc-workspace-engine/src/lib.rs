@@ -5,9 +5,6 @@
 mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
-pub mod cutover_rehearse;
-#[cfg(feature = "harness")]
-pub mod rehearsal_harness;
 pub mod shadow_fence;
 
 #[cfg(feature = "harness")]
@@ -3614,7 +3611,6 @@ impl EngineService {
                     path,
                     mutation_moment_id: params.mutation_moment_id,
                     request_id,
-                    legacy_before_text: params.legacy_before_text,
                     metadata_origin: origin,
                     author_json,
                 },
@@ -10364,8 +10360,6 @@ struct VersionedTextRollbackParams {
     author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
-    #[serde(default)]
-    legacy_before_text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -13321,9 +13315,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
         }
     }
     let code = match error {
-        RuntimeError::Overloaded => ErrorCode::Overloaded,
         RuntimeError::Cancelled => ErrorCode::Cancelled,
-        RuntimeError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
@@ -13467,7 +13459,6 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
         | CollabError::LineageEpochChanged { .. }
-        | CollabError::LineageClaimUnresolved { .. }
         | CollabError::LineagePredecessorMismatch { .. }
         | CollabError::LineageStateVectorMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
@@ -13618,7 +13609,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{CompoundWrite, FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultInjector, FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
     use dohc_engine_testkit::{GateFaults, ScratchDir};
     use std::time::Duration;
@@ -14604,31 +14595,11 @@ mod tests {
         );
         drop(store);
 
+        // A store whose ledger lacks the baseline row needs the migration
+        // runner. A maintenance-free open must refuse it, not repair it.
         let conn = rusqlite::Connection::open(&db_path).expect("fixture connection");
-        let removed_migration: String = conn
-            .query_row(
-                "SELECT id FROM engine_migrations ORDER BY ordinal DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("latest migration");
-        conn.execute(
-            "DELETE FROM engine_migrations WHERE id = ?1",
-            [&removed_migration],
-        )
-        .expect("remove latest migration ledger row");
-        for column in [
-            "before_object_id",
-            "before_version_id",
-            "before_path",
-            "before_updated_at_ms",
-            "before_metadata_origin",
-            "before_metadata_summary",
-            "before_metadata_correlation_id",
-        ] {
-            conn.execute(&format!("ALTER TABLE moments DROP COLUMN {column}"), [])
-                .expect("restore the pre-migration moments shape");
-        }
+        conn.execute("DELETE FROM engine_migrations", [])
+            .expect("remove the baseline ledger row");
         drop(conn);
 
         let supervisor: &'static WorkspaceSupervisor =
@@ -14644,14 +14615,11 @@ mod tests {
                     "skipStartupMaintenance": true,
                 }),
             )
-            .await
-            .expect("maintenance-free open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
+            .await;
+        assert!(
+            opened.is_err(),
+            "a maintenance-free open must refuse a store that needs migration"
+        );
 
         let conn = rusqlite::Connection::open_with_flags(
             &db_path,
@@ -14659,11 +14627,9 @@ mod tests {
         )
         .expect("read migration ledger");
         let present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_migrations WHERE id = ?1",
-                [&removed_migration],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("migration count");
         assert_eq!(
             present, 0,
@@ -15815,15 +15781,23 @@ mod tests {
         let gate_faults: Arc<dyn FaultInjector> = gate.clone();
         let held_write = tokio::spawn(async move {
             actor
-                .write_async(
-                    CompoundWrite {
-                        request_id: "hold-close".to_owned(),
-                        doc_id: "held".to_owned(),
-                        body: "held".to_owned(),
-                        op_kind: "text.write".to_owned(),
+                .versioned_text_write(
+                    WriteText {
+                        workspace_id: "cancelled-close".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-held".to_owned(),
+                        path: "held.md".to_owned(),
+                        text: "held".to_owned(),
+                        moment_id: "moment-held".to_owned(),
+                        metadata_origin: "user".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
                         now_ms: 1,
+                        request_id: None,
                     },
                     gate_faults,
+                    dohc_engine_runtime::CancellationToken::new(),
                 )
                 .await
         });

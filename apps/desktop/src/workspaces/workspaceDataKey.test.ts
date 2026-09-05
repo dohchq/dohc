@@ -1,31 +1,17 @@
 import { randomBytes } from "node:crypto";
-import { access, readFile, rm } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   SECRET_KEY_RELATIVE_PATH,
   installWorkspaceDataKey,
   loadSecretDataKey,
 } from "./workspaceDataKey";
+
 import { createTestScratch } from "./testTemp";
-
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-desktop-data-key-");
-  roots.push(root);
-  return root;
-}
-
 describe("desktop workspace data-key custody", () => {
   it("rejects invalid key lengths before it touches the filesystem", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-desktop-data-key-");
     for (const key of [Buffer.alloc(0), randomBytes(16), randomBytes(64)]) {
       await expect(installWorkspaceDataKey(root, key)).rejects.toMatchObject({
         name: "SecretFileStoreError",
@@ -38,7 +24,7 @@ describe("desktop workspace data-key custody", () => {
   });
 
   it("reinstalls the same key and refuses to overwrite a different key", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-desktop-data-key-");
     const firstKey = randomBytes(32);
     const differentKey = randomBytes(32);
 

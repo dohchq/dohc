@@ -4,8 +4,8 @@
 //! receiver-private follows / personal feed / bookmarks, and the durable agent
 //! dispatch ledger — composed ON the storage seam exactly like the versioning
 //! domain: reads via [`EngineStore::read_with`], every compound mutation via
-//! [`EngineStore::write_with`] so the domain write and its replication-journal
-//! entry commit in one `BEGIN IMMEDIATE` transaction. Storage
+//! [`EngineStore::write_with`] so each compound write commits in one
+//! `BEGIN IMMEDIATE` transaction. Storage
 //! owns the connection, open ritual, transaction boundary, and the crash
 //! fault seam; this crate owns what a channel / thread / message / read-cursor /
 //! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +
@@ -2243,7 +2243,6 @@ impl<'a> LinkedChatStore<'a> {
                 }),
                 now_ms,
             )?;
-            journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
                 channel_id: cid.clone(),
@@ -2364,7 +2363,6 @@ impl<'a> LinkedChatStore<'a> {
                 }),
                 now_ms,
             )?;
-            journal(tx, &cid, "chat.channel.create", now_ms)?;
             Ok::<_, DomainError>(ChatChannel {
                 workspace_id: ws.clone(),
                 channel_id: cid.clone(),
@@ -2589,7 +2587,6 @@ impl<'a> LinkedChatStore<'a> {
                 &payload,
                 input.now_ms,
             )?;
-            journal(tx, &thread_id_c, "chat.thread.create", input.now_ms)?;
             record_request(tx, Some(&input.request_id), &payload_hash, input.now_ms)?;
             Ok::<_, DomainError>(ChatThread {
                 workspace_id: input.workspace_id.clone(),
@@ -2810,8 +2807,6 @@ impl<'a> LinkedChatStore<'a> {
                 now,
                 replicate,
             )?;
-            journal(tx, &input.thread_id, "chat.thread.create", now)?;
-            journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             let thread = ChatThread {
@@ -3063,7 +3058,6 @@ impl<'a> LinkedChatStore<'a> {
                 now,
                 replicate,
             )?;
-            journal(tx, &input.message_id, "chat.message.append", now)?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, now)?;
             bump_chat_conversation_revision(tx, &input.workspace_id, &input.thread_id)?;
             Ok::<_, DomainError>(ChatMessage {
@@ -4394,7 +4388,6 @@ impl<'a> LinkedChatStore<'a> {
                     &payload,
                     at_ms,
                 )?;
-                journal(tx, &input.target_id, "chat.follow.set", at_ms)?;
             }
             require_follow(
                 tx,
@@ -4685,7 +4678,6 @@ impl<'a> LinkedChatStore<'a> {
                     }),
                     at_ms,
                 )?;
-                journal(tx, &owner, "chat.feed.read.set", at_ms)?;
             }
             require_feed_read_state(tx, &ws, &owner)
         })?;
@@ -9086,20 +9078,6 @@ fn dispatch_run_context(
     )
     .optional()
     .map_err(DomainError::sql_corrupt)
-}
-
-fn journal(
-    tx: &Transaction<'_>,
-    doc_id: &str,
-    op_kind: &str,
-    now_ms: i64,
-) -> Result<(), DomainError> {
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) VALUES (?1, ?2, ?3)",
-        params![doc_id, op_kind, now_ms],
-    )
-    .map_err(DomainError::sql_persist)?;
-    Ok(())
 }
 
 /// Look up a prior request's payload hash in the exactly-once ledger

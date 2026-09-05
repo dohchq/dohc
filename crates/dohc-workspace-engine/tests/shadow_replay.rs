@@ -377,9 +377,7 @@ async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
                 conn.query_row(
                     "SELECT \
                        (SELECT COUNT(*) FROM versioned_workspaces) + \
-                       (SELECT COUNT(*) FROM documents) + \
-                       (SELECT COUNT(*) FROM engine_requests) + \
-                       (SELECT COUNT(*) FROM replication_journal)",
+                       (SELECT COUNT(*) FROM engine_requests)",
                     [],
                     |row| row.get(0),
                 )
@@ -431,9 +429,7 @@ async fn valid_marker_cannot_claim_an_unstamped_existing_v2_store() {
             conn.query_row(
                 "SELECT \
                    (SELECT COUNT(*) FROM versioned_workspaces) + \
-                   (SELECT COUNT(*) FROM documents) + \
-                   (SELECT COUNT(*) FROM engine_requests) + \
-                   (SELECT COUNT(*) FROM replication_journal)",
+                   (SELECT COUNT(*) FROM engine_requests)",
                 [],
                 |row| row.get(0),
             )
