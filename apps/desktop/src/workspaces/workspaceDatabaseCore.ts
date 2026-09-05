@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   open,
+  readFile,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -287,6 +288,18 @@ function runEdit(db: SqliteDb, edit: DatabaseEdit): void {
   ).run(...values);
 }
 
+// A counter file that does not exist yet seeds from the operations already in
+// the log, so versions keep climbing from where the log left off.
+async function seedOperationCountFromLog(logPath: string): Promise<number> {
+  try {
+    const text = await readFile(logPath, "utf8");
+    return text.split("\n").filter((line) => line.trim().length > 0).length;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw error;
+  }
+}
+
 function openCounter(statePath: string): SqliteDb {
   const { DatabaseSync } = nodeSqlite();
   const state = new DatabaseSync(statePath);
@@ -311,7 +324,9 @@ async function reserveOperationVersion(input: {
         "SELECT value FROM database_operation_state WHERE key = 'last_version'",
       )
       .get();
-    const currentVersion = row ? Number(row.value) : 0;
+    const currentVersion = row
+      ? Number(row.value)
+      : await seedOperationCountFromLog(input.logPath);
     const version = currentVersion + 1;
     if (!Number.isInteger(version) || version < 0) {
       throw new Error("Database operation version must be a non-negative integer");

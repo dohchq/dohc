@@ -124,7 +124,23 @@ export function resolveWorkspaceHeadingAnchorTarget<
       headingAnchorBase(heading.text) === anchor &&
       heading.occurrence === occurrence,
   );
-  return literalBase ?? null;
+  if (literalBase) return literalBase;
+
+  // Anchors are allocated globally unique: the Nth repeat of a heading gets
+  // `<base>-N` unless a literal heading already holds that anchor, in which
+  // case the repeat is pushed to the next free suffix. A link minted from the
+  // repeat's own occurrence therefore still names `<base>-<occurrence>`, and
+  // resolves to the heading whose text base matches at that occurrence.
+  if (occurrence <= 0) return null;
+  const allocatedSuffix = `-${occurrence}`;
+  if (!anchor.endsWith(allocatedSuffix)) return null;
+  const allocatedBase = anchor.slice(0, -allocatedSuffix.length);
+  if (!allocatedBase) return null;
+  return headings.find(
+    (heading) =>
+      headingAnchorBase(heading.text) === allocatedBase &&
+      heading.occurrence === occurrence,
+  ) ?? null;
 }
 
 function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {
