@@ -90,6 +90,19 @@ export function assertPrepared() {
   return receipt;
 }
 
+export function buildEnvironment(maxJobs, source = process.env) {
+  const env = { ...source };
+  for (const name of Object.keys(env)) {
+    if (["CARGO_BUILD_TARGET", "CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"].includes(name.toUpperCase())) delete env[name];
+  }
+  for (const name of ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"]) env[name] = join(repoRoot, "target");
+  if (maxJobs) {
+    const requested = Number(env.CARGO_BUILD_JOBS);
+    env.CARGO_BUILD_JOBS = String(Number.isInteger(requested) && requested > 0 ? Math.min(requested, maxJobs) : maxJobs);
+  }
+  return env;
+}
+
 export async function withBuildBudget(action) {
   const budget = resolveBuildBudget();
   if (budget) {
@@ -97,11 +110,7 @@ export async function withBuildBudget(action) {
     if (free === null || free < budget.diskFloorGb) throw new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`);
   }
   const slot = budget ? await acquireBuildSlot(budget) : null;
-  const env = { ...process.env };
-  for (const name of Object.keys(env)) {
-    if (["CARGO_BUILD_TARGET", "CARGO_TARGET_DIR"].includes(name.toUpperCase())) delete env[name];
-  }
-  if (budget) env.CARGO_BUILD_JOBS = String(Math.min(Number(env.CARGO_BUILD_JOBS) || budget.jobs, budget.jobs));
+  const env = buildEnvironment(budget?.jobs);
   try { return await action(env); }
   finally { slot?.release(); }
 }

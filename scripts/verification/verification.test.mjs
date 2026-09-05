@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { directoryFingerprint, sourceFingerprint } from "./build.mjs";
+import { buildEnvironment, directoryFingerprint, sourceFingerprint } from "./build.mjs";
 import { selectedGates } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 
@@ -46,8 +46,21 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
-  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs"]) {
+  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
+  }
+});
+
+test("build children use owned output paths and cannot expand the compiler budget", () => {
+  for (const requested of ["-1", "0", "default", "invalid", "1", "999"]) {
+    const source = { CARGO_BUILD_JOBS: requested, Cargo_Target_Dir: "foreign", CARGO_BUILD_BUILD_DIR: "foreign", CARGO_BUILD_TARGET: "other-host", PATH: "retained" };
+    const env = buildEnvironment(8, source);
+    assert.equal(env.CARGO_BUILD_JOBS, requested === "1" ? "1" : "8");
+    for (const key of ["CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"]) assert.equal(env[key], join(repoRoot, "target"));
+    assert.equal(env.Cargo_Target_Dir, undefined);
+    assert.equal(env.CARGO_BUILD_TARGET, undefined);
+    assert.equal(env.PATH, "retained");
+    assert.equal(source.Cargo_Target_Dir, "foreign");
   }
 });
 

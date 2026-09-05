@@ -51,6 +51,8 @@ The runner removes its Postgres container by the recorded container ID.
 
 To schedule jobs separately, use `pnpm verify:pr --base origin/main --job js` and `--job rust`.
 Each report states its scope. Both selected jobs must pass on the same commit before claiming a complete PR gate.
+An explicit `--job` runs that job even when the filters omit it.
+Use it when a build or test step reads a changed file outside the filters.
 
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.
 Repeat affected checks after review fixes. Evidence from another commit does not prove the new commit.

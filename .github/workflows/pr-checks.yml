@@ -106,6 +106,15 @@ jobs:
               - 'deny.toml'
               - 'tools/rust-engine-program/**'
               - 'packages/ydoc-projection/**'
+              # The live fixture oracles and dependency setup are Rust inputs.
+              - 'packages/security-contract/**'
+              - 'packages/workspace-contracts/**'
+              - '**/package.json'
+              - '**/tsconfig*.json'
+              - 'pnpm-workspace.yaml'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
               - 'pnpm-lock.yaml'
               - '.gitignore'
               - '.github/workflows/pr-checks.yml'
@@ -117,6 +126,11 @@ jobs:
             # sees the probe file that test writes into the repo root, so an
             # ignore rule can disable that regression test silently.
             js:
+              # The desktop daemon prebuild reads Cargo configuration.
+              - '.cargo/**'
+              - '.npmrc'
+              - '.pnpmfile.cjs'
+              - '.pnpmfile.mjs'
               - 'apps/**'
               - 'packages/**'
               - 'services/**'

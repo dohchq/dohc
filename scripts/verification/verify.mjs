@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
-import { prepare, assertPrepared, sourceFingerprint } from "./build.mjs";
+import { prepare, assertPrepared, sourceFingerprint, buildEnvironment } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
@@ -58,7 +58,7 @@ export async function verify(args) {
   ])].filter(Boolean) : [];
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   const requiredGates = selectedGates(files, workflow);
-  if (job && !requiredGates[job]) throw new Error(`The ${job} job is not selected by this diff.`);
+  if (job) requiredGates[job] = true;
   const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
   if (mode === "plan") { console.log(JSON.stringify({ base, baseCommit, files, gates }, null, 2)); return; }
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
@@ -103,7 +103,7 @@ export async function verify(args) {
         const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
         if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
       }
-      await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], { ...process.env, CARGO_TARGET_DIR: join(repoRoot, "target") });
+      await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], buildEnvironment());
       await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
     }
     if (mode === "pr" && gates.js) {
