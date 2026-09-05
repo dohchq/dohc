@@ -64,7 +64,7 @@ describe("history diff page", () => {
     const props = {
       workspaceId: "ws-1",
       tabPath: momentDiffTabPath(moment.id),
-      onBeforeRestore: async () => {},
+      onBeforeRestore: async () => () => {},
       onOpenFile: () => {},
       onPathResolved: noop,
       registerActiveUndo: () => {},
@@ -85,7 +85,7 @@ describe("history diff page", () => {
       <EngineMomentDiffPage
         workspaceId="ws-1"
         tabPath={momentDiffTabPath("m-1")}
-        onBeforeRestore={async () => {}}
+        onBeforeRestore={async () => () => {}}
         onOpenFile={() => {}}
         onPathResolved={noop}
         registerActiveUndo={() => {}}

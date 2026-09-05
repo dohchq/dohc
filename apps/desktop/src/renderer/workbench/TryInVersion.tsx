@@ -81,7 +81,10 @@ export function TryInVersionReviewCard(props: {
   workspaceId: string;
   state: TryInVersionRunState;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs — held across the version IPCs so no
+  // cell edit lands between the drain and the lineage change.
+  beginLineageOperation: () => Promise<() => void>;
   onOpenCompare: (versionId: string) => void;
   // Pass the version that is active NOW when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
@@ -141,8 +144,9 @@ export function TryInVersionReviewCard(props: {
     // version lookup) changed nothing, and announcing would reopen the
     // document and set its still-editable draft aside on the same version.
     let switchIssued = false;
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const versions = await bridge().listWorkspaceVersions({ workspaceId });
       if (token !== liveToken.current) return;
@@ -180,6 +184,7 @@ export function TryInVersionReviewCard(props: {
       // Mid-switch: the shell has to ask where it landed.
       props.onWorkspaceStateChanged(undefined);
     } finally {
+      releaseOperation?.();
       if (token === liveToken.current) setBusy(null);
     }
   }, [props, workspaceId]);
@@ -320,7 +325,7 @@ export function TryInVersionReviewCard(props: {
           workspaceId={workspaceId}
           source={mergeSource}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onOutcome={(outcome) => {
             // After a completed merge, return to Main so the folder shows the

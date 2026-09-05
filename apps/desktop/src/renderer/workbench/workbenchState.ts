@@ -1024,16 +1024,28 @@ export function togglePinned(state: WorkbenchState, path: string): WorkbenchStat
 
 // Rename/move/delete remap: every path-keyed slice re-projects through one
 // projection. Tab collisions are removed within each group.
+//
+// The projection speaks filesystem paths. A collection tab encodes its folder
+// path behind dohc://collection/, so the tab projects the DECODED folder and
+// re-encodes the result — projecting the tab path itself matches no rename,
+// and the tab would keep naming the folder the move vacated.
 export function remapWorkbenchPaths(
   state: WorkbenchState,
   project: (path: string) => string | null,
 ): WorkbenchState {
+  const projectTab = (path: string): string | null => {
+    const collectionPath = parseCollectionTabPath(path);
+    if (collectionPath === null) return project(path);
+    const next = project(collectionPath);
+    if (next === null) return null;
+    return next === collectionPath ? path : collectionTabPath(next);
+  };
   const projected = new Map<string, string | null>();
   const editorGroups = state.editorGroups.map((group) => {
     const seen = new Set<string>();
     const tabs: WorkbenchTab[] = [];
     for (const tab of group.tabs) {
-      const next = project(tab.path);
+      const next = projectTab(tab.path);
       projected.set(tab.path, next);
       if (next === null || seen.has(next)) continue;
       seen.add(next);

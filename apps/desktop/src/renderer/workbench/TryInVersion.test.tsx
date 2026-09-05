@@ -84,8 +84,12 @@ afterEach(() => {
 describe("TryTaskDialog", () => {
   it("saves the open draft first, then starts the gesture without a driver", async () => {
     const order: string[] = [];
-    const flushActiveDraft = vi.fn(async () => {
-      order.push("flush");
+    const releaseOperation = vi.fn(() => {
+      order.push("release");
+    });
+    const beginLineageOperation = vi.fn(async () => {
+      order.push("begin");
+      return releaseOperation;
     });
     bridgeMock.tryInWorkspaceVersion.mockImplementation(async () => {
       order.push("start");
@@ -97,7 +101,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={true}
-        flushActiveDraft={flushActiveDraft}
+        beginLineageOperation={beginLineageOperation}
         onStarted={onStarted}
         onClose={() => {}}
       />,
@@ -118,7 +122,9 @@ describe("TryTaskDialog", () => {
     await user.click(screen.getByTestId("try-task-start"));
 
     await waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
-    expect(order).toEqual(["flush", "start"]);
+    // The cell-edit pause spans the whole gesture: drain, then the IPC,
+    // then release.
+    expect(order).toEqual(["begin", "start", "release"]);
     expect(bridgeMock.tryInWorkspaceVersion).toHaveBeenCalledWith({
       workspaceId: "ws-try",
       task: "tidy the notes",
@@ -132,7 +138,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onStarted={() => {}}
         onClose={() => {}}
       />,
@@ -164,7 +170,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onStarted={() => {}}
         onClose={() => {}}
       />,
@@ -203,14 +209,16 @@ describe("TryInVersionReviewCard", () => {
     onOpenCompare?: (versionId: string) => void;
     onDismissed?: () => void;
     onWorkspaceStateChanged?: (activeVersionId?: string) => void;
-    flushActiveDraft?: () => Promise<void>;
+    beginLineageOperation?: () => Promise<() => void>;
   }) {
     return render(
       <TryInVersionReviewCard
         workspaceId="ws-try"
         state={state}
         activeTabDirty={false}
-        flushActiveDraft={handlers?.flushActiveDraft ?? (async () => {})}
+        beginLineageOperation={
+          handlers?.beginLineageOperation ?? (async () => () => {})
+        }
         onOpenCompare={handlers?.onOpenCompare ?? (() => {})}
         onWorkspaceStateChanged={handlers?.onWorkspaceStateChanged ?? (() => {})}
         onDismissed={handlers?.onDismissed ?? (() => {})}
@@ -273,7 +281,7 @@ describe("TryInVersionReviewCard", () => {
     const user = userEvent.setup();
     renderCard(reviewState(), {
       onWorkspaceStateChanged,
-      flushActiveDraft: async () => {
+      beginLineageOperation: async () => {
         throw new Error("disk full");
       },
     });
@@ -287,6 +295,35 @@ describe("TryInVersionReviewCard", () => {
     );
     expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
     expect(onWorkspaceStateChanged).not.toHaveBeenCalled();
+  });
+
+  // A cell edit accepted while the switch IPC is pending would enqueue
+  // against the version the workspace is leaving. The card holds the
+  // operation's release until the whole return-to-Main settles.
+  it("holds the write pause across the whole switch back to Main", async () => {
+    const releaseOperation = vi.fn();
+    const beginLineageOperation = vi.fn(async () => releaseOperation);
+    let resolveSwitch!: (result: { activeVersionId: string; changedFileCount: number }) => void;
+    bridgeMock.switchWorkspaceVersion.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    renderCard(reviewState(), { beginLineageOperation });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+
+    await waitFor(() =>
+      expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledOnce(),
+    );
+    expect(beginLineageOperation).toHaveBeenCalledOnce();
+    expect(releaseOperation).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSwitch({ activeVersionId: "main", changedFileCount: 1 });
+    });
+    await waitFor(() => expect(releaseOperation).toHaveBeenCalled());
   });
 
   // ...but a failure AFTER the switch IPC started must still announce: main
@@ -388,7 +425,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       <VersionMenu
         workspaceId="ws-importing"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={() => {}}
         onError={onError}
@@ -410,7 +447,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         <VersionMenu
           workspaceId="ws-try"
           activeTabDirty={false}
-          flushActiveDraft={async () => {}}
+          beginLineageOperation={async () => () => {}}
           onOpenCompare={() => {}}
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}

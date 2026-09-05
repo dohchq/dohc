@@ -28,6 +28,17 @@ import {
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import type { DraftFlush } from "../FileInspector";
+
+// One Explorer disk operation, as the shell's onBeginChanges opens it.
+// `settle` is the deferred draft settlement runChanges awaits before it
+// projects paths. `release` ends the collection cell-edit pause the begin
+// acquired; runChanges holds it until the successful paths are projected —
+// a drain alone is not enough, because a cell edit accepted while
+// moveWorkspacePath is pending would enqueue the path the move vacates.
+export type TreeChangeOperation = {
+  settle: DraftFlush;
+  release: () => void;
+};
 import { Overlay } from "../Overlay";
 import { momentDiffName } from "./EditorTabs";
 import { planDrop, type DragSource } from "./file-tree-dnd";
@@ -108,8 +119,9 @@ export interface ExplorerProps {
   onOpenCollection: (path: string) => void;
   // The shell flushes the stable active editor before disk changes and returns
   // a settlement that retains every editor mounted while those changes run.
-  // A rejected initial flush aborts the batch.
-  onBeginChanges?: () => Promise<DraftFlush>;
+  // A rejected begin (a flush failure, an unresolved collection write)
+  // aborts the batch.
+  onBeginChanges?: () => Promise<TreeChangeOperation>;
   // Successful moves/deletes re-project tabs/pins/expansion in the shell.
   onPathsChanged: (changes: PendingTreeChange[]) => void;
   // Import into targetDir ("" = root): the folder that was dropped on, or the
@@ -823,40 +835,47 @@ export const Explorer = memo(function Explorer(props: ExplorerProps) {
     ) => {
       if (changes.length === 0) return;
       setOpError(null);
-      // Land the stable active draft before paths move underneath it. The
-      // operation cannot preserve text that this initial flush rejected.
-      let settleDrafts: DraftFlush | null = null;
+      // Land the stable active draft and drain queued collection writes
+      // before paths move underneath them. The operation cannot preserve
+      // text or values this begin rejected.
+      let operation: TreeChangeOperation | null = null;
       try {
-        settleDrafts = (await onBeginChanges?.()) ?? null;
+        operation = (await onBeginChanges?.()) ?? null;
       } catch (cause) {
         setOpError(cause instanceof Error ? cause.message : String(cause));
         return;
       }
-      setPending((current) => [...current, ...changes]);
-      const succeeded: PendingTreeChange[] = [];
-      for (const change of changes) {
+      try {
+        setPending((current) => [...current, ...changes]);
+        const succeeded: PendingTreeChange[] = [];
+        for (const change of changes) {
+          try {
+            await run(change);
+            succeeded.push(change);
+          } catch (cause) {
+            setPending((current) => current.filter((entry) => entry.id !== change.id));
+            setOpError(cause instanceof Error ? cause.message : String(cause));
+          }
+        }
+        const changedExistingPath = succeeded.some(
+          (change) => change.kind !== "create-file" && change.kind !== "create-folder",
+        );
         try {
-          await run(change);
-          succeeded.push(change);
+          await operation?.settle(
+            changedExistingPath ? { captureOnFailure: true } : undefined,
+          );
         } catch (cause) {
-          setPending((current) => current.filter((entry) => entry.id !== change.id));
+          // The disk change already completed. Surface the settlement error,
+          // then project the successful paths so the shell matches storage.
           setOpError(cause instanceof Error ? cause.message : String(cause));
         }
+        if (succeeded.length > 0) onPathsChanged(succeeded);
+        onRefresh();
+      } finally {
+        // Cell edits resume only after the successful paths are projected,
+        // so nothing can enqueue against a path this operation just changed.
+        operation?.release();
       }
-      const changedExistingPath = succeeded.some(
-        (change) => change.kind !== "create-file" && change.kind !== "create-folder",
-      );
-      try {
-        await settleDrafts?.(
-          changedExistingPath ? { captureOnFailure: true } : undefined,
-        );
-      } catch (cause) {
-        // The disk change already completed. Surface the settlement error,
-        // then project the successful paths so the shell matches storage.
-        setOpError(cause instanceof Error ? cause.message : String(cause));
-      }
-      if (succeeded.length > 0) onPathsChanged(succeeded);
-      onRefresh();
     },
     [onBeginChanges, onPathsChanged, onRefresh],
   );

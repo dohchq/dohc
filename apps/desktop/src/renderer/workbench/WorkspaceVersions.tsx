@@ -78,7 +78,12 @@ function isWorkspaceUpdatingInvokeError(error: unknown): boolean {
 export function VersionMenu(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs. Each operation holds the release across
+  // its version IPCs so no cell edit lands between the drain and the
+  // lineage change; a rejection means an unresolved write refused the
+  // operation, with the user-facing line as the error message.
+  beginLineageOperation: () => Promise<() => void>;
   onOpenCompare: (versionId: string) => void;
   // Fired after any operation that may have changed disk or history state so
   // the shell refreshes files/history and reloads open editors.
@@ -220,9 +225,10 @@ export function VersionMenu(props: {
       let announced = false;
       setBusy("switch");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
-        // Re-check liveness after EVERY awaited step: the flush (or the
+        releaseOperation = await props.beginLineageOperation();
+        // Re-check liveness after EVERY awaited step: the begin (or the
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
         if (token !== operationToken.current) return;
@@ -265,6 +271,7 @@ export function VersionMenu(props: {
         }
         props.onWorkspaceStateChanged(recovered?.activeVersionId);
       } finally {
+        releaseOperation?.();
         if (token === operationToken.current) setBusy(null);
       }
     },
@@ -299,8 +306,9 @@ export function VersionMenu(props: {
       const token = beginOperation();
       setBusy("create");
       setInlineError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
-        await props.flushActiveDraft();
+        releaseOperation = await props.beginLineageOperation();
         if (token !== operationToken.current) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
@@ -315,6 +323,7 @@ export function VersionMenu(props: {
         if (token !== operationToken.current) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
       } finally {
+        releaseOperation?.();
         if (token === operationToken.current) setBusy(null);
       }
     },
@@ -640,7 +649,7 @@ export function VersionMenu(props: {
           workspaceId={workspaceId}
           source={mergeSource}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onClose={() => {
             setMergeSource(null);
@@ -653,7 +662,7 @@ export function VersionMenu(props: {
         <TryTaskDialog
           workspaceId={workspaceId}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onStarted={(activeVersionId) => {
             setTryOpen(false);
             // The gesture switched into the new version; refresh the selector
@@ -678,7 +687,8 @@ export function VersionMenu(props: {
 export function TryTaskDialog(props: {
   workspaceId: string;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
   /** The version the gesture created and switched into. */
   onStarted: (activeVersionId: string) => void;
   onClose: () => void;
@@ -737,8 +747,9 @@ export function TryTaskDialog(props: {
     const token = ++liveToken.current;
     setBusy(true);
     setError(null);
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
@@ -751,6 +762,8 @@ export function TryTaskDialog(props: {
       if (token !== liveToken.current) return;
       setError(ipcErrorMessage(caught, "Could not start trying this."));
       setBusy(false);
+    } finally {
+      releaseOperation?.();
     }
   }, [busy, helper, props, task, workspaceId]);
 
@@ -861,7 +874,8 @@ export function VersionMergeDialog(props: {
   workspaceId: string;
   source: WorkspaceVersionRecord;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // VersionMenu's contract: drain writes, hold the release across the IPC.
+  beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active NOW when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
@@ -893,8 +907,9 @@ export function VersionMergeDialog(props: {
   const runMerge = useCallback(async () => {
     const token = ++liveToken.current;
     setStage({ stage: "running" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
@@ -930,6 +945,8 @@ export function VersionMergeDialog(props: {
         stage: "error",
         message: ipcErrorMessage(error, "Could not merge this version into Main."),
       });
+    } finally {
+      releaseOperation?.();
     }
   }, [props, source.id, workspaceId]);
 

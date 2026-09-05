@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -15,13 +15,15 @@ import type {
   QueryCollectionRecordsResult,
   WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
+import { CollectionPage, DRAIN_RECORD_LIMIT } from "./CollectionPage";
 import {
-  CollectionPage,
+  beginCollectionWriteOperation,
+  CollectionFieldWriteHost,
   CollectionRecordFieldWrite,
   FILE_LOCKED_REPORT_MS,
-  DRAIN_RECORD_LIMIT,
   frontmatterWriteValue,
-} from "./CollectionPage";
+  resetCollectionFieldWritesForTests,
+} from "./collections/recordFieldWrites";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
@@ -99,6 +101,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
   docMock.current = null;
   docMock.inputs = [];
+  // The write queue is module state on purpose (it outlives the page);
+  // tests must not leak a pending head into each other.
+  resetCollectionFieldWritesForTests();
   for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
   }
@@ -212,6 +217,31 @@ function makeBridge(
   };
 }
 
+// The page plus the ONE writer host the shell mounts; rerenders reuse this
+// element so the host is never doubled or dropped.
+function pageWithHost(
+  onNewRecord: (collectionPath: string) => void = () => undefined,
+  onOpenRecord: (recordPath: string) => void = () => undefined,
+  view?: {
+    activeViewName?: string | null;
+    onActiveViewChange?: (viewName: string | null) => void;
+  },
+) {
+  return (
+    <>
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        activeViewName={view?.activeViewName ?? null}
+        onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
+        onNewRecord={onNewRecord}
+        onOpenRecord={onOpenRecord}
+      />
+      <CollectionFieldWriteHost />
+    </>
+  );
+}
+
 function renderPage(
   bridge: ReturnType<typeof makeBridge>,
   onNewRecord: (collectionPath: string) => void = () => undefined,
@@ -222,16 +252,7 @@ function renderPage(
   },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
-  return render(
-    <CollectionPage
-      workspaceId="ws-1"
-      collectionPath="tasks"
-      activeViewName={view?.activeViewName ?? null}
-      onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
-      onNewRecord={onNewRecord}
-      onOpenRecord={onOpenRecord}
-    />,
-  );
+  return render(pageWithHost(onNewRecord, onOpenRecord, view));
 }
 
 describe("CollectionPage", () => {
@@ -537,6 +558,7 @@ describe("collection authoring", () => {
 
   it("writes a created select option to the schema before the cell write", async () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
     let releaseWrite!: () => void;
@@ -645,7 +667,7 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 };
 
 describe("cell write queue", () => {
-  it("surfaces a failed write, keeps processing, and clears the error on the next attempt", async () => {
+  it("clears a discarded failure and keeps processing later edits", async () => {
     // The session settles without a doc (conflict, deletion, engine off):
     // the head write fails with no detail.
     docMock.current = engineDocState({ available: false });
@@ -670,9 +692,13 @@ describe("cell write queue", () => {
     const error = await screen.findByTestId("collection-write-error");
     expect(error.textContent).toBe("dohc could not save this change.");
 
+    fireEvent.click(screen.getByTestId("collection-write-discard"));
+    expect(screen.queryByTestId("collection-write-error")).toBeNull();
+
     // The failed write released its queue slot: the next change enqueues,
     // clears the stale message, and reaches its record's doc.
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     fireEvent.click(screen.getByRole("checkbox"));
     await waitFor(() =>
@@ -683,6 +709,7 @@ describe("cell write queue", () => {
 
   it("surfaces a read-only failure and advances to the next queued write", async () => {
     const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc: firstDoc });
     const base = record("rec-1", "Plan");
     const checkboxRecord: CollectionRecord = {
@@ -707,6 +734,7 @@ describe("cell write queue", () => {
     expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
 
     const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-1");
     let writerRender = 0;
     docMock.current = () => {
       writerRender += 1;
@@ -719,16 +747,7 @@ describe("cell write queue", () => {
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
-    page.rerender(
-      <CollectionPage
-        workspaceId="ws-1"
-        collectionPath="tasks"
-        activeViewName={null}
-        onActiveViewChange={() => undefined}
-        onNewRecord={() => undefined}
-        onOpenRecord={() => undefined}
-      />,
-    );
+    page.rerender(pageWithHost());
 
     const error = await screen.findByTestId("collection-write-error");
     expect(error.textContent).toBe(
@@ -741,6 +760,7 @@ describe("cell write queue", () => {
 
   it("reports a head write held file-locked past the window and unblocks the queue", async () => {
     const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc: firstDoc });
     const base = record("rec-1", "Plan");
     const checkboxRecord: CollectionRecord = {
@@ -766,6 +786,7 @@ describe("cell write queue", () => {
 
     vi.useFakeTimers();
     const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-1");
     let writerRender = 0;
     docMock.current = () => {
       writerRender += 1;
@@ -777,16 +798,7 @@ describe("cell write queue", () => {
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
-    page.rerender(
-      <CollectionPage
-        workspaceId="ws-1"
-        collectionPath="tasks"
-        activeViewName={null}
-        onActiveViewChange={() => undefined}
-        onNewRecord={() => undefined}
-        onOpenRecord={() => undefined}
-      />,
-    );
+    page.rerender(pageWithHost());
 
     // Inside the window: no line yet, the queue waits on main's retries.
     await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS - 1);
@@ -802,6 +814,114 @@ describe("cell write queue", () => {
     await waitFor(() =>
       expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
     );
+  });
+
+  it("keeps a queued edit and finishes it after the page unmounts", async () => {
+    // The queue lives outside the page and the shell hosts the writer:
+    // unmounting the page (a tab switch) with the head save pending must not
+    // drop the edit queued behind it.
+    const withCheckbox = (id: string, title: string): CollectionRecord => {
+      const base = record(id, title);
+      return {
+        ...base,
+        values: [
+          ...base.values,
+          {
+            field: "done",
+            value: false,
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      };
+    };
+    const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
+    const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-2");
+    const docFor = (saveState: UseEngineDoc["saveState"]) => (input: unknown) =>
+      (input as { path: string }).path === "tasks/Plan.md"
+        ? engineDocState({ available: true, doc: firstDoc, saveState })
+        : engineDocState({ available: true, doc: nextDoc });
+    docMock.current = docFor("saved");
+    const bridge = makeBridge(
+      [withCheckbox("rec-1", "Plan"), withCheckbox("rec-2", "Ship")],
+      CHECKBOX_SCHEMA,
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    // The host in its own root, standing in for the shell: it must outlive
+    // the page below exactly as the shell outlives a closed tab.
+    const host = render(<CollectionFieldWriteHost />);
+    const page = render(
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
+        onNewRecord={() => undefined}
+        onOpenRecord={() => undefined}
+      />,
+    );
+    await screen.findByText("Plan");
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
+    // The head reached its doc and its save is still pending; the second
+    // edit waits behind it.
+    expect(firstDoc.getMap("frontmatter").get("done")).toBe(true);
+    expect(nextDoc.getMap("frontmatter").has("done")).toBe(false);
+
+    page.unmount();
+
+    // The pending head settles only now, after the page is gone.
+    docMock.current = docFor("saving");
+    host.rerender(<CollectionFieldWriteHost />);
+    docMock.current = docFor("saved");
+    host.rerender(<CollectionFieldWriteHost />);
+
+    await waitFor(() =>
+      expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
+    );
+  });
+
+  it("disables cell editing and says so while a write operation is in progress", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const base = record("rec-1", "Plan");
+    const checkboxRecord: CollectionRecord = {
+      ...base,
+      values: [
+        ...base.values,
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    let guard!: ReturnType<typeof beginCollectionWriteOperation>;
+    act(() => {
+      guard = beginCollectionWriteOperation("ws-1");
+    });
+    // The header says why, and the cell no longer accepts an edit.
+    await screen.findByTestId("collection-writes-paused");
+    expect(
+      (screen.getByRole("checkbox") as HTMLInputElement).disabled,
+    ).toBe(true);
+
+    act(() => guard.release());
+    await waitFor(() =>
+      expect(screen.queryByTestId("collection-writes-paused")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(doc.getMap("frontmatter").get("done")).toBe(true);
   });
 });
 
@@ -1035,6 +1155,7 @@ function person(id: string, name: string): CollectionRecord {
 describe("relation picking", () => {
   it("queries the related collection and writes the picked id through the record's doc", async () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     const relationRecord: CollectionRecord = {
       id: "rec-1",
@@ -1083,19 +1204,25 @@ describe("CollectionRecordFieldWrite", () => {
     value: "done",
   };
 
-  it("writes the field on the frontmatter map and releases after the save settles", () => {
+  // The writer's three outcomes are distinct callbacks: onSettled (on disk),
+  // onHeldDurably (engine holds it through a lock), onFailed (did NOT reach
+  // the engine — the queue must retain it). Exactly one fires per write.
+  function writerProps() {
+    return {
+      workspaceId: "ws-1",
+      change: CHANGE,
+      onSettled: vi.fn(),
+      onHeldDurably: vi.fn(),
+      onFailed: vi.fn(),
+    };
+  }
+
+  it("writes the field on the frontmatter map and settles after the save lands", () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
 
     expect(docMock.inputs[0]).toEqual({
       workspaceId: "ws-1",
@@ -1105,142 +1232,79 @@ describe("CollectionRecordFieldWrite", () => {
     expect(doc.getMap("frontmatter").get("status")).toBe("done");
     // The session opens in "saved"; releasing on that snapshot would race
     // the staged local-update flush, so the writer must still be waiting.
-    expect(onDone).not.toHaveBeenCalled();
+    expect(props.onSettled).not.toHaveBeenCalled();
 
     docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onDone).not.toHaveBeenCalled();
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onSettled).not.toHaveBeenCalled();
 
     docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onDone).toHaveBeenCalledOnce();
-    expect(onError).not.toHaveBeenCalled();
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onSettled).toHaveBeenCalledOnce();
+    expect(props.onFailed).not.toHaveBeenCalled();
+    expect(props.onHeldDurably).not.toHaveBeenCalled();
   });
 
-  it("surfaces a save error and still releases", () => {
+  it("reports a save error as a failure, never a settle", () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "error",
       saveError: "file too large",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onError).toHaveBeenCalledExactlyOnceWith(
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(
       "dohc could not save this change. file too large",
     );
-    expect(onDone).toHaveBeenCalledOnce();
+    expect(props.onSettled).not.toHaveBeenCalled();
   });
 
-  it("reports the locked file and releases only after the bounded window", () => {
+  it("reports the locked file as durably held only after the bounded window", () => {
     vi.useFakeTimers();
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
 
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "file-locked",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     // Inside the window the writer waits on main's own retries.
     vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS - 1);
-    expect(onDone).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(props.onSettled).not.toHaveBeenCalled();
+    expect(props.onHeldDurably).not.toHaveBeenCalled();
 
     // A retry's own saving flip must not restart the window.
     docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "file-locked",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     vi.advanceTimersByTime(1);
-    expect(onError).toHaveBeenCalledExactlyOnceWith(
+    expect(props.onHeldDurably).toHaveBeenCalledExactlyOnceWith(
       "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
     );
-    expect(onDone).toHaveBeenCalledOnce();
+    expect(props.onFailed).not.toHaveBeenCalled();
   });
 
-  it("reports a refusal without touching the doc", () => {
+  it("reports a refusal as a failure without touching the doc", () => {
     docMock.current = engineDocState({ available: false });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onError).toHaveBeenCalledExactlyOnceWith(null);
-    expect(onDone).toHaveBeenCalledOnce();
+    const props = writerProps();
+    render(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
+    expect(props.onSettled).not.toHaveBeenCalled();
   });
 
   it("writes bigints back as numbers when exact, else decimal text", () => {

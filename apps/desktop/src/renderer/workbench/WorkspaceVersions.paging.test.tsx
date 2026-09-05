@@ -300,7 +300,7 @@ describe("VersionMergeDialog conflict paging", () => {
         workspaceId="ws-1"
         source={source}
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
       />,

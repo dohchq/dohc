@@ -324,13 +324,57 @@ describe("CellEditor", () => {
     expect(emit).toHaveBeenCalledExactlyOnceWith(null);
   });
 
-  it("toggles multi-select options, adding and removing", () => {
+  it("compounds multi-select toggles before any refresh lands", () => {
+    // Starting at ["alpha"], toggling beta then alpha must retain beta. The
+    // indexed prop still says ["alpha"] (the host's re-query has not landed),
+    // so deriving each toggle from props would emit [] and erase beta.
     const emit = vi.fn();
     renderEditor({ fieldName: "tags", value: ["alpha"], emit });
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith([]);
+    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+  });
+
+  it("keeps the current multi-select selection when a delayed prop refresh repeats a stale value", () => {
+    const emit = vi.fn();
+    const view = render(
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
+
+    // A slow index read re-serves ["alpha"] after the beta toggle. The open
+    // editor owns the selection; the stale prop must not erase beta.
+    view.rerender(
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+  });
+
+  it("adds a typed unknown multi-select option to the compounded selection", () => {
+    // The add input reads the same live selection as the checkboxes: after a
+    // beta toggle, a typed new option extends ["alpha", "beta"], not props.
+    const emit = vi.fn();
+    const onCreateOption = vi.fn();
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit, onCreateOption });
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "delta" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "beta", "delta"]);
   });
 
   it("opens the relation picker against the related collection and emits ids", async () => {

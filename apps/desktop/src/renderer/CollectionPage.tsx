@@ -18,16 +18,19 @@ import type {
   CollectionQueryParams,
   CollectionRecord,
   CollectionSchema,
-  CollectionValue,
   ViewDefinition,
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useEngineDoc } from "./collab/useEngineDoc";
 import { SecondaryButton } from "./ui/controls";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
+import {
+  enqueueCollectionFieldWrite,
+  useCollectionWritesPaused,
+  useCollectionWriteStatus,
+} from "./collections/recordFieldWrites";
 import { addSelectOption } from "./collections/schemaAuthoring";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
 
@@ -36,15 +39,6 @@ import { rewriteCollectionSchema } from "./collections/schemaWrite";
 // bridge. Reads come from the engine's index; writes ride the record's live
 // document frontmatter map — the SAME path agents and the PropertiesPanel
 // take, so attribution and history stay parallel.
-
-// The live document field PropertiesPanel writes; one name for one thing.
-const FRONTMATTER_FIELD = "frontmatter";
-
-// How long a cell write may sit "file-locked" before the queue reports it.
-// Main's settle retries double from 800 ms to a 10 s cap, so 15 s spans the
-// whole ladder: a lock still held then is a program sitting on the file, not
-// a blip worth waiting out silently.
-export const FILE_LOCKED_REPORT_MS = 15_000;
 
 // How many records a board or calendar drains before the page-by-page
 // drain stops. Ten default engine pages: enough for every view we have
@@ -67,128 +61,6 @@ export interface CollectionPageProps {
   // The md file IS the record: opening one goes through the shell's normal
   // file tab machinery, which composes PropertiesPanel and the live editor.
   onOpenRecord: (recordPath: string) => void;
-}
-
-/**
- * Frontmatter values are what js-yaml round-trips. The one indexed shape it
- * cannot carry as-is is bigint (the engine's wire marker for big integers):
- * write it back as a number when exact, else as its decimal text.
- */
-export function frontmatterWriteValue(value: CollectionValue): unknown {
-  if (typeof value === "bigint") {
-    const max = BigInt(Number.MAX_SAFE_INTEGER);
-    return value <= max && value >= -max ? Number(value) : value.toString();
-  }
-  if (Array.isArray(value)) return value.map(frontmatterWriteValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        frontmatterWriteValue(entry),
-      ]),
-    );
-  }
-  return value;
-}
-
-/**
- * Applies ONE cell change through the record's live document: open the
- * engine doc session, set the field on the frontmatter map inside a
- * transaction, then hold the lease until the engine reports the save
- * settled (local updates are staged and flushed asynchronously, so
- * releasing at transact time could drop the write). A save stuck
- * "file-locked" past FILE_LOCKED_REPORT_MS reports the lock and releases —
- * the engine holds the write durably and keeps retrying. Renders nothing.
- */
-export function CollectionRecordFieldWrite({
-  workspaceId,
-  change,
-  onDone,
-  onError,
-}: {
-  workspaceId: string;
-  change: CollectionCellChange;
-  onDone: () => void;
-  // The full state line the queue shows, or null for its generic one.
-  onError: (message: string | null) => void;
-}) {
-  const docState = useEngineDoc({
-    workspaceId,
-    path: change.recordPath,
-    enabled: true,
-  });
-  const applied = useRef(false);
-  const sawSaving = useRef(false);
-  const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (lockedReport.current !== null) clearTimeout(lockedReport.current);
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (applied.current || docState.opening) return;
-    if (!docState.available || !docState.doc) {
-      // The open settled without a session (conflict, deletion, engine off).
-      onError(null);
-      onDone();
-      return;
-    }
-    applied.current = true;
-    const doc = docState.doc;
-    doc.transact(() => {
-      doc
-        .getMap(FRONTMATTER_FIELD)
-        .set(change.field, frontmatterWriteValue(change.value));
-    });
-  }, [docState.opening, docState.available, docState.doc, change, onDone, onError]);
-
-  useEffect(() => {
-    if (!applied.current) return;
-    switch (docState.saveState) {
-      case "saving":
-        sawSaving.current = true;
-        return;
-      case "saved":
-        // Only a "saved" AFTER our own edit was staged counts: the session
-        // opens in "saved", and releasing on that one would race the flush.
-        if (sawSaving.current) onDone();
-        return;
-      case "file-locked":
-        // Main retries this transient refusal until the lock releases, but
-        // nothing bounds that wait. A "file-locked" report means the settle
-        // committed — the edit is journaled and its write job durably
-        // pending, retried while the session lives and paid after release —
-        // so after the window the queue reports the lock and moves on
-        // instead of stalling every later edit behind this one. A retry's
-        // own saving flip must not reset the window: the timer arms once.
-        if (lockedReport.current === null) {
-          lockedReport.current = setTimeout(() => {
-            const file =
-              change.recordPath.split("/").at(-1) ?? change.recordPath;
-            onError(
-              `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`,
-            );
-            onDone();
-          }, FILE_LOCKED_REPORT_MS);
-        }
-        return;
-      case "error":
-      case "read-only":
-      case "changed-on-disk":
-      case "deleted":
-        onError(
-          docState.saveError
-            ? `dohc could not save this change. ${docState.saveError}`
-            : null,
-        );
-        onDone();
-        return;
-    }
-  }, [docState.saveState, docState.saveError, change.recordPath, onDone, onError]);
-
-  return null;
 }
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
@@ -348,29 +220,27 @@ export function CollectionPage({
   // nears the end of the loaded rows.
   const loadNextPage = useCallback(() => void store.loadMore(), [store]);
 
-  // Cell edits queue one at a time through the live document write path.
-  const nextWriteId = useRef(0);
-  const [writes, setWrites] = useState<
-    { id: number; change: CollectionCellChange }[]
-  >([]);
-  const [writeError, setWriteError] = useState<string | null>(null);
-  const enqueueCellChange = useCallback((change: CollectionCellChange) => {
-    const id = ++nextWriteId.current;
-    // A new write is a new attempt: clear the stale failure; failWrite
-    // repaints it if this one fails too.
-    setWriteError(null);
-    setWrites((queue) => [...queue, { id, change }]);
-  }, []);
-  const completeWrite = useCallback(() => {
-    setWrites((queue) => queue.slice(1));
-    // The index updates when the engine applies the settled write; re-read
-    // now instead of waiting for the activity event.
+  // The global host finishes accepted edits after this page unmounts.
+  const enqueueCellChange = useCallback(
+    (change: CollectionCellChange) => {
+      enqueueCollectionFieldWrite(workspaceId, collectionPath, change);
+    },
+    [workspaceId, collectionPath],
+  );
+  // File and version operations disable new edits until their paths settle.
+  const writesPaused = useCollectionWritesPaused(workspaceId);
+  const onCellChange = writesPaused ? undefined : enqueueCellChange;
+  const writeStatus = useCollectionWriteStatus(workspaceId, collectionPath);
+  const writeError = writeStatus.error;
+  // The index updates when the engine applies a settled write; re-read then
+  // instead of waiting for the activity event.
+  const settledWrites = writeStatus.settled;
+  const seenSettledWrites = useRef(settledWrites);
+  useEffect(() => {
+    if (settledWrites === seenSettledWrites.current) return;
+    seenSettledWrites.current = settledWrites;
     void store.refresh();
-  }, [store]);
-  const failWrite = useCallback((message: string | null) => {
-    setWriteError(message ?? "dohc could not save this change.");
-  }, []);
-  const headWrite = writes[0];
+  }, [settledWrites, store]);
 
   const newRecord = useCallback(
     () => onNewRecord(collectionPath),
@@ -556,6 +426,13 @@ export function CollectionPage({
               Retry
             </SecondaryButton>
           </>
+        ) : writesPaused ? (
+          <span
+            data-testid="collection-writes-paused"
+            className="truncate text-[11px] text-muted"
+          >
+            Editing is paused while dohc changes files in this workspace.
+          </span>
         ) : writeError ? (
           <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
             {writeError}
@@ -594,7 +471,7 @@ export function CollectionPage({
             groups={state.groups ?? []}
             groupBy={activeView?.groupBy ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={enqueueCellChange}
+            onCellChange={onCellChange}
             onOpenRecord={openRecord}
           />
         ) : calendarReady ? (
@@ -603,7 +480,7 @@ export function CollectionPage({
             records={state.records}
             dateField={activeView?.dateField ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={enqueueCellChange}
+            onCellChange={onCellChange}
             onOpenRecord={openRecord}
           />
         ) : (
@@ -613,8 +490,8 @@ export function CollectionPage({
             sort={state.query.sort ?? []}
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
-            onCellChange={enqueueCellChange}
-            onCreateOption={createOption}
+            onCellChange={onCellChange}
+            onCreateOption={writesPaused ? undefined : createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
             onNearEnd={loadNextPage}
@@ -640,15 +517,6 @@ export function CollectionPage({
           onDeleted={(name) => {
             if (activeViewName === name) onActiveViewChange(null);
           }}
-        />
-      ) : null}
-      {headWrite ? (
-        <CollectionRecordFieldWrite
-          key={headWrite.id}
-          workspaceId={workspaceId}
-          change={headWrite.change}
-          onDone={completeWrite}
-          onError={failWrite}
         />
       ) : null}
     </div>

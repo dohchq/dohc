@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
 pub mod cutover_rehearse;
@@ -67,7 +68,7 @@ const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
-/// The startup reaper only reclaims a running automation claim idle at least
+/// Startup recovery only reclaims a running automation claim idle at least
 /// this long. A desktop that outlives a daemon rebind may still be running
 /// its handler; a claim younger than this bound is presumed alive and left
 /// running rather than double-fired.
@@ -912,6 +913,7 @@ struct OpenWorkspace {
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -994,29 +996,36 @@ impl OpenWorkspace {
         }
     }
 
-    /// Signal the capture loop to stop without removing its handle. A version
+    /// Signal the background tasks to stop without removing their handles. A version
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        if let Some(recovery) = lock(&self.automation_recovery).as_ref() {
+            recovery.request_shutdown();
+        }
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.request_shutdown();
         }
     }
 
-    /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
-    /// aborted RPC future can never leave a driver un-cancelled), returning
-    /// the join handle for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
-        lock(&self.capture)
+    /// Take and cancel the background tasks without an await point, so an
+    /// aborted RPC future cannot leave them running. Return
+    /// the join handles for callers that must await the full drain.
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 2] {
+        let capture = lock(&self.capture)
             .take()
-            .and_then(capture_driver::CaptureDriver::begin_shutdown)
+            .and_then(capture_driver::CaptureDriver::begin_shutdown);
+        let recovery = lock(&self.automation_recovery)
+            .take()
+            .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        [capture, recovery]
     }
 
-    /// Cancel and await the capture driver's full drain (idempotent).
+    /// Cancel and await capture and automation recovery (idempotent).
     /// Strictly BEFORE the store-actor close: the driver may be mid-apply
     /// against the actor.
     async fn shutdown_capture(&self) {
-        if let Some(task) = self.begin_capture_shutdown() {
+        for task in self.begin_capture_shutdown().into_iter().flatten() {
             let _ = task.await;
         }
     }
@@ -2347,6 +2356,7 @@ impl EngineService {
                     "workspace.open (automation reclaim)",
                     actor.automation_reclaim_running(
                         params.workspace_id.clone(),
+                        None,
                         AUTOMATION_CLAIM_MAX_ATTEMPTS,
                         now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
@@ -2361,6 +2371,24 @@ impl EngineService {
             }
             capture
         };
+        let automation_recovery = if requested_mode == WorkspaceOpenMode::Full {
+            let attempts = Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (automation recovery snapshot)",
+                actor.automation_running_attempts(params.workspace_id.clone()),
+            )
+            .await?;
+            (!attempts.is_empty()).then(|| {
+                automation_recovery::AutomationRecovery::spawn(
+                    actor.clone(),
+                    params.workspace_id.clone(),
+                    attempts,
+                    self.events.clone(),
+                )
+            })
+        } else {
+            None
+        };
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -2374,6 +2402,7 @@ impl EngineService {
                     .relay
                     .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
+                automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -2502,7 +2531,7 @@ impl EngineService {
             lock(&sessions).retain(|_, session| {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
-            if let Some(drain) = capture_drain {
+            for drain in capture_drain.into_iter().flatten() {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
@@ -14340,6 +14369,85 @@ mod tests {
             .workspace_close(Some(rebound_handle))
             .await
             .expect("workspace close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_recovery_follows_full_workspace_lifetime_without_requiring_capture() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        store
+            .bind_shadow_clone_token(SHADOW_TOKEN)
+            .expect("bind shadow token");
+        drop(store);
+        for (capture_enabled, read_only, seed_claim) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let conn = rusqlite::Connection::open(&db_path).expect("seed connection");
+            conn.execute("DELETE FROM automation_claims", [])
+                .expect("reset claims");
+            if seed_claim {
+                conn.execute(
+                    "INSERT INTO automation_claims \
+                     (workspace_id,claim_id,automation_id,trigger_history_id,record_id,collection_path, \
+                      depth,state,attempts,created_at_ms,updated_at_ms) \
+                     VALUES ('automation-recovery-lifetime','interrupted','automation',1,'record','tasks', \
+                             0,'running',2,?1,?1)",
+                    [now_ms().expect("current time")],
+                ).expect("seed interrupted claim");
+            }
+            drop(conn);
+            let mut params = json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "automation-recovery-lifetime",
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": read_only,
+            });
+            if !capture_enabled {
+                params["captureMode"] = json!("none");
+            }
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect("open workspace");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let open = service.open(Some(&handle)).expect("open state");
+            assert_eq!(lock(&open.capture).is_some(), capture_enabled);
+            assert_eq!(
+                lock(&open.automation_recovery).is_some(),
+                seed_claim && !read_only
+            );
+
+            // The synchronous cleanup fallback has no Tokio runtime. Taking
+            // both tasks must cancel them there without spawning a join task.
+            let tasks = std::thread::spawn(move || open.begin_capture_shutdown())
+                .join()
+                .expect("background cancellation needs no runtime");
+            assert_eq!(
+                tasks.iter().flatten().count(),
+                usize::from(capture_enabled) + usize::from(seed_claim && !read_only),
+            );
+            for task in tasks.into_iter().flatten() {
+                task.await
+                    .expect("background task joins after cancellation");
+            }
+            let open = service.open(Some(&handle)).expect("binding still open");
+            assert!(lock(&open.capture).is_none());
+            assert!(lock(&open.automation_recovery).is_none());
+            service
+                .workspace_close(Some(handle))
+                .await
+                .expect("close workspace after drain");
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

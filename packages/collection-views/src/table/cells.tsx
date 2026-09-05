@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -178,6 +178,79 @@ function AddOptionInput({
   );
 }
 
+/**
+ * The multi-select editor owns its selection while it is open: each toggle
+ * compounds on the previous one, and the props only seed the initial state.
+ * Deriving every toggle from the indexed value would erase earlier toggles —
+ * the host's re-query is asynchronous, so a delayed or stale indexed prop
+ * still names the pre-edit selection.
+ */
+function MultiSelectEditor({
+  options,
+  value,
+  emit,
+  close,
+  onCreateOption,
+}: {
+  options: readonly string[];
+  value: CollectionValue;
+  emit: (value: CollectionValue) => void;
+  close: () => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+}) {
+  const [selected, setSelected] = useState(() => asTextArray(value));
+  const select = (next: string[]) => {
+    setSelected(next);
+    emit(next);
+  };
+  return (
+    <span className="flex w-full flex-col gap-0.5">
+      <span
+        role="listbox"
+        aria-multiselectable="true"
+        className="flex flex-col gap-0.5"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") close();
+        }}
+      >
+        {options.map((option) => (
+          <label key={option} className="flex items-center gap-1.5 text-[13px]">
+            <input
+              type="checkbox"
+              checked={selected.includes(option)}
+              onChange={() =>
+                select(
+                  selected.includes(option)
+                    ? selected.filter((entry) => entry !== option)
+                    : [...selected, option],
+                )
+              }
+            />
+            {option}
+          </label>
+        ))}
+      </span>
+      {onCreateOption ? (
+        <AddOptionInput
+          options={options}
+          cancel={close}
+          onPick={(option, isNew) => {
+            const next = selected.includes(option)
+              ? selected
+              : [...selected, option];
+            if (isNew) {
+              onCreateOption(option, next);
+              close();
+            } else {
+              select(next);
+            }
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
 export interface CellEditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
@@ -284,55 +357,16 @@ export function CellEditor({
         </span>
       );
     }
-    case "multi-select": {
-      const selected = asTextArray(value);
+    case "multi-select":
       return (
-        <span className="flex w-full flex-col gap-0.5">
-          <span
-            role="listbox"
-            aria-multiselectable="true"
-            className="flex flex-col gap-0.5"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") close();
-            }}
-          >
-            {field.options.map((option) => (
-              <label key={option} className="flex items-center gap-1.5 text-[13px]">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(option)}
-                  onChange={() =>
-                    emit(
-                      selected.includes(option)
-                        ? selected.filter((entry) => entry !== option)
-                        : [...selected, option],
-                    )
-                  }
-                />
-                {option}
-              </label>
-            ))}
-          </span>
-          {onCreateOption ? (
-            <AddOptionInput
-              options={field.options}
-              cancel={close}
-              onPick={(option, isNew) => {
-                const next = selected.includes(option)
-                  ? selected
-                  : [...selected, option];
-                if (isNew) {
-                  onCreateOption(option, next);
-                  close();
-                } else {
-                  emit(next);
-                }
-              }}
-            />
-          ) : null}
-        </span>
+        <MultiSelectEditor
+          options={field.options}
+          value={value}
+          emit={emit}
+          close={close}
+          onCreateOption={onCreateOption}
+        />
       );
-    }
     case "relation": {
       // Guarded by the caller: editing only starts with an executor.
       if (!relationExecutor) return null;

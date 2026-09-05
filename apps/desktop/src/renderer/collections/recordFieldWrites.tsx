@@ -1,0 +1,598 @@
+import { useEffect, useRef, useSyncExternalStore } from "react";
+import type { CollectionCellChange } from "@dohc/collection-views";
+import type { CollectionValue } from "@dohc/workspace-contracts";
+import { useEngineDoc } from "../collab/useEngineDoc";
+import { SecondaryButton } from "../ui/controls";
+
+// The global host keeps accepted edits alive when navigation unmounts a page.
+// It writes through one live document at a time, preserving engine history.
+
+// The live document field PropertiesPanel writes; one name for one thing.
+const FRONTMATTER_FIELD = "frontmatter";
+
+// Main's settle retries grow from 800 ms to a 10 s cap. Report a persistent
+// lock after that retry window; the engine already holds the edit durably.
+export const FILE_LOCKED_REPORT_MS = 15_000;
+
+/**
+ * Frontmatter values are what js-yaml round-trips. The one indexed shape it
+ * cannot carry as-is is bigint (the engine's wire marker for big integers):
+ * write it back as a number when exact, else as its decimal text.
+ */
+export function frontmatterWriteValue(value: CollectionValue): unknown {
+  if (typeof value === "bigint") {
+    const max = BigInt(Number.MAX_SAFE_INTEGER);
+    return value <= max && value >= -max ? Number(value) : value.toString();
+  }
+  if (Array.isArray(value)) return value.map(frontmatterWriteValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        frontmatterWriteValue(entry),
+      ]),
+    );
+  }
+  return value;
+}
+
+/**
+ * Applies a cell edit and holds its lease until the asynchronous save settles.
+ * A persistent file lock releases the queue once the engine owns the edit.
+ */
+export function CollectionRecordFieldWrite({
+  workspaceId,
+  change,
+  onSettled,
+  onHeldDurably,
+  onFailed,
+}: {
+  workspaceId: string;
+  change: CollectionCellChange;
+  // The engine confirmed the save settled: the change is on disk.
+  onSettled: () => void;
+  // The settle committed but the file is locked: the engine holds the write
+  // durably and retries, so the queue reports and moves on — NOT a failure.
+  onHeldDurably: (message: string) => void;
+  // The change did NOT reach the engine: the queue must retain it. The full
+  // state line to show, or null for the generic one.
+  onFailed: (message: string | null) => void;
+}) {
+  const docState = useEngineDoc({
+    workspaceId,
+    path: change.recordPath,
+    enabled: true,
+  });
+  const applied = useRef(false);
+  const sawSaving = useRef(false);
+  const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (lockedReport.current !== null) clearTimeout(lockedReport.current);
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (applied.current || docState.opening) return;
+    if (!docState.available || !docState.doc) {
+      // The open settled without a session (conflict, deletion, engine off).
+      onFailed(null);
+      return;
+    }
+    const doc = docState.doc;
+    if (doc.getMap(FRONTMATTER_FIELD).get("id") !== change.recordId) {
+      onFailed(
+        "This file no longer contains the original record. Your change is still here.",
+      );
+      return;
+    }
+    applied.current = true;
+    doc.transact(() => {
+      doc
+        .getMap(FRONTMATTER_FIELD)
+        .set(change.field, frontmatterWriteValue(change.value));
+    });
+  }, [docState.opening, docState.available, docState.doc, change, onFailed]);
+
+  useEffect(() => {
+    if (!applied.current) return;
+    switch (docState.saveState) {
+      case "saving":
+        sawSaving.current = true;
+        return;
+      case "saved":
+        // Only a "saved" AFTER our own edit was staged counts: the session
+        // opens in "saved", and releasing on that one would race the flush.
+        if (sawSaving.current) onSettled();
+        return;
+      case "file-locked":
+        // The engine journal owns this edit and keeps retrying the file.
+        // Arm once so intermediate "saving" events cannot restart the window.
+        if (lockedReport.current === null) {
+          lockedReport.current = setTimeout(() => {
+            const file =
+              change.recordPath.split("/").at(-1) ?? change.recordPath;
+            onHeldDurably(
+              `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`,
+            );
+          }, FILE_LOCKED_REPORT_MS);
+        }
+        return;
+      case "error":
+      case "read-only":
+      case "changed-on-disk":
+      case "deleted":
+        onFailed(
+          docState.saveError
+            ? `dohc could not save this change. ${docState.saveError}`
+            : null,
+        );
+        return;
+    }
+  }, [
+    docState.saveState,
+    docState.saveError,
+    change.recordPath,
+    onSettled,
+    onHeldDurably,
+    onFailed,
+  ]);
+
+  return null;
+}
+
+export type CollectionFieldWrite = {
+  id: number;
+  workspaceId: string;
+  collectionPath: string;
+  change: CollectionCellChange;
+};
+
+// A write that did NOT reach the engine, retained whole: the accepted value
+// belongs to the user until a retry lands it or the user discards it. A
+// file-locked settle is NOT one of these — the engine already holds that
+// write durably.
+export type CollectionWriteFailure = CollectionFieldWrite & {
+  // The state line the failure row shows.
+  message: string;
+};
+
+export type CollectionWriteStatus = {
+  // The failure line the page's state slot shows, or null. A new write for
+  // the collection clears it; a failed settle repaints it.
+  error: string | null;
+  // Grows once per settled write. The engine's index updates when a settled
+  // write applies, so a mounted page re-reads on change instead of waiting
+  // for the activity event.
+  settled: number;
+};
+
+const EMPTY_STATUS: CollectionWriteStatus = Object.freeze({
+  error: null,
+  settled: 0,
+});
+
+// A memory bound, not a UX target (MAX_COLLECTION_VIEWS posture): at the
+// bound the oldest idle status gives way. Entries with a queued write or a
+// visible failure stay.
+export const MAX_COLLECTION_WRITE_STATUSES = 100;
+
+let queue: readonly CollectionFieldWrite[] = [];
+let failures: readonly CollectionWriteFailure[] = [];
+let nextWriteId = 0;
+const statuses = new Map<string, CollectionWriteStatus>();
+// Workspaces whose cell edits a path/lineage operation paused, refcounted:
+// Explorer's runChanges and a version restore can overlap, and editing
+// resumes only when the LAST operation releases.
+const pausedWorkspaces = new Map<string, number>();
+const listeners = new Set<() => void>();
+
+// What an edit refused during a pause shows; the failure row's Retry is the
+// next step once the operation finishes.
+const PAUSED_REFUSAL_MESSAGE =
+  "dohc did not save this change because a file operation was in progress.";
+
+function keyFor(workspaceId: string, collectionPath: string): string {
+  // JSON quotes each part, so two different keys cannot collide.
+  return JSON.stringify([workspaceId, collectionPath]);
+}
+
+function notify(): void {
+  for (const listener of [...listeners]) listener();
+}
+
+function subscribe(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function trimStatuses(): void {
+  if (statuses.size <= MAX_COLLECTION_WRITE_STATUSES) return;
+  for (const [key, status] of statuses) {
+    if (statuses.size <= MAX_COLLECTION_WRITE_STATUSES) return;
+    if (status.error !== null) continue;
+    const queued = queue.some(
+      (write) => keyFor(write.workspaceId, write.collectionPath) === key,
+    );
+    if (!queued) statuses.delete(key);
+  }
+}
+
+/**
+ * Queues an edit, or retains it as a failure if a file operation paused edits.
+ * A callback already in flight can arrive after its control was disabled.
+ */
+export function enqueueCollectionFieldWrite(
+  workspaceId: string,
+  collectionPath: string,
+  change: CollectionCellChange,
+): boolean {
+  nextWriteId += 1;
+  const key = keyFor(workspaceId, collectionPath);
+  const current = statuses.get(key) ?? EMPTY_STATUS;
+  if (pausedWorkspaces.has(workspaceId)) {
+    failures = [
+      ...failures,
+      {
+        id: nextWriteId,
+        workspaceId,
+        collectionPath,
+        change,
+        message: PAUSED_REFUSAL_MESSAGE,
+      },
+    ];
+    statuses.set(key, { ...current, error: PAUSED_REFUSAL_MESSAGE });
+    trimStatuses();
+    notify();
+    return false;
+  }
+  // A new write is a new attempt: clear the stale failure.
+  statuses.set(key, { ...current, error: null });
+  queue = [...queue, { id: nextWriteId, workspaceId, collectionPath, change }];
+  trimStatuses();
+  notify();
+  return true;
+}
+
+// The host's settle callbacks carry the head's id so a late or repeated
+// callback from an unmounting writer cannot pop a write it does not own.
+function completeCollectionFieldWrite(id: number): void {
+  const head = queue[0];
+  if (head?.id !== id) return;
+  queue = queue.slice(1);
+  const key = keyFor(head.workspaceId, head.collectionPath);
+  const current = statuses.get(key) ?? EMPTY_STATUS;
+  statuses.set(key, { ...current, settled: current.settled + 1 });
+  notify();
+}
+
+// The write leaves the queue but NOT the app: it moves to the retained
+// failures whole, so a retry can replay the exact accepted value and only an
+// explicit discard may drop it. The collection's status line repaints too,
+// for a page that is still mounted.
+function failCollectionFieldWrite(id: number, message: string | null): void {
+  const head = queue[0];
+  if (head?.id !== id) return;
+  queue = queue.slice(1);
+  const line = message ?? "dohc could not save this change.";
+  failures = [...failures, { ...head, message: line }];
+  const key = keyFor(head.workspaceId, head.collectionPath);
+  const current = statuses.get(key) ?? EMPTY_STATUS;
+  statuses.set(key, { ...current, error: line });
+  notify();
+}
+
+// A file-locked settle: the engine holds the write durably and retries, so
+// the queue reports the lock on the status line and completes — retaining it
+// here would offer a retry of a write that is not lost.
+function holdCollectionFieldWriteDurably(id: number, message: string): void {
+  const head = queue[0];
+  if (head?.id !== id) return;
+  const key = keyFor(head.workspaceId, head.collectionPath);
+  const current = statuses.get(key) ?? EMPTY_STATUS;
+  statuses.set(key, { ...current, error: message });
+  completeCollectionFieldWrite(id);
+}
+
+/** Replays a retained failure with its original value: back onto the queue. */
+export function retryCollectionFieldWrite(id: number): void {
+  const failure = failures.find((entry) => entry.id === id);
+  if (!failure) return;
+  // While the workspace's edits are paused the retry button is disabled;
+  // this guard covers a programmatic caller. The failure stays retained.
+  if (pausedWorkspaces.has(failure.workspaceId)) return;
+  failures = failures.filter((entry) => entry.id !== id);
+  const key = keyFor(failure.workspaceId, failure.collectionPath);
+  const current = statuses.get(key) ?? EMPTY_STATUS;
+  statuses.set(key, { ...current, error: null });
+  queue = [
+    ...queue,
+    {
+      id: failure.id,
+      workspaceId: failure.workspaceId,
+      collectionPath: failure.collectionPath,
+      change: failure.change,
+    },
+  ];
+  notify();
+}
+
+/** The user's explicit decision to drop a retained failure's value. */
+export function discardCollectionFieldWrite(id: number): void {
+  const discarded = failures.find((entry) => entry.id === id);
+  if (!discarded) return;
+  failures = failures.filter((entry) => entry.id !== id);
+  const key = keyFor(discarded.workspaceId, discarded.collectionPath);
+  const current = statuses.get(key);
+  if (current?.error === discarded.message) {
+    const remaining = failures.find(
+      (entry) => keyFor(entry.workspaceId, entry.collectionPath) === key,
+    );
+    statuses.set(key, { ...current, error: remaining?.message ?? null });
+  }
+  notify();
+}
+
+/** True while an accepted cell edit has not reached its record's document. */
+export function hasPendingCollectionFieldWrites(): boolean {
+  return queue.length > 0;
+}
+
+/** The retained failures — writes that need a retry or an explicit discard. */
+export function collectionWriteFailures(): readonly CollectionWriteFailure[] {
+  return failures;
+}
+
+export function useCollectionWriteFailures(): readonly CollectionWriteFailure[] {
+  return useSyncExternalStore(subscribe, collectionWriteFailures);
+}
+
+// A queue that stops moving (a hung engine) must not hold a boundary
+// hostage: the caller moves every queued write into the retained failures,
+// where each keeps its value and its retry.
+export function abandonPendingCollectionFieldWrites(message: string): void {
+  if (queue.length === 0) return;
+  failures = [...failures, ...queue.map((write) => ({ ...write, message }))];
+  queue = [];
+  notify();
+}
+
+/**
+ * Rename/move remap (remapWorkbenchPaths precedent): queued and retained
+ * writes name their record and collection by PATH, so they follow the same
+ * projection as tabs — otherwise a write replays against the path the move
+ * vacated. A null projection (deletion) keeps the original path: the write
+ * then fails there and is retained for the user to discard.
+ */
+export function remapCollectionFieldWritePaths(
+  workspaceId: string,
+  project: (path: string) => string | null,
+): void {
+  const remap = <T extends CollectionFieldWrite>(write: T): T => {
+    if (write.workspaceId !== workspaceId) return write;
+    const recordPath =
+      project(write.change.recordPath) ?? write.change.recordPath;
+    const collectionPath =
+      project(write.collectionPath) ?? write.collectionPath;
+    if (
+      recordPath === write.change.recordPath &&
+      collectionPath === write.collectionPath
+    ) {
+      return write;
+    }
+    return { ...write, collectionPath, change: { ...write.change, recordPath } };
+  };
+  queue = queue.map(remap);
+  failures = failures.map(remap);
+  notify();
+}
+
+export type CollectionWriteSettleReport = {
+  // EVERY retained failure in scope at resolution — including ones from
+  // before the wait — so a boundary that must not continue over an
+  // unresolved failure sees all of them, not only fresh ones.
+  failed: number;
+  // The queue stopped moving for `stallMs` with writes still queued; the
+  // caller decides what a stuck queue means.
+  stalled: boolean;
+};
+
+function settleWrites(
+  inScope: (entry: { workspaceId: string }) => boolean,
+  options?: { stallMs?: number },
+): Promise<CollectionWriteSettleReport> {
+  const queuePending = () => queue.some(inScope);
+  const failedCount = () => failures.filter(inScope).length;
+  if (!queuePending()) {
+    return Promise.resolve({ failed: failedCount(), stalled: false });
+  }
+  return new Promise((resolve) => {
+    let lastQueue = queue;
+    let stallTimer: ReturnType<typeof setTimeout> | null = null;
+    const finish = (stalled: boolean) => {
+      if (stallTimer !== null) clearTimeout(stallTimer);
+      unsubscribe();
+      resolve({ failed: failedCount(), stalled });
+    };
+    const armStall = () => {
+      if (options?.stallMs === undefined) return;
+      if (stallTimer !== null) clearTimeout(stallTimer);
+      stallTimer = setTimeout(() => finish(true), options.stallMs);
+    };
+    const unsubscribe = subscribe(() => {
+      if (!queuePending()) {
+        finish(false);
+        return;
+      }
+      // Any queue movement is progress; status-only notifies are not.
+      if (queue !== lastQueue) {
+        lastQueue = queue;
+        armStall();
+      }
+    });
+    armStall();
+  });
+}
+
+/**
+ * Resolves once every queued write has settled — or, with `exceptWorkspaceId`,
+ * once no queued write needs a DIFFERENT workspace's renderer session (the
+ * admission gate: `openWorkspace` revokes the previous workspace's session,
+ * so that workspace's accepted writes must land first; the new workspace's
+ * own writes settle fine after admission).
+ */
+export function settleCollectionFieldWrites(
+  exceptWorkspaceId?: string,
+  options?: { stallMs?: number },
+): Promise<CollectionWriteSettleReport> {
+  return settleWrites(
+    (entry) =>
+      exceptWorkspaceId === undefined ||
+      entry.workspaceId !== exceptWorkspaceId,
+    options,
+  );
+}
+
+export type CollectionWriteOperationGuard = {
+  // Resolves once no queued write targets the workspace; `failed` counts its
+  // retained failures at that point, old and new. The caller reads it before
+  // mutating paths.
+  settled: Promise<CollectionWriteSettleReport>;
+  // Resumes accepting the workspace's cell edits. Idempotent.
+  release: () => void;
+};
+
+/**
+ * Pauses new edits while queued edits settle before a path or version change.
+ * Hold the pause through the operation and path projection, then release it.
+ */
+export function beginCollectionWriteOperation(
+  workspaceId: string,
+  options?: { stallMs?: number },
+): CollectionWriteOperationGuard {
+  pausedWorkspaces.set(workspaceId, (pausedWorkspaces.get(workspaceId) ?? 0) + 1);
+  notify();
+  let released = false;
+  return {
+    settled: settleWrites((entry) => entry.workspaceId === workspaceId, options),
+    release: () => {
+      if (released) return;
+      released = true;
+      const count = pausedWorkspaces.get(workspaceId) ?? 0;
+      if (count <= 1) pausedWorkspaces.delete(workspaceId);
+      else pausedWorkspaces.set(workspaceId, count - 1);
+      notify();
+    },
+  };
+}
+
+/** True while an operation guard pauses the workspace's cell edits. */
+export function collectionWritesPaused(workspaceId: string): boolean {
+  return pausedWorkspaces.has(workspaceId);
+}
+
+/** The pause as page state: CollectionPage disables its cells and says why. */
+export function useCollectionWritesPaused(workspaceId: string): boolean {
+  return useSyncExternalStore(subscribe, () =>
+    collectionWritesPaused(workspaceId),
+  );
+}
+
+/** One collection's write status: the page's error line and settle count. */
+export function useCollectionWriteStatus(
+  workspaceId: string,
+  collectionPath: string,
+): CollectionWriteStatus {
+  return useSyncExternalStore(
+    subscribe,
+    () => statuses.get(keyFor(workspaceId, collectionPath)) ?? EMPTY_STATUS,
+  );
+}
+
+// Test seam: the queue is module state, so suites that enqueue writes reset
+// it between tests instead of leaking a pending head into each other.
+export function resetCollectionFieldWritesForTests(): void {
+  queue = [];
+  failures = [];
+  statuses.clear();
+  pausedWorkspaces.clear();
+  nextWriteId = 0;
+  notify();
+}
+
+// Retry preserves the accepted value and waits until file operations finish.
+function CollectionWriteFailureRow({
+  failure,
+}: {
+  failure: CollectionWriteFailure;
+}) {
+  const paused = useCollectionWritesPaused(failure.workspaceId);
+  const file =
+    failure.change.recordPath.split("/").at(-1) ?? failure.change.recordPath;
+  return (
+    <div
+      data-testid="collection-write-failure"
+      className="flex flex-col gap-1.5 border-t border-line pt-2 first:border-t-0 first:pt-0"
+    >
+      <span className="truncate font-mono text-[11px] text-subtle">
+        {failure.change.field} in {file}
+      </span>
+      <span className="text-[12px] text-ink">{failure.message}</span>
+      <div className="flex gap-1.5">
+        <SecondaryButton
+          data-testid="collection-write-retry"
+          className="disabled:opacity-50"
+          disabled={paused}
+          onClick={() => retryCollectionFieldWrite(failure.id)}
+        >
+          Retry
+        </SecondaryButton>
+        <SecondaryButton
+          data-testid="collection-write-discard"
+          onClick={() => discardCollectionFieldWrite(failure.id)}
+        >
+          Discard unsaved change
+        </SecondaryButton>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Mount once above keyed views and the error boundary. Writes and recovery
+ * controls must survive navigation and shell crashes.
+ */
+export function CollectionFieldWriteHost() {
+  const head = useSyncExternalStore(subscribe, () => queue[0] ?? null);
+  const retained = useCollectionWriteFailures();
+  return (
+    <>
+      {head === null ? null : (
+        <CollectionRecordFieldWrite
+          key={head.id}
+          workspaceId={head.workspaceId}
+          change={head.change}
+          onSettled={() => completeCollectionFieldWrite(head.id)}
+          onHeldDurably={(message) =>
+            holdCollectionFieldWriteDurably(head.id, message)
+          }
+          onFailed={(message) => failCollectionFieldWrite(head.id, message)}
+        />
+      )}
+      {retained.length === 0 ? null : (
+        <div
+          data-testid="collection-write-failures"
+          className="dohc-popover fixed bottom-3 right-3 z-50 flex max-h-80 w-80 flex-col gap-2 overflow-auto rounded-xl border border-line bg-panel p-3"
+        >
+          <span className="text-sm font-semibold text-ink">
+            Unsaved collection changes
+          </span>
+          {retained.map((failure) => (
+            <CollectionWriteFailureRow key={failure.id} failure={failure} />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
