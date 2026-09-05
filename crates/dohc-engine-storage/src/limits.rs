@@ -1,12 +1,5 @@
-//! Storage-layer bounds. Every value the compound-write API accepts is
-//! bounded; violations are typed errors, never silent truncation (plan
-//! §"Rust policy": bounded everything).
-
-/// Maximum document body size accepted by [`crate::EngineStore::commit_compound`],
-/// in UTF-8 bytes. Compared against `str::len()` — already the UTF-8 byte
-/// length, so no re-encoding is needed (`PORTING.md` §6: this is a place Rust
-/// is simpler than the TS `Buffer.byteLength` detour).
-pub const MAX_DOCUMENT_BODY_BYTES: usize = 256 * 1024;
+//! Storage-layer bounds. Every value the storage API accepts is bounded;
+//! violations are typed errors, never silent truncation.
 
 /// Maximum length of an identifier a caller mints on a write, in UTF-8 bytes:
 /// workspace, version, object and moment ids on every layer's write path.

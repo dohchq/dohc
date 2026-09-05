@@ -4,7 +4,7 @@
 //!
 //! This ports the TS `searchIndex.ts` (FTS maintenance + policy-filtered query)
 //! and the pure preview slice of `workspaceSearch.ts`. The FTS tables are
-//! created by the storage migration ledger (ordinal 4, `v1-search`); this module
+//! created by the storage baseline migration; this module
 //! is the logic that fills and reads them, composed through the storage seams
 //! (`EngineStore::write_with` / `read_with`) exactly like the versioning and
 //! chat domains — the connection never leaves the actor thread.

@@ -1800,8 +1800,6 @@ mod tests {
 
     fn durable_row_counts(db: &Path) -> Vec<(&'static str, i64)> {
         const TABLES: &[&str] = &[
-            "documents",
-            "replication_journal",
             "file_objects",
             "blobs",
             "path_aliases",

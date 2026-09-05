@@ -74,8 +74,7 @@ impl FaultInjector for PanicFaults {
 
 /// An injector that blocks inside `poll` at the armed point until
 /// [`GateFaults::release`] is called, then lets every future traversal proceed.
-/// Wedging the worker this way lets a test back up the bounded command queue and
-/// observe [`dohc_engine_runtime::RuntimeError::Overloaded`].
+/// Wedging the worker this way lets a test hold a write open at a named point.
 mod wait_flag {
     use super::{Condvar, Mutex};
 

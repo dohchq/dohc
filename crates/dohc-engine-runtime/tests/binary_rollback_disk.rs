@@ -113,7 +113,6 @@ fn rollback(version_id: &str, path: &str, moment_id: &str) -> RollbackTextFileMu
         path: path.to_owned(),
         mutation_moment_id: moment_id.to_owned(),
         request_id: None,
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     }
@@ -328,7 +327,6 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
                 path: "shared.bin".to_owned(),
                 mutation_moment_id: "a-mutation".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -1855,7 +1853,6 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
                 path: "shared.bin".to_owned(),
                 mutation_moment_id: "workspace-a-write".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -2111,198 +2108,6 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn migrated_opaque_jobs_replay_and_legacy_completed_jobs_keep_fencing() {
-    const WORKSPACE_A: &str = "legacy-workspace-a";
-    const WORKSPACE_B: &str = "legacy-workspace-b";
-    const OPAQUE_PENDING_JOB: &str =
-        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const OPAQUE_COMPLETED_JOB: &str =
-        "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210";
-    const LEGACY_PROJECTION: &[u8] = b"# migrated settle projection\n";
-
-    let database = ScratchDir::new().expect("database scratch");
-    let replay_root = ScratchDir::new().expect("replay root");
-    let db = database.engine_db_path().expect("db");
-
-    let store = EngineStore::open(&db, 1).expect("create current store");
-    let content_sha = store
-        .put_binary_blob(LEGACY_PROJECTION)
-        .expect("stage legacy projection");
-    drop(store);
-
-    // Rewind only ordinal 24's additive schema to construct the exact shipped
-    // pre-migration shape, then seed two workspaces and settle-shaped opaque
-    // job ids that none of the coordinate backfills can decode.
-    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
-                 VALUES ('legacy-workspace-a', 'main'), ('legacy-workspace-b', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
-                 VALUES ('legacy-workspace-a', 'main', 'main', 'Main', 1),
-                        ('legacy-workspace-b', 'main', 'main', 'Main', 1);
-             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
-             DELETE FROM engine_migrations WHERE ordinal = 24;
-             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
-        )
-        .expect("rewind workspace-coordinate migration");
-    connection
-        .execute(
-            "INSERT INTO materialization_jobs \
-             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-              target_generation, status, created_at_ms, completed_at_ms, operation) \
-             VALUES (?1, 'legacy-settle.md', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
-            rusqlite::params![OPAQUE_PENDING_JOB, content_sha],
-        )
-        .expect("pending opaque settle job");
-    connection
-        .execute(
-            "INSERT INTO materialization_jobs \
-             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-              target_generation, status, created_at_ms, completed_at_ms, operation) \
-             VALUES (?1, 'fenced.bin', ?2, 0, NULL, 41, 'complete', 11, 12, 'write')",
-            rusqlite::params![OPAQUE_COMPLETED_JOB, content_sha],
-        )
-        .expect("completed opaque fence job");
-    drop(connection);
-
-    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
-    for job_id in [OPAQUE_PENDING_JOB, OPAQUE_COMPLETED_JOB] {
-        let workspace_id: String = migrated
-            .read_with(|connection| {
-                connection.query_row(
-                    "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
-                    [job_id],
-                    |row| row.get(0),
-                )
-            })
-            .expect("read migrated workspace sentinel");
-        assert_eq!(
-            workspace_id, "",
-            "opaque jobs must retain the legacy wildcard sentinel"
-        );
-    }
-    for workspace_id in [WORKSPACE_A, WORKSPACE_B] {
-        assert_eq!(
-            migrated
-                .max_completed_generation_for_path(workspace_id, "fenced.bin")
-                .expect("legacy completed fence"),
-            Some(41),
-            "a pre-coordinate completed job keeps its old global fence semantics"
-        );
-    }
-    drop(migrated);
-
-    let supervisor = WorkspaceSupervisor::new();
-    let actor = supervisor.open(&db, 30).expect("open migrated actor").actor;
-    assert_eq!(
-        actor
-            .materialize_replay_pending(
-                replay_root.path().to_path_buf(),
-                WORKSPACE_B.to_owned(),
-                31,
-            )
-            .await
-            .expect("replay legacy opaque job"),
-        1
-    );
-    assert_eq!(
-        std::fs::read(replay_root.path().join("legacy-settle.md"))
-            .expect("materialized legacy settle projection"),
-        LEGACY_PROJECTION
-    );
-    let connection = rusqlite::Connection::open(&db).expect("read replay status");
-    let status: String = connection
-        .query_row(
-            "SELECT status FROM materialization_jobs WHERE job_id = ?1",
-            [OPAQUE_PENDING_JOB],
-            |row| row.get(0),
-        )
-        .expect("opaque replay status");
-    assert_eq!(status, "complete");
-    drop(connection);
-    supervisor.close(&db).expect("close actor");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn migration_backfill_binds_ambiguous_moment_ids_by_generation() {
-    // MUTATION: drop the target_generation = moment_order condition from the
-    // ordinal-24 backfill and this job is assigned to workspace B purely
-    // because B's reuse of the moment id is newer.
-    const WORKSPACE_A: &str = "ambiguous-workspace-a";
-    const WORKSPACE_B: &str = "ambiguous-workspace-b";
-    const SHARED_MOMENT: &str = "shared-moment-id";
-    const CONTENT: &[u8] = b"generation-bound backfill\n";
-
-    let database = ScratchDir::new().expect("database scratch");
-    let db = database.engine_db_path().expect("db");
-    let store = EngineStore::open(&db, 1).expect("create current store");
-    let content_sha = store.put_binary_blob(CONTENT).expect("stage content");
-    drop(store);
-
-    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
-                 VALUES ('ambiguous-workspace-a', 'main'), ('ambiguous-workspace-b', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
-                 VALUES ('ambiguous-workspace-a', 'main', 'main', 'Main', 1),
-                        ('ambiguous-workspace-b', 'main', 'main', 'Main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES ('ambiguous-workspace-a', 'object-a', 1),
-                        ('ambiguous-workspace-b', 'object-b', 1);
-             INSERT INTO blobs (sha256, byte_length, text) \
-                 VALUES ('moment-text-sha', 4, 'text');
-             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
-             DELETE FROM engine_migrations WHERE ordinal = 24;
-             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
-        )
-        .expect("rewind workspace-coordinate migration");
-    for (workspace, object, order) in [
-        (WORKSPACE_A, "object-a", 7_i64),
-        (WORKSPACE_B, "object-b", 99_i64),
-    ] {
-        connection
-            .execute(
-                "INSERT INTO moments \
-                 (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-                  recorded_at_ms, operation, after_blob_sha256, before_present, \
-                  metadata_origin) \
-                 VALUES (?1, ?2, ?3, 'main', ?4, 'shared.bin', 2, 'write', ?5, 0, 'api')",
-                rusqlite::params![workspace, order, SHARED_MOMENT, object, "moment-text-sha"],
-            )
-            .expect("seed reused moment id");
-    }
-    // An ordinary binary write's job id IS its moment id; generation 7 makes
-    // workspace A the only correct owner even though B's moment is newer.
-    connection
-        .execute(
-            "INSERT INTO materialization_jobs \
-             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-              target_generation, status, created_at_ms, completed_at_ms, operation) \
-             VALUES (?1, 'shared.bin', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
-            rusqlite::params![SHARED_MOMENT, content_sha],
-        )
-        .expect("legacy job with ambiguous moment id");
-    drop(connection);
-
-    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
-    let workspace_id: String = migrated
-        .read_with(|connection| {
-            connection.query_row(
-                "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
-                [SHARED_MOMENT],
-                |row| row.get(0),
-            )
-        })
-        .expect("backfilled workspace");
-    assert_eq!(
-        workspace_id, WORKSPACE_A,
-        "the backfill must bind by matching generation, not by newest moment"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
     const LEGACY_JOB: &str = "opaque-global-pending";
     const SCOPED_JOB: &str = "newer-scoped-complete";
@@ -2364,120 +2169,6 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
     assert_eq!(status, "complete", "the global job must be superseded");
     drop(connection);
     supervisor.close(&db).expect("close actor");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn migration_backfill_keeps_secret_job_with_colliding_secret_moment() {
-    const ORDINARY_WORKSPACE: &str = "ordinary-collision-workspace";
-    const SECRET_WORKSPACE: &str = "secret-collision-workspace";
-    const SHARED_MOMENT: &str = "shared-secret-id";
-    const BARE_SECRET_MOMENT: &str = "bare-secret-id";
-    const BARE_SECRET_JOB: &str = "secret-mat_bare-secret-id";
-
-    let database = ScratchDir::new().expect("database scratch");
-    let db = database.engine_db_path().expect("db");
-    let store = EngineStore::open(&db, 1).expect("create current store");
-    let content_sha = store
-        .put_binary_blob(b"ciphertext placeholder")
-        .expect("stage materialization content");
-    drop(store);
-
-    let connection = rusqlite::Connection::open(&db).expect("open legacy fixture");
-    connection
-        .execute_batch(
-            "INSERT INTO versioned_workspaces (workspace_id, main_version_id) \
-                 VALUES ('ordinary-collision-workspace', 'main'), \
-                        ('secret-collision-workspace', 'main');
-             INSERT INTO versions (workspace_id, version_id, kind, name, created_at_ms) \
-                 VALUES ('ordinary-collision-workspace', 'main', 'main', 'Main', 1), \
-                        ('secret-collision-workspace', 'main', 'main', 'Main', 1);
-             INSERT INTO file_objects (workspace_id, object_id, created_at_ms) \
-                 VALUES ('ordinary-collision-workspace', 'ordinary-object', 1), \
-                        ('ordinary-collision-workspace', 'bare-ordinary-object', 1);
-             INSERT INTO blobs (sha256, byte_length, text) \
-                 VALUES ('ordinary-text-sha', 4, 'text');
-             DROP INDEX idx_materialization_jobs_workspace_path_status_generation;
-             DELETE FROM engine_migrations WHERE ordinal = 24;
-             ALTER TABLE materialization_jobs DROP COLUMN workspace_id;",
-        )
-        .expect("rewind workspace-coordinate migration");
-    connection
-        .execute(
-            "INSERT INTO moments \
-             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-              recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin) \
-             VALUES (?1, 7, ?2, 'main', 'ordinary-object', 'ordinary.md', 2, \
-                     'write', 'ordinary-text-sha', 0, 'api')",
-            rusqlite::params![ORDINARY_WORKSPACE, SHARED_MOMENT],
-        )
-        .expect("ordinary collision moment");
-    connection
-        .execute(
-            "INSERT INTO moments \
-             (workspace_id, moment_order, moment_id, version_id, object_id, path, \
-              recorded_at_ms, operation, after_blob_sha256, before_present, metadata_origin) \
-             VALUES (?1, 8, ?2, 'main', 'bare-ordinary-object', 'bare-ordinary.md', 3, \
-                     'write', 'ordinary-text-sha', 0, 'api')",
-            rusqlite::params![ORDINARY_WORKSPACE, BARE_SECRET_JOB],
-        )
-        .expect("bare ordinary identity collision moment");
-    connection
-        .execute(
-            "INSERT INTO secret_moments \
-             (workspace_id, moment_order, moment_id, version_id, path, recorded_at_ms, \
-              operation, metadata_origin, after_present) \
-             VALUES (?1, 7, ?2, 'main', '.env', 2, 'write', 'api', 1)",
-            rusqlite::params![SECRET_WORKSPACE, SHARED_MOMENT],
-        )
-        .expect("secret collision moment");
-    connection
-        .execute(
-            "INSERT INTO secret_moments \
-             (workspace_id, moment_order, moment_id, version_id, path, recorded_at_ms, \
-              operation, metadata_origin, after_present) \
-             VALUES (?1, 8, ?2, 'main', '.bare-env', 3, 'write', 'api', 1)",
-            rusqlite::params![SECRET_WORKSPACE, BARE_SECRET_MOMENT],
-        )
-        .expect("bare secret collision moment");
-    connection
-        .execute(
-            "INSERT INTO materialization_jobs \
-             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-              target_generation, status, created_at_ms, completed_at_ms, operation) \
-             VALUES (?1, '.env', ?2, 0, NULL, 7, 'pending', 10, NULL, 'write')",
-            rusqlite::params![format!("secret-mat_{SHARED_MOMENT}"), content_sha],
-        )
-        .expect("legacy secret job");
-    connection
-        .execute(
-            "INSERT INTO materialization_jobs \
-             (job_id, target_path, content_sha256, preimage_present, preimage_sha256, \
-              target_generation, status, created_at_ms, completed_at_ms, operation) \
-             VALUES (?1, '.bare-env', ?2, 0, NULL, 8, 'pending', 11, NULL, 'write')",
-            rusqlite::params![BARE_SECRET_JOB, content_sha],
-        )
-        .expect("legacy bare-equality secret job");
-    drop(connection);
-
-    let migrated = EngineStore::open(&db, 20).expect("upgrade legacy store");
-    for (job_id, collision_kind) in [
-        (format!("secret-mat_{SHARED_MOMENT}"), "ordinary suffix"),
-        (BARE_SECRET_JOB.to_owned(), "bare ordinary equality"),
-    ] {
-        let workspace_id: String = migrated
-            .read_with(|connection| {
-                connection.query_row(
-                    "SELECT workspace_id FROM materialization_jobs WHERE job_id = ?1",
-                    [&job_id],
-                    |row| row.get(0),
-                )
-            })
-            .expect("backfilled secret workspace");
-        assert_eq!(
-            workspace_id, SECRET_WORKSPACE,
-            "a secret job must not be captured by the {collision_kind} backfill"
-        );
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2976,7 +2667,6 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
                 path: path.to_owned(),
                 mutation_moment_id: mutation_moment_id.to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -3020,7 +2710,6 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
                 path: path.to_owned(),
                 mutation_moment_id: conflict_moment_id.to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },

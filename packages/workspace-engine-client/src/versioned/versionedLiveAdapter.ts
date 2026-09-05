@@ -938,7 +938,6 @@ export class VersionedLiveAdapter {
     versionId: string;
     path: string;
     mutationMomentId: string;
-    legacyBeforeText?: string;
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     const requestId = randomUUID();

@@ -4,8 +4,6 @@
 //! and redaction-safe: no paths with user content, no document bodies, no key
 //! material.
 
-use crate::limits::MAX_DOCUMENT_BODY_BYTES;
-
 /// A typed storage failure. `#[non_exhaustive]` because capability shards add
 /// variants without a breaking change; every variant maps to a stable
 /// `code()` string.
@@ -40,10 +38,6 @@ pub enum StorageError {
     #[error("invalid input: {reason}")]
     InvalidInput { reason: &'static str },
 
-    /// The document body exceeded [`MAX_DOCUMENT_BODY_BYTES`].
-    #[error("document body {actual} bytes exceeds the {MAX_DOCUMENT_BODY_BYTES}-byte limit")]
-    DocumentTooLarge { actual: usize },
-
     /// A write transaction failed to persist. The transaction rolled back;
     /// observable state is unchanged.
     #[error("write failed to persist")]
@@ -51,13 +45,6 @@ pub enum StorageError {
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
-
-    /// A retry reused an idempotency key with a *different* payload than the
-    /// originally recorded request. Replaying would either drop the new write
-    /// or return a stale result, so the store fails closed instead of guessing
-    /// (a same-payload retry stays exactly-once).
-    #[error("idempotency key was reused with a different payload")]
-    IdempotencyKeyReuseMismatch,
 
     /// An ordered migration failed to apply, or a previously-applied migration's
     /// recorded checksum does not match this build's definition (a tampered or
@@ -123,9 +110,7 @@ impl StorageError {
             StorageError::ForeignDatabase => "foreign-database",
             StorageError::StateCorrupt { .. } => "state-corrupt",
             StorageError::InvalidInput { .. } => "invalid-input",
-            StorageError::DocumentTooLarge { .. } => "document-too-large",
             StorageError::PersistFailed { .. } => "persist-failed",
-            StorageError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             StorageError::MigrationFailed { .. } => "migration-failed",
             StorageError::BackupFailed { .. } => "backup-failed",
             StorageError::DiskFull { .. } => "disk-full",

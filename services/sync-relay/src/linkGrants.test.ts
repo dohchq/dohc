@@ -154,31 +154,13 @@ describe("workspace link inventory index", () => {
     expect(queryPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   }
 
-  it("installs the index for new and reopened storage", async () => {
-    const { storage, dbPath } = await newStorageWithPath();
-    const initialInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+  it("installs the index for new storage", async () => {
+    const { dbPath } = await newStorageWithPath();
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
     try {
-      expectWorkspaceIndex(initialInspection);
+      expectWorkspaceIndex(inspection);
     } finally {
-      initialInspection.close();
-    }
-
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const writableInspection = new InspectionDatabaseSync(dbPath);
-    try {
-      writableInspection.exec(`DROP INDEX ${indexName}`);
-    } finally {
-      writableInspection.close();
-    }
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    const reopenedInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expectWorkspaceIndex(reopenedInspection);
-    } finally {
-      reopenedInspection.close();
+      inspection.close();
     }
   });
 });

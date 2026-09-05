@@ -83,7 +83,6 @@ fn rollback_input() -> RollbackTextFileMutation {
         path: "a.md".to_owned(),
         mutation_moment_id: "m2".to_owned(),
         request_id: None,
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     }

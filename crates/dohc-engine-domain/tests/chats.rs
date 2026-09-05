@@ -1436,25 +1436,6 @@ fn authorless_message_and_derived_state_stay_local() {
         })
         .expect("relay-visible ops");
     assert_eq!(unsafe_relay_ops, 0);
-
-    let local_journal: Vec<(String, String)> = store
-        .read_with(|conn| {
-            let mut statement = conn.prepare(
-                "SELECT doc_id, op_kind FROM replication_journal \
-                 WHERE doc_id IN ('local-thread', 'local-message') ORDER BY seq",
-            )?;
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect()
-        })
-        .expect("local journal");
-    assert_eq!(
-        local_journal,
-        vec![
-            ("local-thread".to_owned(), "chat.thread.create".to_owned()),
-            ("local-message".to_owned(), "chat.message.append".to_owned()),
-        ]
-    );
 }
 
 #[test]
@@ -2758,7 +2739,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
 // ------------------------------------------------------ migration presence
 
 #[test]
-fn chats_migration_and_deferred_parent_repair_applied() {
+fn baseline_creates_the_chat_tables() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let store = open(&db, 1);
@@ -2766,12 +2747,12 @@ fn chats_migration_and_deferred_parent_repair_applied() {
         .read_with(|conn| {
             let has: i64 = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM engine_migrations WHERE id = 'v1-chats'",
+                    "SELECT COUNT(*) FROM engine_migrations WHERE id = 'v2-baseline'",
                     [],
                     |r| r.get(0),
                 )
                 .expect("migration row");
-            assert_eq!(has, 1, "v1-chats migration is recorded");
+            assert_eq!(has, 1, "baseline migration is recorded");
             // The repair table exists and is empty on a fresh store.
             let pending: i64 = conn
                 .query_row(

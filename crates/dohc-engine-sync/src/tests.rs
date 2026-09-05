@@ -130,8 +130,8 @@ fn seed_text_head(engine: &mut EngineStore, object_id: &str, path: &str, text: &
 
 fn insert_probe(tx: &rusqlite::Transaction<'_>, op: &ReplicationEnvelope) -> Result<(), SyncError> {
     tx.execute(
-        "INSERT OR REPLACE INTO documents (doc_id,body,updated_at_ms) VALUES (?1,?2,?3)",
-        params![op.origin_id, op.op_kind, op.recorded_at_ms],
+        "INSERT OR REPLACE INTO blobs (sha256,byte_length,text) VALUES (?1,?2,?3)",
+        params![op.origin_id, op.op_kind.len() as i64, op.op_kind],
     )
     .map_err(SyncError::persist)?;
     Ok(())
@@ -1118,7 +1118,14 @@ fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
     assert_eq!(outcome, ApplyOutcome::Crashed { committed: false });
     drop(engine);
     let mut reopened = EngineStore::open(&path, 2_001).expect("reopen");
-    assert!(reopened.read_document("peer").expect("read").is_none());
+    let probe_rows: i64 = reopened
+        .read_with(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM blobs WHERE sha256='peer'", [], |r| {
+                r.get(0)
+            })
+        })
+        .expect("probe rows");
+    assert_eq!(probe_rows, 0);
     assert_eq!(
         read_replication_acked_seq(&reopened, "ws", "peer").expect("ack"),
         -1
@@ -26192,7 +26199,7 @@ fn share_proposal_submit_at_exactly_the_bound_asks_for_no_second_press() {
 ///
 /// It does not: `replay_share_write` writes through
 /// `VersionedTextStore::write_text` in `dohc-engine-domain`, and that door
-/// touches `replication_journal` only. The `replication_log` row the scan
+/// appends no `replication_log` row. The `replication_log` row the scan
 /// reads is appended by `journal_moment_outbound_in_tx`
 /// (`dohc-engine-runtime/src/actor.rs`), which sits on the LOCAL write path
 /// alone. This test is the standing proof of that gap.

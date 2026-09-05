@@ -2199,7 +2199,6 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
                 path: PATH.to_owned(),
                 mutation_moment_id: settled.moment_id,
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "test-rollback".to_owned(),
                 author_json: None,
             },

@@ -101,7 +101,7 @@ function terminalMigrationOrdinal(): number {
   if (start < 0) {
     throw new Error(`${MIGRATION_SOURCE} has no BASELINE_MIGRATIONS list to read ordinals from.`);
   }
-  const end = source.indexOf("\n];", start);
+  const end = source.indexOf("];", start);
   if (end < 0) {
     throw new Error(`${MIGRATION_SOURCE} has an unterminated BASELINE_MIGRATIONS list.`);
   }

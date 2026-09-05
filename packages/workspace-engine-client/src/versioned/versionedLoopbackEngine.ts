@@ -212,7 +212,6 @@ const VERSIONED_PARAM_SHAPES = {
       "metadataOrigin",
       "authorJson",
       "requestId",
-      "legacyBeforeText",
     ],
     optionalJson: ["author"],
   },
@@ -1857,7 +1856,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
       versionId: params.versionId,
       path,
       mutationMomentId: params.mutationMomentId,
-      legacyBeforeText: params.legacyBeforeText ?? null,
       metadataOrigin: origin,
       authorJson,
     });

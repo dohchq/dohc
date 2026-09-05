@@ -369,15 +369,9 @@ fn default_follows_exclude_dm_and_placeholders() {
 }
 
 #[test]
-fn default_follow_seed_is_insert_ignore_and_unjournaled() {
+fn default_follow_seed_is_insert_ignore() {
     let (_scratch, mut store) = open_store();
     base_chat(&mut store);
-    let before: i64 = store
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |r| r.get(0))
-                .map_err(StorageError::corrupt_public)
-        })
-        .expect("before");
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_default_channel_follows(WS, "owner", &NO_FAULTS)
@@ -385,22 +379,18 @@ fn default_follow_seed_is_insert_ignore_and_unjournaled() {
     chats
         .ensure_default_channel_follows(WS, "owner", &NO_FAULTS)
         .expect("second");
-    let (count, after): (i64, i64) = store
+    let count: i64 = store
         .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_follows WHERE workspace_id=?1",
-                    params![WS],
-                    |r| r.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |r| r.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-            ))
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_follows WHERE workspace_id=?1",
+                params![WS],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
         })
-        .expect("counts");
-    // MUTATION: replace insert-ignore or journal seeds -> duplicates/journal growth.
-    assert_eq!((count, after), (1, before));
+        .expect("count");
+    // MUTATION: replace insert-ignore -> duplicates.
+    assert_eq!(count, 1);
 }
 
 #[test]

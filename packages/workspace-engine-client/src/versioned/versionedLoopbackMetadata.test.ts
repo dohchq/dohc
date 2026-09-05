@@ -1860,7 +1860,6 @@ describe("loopback moment metadata", () => {
       mutationMomentId: "canonical-rollback-mutation",
       origin: "restore",
       author: null,
-      legacyBeforeText: null,
       requestId: "canonical-rollback-request",
     });
     expect(first.deduped).toBe(false);

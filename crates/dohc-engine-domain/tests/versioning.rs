@@ -8,7 +8,7 @@ use dohc_engine_domain::{
     MergeTextFileResult, MomentOp, NoFaults, RenameTextFile, RollbackTextFileMutation,
     SnapshotContent, VersionKind, VersionedTextStore, WriteText,
 };
-use dohc_engine_storage::{CompoundWrite, EngineStore, WriteOutcome};
+use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::ScratchDir;
 
 const NO_FAULTS: NoFaults = NoFaults;
@@ -75,7 +75,6 @@ fn rollback(version: &str, path: &str, moment: &str) -> RollbackTextFileMutation
         path: path.to_owned(),
         mutation_moment_id: moment.to_owned(),
         request_id: None,
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     }
@@ -416,8 +415,8 @@ fn rollback_clears_idempotency_ledger_so_stale_retry_does_not_replay() {
 }
 
 #[test]
-fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
-    // MUTATION: drop the kind predicate -> the compound collision is deleted.
+fn rollback_purges_versioned_and_merge_requests_but_preserves_other_kinds() {
+    // MUTATION: drop the kind predicate -> the chat collision is deleted.
     // MUTATION: drop `merge` from the IN list -> the merge retry reconstructs a
     // deleted moment instead of re-executing.
     let scratch = ScratchDir::new().expect("scratch");
@@ -429,25 +428,20 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
         .write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
         .expect("first versioned write");
 
-    // The first versioned write consumed replication seq 1. This compound
-    // write therefore records result_seq 2, which intentionally collides with
+    // A chat-domain ledger row whose result_seq intentionally collides with
     // the next versioned moment_order.
-    let compound = CompoundWrite {
-        request_id: "compound-collision".to_owned(),
-        doc_id: "compound-document".to_owned(),
-        body: "durable body".to_owned(),
-        op_kind: "compound-write".to_owned(),
-        now_ms: 15,
-    };
-    assert_eq!(
-        store
-            .commit_compound(&compound, &NO_FAULTS)
-            .expect("compound write"),
-        WriteOutcome::Acked {
-            seq: 2,
-            deduped: false,
-        }
-    );
+    store
+        .write_with(&NO_FAULTS, |tx| {
+            tx.execute(
+                "INSERT INTO engine_requests \
+                 (request_id, payload_hash, result_seq, committed_at, kind) \
+                 VALUES ('chat-collision', 'hash', 2, 15, 'chat')",
+                [],
+            )
+            .map_err(StorageError::persist_public)?;
+            Ok::<_, StorageError>(())
+        })
+        .expect("chat ledger row");
 
     let mut second = write("main", "a.md", "two", "m2", "o1", 20);
     second.request_id = Some("versioned-collision".to_owned());
@@ -465,13 +459,13 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
     let surviving_kind: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                "SELECT kind FROM engine_requests WHERE request_id = 'chat-collision'",
                 [],
                 |row| row.get(0),
             )
         })
-        .expect("compound ledger survives");
-    assert_eq!(surviving_kind.as_deref(), Some("compound"));
+        .expect("chat ledger survives");
+    assert_eq!(surviving_kind.as_deref(), Some("chat"));
 
     let merge = MergeTextFileFromVersion {
         workspace_id: WS.to_owned(),
@@ -547,23 +541,13 @@ fn rollback_purges_versioned_and_merge_requests_but_preserves_compound_rows() {
     let surviving_kind_after_merge: Option<String> = store
         .read_with(|conn| {
             conn.query_row(
-                "SELECT kind FROM engine_requests WHERE request_id = 'compound-collision'",
+                "SELECT kind FROM engine_requests WHERE request_id = 'chat-collision'",
                 [],
                 |row| row.get(0),
             )
         })
-        .expect("compound ledger still survives merge rollback");
-    assert_eq!(surviving_kind_after_merge.as_deref(), Some("compound"));
-
-    assert_eq!(
-        store
-            .commit_compound(&compound, &NO_FAULTS)
-            .expect("compound replay"),
-        WriteOutcome::Acked {
-            seq: 2,
-            deduped: true,
-        }
-    );
+        .expect("chat ledger still survives merge rollback");
+    assert_eq!(surviving_kind_after_merge.as_deref(), Some("chat"));
 }
 
 // oracle: a reserved / absolute / traversal path is rejected.
@@ -674,7 +658,7 @@ fn create_named_version_forks_and_isolates() {
         Some("imported summary".to_owned()),
         Some("imported correlation".to_owned()),
     );
-    // MUTATION: omitting either ordinal-18 column from either INSERT...SELECT
+    // MUTATION: omitting either metadata column from either INSERT...SELECT
     // loses provenance from the live fork or its frozen comparison base.
     assert_eq!(
         copied_metadata,
@@ -1496,78 +1480,6 @@ fn rollback_rejects_occupied_restore_path() {
             .expect_err("occupied")
             .code(),
         "target-path-exists"
-    );
-}
-
-// oracle: versions-rollback-text-file-mutation reconstructs a legacy missing
-// preimage from the earlier moment plus caller-supplied legacy text.
-#[test]
-fn rollback_legacy_moment_uses_supplied_before_text() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let mut store = EngineStore::open(&db, 1).expect("open");
-    bootstrap(&mut store);
-    {
-        let mut vt = VersionedTextStore::new(&mut store);
-        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
-            .expect("first");
-        vt.write_text(&write("main", "a.md", "two", "m2", "o1", 20), &NO_FAULTS)
-            .expect("second");
-    }
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE moments SET before_present = 0, before_blob_sha256 = NULL, \
-                 before_latest_moment_id = NULL WHERE workspace_id = ?1 AND moment_id = 'm2'",
-                [WS],
-            )
-        })
-        .expect("legacy update");
-    let mut input = rollback("main", "a.md", "m2");
-    input.legacy_before_text = Some("one".to_owned());
-    let mut vt = VersionedTextStore::new(&mut store);
-    vt.rollback_text_file_mutation(&input, &NO_FAULTS)
-        .expect("legacy rollback");
-    let restored = vt.read_text(WS, "main", "a.md").unwrap().unwrap();
-    assert_eq!(restored.text, "one");
-    assert!(restored.latest_moment_id.starts_with("rollback-"));
-    assert_eq!(
-        vt.get_moment(WS, &restored.latest_moment_id)
-            .unwrap()
-            .expect("compensating write")
-            .before_latest_moment_id
-            .as_deref(),
-        Some("m2")
-    );
-}
-
-// oracle: versions-rollback-text-file-mutation fails closed for a legacy-unset
-// first mutation because no prior snapshot or caller text can reconstruct it.
-#[test]
-fn rollback_legacy_moment_without_preimage_or_text_is_rejected() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
-    let mut store = EngineStore::open(&db, 1).expect("open");
-    bootstrap(&mut store);
-    {
-        let mut vt = VersionedTextStore::new(&mut store);
-        vt.write_text(&write("main", "a.md", "one", "m1", "o1", 10), &NO_FAULTS)
-            .expect("write");
-    }
-    store
-        .read_with(|conn| {
-            conn.execute(
-                "UPDATE moments SET before_present = 0 WHERE workspace_id = ?1 AND moment_id = 'm1'",
-                [WS],
-            )
-        })
-        .expect("legacy update");
-    let mut vt = VersionedTextStore::new(&mut store);
-    assert_eq!(
-        vt.rollback_text_file_mutation(&rollback("main", "a.md", "m1"), &NO_FAULTS)
-            .expect_err("missing legacy preimage")
-            .code(),
-        "invalid-input"
     );
 }
 

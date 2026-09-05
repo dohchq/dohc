@@ -110,14 +110,6 @@ pub enum CollabError {
     )]
     LineageEpochChanged { expected: String, observed: String },
 
-    /// Successor installation requires an exact predecessor claim. A compacted
-    /// legacy lineage has no recoverable claim until semantic repair inspects
-    /// its Yrs state.
-    #[error(
-        "Y.Doc lineage claim status is {status}; successor replacement requires lineage_claim_status=exact"
-    )]
-    LineageClaimUnresolved { status: String },
-
     /// The active claim changed after the successor artifact was prepared.
     #[error(
         "Y.Doc successor predecessor mismatch: expected {expected}, observed {observed:?}; reload the active lineage and retry"
@@ -216,7 +208,6 @@ impl CollabError {
             CollabError::SuccessorProjectionMismatch { .. } => "successor-projection-mismatch",
             CollabError::SuccessorResultMismatch { .. } => "successor-result-mismatch",
             CollabError::LineageEpochChanged { .. } => "lineage-epoch-changed",
-            CollabError::LineageClaimUnresolved { .. } => "lineage-claim-unresolved",
             CollabError::LineagePredecessorMismatch { .. } => "lineage-predecessor-mismatch",
             CollabError::LineageStateVectorMismatch { .. } => "lineage-state-vector-mismatch",
             CollabError::InvalidSuccessorBase { .. } => "invalid-successor-base",

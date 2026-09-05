@@ -75,22 +75,10 @@ pub enum RuntimeError {
     #[error("workspace actor is unavailable")]
     ActorUnavailable,
 
-    /// The actor's bounded command queue is full. Explicit backpressure — the
-    /// protocol's `OVERLOADED` (`plan §Rust policy`: bounded everything, no
-    /// unbounded growth). Retry after backoff.
-    #[error("workspace actor command queue is full")]
-    Overloaded,
-
     /// The actor's worker thread panicked; the connection was released by
     /// unwinding but the session is dead.
     #[error("workspace actor worker thread panicked")]
     WorkerPanicked,
-
-    /// A request's deadline elapsed before the operation completed. The
-    /// operation's cancellation token was tripped; work already committed
-    /// stays durable (exactly-once ack — `PORTING.md` §12).
-    #[error("request deadline elapsed")]
-    DeadlineExceeded,
 
     /// Cooperative cancellation won between bounded units.
     #[error("request cancelled")]
@@ -119,9 +107,7 @@ impl RuntimeError {
             RuntimeError::SceneAssetDeletePending => "scene-asset-delete-pending",
             RuntimeError::ThreadSpawn(_) => "thread-spawn-failed",
             RuntimeError::ActorUnavailable => "actor-unavailable",
-            RuntimeError::Overloaded => "overloaded",
             RuntimeError::WorkerPanicked => "worker-panicked",
-            RuntimeError::DeadlineExceeded => "deadline-exceeded",
             RuntimeError::Cancelled => "cancelled",
             RuntimeError::OperationCrashed => "operation-crashed",
         }

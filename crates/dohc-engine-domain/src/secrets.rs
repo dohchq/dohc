@@ -404,7 +404,6 @@ impl<'a> SecretFileStore<'a> {
                     dohc_engine_storage::record_completed_job(tx, &spec)?;
                 }
             }
-            journal(tx, &path, "secret.file.put", input.now_ms)?;
             let moment = SecretMomentRecord {
                 moment_order,
                 ..moment.clone()
@@ -749,7 +748,6 @@ pub(crate) fn fork_version_in_tx(
     workspace_id: &str,
     from_version_id: &str,
     to_version_id: &str,
-    now_ms: i64,
 ) -> Result<(), DomainError> {
     tx.execute(
         "DELETE FROM secret_files WHERE workspace_id = ?1 AND version_id = ?2",
@@ -779,7 +777,6 @@ pub(crate) fn fork_version_in_tx(
         params![workspace_id, to_version_id, from_version_id],
     )
     .map_err(DomainError::sql_persist)?;
-    journal(tx, to_version_id, "secret.version.fork", now_ms)?;
     Ok(())
 }
 
@@ -810,7 +807,7 @@ pub fn fork_version_keyless_with<F>(
     workspace_id: &str,
     from_version_id: &str,
     to_version_id: &str,
-    now_ms: i64,
+    _now_ms: i64,
     faults: &dyn FaultInjector,
     after: F,
 ) -> Result<(), DomainError>
@@ -828,7 +825,7 @@ where
         require_version(conn, workspace_id, to_version_id)
     })?;
     let outcome = store.write_with(faults, |tx| {
-        fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id, now_ms)?;
+        fork_version_in_tx(tx, workspace_id, from_version_id, to_version_id)?;
         after(tx)?;
         Ok::<(), DomainError>(())
     })?;
@@ -1293,7 +1290,6 @@ where
                     now_ms,
                 },
             )?;
-            journal(tx, &path, "secret.file.put", now_ms)?;
         } else {
             let target = target.ok_or(DomainError::StateCorrupt {
                 reason: "secret delete apply has no target preimage",
@@ -1321,7 +1317,6 @@ where
                 params![workspace_id, to_version_id, path],
             )
             .map_err(DomainError::sql_persist)?;
-            journal(tx, &path, "secret.file.delete", now_ms)?;
         }
                 SecretWriteResult {
                     changed: true,
@@ -1510,7 +1505,6 @@ where
                     now_ms,
                 },
             )?;
-            journal(tx, &record.path, "secret.file.put", now_ms)?;
         } else {
             let outgoing = current.as_ref().ok_or(DomainError::StateCorrupt {
                 reason: "secret restore delete has no outgoing tip",
@@ -1533,7 +1527,6 @@ where
                 params![workspace_id, record.version_id, record.path],
             )
             .map_err(DomainError::sql_persist)?;
-            journal(tx, &record.path, "secret.file.delete", now_ms)?;
         }
             SecretRestoreResult {
                 restored: if target.is_some() { "text" } else { "deleted" },
@@ -1653,7 +1646,6 @@ fn delete_secret_file_inner(
             params![ws, input.version_id, path],
         )
         .map_err(DomainError::sql_persist)?;
-        journal(tx, &path, "secret.file.delete", input.now_ms)?;
         let record = SecretMomentRecord {
             moment_order,
             ..record.clone()
@@ -2063,21 +2055,6 @@ fn upsert_tip(
             moment.recorded_at_ms,
             moment.moment_id,
         ],
-    )
-    .map_err(DomainError::sql_persist)?;
-    Ok(())
-}
-
-/// Append the compound-commit journal entry (op kind + path, never content).
-fn journal(
-    tx: &Transaction<'_>,
-    doc_id: &str,
-    op_kind: &str,
-    now_ms: i64,
-) -> Result<(), DomainError> {
-    tx.execute(
-        "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) VALUES (?1, ?2, ?3)",
-        params![doc_id, op_kind, now_ms],
     )
     .map_err(DomainError::sql_persist)?;
     Ok(())
