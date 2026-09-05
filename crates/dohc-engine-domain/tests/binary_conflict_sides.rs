@@ -1,9 +1,8 @@
-//! Adversarial regression probes for binary conflict sides: what a side must
-//! carry to be persisted, what a resolve still refuses to do with bytes (WS-G1
-//! keeps combined TEXT and divergent MOVES closed), that a resolve measures the
-//! LIVE head before acting, blob hydration is verified content-addressing, and
-//! text conflicts are unaffected by the schema change. Each probe asserts a
-//! fail-closed invariant; a failing probe is a regression.
+//! Binary conflict sides: what a side must carry to be persisted, what a
+//! resolve still refuses to do with bytes (combined TEXT and divergent MOVES
+//! stay closed), that a resolve measures the LIVE head before acting, that
+//! blob hydration is verified content-addressing, and that text conflicts are
+//! unaffected. Each test asserts a fail-closed invariant.
 
 use dohc_engine_domain::conflicts::hydrate_binary_conflict_blob;
 use dohc_engine_domain::{

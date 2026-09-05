@@ -248,9 +248,9 @@ type SyncRelayRoute =
 // #549 measured a rich document at MAX_TEXT_BYTES encoding to 14.06 MiB of
 // Y.Doc full state, so MAX_YDOC_UPDATE_BYTES is 20 MiB. Under that number a
 // document the engine accepts would be refused 413 here, and the base it needs
-// could never reach a peer. `the_relay_transport_cap_covers_the_widest_engine_ingest_ceiling`
-// (crates/dohc-engine-sync-http/tests/relay_http.rs) reads this line and fails
-// if the two drift.
+// could never reach a peer. Keep this at or above the engine's
+// MAX_INGEST_BLOB_BYTES (crates/dohc-engine-sync/src/hydration.rs); no test
+// compares the two, so check both when widening either.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
 const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
