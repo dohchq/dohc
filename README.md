@@ -92,9 +92,12 @@ behavior.
 apps/desktop          Electron desktop app
 apps/site             marketing site and interactive product demo
 crates                Rust workspace engine and supporting crates
+docs                  ADRs and implementation plans
+fixtures              workspace fixtures the engine crates read
 packages              shared TypeScript contracts, clients, tools, and UI code
-services              optional authentication and sync services
-tools                 Rust engine gate scripts, fixtures, and evidence
+services              optional authentication, sync, and share viewer services
+tools/rust-engine-program   the Rust gate and its fixture goldens
+tools/perf-profiling  renderer and engine profiling harnesses
 ```
 
 ## Checks
@@ -107,7 +110,7 @@ pnpm test:desktop
 pnpm test
 ```
 
-Run Rust checks through [`rust-gate`](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Contributors and agents should read [`AGENTS.md`](AGENTS.md) before changing the codebase.
+Run Rust checks through [`rust-gate`](.agents/skills/rust-gate/SKILL.md), never a bare `cargo` command. Contributors and agents should read [`AGENTS.md`](AGENTS.md) before changing the codebase, and [`CONTEXT.md`](CONTEXT.md) for the vocabulary.
 
 ## Stack
 

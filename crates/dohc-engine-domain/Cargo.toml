@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-2 calibration slice: the versioning domain — stable object identity, versioned text write/read, moment history with keyset pagination, named-version fork, and restore (set-active-version) — over the CAL-1 storage core's single-transaction seam. Dormant; not wired into the product."
+description = "Workspace engine domain: versioned objects, moment history, forks, restore, chats, collections, conflicts, and secrets over the storage crate's transaction seam."
 
 [features]
 # Forwards the storage crash-injection seam so the version-create / restore

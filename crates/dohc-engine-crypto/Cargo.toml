@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "R08 secrets crypto core: AES-256-GCM secret-file AEAD with byte-exact cross-engine parity to the TS engine, the scrypt-wrapped workspace data-key envelope, and redaction-safe zeroizing plaintext/key types. Pure crypto — no storage or filesystem. Dormant; not wired into the product."
+description = "Secret-file crypto for the workspace engine: AES-256-GCM AEAD, the workspace data-key envelope, and zeroizing plaintext and key types."
 
 [features]
 # Exposes the deterministic, caller-supplied-IV `seal_with_iv`. OFF by default:

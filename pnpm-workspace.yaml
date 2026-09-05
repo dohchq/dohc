@@ -2,8 +2,8 @@ packages:
   - "apps/*"
   - "packages/*"
   - "services/*"
-  # R11 spike: the Node driver for the yrs/Yjs interop harness needs the
-  # repo's pinned yjs + @dohc/ydoc-projection (see crates/yrs-spike).
+  # The Node driver for the yrs/Yjs interop harness needs the repo's pinned
+  # yjs and @dohc/ydoc-projection (see crates/yrs-spike).
   - "crates/yrs-spike/scripts"
 
 # pnpm blocks dependency build scripts unless this map allows them. Electron's

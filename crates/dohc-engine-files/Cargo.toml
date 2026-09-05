@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-3 calibration slice: workspace filesystem scan / streaming content hash / scan-generation diff / reconcile-plan, with cooperative cancellation BETWEEN bounded units and fully bounded resources (max files, max file size, bounded read buffer, bounded hash-worker pool, bounded in-memory diff), the path floor, and the watcher dirty-generation reconcile model — driven actor-native on a dedicated blocking thread under a tokio command loop (the CAL-2 model). Dormant; not wired into the product."
+description = "Workspace filesystem capture for the engine: bounded scan, content hashing, scan-generation diff, reconcile planning, the path floor, and the watcher."
 
 [features]
 # The materialization crash-injection seam. OFF by default so a release build
