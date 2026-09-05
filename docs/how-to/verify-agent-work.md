@@ -5,6 +5,8 @@ Use this procedure when changing dohc through an agent or an isolated worktree.
 ## Prepare the checkout
 
 Create a worktree from the intended base. Keep dependencies, build outputs, and application profiles inside that worktree.
+On Windows, install PowerShell 7 and put `pwsh.exe` on `PATH` before running setup.
+Verification uses it to own command descendants and stop them after interruption or timeout, even when their launcher exits first.
 Run `pnpm setup:worktree`. This installs the pinned dependencies and checks the local tools.
 Codex runs the same setup through `.codex/environments/environment.toml` when creating a worktree.
 

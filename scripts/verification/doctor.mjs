@@ -12,6 +12,14 @@ export function doctor({ ready = false } = {}) {
   const pkg = JSON.parse(readFileSync(join(repoRoot, "package.json"), "utf8"));
   const [major, minor] = process.versions.node.split(".").map(Number);
   add("node", major > 24 || major === 24 && minor >= 14, process.version);
+  if (process.platform === "win32") {
+    try {
+      const version = execFileSync("pwsh.exe", ["-NoProfile", "-NonInteractive", "-Command", "$PSVersionTable.PSVersion.ToString()"], {
+        encoding: "utf8", windowsHide: true, timeout: 10_000,
+      }).trim();
+      add("PowerShell", Number(version.split(".")[0]) >= 7, version);
+    } catch { add("PowerShell", false, "Install PowerShell 7 and put pwsh.exe on PATH."); }
+  }
   const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
   for (const dependency of ["pnpm", "electron", "playwright"]) {
     try {

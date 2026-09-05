@@ -309,11 +309,12 @@ test("a stalled command times out, stops its process, and retains its output", {
   const root = mkdtempSync(join(tmpdir(), "dohc-command-timeout-"));
   const log = join(root, "timeout.log");
   let child;
+  const timeoutMs = process.platform === "win32" ? 3000 : 1000;
   t.after(() => { if (child?.exitCode === null && child.signalCode === null) child.kill(); });
   try {
     await assert.rejects(run(process.execPath, ["-e", "console.log('waiting-for-service');setInterval(() => {}, 1000)"], {
-      log, timeoutMs: 1000, onSpawn: (process) => { child = process; },
-    }), /timed out after 1000ms/);
+      log, timeoutMs, onSpawn: (process) => { child = process; },
+    }), new RegExp(`timed out after ${timeoutMs}ms`));
     assert.ok(child.exitCode !== null || child.signalCode !== null, "the timed-out process must have exited");
     assert.match(readFileSync(log, "utf8"), /waiting-for-service/);
   } finally { rmSync(root, { recursive: true, force: true }); }
