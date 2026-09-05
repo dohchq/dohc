@@ -88,6 +88,7 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     const remaining = await right.page.evaluate(async (workspaceId) => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listWorkspaceVersionConflicts({ workspaceId }), workspaceId);
     expect(remaining.conflicts).toEqual([]);
   } finally {
+    try {
     for (const [name, desktop] of [["left", left], ["right", right]] as const) {
       if (!desktop || desktop.page.isClosed()) continue;
       const status = await desktop.page.evaluate(async (workspaceId) => {
@@ -97,8 +98,10 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
       await test.info().attach(`${name} sync status`, { body: JSON.stringify(status, null, 2), contentType: "application/json" });
       console.log(`[two-client] ${name}: ${JSON.stringify(status)}`);
     }
-    await cleanupDesktopWorkspace(right, second);
-    try { if (left) await left.close(); }
-    finally { try { await relay?.stop(); } finally { await first.cleanup(); } }
+    } finally {
+      await cleanupDesktopWorkspace(right, second);
+      try { if (left) await left.close(); }
+      finally { try { await relay?.stop(); } finally { await first.cleanup(); } }
+    }
   }
 });
