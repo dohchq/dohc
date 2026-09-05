@@ -104,7 +104,7 @@ Name the reader before adding a document to main. If nobody will use it to make 
 
 Read [`.agents/skills/dohc-writing/SKILL.md`](.agents/skills/dohc-writing/SKILL.md) before writing docs, specs, plans, PR bodies, commit messages, or skills. Use [`.agents/skills/dohc-interface/SKILL.md`](.agents/skills/dohc-interface/SKILL.md) for anything a person sees inside the app.
 
-Use one name for one thing. Check terms against the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
+Use one name for one thing. [`CONTEXT.md`](CONTEXT.md) is the canonical term list; check terms against it and the surrounding code before defining them. If a paragraph-long code comment is needed to defend a workaround, fix the code instead.
 
 ## Where code lives
 

@@ -15,7 +15,7 @@ target/
 # Playwright output
 test-results/
 
-# In-worktree cargo target dirs (WINDOWS_DEV prefers out-of-repo CARGO_TARGET_DIR)
+# In-worktree cargo target dirs (the gate prefers an out-of-repo CARGO_TARGET_DIR)
 target-*/
 **/target-*/
 
@@ -24,6 +24,7 @@ target-*/
 # one checkout and travel with nobody.
 /.claude/settings.local.json
 /.claude/worktrees/
+/.agent-worktrees/
 /CLAUDE.local.md
 
 # One home for throwaway agent prompts, reports, and CLI logs. Anything worth

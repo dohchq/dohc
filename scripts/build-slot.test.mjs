@@ -1,6 +1,6 @@
 // The build-slot budget, exercised against a private slot root.
 //
-// The contract under test is WINDOWS_DEV.md "Build economics": four slots,
+// The contract under test is the machine's build budget: four slots,
 // atomic directory acquisition, owner-safe reclamation (stale heartbeat AND
 // dead pid, never either alone), and a denial that names the constraint. The
 // gate holds a slot for its whole run, so a defect here either deadlocks

@@ -93,44 +93,6 @@ describe("workspaceActivity capture hooks", () => {
     }
   });
 
-  it("fires and contains the dormant Rust shadow observer only when supplied", async () => {
-    const captureBatch = vi.fn();
-    const onRustEngineShadowActivity = vi.fn(async () => {
-      throw new Error("shadow adapter unavailable");
-    });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({
-        shareView: false,
-        capture: {
-          start: vi.fn(),
-          captureBatch,
-          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
-          stop: vi.fn(async () => undefined),
-        } as never,
-      }),
-      onRustEngineShadowActivity,
-    });
-    await activity.open(workspace());
-    await writeFile(join(root, "shadow.md"), "shadow");
-
-    await vi.waitFor(
-      () => {
-        expect(captureBatch).toHaveBeenCalled();
-        expect(onRustEngineShadowActivity).toHaveBeenCalledWith({
-          workspaceId: "activity-test",
-          rootPath: root,
-        });
-        expect(errorSpy).toHaveBeenCalledWith(
-          expect.stringContaining("Rust engine shadow activity failed"),
-          expect.any(Error),
-        );
-      },
-      { timeout: 3_000 },
-    );
-    await activity.stopAll();
-  });
-
   it("publishes settled watcher paths with the workspace activity", async () => {
     const notify = vi.fn();
     const activity = createWorkspaceActivity(notify, {

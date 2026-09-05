@@ -1,4 +1,4 @@
-//! dohc engine files — CAL-3 calibration slice.
+//! dohc engine files: workspace filesystem capture.
 //!
 //! Workspace filesystem **scan → hash → diff → reconcile-plan**, with the path
 //! floor, the watcher dirty-generation state machine, and full resource bounds,
@@ -24,9 +24,6 @@
 //! - **Dirty-generation reconcile.** A watcher overflow sets a dirty generation
 //!   forcing a full bounded rescan; coalescing may reduce work but never drops
 //!   the only evidence of a change.
-//!
-//! The crate is dormant: nothing here is reachable from product code, and it
-//! changes no TypeScript/product behavior.
 
 #![forbid(unsafe_code)]
 

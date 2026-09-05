@@ -1,4 +1,4 @@
-//! dohc engine crypto — R08 secrets capability shard.
+//! dohc engine crypto: secret-file crypto for the workspace engine.
 //!
 //! The security-critical core for secret-backed files: AES-256-GCM AEAD with
 //! byte-exact parity with the frozen TypeScript oracle recorded before the
@@ -21,7 +21,7 @@
 //!
 //! This crate is pure crypto: it depends on no storage, filesystem, or SQLite.
 //! The secret domain ops (tables, write/read, fork, materialization) live in
-//! `dohc-engine-domain`. The crate is dormant — not wired into the product.
+//! `dohc-engine-domain`.
 
 #![forbid(unsafe_code)]
 

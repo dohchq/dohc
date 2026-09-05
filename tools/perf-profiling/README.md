@@ -1,9 +1,18 @@
 # Renderer profiling harness
 
-This harness measures renderer hypotheses A1 and A3 from `DISCOVERY-R2.md`.
-It also validates workspace-switch wins through the bounded switch timeline.
+This harness profiles the desktop renderer on seeded workspaces. Its six
+scenarios measure:
 
-The reader is the next agent preparing an orchestrator-scheduled profiling run.
+- `switch-profile`: ten workspace switches after both workspaces are ready,
+  as a phase timeline with median and p95 offsets.
+- `explorer-profile`: expanding a 5,000-file Explorer folder, to first child
+  and to the complete tree.
+- `quickopen-graph`: eight Quick Open keystrokes and Graph construction.
+- `excalidraw-profile`: pointer-frame dragging in the 1,500-element scene.
+- `bigdoc-profile`: opening, typing in, and saving the 250 KiB document.
+- `bigdoc-read-profile`: a settled read of the 3 MiB Markdown document.
+
+The reader is the next agent preparing a scheduled profiling run.
 
 ## Run the full profiles
 

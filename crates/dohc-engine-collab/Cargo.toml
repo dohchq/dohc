@@ -15,7 +15,7 @@ version.workspace = true
 edition = "2021"
 rust-version = "1.82"
 publish.workspace = true
-description = "R11a durable Y.Doc layer: the content-addressed durable update log, folded snapshots, convergence-neutral compaction, per-doc leases, base-once replicated lineage, idempotent/echo-suppressed ydoc.update replication apply, and the settle projection materialized through R04's job pipeline. Two regimes (local-only prunable cache vs replicated never-prune durable lineage). Dormant; not wired into the product."
+description = "Durable Y.Doc layer for the workspace engine: update log, snapshots, compaction, per-document leases, replicated lineage, and the settle projection."
 
 [features]
 # Passthrough of the storage crate's crash-injection seam so the durable

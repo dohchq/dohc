@@ -10,7 +10,6 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@dohc/workspace-core": "workspace:*",
     "@tiptap/core": "^3.29.2",
     "@tiptap/extension-list": "3.29.2",
     "@tiptap/extension-table": "^3.29.2",

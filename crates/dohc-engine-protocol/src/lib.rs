@@ -1,9 +1,8 @@
-//! dohc engine protocol — R03 spike crate.
+//! dohc engine protocol: the wire contract between the daemon and its clients.
 //!
-//! This crate is the dormant seed of `dohc-engine-protocol` from the rewrite
-//! plan's crate graph: wire types, error taxonomy, bounds, a minimal framed
-//! codec with fuzz-friendly parsing, and the transport seams (including the
-//! in-process direct-call transport required by portability guardrail 3).
+//! Wire types, error taxonomy, bounds, a framed codec with fuzz-friendly
+//! parsing, and the transport seams (including the in-process direct-call
+//! transport).
 //!
 //! Design summary (full rationale in
 //! this crate's own types):
@@ -28,9 +27,6 @@
 //!   in-flight concurrency, deadlines, cooperative cancellation, and typed
 //!   `OVERLOADED` backpressure errors — replacing the retired accelerator
 //!   spike's thread-per-request model.
-//!
-//! The crate is standalone (no repo-level Cargo workspace yet; R02 owns
-//! that) and is not reachable from any product code path.
 
 #![forbid(unsafe_code)]
 

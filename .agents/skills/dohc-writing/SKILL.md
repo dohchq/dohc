@@ -134,10 +134,9 @@ means two.
 - When the codebase has not settled a term, say so instead of picking a winner
   silently.
 
-**There is deliberately no term list here.** One was drafted and removed:
-review found it wrong round after round, and a subtly wrong list is worse than
-no list, because it speaks authoritatively to a reader who will act on it. Add
-one when the terms settle, and keep it next to the code it describes.
+The term list is [`CONTEXT.md`](../../../CONTEXT.md) at the repository root. It
+is the canonical vocabulary; check a name against it before defining one, and
+add a term there when the code settles it.
 
 ### One reading per sentence
 

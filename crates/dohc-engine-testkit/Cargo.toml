@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-1 calibration slice: fixtures (scratch workspaces, path aliases, adversarial v1/foreign databases) and the in-process crash/restart harness with named fault points. Dormant test infrastructure; not wired into the product."
+description = "Test fixtures for the engine crates: scratch workspaces, path aliases, adversarial databases, and the in-process crash and restart harness."
 
 [dependencies]
 dohc-test-scratch = { path = "../dohc-test-scratch" }
