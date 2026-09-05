@@ -119,10 +119,29 @@ export function CollectionPage({
 
   // The store owns query state and guards its own async responses with a
   // request token; the desktop binds its executor to the query bridge call.
+  const nextEditId = useRef(0);
+  const completedEdits = useRef(new Map<string, number>());
+  const indexedEdits = useRef(new WeakMap<CollectionRecord, ReadonlyMap<string, number>>());
   const executor = useCallback(
-    async (params: CollectionQueryParams) =>
-      await bridge().queryCollectionRecords({ workspaceId, ...params }),
+    async (params: CollectionQueryParams) => {
+      // Only index commits confirmed before this query belong to its acknowledgement.
+      const acknowledged = new Map(completedEdits.current);
+      const result = await bridge().queryCollectionRecords({ workspaceId, ...params });
+      return {
+        ...result,
+        records: result.records.map((record) => {
+          const indexed = { ...record };
+          indexedEdits.current.set(indexed, acknowledged);
+          return indexed;
+        }),
+      };
+    },
     [workspaceId],
+  );
+  const acknowledgedWriteId = useCallback(
+    (record: CollectionRecord, field: string) =>
+      indexedEdits.current.get(record)?.get(JSON.stringify([record.id, record.path, field])) ?? 0,
+    [],
   );
   const store = useMemo(
     () => createCollectionStore({ collectionPath, executor }),
@@ -226,8 +245,13 @@ export function CollectionPage({
   // The global host finishes accepted edits after this page unmounts.
   const lineage = useCollectionWriteLineage(workspaceId);
   const enqueueCellChange = useCallback(
-    (change: CollectionCellChange) => {
-      enqueueCollectionFieldWrite(workspaceId, collectionPath, change, undefined, lineage);
+    (change: CollectionCellChange, createOption?: string) => {
+      const editId = ++nextEditId.current;
+      const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
+      enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
+        completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
+      });
+      return editId;
     },
     [workspaceId, collectionPath, lineage],
   );
@@ -292,9 +316,7 @@ export function CollectionPage({
   // then the cell value; a preparation failure retains the edit for retry.
   const createOption = useCallback(
     (create: CollectionOptionCreate) => {
-      enqueueCollectionFieldWrite(
-        workspaceId,
-        collectionPath,
+      return enqueueCellChange(
         {
           recordId: create.recordId,
           recordPath: create.recordPath,
@@ -302,10 +324,9 @@ export function CollectionPage({
           value: create.value,
         },
         create.option,
-        lineage,
       );
     },
-    [workspaceId, collectionPath, lineage],
+    [enqueueCellChange],
   );
 
   // Relation fields target other collections; the list loads when the
@@ -492,6 +513,7 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={onCellChange}
+            acknowledgedWriteId={acknowledgedWriteId}
             onCreateOption={writesPaused ? undefined : createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}

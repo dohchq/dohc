@@ -145,6 +145,9 @@ export interface EngineDaemonLifecycleOptions {
   maxPingExpiries?: number;
   maxConsecutiveWedges?: number;
   onFailure?: (error: Error, terminal: boolean) => void;
+  // Retire work owned by the previous daemon before callers can open workspaces
+  // on its replacement. This barrier must not request the unpublished client.
+  beforePublish?: () => void | Promise<void>;
   // Fires once per launched daemon generation (the first launch AND every
   // restart). The first generation is only handshaked when this fires — its
   // startup smoke still runs behind it; restart generations have passed the
@@ -654,6 +657,24 @@ export class EngineDaemonLifecycle {
             "Rust engine exited during its startup health check.",
           );
         }
+      }
+      let onAbort!: () => void;
+      const cancelled = new Promise<void>((resolve) => { onAbort = resolve; });
+      signal.addEventListener("abort", onAbort, { once: true });
+      try {
+        if (signal.aborted) onAbort();
+        // Shutdown stops waiting; the race still observes a later retirement
+        // rejection, and the publication check below rejects a cancelled launch.
+        await Promise.race([this.options.beforePublish?.(), cancelled]);
+      } finally {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (this.stopping || signal.aborted || this.exitedGenerations.has(generation)) {
+        await this.closeClient(client);
+        if (this.stopping || signal.aborted) return;
+        throw new EngineDaemonUnavailableError(
+          "Rust engine exited while retiring the previous generation's work.",
+        );
       }
       this.client = client;
       this.running = true;

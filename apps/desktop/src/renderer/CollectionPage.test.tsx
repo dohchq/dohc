@@ -425,6 +425,85 @@ describe("CollectionPage", () => {
     },
   );
 
+  it("keeps a remote selection after a coalesced refresh acknowledges a local round trip", async () => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    for (let index = 0; index < 2; index += 1) {
+      docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+      page.rerender(pageWithHost());
+      docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+      page.rerender(pageWithHost());
+    }
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+
+    records[0] = {
+      ...records[0]!,
+      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
+    };
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("does not acknowledge a save through an index query that started before it", async () => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+
+    let resolveQuery!: (result: QueryCollectionRecordsResult) => void;
+    bridge.queryCollectionRecords.mockReturnValueOnce(new Promise((resolve) => { resolveQuery = resolve; }));
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(pageWithHost());
+    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    page.rerender(pageWithHost());
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    await act(async () => resolveQuery({
+      collection: { path: "tasks", status: "valid", reasons: [] },
+      records,
+      groups: null,
+      nextCursor: null,
+    }));
+
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
+  });
+
   it("retries a failed record query", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     bridge.queryCollectionRecords.mockRejectedValueOnce(

@@ -31,7 +31,10 @@ interface TestParts {
     dispose: ReturnType<typeof vi.fn>;
     handleWatcherEvents: ReturnType<typeof vi.fn>;
   };
-  automations: { dispose: ReturnType<typeof vi.fn> };
+  automations: {
+    dispose: ReturnType<typeof vi.fn>;
+    stopForEngineRestart: ReturnType<typeof vi.fn>;
+  };
 }
 
 function deferred(): {
@@ -70,7 +73,10 @@ function makeParts(overrides: {
       dispose: vi.fn(() => undefined),
       handleWatcherEvents: vi.fn(() => undefined),
     },
-    automations: { dispose: vi.fn(async () => undefined) },
+    automations: {
+      dispose: vi.fn(async () => undefined),
+      stopForEngineRestart: vi.fn(),
+    },
   };
 }
 
@@ -143,6 +149,59 @@ const registration = (directoryName = "example-plugin") => ({
 });
 
 describe("plugin workspace runtimes", () => {
+  it("retires automation authority before host teardown and recreates only after engine publication", async () => {
+    const teardown = deferred();
+    const order: string[] = [];
+    let first = true;
+    const h = createHarness({
+      create: () => {
+        const original = first;
+        first = false;
+        const parts = makeParts({
+          dispose: async () => {
+            order.push("host admission closed");
+            if (original) await teardown.promise;
+          },
+        });
+        parts.automations.stopForEngineRestart.mockImplementation(() => {
+          order.push("automation authority retired");
+        });
+        return parts;
+      },
+    });
+    const original = await h.owner.ensure(workspace());
+    const stopped = h.owner.prepareForEngineRestart();
+    expect(h.owner.prepareForEngineRestart()).toBe(stopped);
+    expect(order).toEqual(["automation authority retired", "host admission closed"]);
+    expect(h.owner.current("workspace-1")).toBeUndefined();
+    const waiting = h.owner.ensure(workspace());
+    teardown.resolve();
+    await stopped;
+    expect(h.created).toHaveLength(1);
+    // A failed daemon launch may retry this barrier before any onLaunch fires.
+    await h.owner.prepareForEngineRestart();
+    expect(h.created).toHaveLength(1);
+    h.owner.resumeAfterEngineRestart();
+    const replacement = await waiting;
+    expect(replacement).not.toBe(original);
+    expect(h.created).toHaveLength(2);
+    expect(h.created[1]?.pipeline.start).toHaveBeenCalledOnce();
+    expect(h.owner.current("workspace-1")).toBe(replacement);
+    await h.owner.close();
+  });
+
+  it("does not recreate a workspace closed while the engine restart was paused", async () => {
+    const h = createHarness();
+    await h.owner.ensure(workspace());
+    await h.owner.prepareForEngineRestart();
+    const waiting = h.owner.ensure(workspace());
+    const refused = expect(waiting).rejects.toThrow("Plugins are closed");
+    await h.owner.close();
+    await refused;
+    h.owner.resumeAfterEngineRestart();
+    expect(h.created).toHaveLength(1);
+  });
+
   it("coalesces concurrent ensures into one started runtime", async () => {
     const opening = deferred();
     const harness = createHarness({

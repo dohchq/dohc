@@ -1113,6 +1113,9 @@ function createPluginWorkspaceRuntimeParts(
                 currentPipeline.ensureStarted(pluginId, commandAuthority),
               ),
           );
+          if (!automations.activeRun({ claimId: params.claimId, pluginId })) {
+            return { ok: true as const };
+          }
           await host.runAutomation(pluginId, params);
           return { ok: true as const };
         },
@@ -13609,6 +13612,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
   // callback and leave the user with no dialog, on the one path whose job is
   // to explain that the engine could not start.
   try {
+    const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
     rustEngineDaemon = createRustEngineDaemon({
       ...testEngineRestartOverrides(),
       command: defaultEngineBinaryPath({
@@ -13639,12 +13643,27 @@ async function startRustEngineDaemon(): Promise<boolean> {
           );
         }
       },
+      beforePublish: async () => {
+        await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
+          workspaceAuthorities.withAuthority(workspaceId, (lease) => {
+            const runtimes = lease.state.pluginRuntimes;
+            restartingPluginRuntimes.add(runtimes);
+            return runtimes.prepareForEngineRestart();
+          }),
+        ));
+      },
       // A capture event can die with the previous daemon's transport after its
       // moment committed; the replacement never re-emits it (its baseline finds
       // disk and manifest agreeing). One repaint per healthy launch closes that
       // staleness window. Scope-free: the lost event could have belonged to
       // any open workspace.
-      onLaunch: () => notifyRenderer(),
+      onLaunch: () => {
+        for (const runtimes of restartingPluginRuntimes) {
+          runtimes.resumeAfterEngineRestart();
+        }
+        restartingPluginRuntimes.clear();
+        notifyRenderer();
+      },
     });
     await rustEngineDaemon.start();
     // The daemon owns capture: its capture.momentRecorded events are the ONLY

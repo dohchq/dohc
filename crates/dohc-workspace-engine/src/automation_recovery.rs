@@ -1,6 +1,6 @@
 use crate::{
-    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, EngineEvents,
-    emit_automation_claimed,
+    AUTOMATION_CLAIM_MAX_ATTEMPTS, AUTOMATION_CLAIM_REAP_IDLE_MS, AUTOMATION_CLAIMED_EVENT,
+    EngineEventNotice, EngineEvents, automation_claim_json, lock,
 };
 use dohc_engine_domain::AutomationClaimAttempt;
 use dohc_engine_protocol::error::WireError;
@@ -90,7 +90,22 @@ async fn recover_interrupted_claims(
             .await
         {
             Ok(claims) => {
-                emit_automation_claimed(&events, &workspace_id, &claims);
+                for claim in &claims {
+                    let mut payload = automation_claim_json(claim);
+                    payload["workspaceId"] = serde_json::json!(workspace_id);
+                    send_recovery_notice(
+                        &events,
+                        EngineEventNotice {
+                            name: AUTOMATION_CLAIMED_EVENT.to_owned(),
+                            payload,
+                        },
+                        &cancel,
+                    )
+                    .await;
+                    if cancel.is_cancelled() {
+                        return;
+                    }
+                }
                 match actor
                     .automation_running_attempts(workspace_id.clone())
                     .await
@@ -117,10 +132,27 @@ async fn recover_interrupted_claims(
     }
 }
 
+// Recovery emits each transition once, so unlike capture repaint hints these
+// wake-ups must wait for transport capacity. Teardown can still join promptly.
+async fn send_recovery_notice(
+    events: &EngineEvents,
+    notice: EngineEventNotice,
+    cancel: &CancellationToken,
+) {
+    let sender = lock(&events.subscriber).clone();
+    let Some(sender) = sender else {
+        return;
+    };
+    tokio::select! {
+        biased;
+        () = cancel.cancelled() => {}
+        _ = sender.send(notice) => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::AUTOMATION_CLAIMED_EVENT;
     use dohc_engine_domain::AUTOMATION_RECLAIM_EXHAUSTED;
     use dohc_engine_runtime::WorkspaceSupervisor;
     use dohc_engine_storage::EngineStore;
@@ -129,6 +161,52 @@ mod tests {
 
     const WORKSPACE: &str = "ws-automation-recovery";
     const OPENED_AT: i64 = 1_000_000;
+
+    #[tokio::test]
+    async fn recovery_notice_waits_for_capacity_and_shutdown_cancels_a_blocked_send() {
+        use std::future::{Future, poll_fn};
+        use std::task::Poll;
+
+        for shutdown in [false, true] {
+            let events = EngineEvents::default();
+            let mut notices = events.subscribe();
+            for _ in 0..crate::ENGINE_EVENT_QUEUE_CAPACITY {
+                events.emit("capture.momentRecorded", serde_json::json!({}));
+            }
+            let cancel = CancellationToken::new();
+            let notice = EngineEventNotice {
+                name: AUTOMATION_CLAIMED_EVENT.to_owned(),
+                payload: serde_json::json!({"workspaceId": WORKSPACE, "state": "pending"}),
+            };
+            let send = send_recovery_notice(&events, notice, &cancel);
+            tokio::pin!(send);
+            poll_fn(|cx| {
+                assert!(send.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+
+            if shutdown {
+                cancel.cancel();
+            } else {
+                notices.recv().await.expect("release one transport slot");
+            }
+            send.await;
+            for _ in 0..crate::ENGINE_EVENT_QUEUE_CAPACITY - usize::from(!shutdown) {
+                assert_eq!(
+                    notices.try_recv().expect("queued capture notice").name,
+                    "capture.momentRecorded"
+                );
+            }
+            if !shutdown {
+                let notice = notices.try_recv().expect("recovery wake-up was retained");
+                assert_eq!(notice.name, AUTOMATION_CLAIMED_EVENT);
+                assert_eq!(notice.payload["workspaceId"], WORKSPACE);
+                assert_eq!(notice.payload["state"], "pending");
+            }
+            assert!(notices.try_recv().is_err());
+        }
+    }
 
     #[tokio::test(start_paused = true)]
     async fn interrupted_claims_recover_and_notify_after_the_guard_without_reopening() {

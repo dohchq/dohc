@@ -46,7 +46,9 @@ export interface TableViewProps {
   /** A view definition's visible field names; omit for every schema field. */
   visibleFields?: readonly string[] | null;
   onSortChange?: (sort: CollectionQuerySort[]) => void;
-  onCellChange?: (change: CollectionCellChange) => void;
+  onCellChange?: (change: CollectionCellChange) => number;
+  /** Highest saved edit id reflected in this record's queried field value. */
+  acknowledgedWriteId?: (record: CollectionRecord, field: string) => number;
   onCreateOption?: (create: CollectionOptionCreate) => void;
   /** Receives the row's record when its Open control is clicked. */
   onOpenRecord?: (record: CollectionRecord) => void;
@@ -92,6 +94,7 @@ export function TableView({
   visibleFields,
   onSortChange,
   onCellChange,
+  acknowledgedWriteId,
   onCreateOption,
   onOpenRecord,
   relationExecutor,
@@ -309,6 +312,7 @@ export function TableView({
               >
                 <CellEditor
                   field={editingField}
+                  acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
                   indexed={editingRow.original.values.find(
                     (entry) => entry.field === editingField.name,
                   )}

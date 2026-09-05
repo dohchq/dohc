@@ -968,6 +968,7 @@ export function EngineMomentDiffPage({
         workspaceId,
         momentId: target,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -978,7 +979,6 @@ export function EngineMomentDiffPage({
             : "Undid the restore. This was recorded in history.",
       });
       setUndoMomentId(null);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({
@@ -1083,6 +1083,7 @@ export function EngineMomentDiffPage({
         workspaceId,
         momentId: moment.id,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -1093,7 +1094,6 @@ export function EngineMomentDiffPage({
             : "Restored the earlier state. Undo restore is available here.",
       });
       setUndoMomentId(result.restoredMomentId);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({

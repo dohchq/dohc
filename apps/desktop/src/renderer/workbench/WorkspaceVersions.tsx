@@ -271,7 +271,7 @@ export function VersionMenu(props: {
         }
         props.onWorkspaceStateChanged(
           recovered?.activeVersionId,
-          recovered === null || recovered.activeVersionId !== before,
+          recovered === null ? switchIssued : recovered.activeVersionId !== before,
         );
       } finally {
         releaseOperation?.();

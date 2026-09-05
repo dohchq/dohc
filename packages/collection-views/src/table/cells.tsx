@@ -179,7 +179,7 @@ function AddOptionInput({
 }
 
 type PendingSelection = {
-  value: string[];
+  writeId: number;
   added: string[];
   removed: string[];
 };
@@ -188,40 +188,36 @@ function sameSelection(left: readonly string[], right: readonly string[]): boole
   return left.length === right.length && left.every((option, index) => option === right[index]);
 }
 
-// Props can acknowledge an earlier toggle while later toggles are queued.
-// Retire that acknowledged prefix and apply the remaining local changes to
-// the observed selection. Other changed props carry external edits; those
-// become visible too, without erasing pending local additions or removals.
+// The indexed result acknowledges saved edits by id, including round trips
+// whose final value equals the original. Later local changes still apply on
+// top of that result, including any external edits it contains.
 function MultiSelectEditor({
   options,
   value,
+  acknowledgedWriteId,
   emit,
   close,
   onCreateOption,
 }: {
   options: readonly string[];
   value: CollectionValue;
-  emit: (value: CollectionValue) => void;
+  acknowledgedWriteId: number;
+  emit: (value: CollectionValue) => number;
   close: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
 }) {
   const [selection, setSelection] = useState(() => ({
     observed: asTextArray(value),
+    acknowledgedWriteId,
     pending: [] as PendingSelection[],
   }));
   const observed = asTextArray(value);
   let current = selection;
-  if (!sameSelection(observed, selection.observed)) {
-    let acknowledged = -1;
-    for (let index = selection.pending.length - 1; index >= 0; index -= 1) {
-      if (sameSelection(selection.pending[index]!.value, observed)) {
-        acknowledged = index;
-        break;
-      }
-    }
+  if (acknowledgedWriteId !== selection.acknowledgedWriteId || !sameSelection(observed, selection.observed)) {
     current = {
       observed,
-      pending: selection.pending.slice(acknowledged + 1),
+      acknowledgedWriteId,
+      pending: selection.pending.filter((change) => change.writeId > acknowledgedWriteId),
     };
     setSelection(current);
   }
@@ -233,15 +229,15 @@ function MultiSelectEditor({
     current.observed,
   );
   const select = (next: string[]) => {
+    const writeId = emit(next);
     setSelection({
       ...current,
       pending: [...current.pending, {
-        value: next,
+        writeId,
         added: next.filter((option) => !selected.includes(option)),
         removed: selected.filter((option) => !next.includes(option)),
       }],
     });
-    emit(next);
   };
   return (
     <span className="flex w-full flex-col gap-0.5">
@@ -294,11 +290,13 @@ function MultiSelectEditor({
 export interface CellEditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
+  /** Highest saved edit id reflected in this indexed value; 0 before any edit. */
+  acknowledgedWriteId: number;
   /**
    * Receives the edited value. The host applies it through its own write
-   * path; this package never writes.
+   * path and returns a monotonically increasing edit id; this package never writes.
    */
-  emit: (value: CollectionValue) => void;
+  emit: (value: CollectionValue) => number;
   close: () => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
@@ -317,6 +315,7 @@ export interface CellEditorProps {
 export function CellEditor({
   field,
   indexed,
+  acknowledgedWriteId,
   emit,
   close,
   onCreateOption,
@@ -402,6 +401,7 @@ export function CellEditor({
         <MultiSelectEditor
           options={field.options}
           value={value}
+          acknowledgedWriteId={acknowledgedWriteId}
           emit={emit}
           close={close}
           onCreateOption={onCreateOption}

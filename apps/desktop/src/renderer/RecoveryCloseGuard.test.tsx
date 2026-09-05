@@ -1414,6 +1414,54 @@ describe("RecoveryCloseGuard with pending collection writes", () => {
     expect(dispatchUnload().defaultPrevented).toBe(false);
   });
 
+  it("drains an edit accepted during main's install check and retries the same restart", async () => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
+    renderGuardWithHost();
+    const installing = requestGuardedUpdateInstall();
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+  });
+
+  it.each([false, true])("a newer reload supersedes an install retry drain (confirmed: %s)", async (confirmed) => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const reloadRenderer = vi.fn(async () => { dispatchUnload(); });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate, reloadRenderer });
+    if (confirmed) captureOrphanedDraft("ws-1", "old.md", "Before restart");
+    renderGuardWithHost();
+    let installing: Promise<unknown>;
+    if (confirmed) {
+      expect(await requestGuardedUpdateInstall()).toBeNull();
+      await userEvent.click(await screen.findByTestId("recovery-close-anyway"));
+      installing = Promise.resolve();
+    } else {
+      installing = requestGuardedUpdateInstall();
+    }
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    act(() => {
+      captureOrphanedDraft("ws-1", "new.md", "During restart");
+      requestGuardedReload();
+    });
+    settleSave("tasks/one.md");
+    await installing;
+    await waitFor(() => expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway"));
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+  });
+
   it("a write that fails while the unload waits keeps the app open", async () => {
     let resolveOpen: ((result: { available: false }) => void) | null = null;
     const open = new Promise<{ available: false }>((resolve) => {

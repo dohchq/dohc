@@ -141,6 +141,8 @@ export class PluginAutomations {
   private draining = false;
   private redrain = false;
   private disposed = false;
+  private engineRestarted = false;
+  private readonly runAbort = new AbortController();
 
   constructor(private readonly options: PluginAutomationsOptions) {}
 
@@ -194,16 +196,14 @@ export class PluginAutomations {
   /** Workspace close: removes this desktop's subscriptions, best-effort. */
   async dispose(): Promise<void> {
     if (this.disposed) return;
-    this.disposed = true;
     const pairs = [...this.registered.entries()];
-    this.registered.clear();
-    this.activeRuns.clear();
-    this.deferred.clear();
+    this.stop();
     await this.reconcileChain.catch(() => undefined);
     for (const [automationId, entry] of pairs) {
+      if (this.engineRestarted) return;
       try {
         await this.options.withAdapter((adapter) =>
-          adapter.unsubscribeAutomation({
+          this.engineRestarted ? Promise.resolve(null) : adapter.unsubscribeAutomation({
             automationId,
             path: entry.declaration.collection,
           }),
@@ -215,6 +215,29 @@ export class PluginAutomations {
         );
       }
     }
+  }
+
+  /** Retire this executor without reopening the engine to unsubscribe. */
+  stopForEngineRestart(): void {
+    this.engineRestarted = true;
+    this.stop();
+  }
+
+  private stop(): void {
+    this.disposed = true;
+    this.registered.clear();
+    this.activeRuns.clear();
+    this.deferred.clear();
+    this.runAbort.abort();
+  }
+
+  private withLiveAdapter<T>(
+    work: (adapter: AutomationEngineAdapter) => Promise<T>,
+  ): Promise<T | null> {
+    if (this.disposed) return Promise.resolve(null);
+    return this.options.withAdapter((adapter) =>
+      this.disposed ? Promise.resolve(null) : work(adapter),
+    );
   }
 
   private enqueueReconcile(
@@ -247,12 +270,13 @@ export class PluginAutomations {
     // collection — the engine removes one exact pair, so a moved automation
     // is an unsubscribe of the old pair plus a subscribe of the new).
     for (const [automationId, entry] of [...this.registered]) {
+      if (this.disposed) return;
       if (entry.pluginId !== pluginId) continue;
       const wanted = desiredById.get(automationId);
       if (wanted && wanted.collection === entry.declaration.collection) {
         continue;
       }
-      const removed = await this.options.withAdapter((adapter) =>
+      const removed = await this.withLiveAdapter((adapter) =>
         adapter.unsubscribeAutomation({
           automationId,
           path: entry.declaration.collection,
@@ -264,6 +288,7 @@ export class PluginAutomations {
       this.registered.delete(automationId);
     }
     for (const [automationId, declaration] of desiredById) {
+      if (this.disposed) return;
       const current = this.registered.get(automationId);
       if (current && current.declaration.collection === declaration.collection) {
         // Same engine pair; refresh the handler name the runs resolve.
@@ -282,12 +307,13 @@ export class PluginAutomations {
         );
         continue;
       }
-      const subscribed = await this.options.withAdapter((adapter) =>
+      const subscribed = await this.withLiveAdapter((adapter) =>
         adapter.subscribeAutomation({
           automationId,
           path: declaration.collection,
         }),
       );
+      if (this.disposed) return;
       if (subscribed === null) continue;
       this.registered.set(automationId, { pluginId, declaration });
     }
@@ -308,12 +334,12 @@ export class PluginAutomations {
         if (outcome === "settled") this.deferred.delete(claim.claimId);
       }
       while (!this.disposed) {
-        const claim = await this.options.withAdapter((adapter) =>
+        const claim = await this.withLiveAdapter((adapter) =>
           adapter.claimNextAutomation(),
         );
         // Null is both "drained" and "engine unavailable": either way the
         // next wake-up (event or reconcile) resumes.
-        if (claim === null) break;
+        if (this.disposed || claim === null) break;
         const outcome = await this.execute(claim);
         if (outcome !== "settled") {
           this.deferred.set(claim.claimId, claim);
@@ -362,6 +388,7 @@ export class PluginAutomations {
   private async execute(
     claim: AutomationClaim,
   ): Promise<"settled" | "defer"> {
+    if (this.disposed) return "settled";
     const registered = this.registered.get(claim.automationId);
     if (!registered) {
       const declares = this.installedPluginDeclares(claim.automationId);
@@ -395,7 +422,7 @@ export class PluginAutomations {
       writes: 0,
     });
     let attempt:
-      | { kind: "completed" | "refused" | "deadline" }
+      | { kind: "completed" | "refused" | "deadline" | "cancelled" }
       | { kind: "threw"; error: unknown };
     try {
       attempt = await this.runWithDeadline(registered, claim);
@@ -404,7 +431,10 @@ export class PluginAutomations {
       // write from a still-live handler must refuse.
       this.activeRuns.delete(claim.claimId);
     }
+    if (this.disposed) return "settled";
     switch (attempt.kind) {
+      case "cancelled":
+        return "settled";
       case "completed":
         await this.settle(claim.claimId, { state: "done" });
         return "settled";
@@ -443,13 +473,24 @@ export class PluginAutomations {
     registered: RegisteredAutomation,
     claim: AutomationClaim,
   ): Promise<
-    { kind: "completed" | "refused" | "deadline" } | { kind: "threw"; error: unknown }
+    { kind: "completed" | "refused" | "deadline" | "cancelled" } | { kind: "threw"; error: unknown }
   > {
     return new Promise((resolve) => {
+      const finish: typeof resolve = (outcome) => {
+        clearTimeout(timer);
+        this.runAbort.signal.removeEventListener("abort", abort);
+        resolve(outcome);
+      };
+      const abort = () => finish({ kind: "cancelled" });
       const timer = setTimeout(
-        () => resolve({ kind: "deadline" }),
+        () => finish({ kind: "deadline" }),
         AUTOMATION_RUN_DEADLINE_MS,
       );
+      this.runAbort.signal.addEventListener("abort", abort, { once: true });
+      if (this.runAbort.signal.aborted) {
+        abort();
+        return;
+      }
       this.options
         .runOnPlugin(registered.pluginId, {
           claimId: claim.claimId,
@@ -463,12 +504,10 @@ export class PluginAutomations {
         })
         .then(
           (outcome) => {
-            clearTimeout(timer);
-            resolve({ kind: outcome });
+            finish({ kind: outcome });
           },
           (error: unknown) => {
-            clearTimeout(timer);
-            resolve({ kind: "threw", error });
+            finish({ kind: "threw", error });
           },
         );
     });
@@ -481,7 +520,7 @@ export class PluginAutomations {
       | { state: "failed"; error: string; automationId: string },
   ): Promise<void> {
     try {
-      await this.options.withAdapter((adapter) =>
+      await this.withLiveAdapter((adapter) =>
         adapter.settleAutomationClaim(
           input.state === "failed"
             ? { claimId, state: "failed", error: input.error }
@@ -495,7 +534,7 @@ export class PluginAutomations {
       this.options.onError(`settle automation claim "${claimId}"`, error);
       return;
     }
-    if (input.state === "failed") {
+    if (!this.disposed && input.state === "failed") {
       this.options.onClaimFailed?.(input.automationId);
     }
   }

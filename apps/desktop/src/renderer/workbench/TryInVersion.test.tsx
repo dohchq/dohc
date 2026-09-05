@@ -410,6 +410,36 @@ describe("TryInVersionReviewCard", () => {
 });
 
 describe("VersionMenu refreshKey (regression: external version switches)", () => {
+  it.each([false, true])("changes lineage after a failed preflight only for an observed version change (%s)", async (recoveredChange) => {
+    const onWorkspaceStateChanged = vi.fn();
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <VersionMenu
+        workspaceId="ws-try"
+        activeTabDirty={false}
+        beginLineageOperation={async () => { throw new Error("Retained collection input"); }}
+        onOpenCompare={() => {}}
+        onWorkspaceStateChanged={onWorkspaceStateChanged}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Try: tidy the notes"));
+    if (recoveredChange) {
+      bridgeMock.listWorkspaceVersions.mockResolvedValue({
+        versions: [{ id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false }],
+        activeVersionId: "main",
+      });
+    } else {
+      bridgeMock.listWorkspaceVersions.mockRejectedValue(new Error("Recovery read failed"));
+    }
+    await user.click(screen.getByTestId("version-menu-button"));
+    await user.click(screen.getByRole("menuitemradio", { name: "Main" }));
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
+    expect(onWorkspaceStateChanged).toHaveBeenCalledWith(recoveredChange ? "main" : undefined, recoveredChange);
+  });
+
   it("keeps waiting while a large workspace is still importing", async () => {
     vi.useFakeTimers();
     let attempts = 0;

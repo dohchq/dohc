@@ -86,6 +86,20 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it("exposes the exact retained input for copying when its record cannot open", async () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    const value = "  Keep this exact input.\nWith another line.  ";
+    enqueue({ ...CHANGE, value });
+    expect(collectionWriteFailures()[0]?.superseded).toBe(false);
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", value);
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    fireEvent.click(screen.getByTestId("collection-write-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(value));
+    expect(collectionWriteFailures()[0]?.change.value).toBe(value);
+  });
+
   it("does not replay a failed full-array edit over a newer saved selection", async () => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
@@ -213,6 +227,56 @@ describe("retained failures", () => {
   });
 });
 
+describe("collection index acknowledgements", () => {
+  it("acknowledges a saved edit once, after the actual save result", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    const onIndexed = vi.fn();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
+    expect(onIndexed).not.toHaveBeenCalled();
+    settleHead(host, doc);
+    host.rerender(<CollectionFieldWriteHost />);
+    expect(onIndexed).toHaveBeenCalledOnce();
+  });
+
+  it.each(["retry", "discard"] as const)("does not acknowledge failed input before %s", (action) => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const onIndexed = vi.fn();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
+    expect(onIndexed).not.toHaveBeenCalled();
+    const failure = collectionWriteFailures()[0]!;
+    if (action === "discard") {
+      act(() => discardCollectionFieldWrite(failure.id));
+      expect(onIndexed).not.toHaveBeenCalled();
+    } else {
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(failure.id));
+      expect(onIndexed).not.toHaveBeenCalled();
+      settleHead(host, doc);
+      expect(onIndexed).toHaveBeenCalledOnce();
+    }
+  });
+
+  it("acknowledges a durably held file-lock edit once", async () => {
+    vi.useFakeTimers();
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    render(<CollectionFieldWriteHost />);
+    const onIndexed = vi.fn();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, undefined, onIndexed); });
+    expect(onIndexed).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS * 2); });
+    expect(onIndexed).toHaveBeenCalledOnce();
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+});
+
 describe("settleCollectionFieldWrites", () => {
   it("reports a failure from before the wait, and a second wait still reports it", async () => {
     docMock.current = engineDocState({ available: false });
@@ -252,6 +316,47 @@ describe("settleCollectionFieldWrites", () => {
 });
 
 describe("beginCollectionWriteOperation", () => {
+  it("keeps older paused input copy-only after retrying and saving the newer input", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    let guard!: ReturnType<typeof beginCollectionWriteOperation>;
+    act(() => { guard = beginCollectionWriteOperation("ws-1"); });
+    enqueue({ ...CHANGE, field: "tags", value: ["alpha"] });
+    enqueue({ ...CHANGE, field: "tags", value: ["alpha", "beta"] });
+    const [older, newer] = collectionWriteFailures();
+    expect(older?.superseded).toBe(true);
+    act(() => { guard.release(); retryCollectionFieldWrite(newer!.id); });
+    settleHead(host, doc);
+    act(() => retryCollectionFieldWrite(older!.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", '[\n  "alpha"\n]');
+  });
+
+  it("does not supersede current-lineage input with a delayed callback from an older lineage", () => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    act(() => advanceCollectionWriteLineage("ws-1"));
+    enqueue({ ...CHANGE, value: "current" });
+    const current = collectionWriteFailures()[0]!;
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, value: "old" }, undefined, 0);
+    });
+    expect(collectionWriteFailures().find((failure) => failure.id === current.id)?.superseded).toBe(false);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(current.id));
+    settleHead(host, doc);
+    expect(doc.getMap("frontmatter").get("status")).toBe("current");
+    expect(collectionWriteFailures()[0]?.change.value).toBe("old");
+  });
+
   it("rejects a failure arriving while the initial draft flush is pending", async () => {
     let finishFlush!: () => void;
     const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
@@ -401,6 +506,39 @@ describe("abandoned schema preparation", () => {
     contentHash: "same-schema-in-both-versions",
   };
 
+  it.each(["removed", "renamed", "number", "multi-select"] as const)(
+    "retains an option edit when its select field was %s before preparation",
+    async (scenario) => {
+      const schema: Parameters<typeof serializeCollectionSchema>[0] = {
+        name: null,
+        description: null,
+        fields: scenario === "removed" ? []
+          : scenario === "renamed" ? [{ name: "other", type: "select", options: [] }]
+          : scenario === "number" ? [{ name: "status", type: "number" }]
+          : [{ name: "status", type: "multi-select", options: [] }],
+        views: [],
+      };
+      const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
+      vi.stubGlobal("dohcDesktop", {
+        readWorkspaceText: vi.fn(async () => ({ ...read, text: serializeCollectionSchema(schema) })),
+        writeWorkspaceText,
+      });
+      const doc = new Y.Doc();
+      doc.getMap("frontmatter").set("id", "rec-1");
+      docMock.current = engineDocState({ available: true, doc });
+      render(<CollectionFieldWriteHost />);
+      const onIndexed = vi.fn();
+      act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done", undefined, onIndexed); });
+      await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+      expect(writeWorkspaceText).not.toHaveBeenCalled();
+      expect(doc.getMap("frontmatter").has("status")).toBe(false);
+      expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+      expect(collectionWriteFailures()[0]?.createOption).toBe("done");
+      expect(collectionWriteFailures()[0]?.message).toContain("This field changed.");
+      expect(onIndexed).not.toHaveBeenCalled();
+    },
+  );
+
   it("does not prepare an option until the bound document proves the original record identity", () => {
     const readWorkspaceText = vi.fn(async () => read);
     const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
@@ -470,6 +608,28 @@ describe("abandoned schema preparation", () => {
 });
 
 describe("abandonPendingCollectionFieldWrites", () => {
+  it("orders an abandoned older edit against newer input already retained during a pause", () => {
+    docMock.current = engineDocState({ opening: true });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue({ ...CHANGE, value: "older" });
+    let guard!: ReturnType<typeof beginCollectionWriteOperation>;
+    act(() => { guard = beginCollectionWriteOperation("ws-1"); });
+    enqueue({ ...CHANGE, value: "newer" });
+    const newer = collectionWriteFailures()[0]!;
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    const older = collectionWriteFailures().find((failure) => failure.change.value === "older")!;
+    expect(older.superseded).toBe(true);
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => { guard.release(); retryCollectionFieldWrite(newer.id); });
+    settleHead(host, doc);
+    act(() => retryCollectionFieldWrite(older.id));
+    expect(doc.getMap("frontmatter").get("status")).toBe("newer");
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()[0]?.change.value).toBe("older");
+  });
+
   it("keeps an applied head owned and abandons only its unapplied tail", () => {
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");

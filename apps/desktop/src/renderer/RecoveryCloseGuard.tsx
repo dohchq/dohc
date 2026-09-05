@@ -80,6 +80,7 @@ export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult 
   if (request !== exitRequest) return null;
   if (atRiskOrphanedDraftIds().length === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
+    if (request !== exitRequest) return null;
     if (!result.accepted && hasUnsettledCollectionWrites()) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
     // aside after THIS renderer's own check (#579 review, r12). That refusal
@@ -191,7 +192,19 @@ export function resetGuardedExits(): void {
 // one-shot and already spent by the time beforeunload can fire, and main has
 // pre-approved the quit it started. A plain window.close() would also strand
 // the staged installer on macOS, where closing a window does not quit.
-function beginInstall(): Promise<UpdateActionResult> {
+async function beginInstall(): Promise<UpdateActionResult> {
+  const request = exitRequest;
+  for (;;) {
+    const result = await attemptInstall();
+    if (result.accepted || !hasUnsettledCollectionWrites()) return result;
+    if (request !== exitRequest) return result;
+    // Main can observe an edit accepted after the renderer's first drain.
+    // A refused install has not consumed the updater's one-shot latch.
+    if (!(await settleCollectionWritesForExit()) || request !== exitRequest) return result;
+  }
+}
+
+function attemptInstall(): Promise<UpdateActionResult> {
   const attempt: PendingUnload = {
     kind: "update",
     resume: () => resumeExit("update"),
@@ -514,8 +527,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     rearmGuard,
                     BYPASS_REARM_MS,
                   );
+                  const request = exitRequest;
                   void resume().then((unloading) => {
-                    if (unloading) return;
+                    if (unloading || request !== exitRequest) return;
                     // The action did not unload. When a draft this approval
                     // never covered is WHY — the boundary re-check refuses an
                     // install for it — the user gets the decision back, now
