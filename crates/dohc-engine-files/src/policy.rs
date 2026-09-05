@@ -245,7 +245,7 @@ fn has_ignored_segment(path: &str) -> bool {
     })
 }
 
-/// THE secret-path rule. `path` must already be normalized: relative,
+/// The secret-path rule. `path` must already be normalized: relative,
 /// slash-separated, with `.`, `..`, and percent-encoding resolved.
 ///
 /// Exported so the share boundary reuses this rule instead of restating it.
@@ -253,12 +253,12 @@ fn has_ignored_segment(path: &str) -> bool {
 /// replay, and `replay_share_delete` carries no floor of its own, so a delete
 /// of secret material is refused only while the boundary and this floor name
 /// the same secrets. They did, in two copies, by coincidence — a class added
-/// here alone made deletes of it replayable (#484). One rule, one place, so a
+/// here alone made deletes of it replayable. One rule, one place, so a
 /// new class reaches both callers at once.
 ///
 /// The search floor (`search_policy.rs`) reads the same rule through
-/// [`segments_are_secret`], keeping its own per-platform normalization
-/// (#543): a class added there reaches search too.
+/// [`segments_are_secret`], keeping its own per-platform normalization:
+/// a class added there reaches search too.
 pub fn normalized_path_is_secret(path: &str) -> bool {
     let segments: Vec<String> = path
         .split('/')
@@ -268,9 +268,9 @@ pub fn normalized_path_is_secret(path: &str) -> bool {
     segments_are_secret(&segments)
 }
 
-/// THE secret-segment rule, over segments the caller already normalized
+/// The secret-segment rule, over segments the caller already normalized
 /// (lowercased, with its own platform's alias folding applied). Add a new
-/// secret class HERE, never in a caller: [`normalized_path_is_secret`] and the
+/// secret class here, never in a caller: [`normalized_path_is_secret`] and the
 /// search floor both read this rule, so one edit reaches the write floor, the
 /// share boundary, and search at once.
 pub fn segments_are_secret<S: AsRef<str>>(segments: &[S]) -> bool {

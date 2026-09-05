@@ -72,8 +72,8 @@ let momentQueryId = 1;
 // behind the daemon harness keeps its state in memory. Rows come back newest
 // first and are re-sorted ascending, the order a history reads in.
 //
-// It reports the text each WRITE landed, so it keeps writes alone. A delete
-// repeats its preimage on the after side (#487) and a binary write has no text
+// It reports the text each write landed, so it keeps writes alone. A delete
+// repeats its preimage on the after side and a binary write has no text
 // there at all, so keying on `afterText` by itself would report a removed body
 // as though a write had landed it.
 async function readDaemonMoments(
@@ -176,7 +176,7 @@ function conflictState(
   };
 }
 
-// A side is present when it holds EITHER a text snapshot or a binary head.
+// A side is present when it holds either a text snapshot or a binary head.
 // Testing only for a snapshot reads every binary side as an absent one, which
 // turns "keep the other version's image" into "delete the file".
 function sidePresent(side: ConflictRecord["current"]): boolean {
@@ -228,7 +228,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
   private dropHeadAfter: string | null = null;
 
   /**
-   * Refuse every out-of-band body read. A resolution has COMMITTED before its
+   * Refuse every out-of-band body read. A resolution has committed before its
    * answer is read, so anything the desktop still has to fetch to materialize
    * is a window where the folder keeps the losing content and the conflict is
    * already closed.
@@ -440,7 +440,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         };
       }
 
-      // The LEDGER holds full bodies; withholding happens at serve time
+      // The ledger holds full bodies; withholding happens at serve time
       // (`settledConflictForWire`, `conflictListRowForWire`). A withheld side
       // here would mean the fixture lost the body it is being asked to apply.
       const incomingText = existing.incoming.snapshot?.text ?? null;
@@ -451,7 +451,7 @@ class ConflictLoopbackEngine extends VersionedLoopbackEngine {
         resolution === "apply-incoming"
           ? (incomingText ?? "")
           : String(local.mergedText);
-      // Only a COMBINED body is bounded, and by the control frame that carried
+      // Only a combined body is bounded, and by the control frame that carried
       // it — the daemon puts no size check on a side choice, which sends no
       // text at all (lib.rs conflicts_resolve). What it measures is the whole
       // REQUEST: the same envelope carries two 16 KiB metadata fields and five
@@ -826,14 +826,14 @@ describe("switchVersion", () => {
     await engine.createVersion("Draft");
     await write(root, "plan.md", "draft text\n");
     await engine.switchVersion("main");
-    // The counter is only a suppression signal if the un-suppressed path DOES
+    // The counter is only a suppression signal if the un-suppressed path does
     // read: a wrapper that never sees a read would report zero for any reason.
     expect(planReads).toBeGreaterThan(0);
 
     const momentsBefore = (await readDaemonMoments(loopback)).length;
     planReads = 0;
     // Simulate the watcher observing the switch's disk writes: the expected
-    // event registrations must swallow them — zero new engine moments AND
+    // event registrations must swallow them — zero new engine moments and
     // zero engine reads for the suppressed path.
     engine.captureBatch([{ path: "plan.md", operation: "update" }]);
     await engine.stop();
@@ -927,7 +927,7 @@ describe("switchVersion", () => {
     await engine.flush();
 
     // The crash-honest invariant: Main is recorded active, and Main's engine
-    // tip mirrors the ACTUAL (partial) disk state — a.md switched, b.md not.
+    // tip mirrors the actual (partial) disk state — a.md switched, b.md not.
     const { activeVersionId } = await engine.listVersions();
     expect(activeVersionId).toBe("main");
     expect(await readText(root, "a.md")).toBe("main a\n");
@@ -1041,7 +1041,7 @@ describe("mergeVersionIntoMain", () => {
     const draftId = await versionIdByName(engine, "Draft");
     const result = await engine.mergeVersionIntoMain(draftId);
     expect(result.mergedFileCount).toBe(1);
-    // Disk still shows the ACTIVE version (Other), not Main's merged state.
+    // Disk still shows the active version (Other), not Main's merged state.
     expect(await readText(root, "plan.md")).toBe("other text\n");
     // ...but Main's engine state has the merge.
     const moments = await readDaemonMoments(loopback);
@@ -1049,7 +1049,7 @@ describe("mergeVersionIntoMain", () => {
       .filter((moment) => moment.versionId === "main" && moment.path === "plan.md")
       .at(-1);
     expect(mainTip?.text).toBe("draft text\n");
-    // Data durability: the merge captured Other's UNSETTLED edit into
+    // Data durability: the merge captured Other's unsettled edit into
     // Other's own tip first — a later switch away can't lose "other text".
     const otherId = await versionIdByName(engine, "Other");
     const otherTip = moments
@@ -1131,14 +1131,11 @@ describe("mergeVersionIntoMain", () => {
     // Every side arrives whole, whichever way it crossed.
     expect(conflict.base.text).toBe("base line\n");
     expect(conflict.current.text).toBe("current line\n");
-    // MUTATION: drop the adapter's hydration branch and this text is gone.
-    expect(conflict.incoming.text).toBe(incomingBody);
-    // Each body crossed as a blob, not in the listing row — EVERY side, not
+    expect(conflict.incoming.text, "drop the adapter's hydration branch and this text is gone.").toBe(incomingBody);
+    // Each body crossed as a blob, not in the listing row — every side, not
     // only the over-cap one, because a row crosses the cap on the sum of its
     // parts and the daemon withholds them all
-    // (`withhold_all_conflict_side_texts`). MUTATION: stop degrading the row
-    // in `conflictListRowForWire`, or withhold only its over-cap body there,
-    // and the fixture serves in band what the daemon serves as digests.
+    // (`withhold_all_conflict_side_texts`).
     const hydrationReads = requests
       .filter((request) => request.method === VERSIONED_METHOD.textReadBlob)
       .map((request) => String((request.params as JsonObject).sha256));
@@ -1153,13 +1150,11 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("resumes a merge without transferring conflict bodies", async () => {
-    // Re-running a merge RESUMES: the walk over open conflicts keeps their
+    // Re-running a merge resumes: the walk over open conflicts keeps their
     // paths and discards everything else. Hydrating for it fetches every
     // withheld body of every open conflict just to drop it — the operation is
     // wrong, not merely expensive.
     //
-    // MUTATION: drop `bodies: "withheld"` from the resume walk and the blob
-    // read for this body reappears.
     const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
     const root = await tempRoot();
     await write(root, "plan.md", "base line\n");
@@ -1257,10 +1252,8 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("fast-forwards a source-only binary asset onto disk", async () => {
-    // Nothing on Main can be lost, so the user is asked nothing (#497).
+    // Nothing on Main can be lost, so the user is asked nothing.
     //
-    // MUTATION: read the merged binary status as a delete -> the merge throws
-    // on the absent preimage instead of landing the asset.
     const root = await tempRoot();
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
     await write(root, "plan.md", "v1 text\n");
@@ -1320,11 +1313,9 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("refuses a binary resolution whose engine head vanished", async () => {
-    // Going quiet here would leave the folder on the LOSING bytes while the
+    // Going quiet here would leave the folder on the losing bytes while the
     // engine reports the conflict resolved -- divergence the user cannot see.
     //
-    // MUTATION: skip the missing-head branch and return success -> this
-    // resolves and the folder keeps main's bytes.
     const root = await tempRoot();
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xee]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]);
@@ -1428,18 +1419,15 @@ describe("mergeVersionIntoMain", () => {
 
   it("applies a combined resolution past the in-band cap and mirrors it", async () => {
     // The body the daemon accepts is bounded by the control frame, not by the
-    // in-band cap on an ANSWER: past that cap the resolve result carries the
+    // in-band cap on an answer: past that cap the resolve result carries the
     // digest, and the desktop hydrates the body before it writes the folder.
     //
-    // MUTATION: route the fixture's settled write back through the capped
-    // `versionedText.write` -> this refuses. MUTATION: drop hydratedSnapshot
-    // -> the mirror throws on the withheld body.
     const { root, engine, conflict, loopback } = await openDivergedTextConflict();
     // Every out-of-band read fails. A resolution that still needed one would
     // commit, throw, and leave the folder on the losing content.
     loopback.failEveryBlobRead = true;
     const combined = `combined ✓ line\n`.repeat(12_000);
-    expect(Buffer.byteLength(combined, "utf8")).toBeGreaterThan(
+    expect(Buffer.byteLength(combined, "utf8"), "route the fixture's settled write back through the capped `versionedText.write` -> this refuses; drop hydratedSnapshot -> the mirror throws on the withheld body.").toBeGreaterThan(
       MAX_DESKTOP_CAPTURE_TEXT_BYTES,
     );
 
@@ -1451,17 +1439,15 @@ describe("mergeVersionIntoMain", () => {
     expect(merged.conflict.resolution).toBe("applied-merged");
     expect(await readText(root, "plan.md")).toBe(combined);
     expect((await engine.listOpenConflictsPage()).conflicts).toHaveLength(0);
-    // NOTHING was fetched to get here. The body the answer withheld is the
+    // Nothing was fetched to get here. The body the answer withheld is the
     // body this call submitted, so the write materialized from what the caller
     // already held.
     //
-    // MUTATION: drop the offer, or give each hydration its own reader -> a
-    // post-commit read appears, and with `failEveryBlobRead` set it takes the
-    // write down with it.
     expect(
       loopback.requests.filter(
         (request) => request.method === VERSIONED_METHOD.textReadBlob,
       ),
+      "drop the offer, or give each hydration its own reader -> a post-commit read appears, and with `failEveryBlobRead` set it takes the write down with it.",
     ).toHaveLength(0);
     await engine.stop();
   });
@@ -1471,9 +1457,8 @@ describe("mergeVersionIntoMain", () => {
     // sends no text for one. A fixture that capped it would refuse work the
     // daemon accepts, and no desktop test could prove this path at all.
     //
-    // MUTATION: cap the fixture's side-choice write -> this refuses.
     const incoming = `draft ✓ line\n`.repeat(12_000);
-    expect(Buffer.byteLength(incoming, "utf8")).toBeGreaterThan(
+    expect(Buffer.byteLength(incoming, "utf8"), "cap the fixture's side-choice write -> this refuses.").toBeGreaterThan(
       MAX_DESKTOP_CAPTURE_TEXT_BYTES,
     );
     const root = await tempRoot();
@@ -1510,11 +1495,9 @@ describe("mergeVersionIntoMain", () => {
     // encoder would count every backslash again and refuse this at about
     // 2.8 MiB — a limit the daemon does not have.
     //
-    // MUTATION: measure `jsonStringEncodedLength(JSON.stringify(params))` ->
-    // the fixture refuses a request the daemon accepts.
     const { root, engine, conflict } = await openDivergedTextConflict();
     const combined = "\n".repeat(3 * 1024 * 1024);
-    expect(jsonStringEncodedLength(combined)).toBeGreaterThan(
+    expect(jsonStringEncodedLength(combined), "measure `jsonStringEncodedLength(JSON.stringify(params))` -> the fixture refuses a request the daemon accepts.").toBeGreaterThan(
       RESOLVE_REQUEST_FRAME_BYTES / 2,
     );
     expect(jsonStringEncodedLength(combined)).toBeLessThan(RESOLVE_REQUEST_FRAME_BYTES);
@@ -1535,11 +1518,9 @@ describe("mergeVersionIntoMain", () => {
     // that measured the caller-shaped request would see room inside that gap
     // and accept work the shipping client cannot send.
     //
-    // The boundary body is calibrated from the request the fixture ACTUALLY
+    // The boundary body is calibrated from the request the fixture actually
     // received, so it does not depend on this test guessing the param shape.
     //
-    // MUTATION: measure `request` directly instead of the envelope it becomes
-    // -> the boundary resolution is accepted and this fails.
     const { root, engine, conflict, loopback } = await openDivergedTextConflict();
 
     // A first, plainly over-frame attempt: refused, and it records the exact
@@ -1633,7 +1614,7 @@ describe("mergeVersionIntoMain", () => {
     const firstOpen = (await engine.listOpenConflictsPage()).conflicts;
     expect(firstOpen).toHaveLength(1);
 
-    // User closed the conflict panel; merging again surfaces the SAME open
+    // User closed the conflict panel; merging again surfaces the same open
     // conflict — duplicates never pile up.
     const second = await engine.mergeVersionIntoMain(draftId);
     expect(second.conflictCount).toBe(1);
@@ -1681,7 +1662,7 @@ describe("restoreFileToBeforeMoment", () => {
   });
 });
 
-describe("switch scale coverage (PR 0M-4)", () => {
+describe("switch scale coverage", () => {
   it("switches a 200-file loopback fixture with 20 differing files", async () => {
     const root = await tempRoot();
     for (let index = 0; index < 200; index += 1) {

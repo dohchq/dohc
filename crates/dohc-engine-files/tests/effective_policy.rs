@@ -4,7 +4,7 @@
 //! The Rust module states in its own header that it ports `effectivePolicy.ts`.
 //! Without this test that claim is unchecked: glob validation, glob matching,
 //! TOML rule parsing, and effective-policy resolution could drift apart while
-//! the canonical gate stayed green (issue #477).
+//! the canonical gate stayed green.
 //!
 //! The fixture is REGENERATED from the TypeScript oracle by
 //! `tests/fixtures/gen-fixtures.mjs` and drift-checked by
@@ -200,7 +200,7 @@ fn generated_ts_glob_matching_matches_the_rust_port() {
     }
 }
 
-/// Both ports must collect the SAME errors in the SAME order: the first error is
+/// Both ports must collect the same errors in the same order: the first error is
 /// what a user's agent reads back from a rejected policy file.
 fn assert_parse_case<R, T>(
     case: &ParseCase<R>,

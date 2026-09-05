@@ -164,7 +164,7 @@ fn assert_refusal_code(result: Result<RehearsalOutcome, RehearsalError>, code: &
     }
 }
 
-/// The FIRST refusal on a fresh run may legitimately advance the state
+/// The first refusal on a fresh run may legitimately advance the state
 /// machine before refusing, but it must never persist a terminal state.
 #[track_caller]
 fn assert_first_refusal(
@@ -184,7 +184,7 @@ fn assert_first_refusal(
     }
 }
 
-/// A precondition refusal: the given error code AND a byte-identical state
+/// A precondition refusal: the given error code and a byte-identical state
 /// dir before and after — a refusal must never mutate rehearsal state.
 #[track_caller]
 fn assert_refused(
@@ -274,7 +274,7 @@ fn resume_with_lost_backup_is_refused_before_move_aside() {
 }
 
 // ---------------------------------------------------------------------------
-// The recovery dir must be outside the clone root on EVERY invocation.
+// The recovery dir must be outside the clone root on every invocation.
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -753,8 +753,8 @@ fn completed_initialize_without_marker_resumes_to_complete() {
     ));
     let paths = fixture.paths();
 
-    // The crash window AFTER initialize fully completed (fresh store created
-    // AND bound) but before the Initialized marker persisted: the retained
+    // The crash window after initialize fully completed (fresh store created
+    // and bound) but before the Initialized marker persisted: the retained
     // moved-aside store proves the window, so resume continues.
     let mut store = EngineStore::open(&paths.db, NOW_MS + 2).expect("fresh store");
     assert!(store.was_freshly_created());
@@ -1174,7 +1174,7 @@ fn stale_same_clone_db_at_moved_aside_resume_is_refused() {
     ));
     let paths = fixture.paths();
 
-    // The ORIGINAL store (bound to the same shadow token) is copied back over
+    // The original store (bound to the same shadow token) is copied back over
     // engine.db: the token check alone would accept it as "reset".
     std::fs::copy(moved_aside_path(&paths).join("engine.db"), &paths.db)
         .expect("copy stale store back");
@@ -1197,7 +1197,7 @@ fn stale_same_clone_db_at_initialized_resume_is_refused() {
     ));
     let paths = fixture.paths();
 
-    // The fresh store is replaced by the stale same-clone original AFTER the
+    // The fresh store is replaced by the stale same-clone original after the
     // Initialized marker: the shared token passes, the recorded reset
     // identity must not.
     std::fs::remove_file(&paths.db).expect("drop fresh store");
@@ -1223,7 +1223,7 @@ fn new_protected_sibling_after_backup_fails_capture() {
         RehearsalOutcome::Crashed(_)
     ));
 
-    // The protected sibling APPEARS before the capture resume: it has no
+    // The protected sibling appears before the capture resume: it has no
     // restore point, so Complete must be refused.
     std::fs::write(
         fixture.root.join(".dohc").join("agent-runs.json"),
@@ -1350,7 +1350,7 @@ fn capturing_resume_reruns_the_capture_proofs() {
         .expect("crashed record");
 
     // The crash window between Capturing and Complete, forged from the real
-    // Initialized record; then a user file mutates AFTER the capture check.
+    // Initialized record; then a user file mutates after the capture check.
     let mut history = crashed.history.clone();
     history.push(StableState::Capturing);
     let forged = StateRecord {
@@ -1450,7 +1450,7 @@ fn transient_backup_read_failure_during_capture_is_not_terminal() {
     ));
 
     // The directory-backup manifest is transiently unavailable (e.g. the
-    // recovery volume is being restored): capture must refuse WITHOUT
+    // recovery volume is being restored): capture must refuse without
     // persisting a terminal Failed.
     let manifest = fixture.recovery.join("cutover-files.manifest.json");
     let parked = fixture.recovery.join("parked-manifest.json");
@@ -1537,7 +1537,7 @@ fn malformed_directory_manifest_is_retryable_at_capture() {
     ));
 
     // The directory manifest is transiently malformed (torn restore of the
-    // recovery volume): refuse WITHOUT persisting a terminal Failed.
+    // recovery volume): refuse without persisting a terminal Failed.
     let manifest = fixture.recovery.join("cutover-files.manifest.json");
     let original = std::fs::read(&manifest).expect("manifest bytes");
     std::fs::write(&manifest, b"{torn").expect("malform manifest");
@@ -1565,7 +1565,7 @@ fn edited_backup_manifest_uuid_cannot_evade_stale_store_refusal() {
     ));
     let paths = fixture.paths();
 
-    // The stale ORIGINAL store is copied back over engine.db, and the DB
+    // The stale original store is copied back over engine.db, and the DB
     // backup manifest's engine_uuid field is edited (the DB checksum field is
     // untouched, so the pair still validates). The identity must come from
     // the backup DB bytes, so the stale copy is still refused.
@@ -1671,7 +1671,7 @@ fn foreign_db_backup_in_recovery_dir_is_refused() {
 
     let fixture = Fixture::new();
     // A valid backup pair already sits in the recovery dir — but it was taken
-    // from a DIFFERENT clone (bound to another shadow token).
+    // from a different clone (bound to another shadow token).
     let foreign_root = ScratchDir::new().expect("foreign root");
     let foreign_db = foreign_root.engine_db_path().expect("foreign db path");
     let mut foreign = EngineStore::open(&foreign_db, NOW_MS).expect("foreign store");
@@ -1742,7 +1742,7 @@ fn directory_backup_with_extras_or_empty_manifest_is_invalid() {
             .is_some()
     );
 
-    // An undeclared EMPTY directory invalidates it too.
+    // An undeclared empty directory invalidates it too.
     let extra_dir = fixture
         .recovery
         .join("cutover-files")

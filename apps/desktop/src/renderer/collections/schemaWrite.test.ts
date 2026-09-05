@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCollectionSchema } from "@dohc/workspace-contracts/collection-values";
 import { rewriteCollectionSchema } from "./schemaWrite";
 
-// The rewrite's whole contract: the mutation input comes from the SAME read
+// The rewrite's whole contract: the mutation input comes from the same read
 // that supplies expectedContentHash, so no other request can slip a stale
 // schema over a newer file, and a degraded parse never reaches the write.
 

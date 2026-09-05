@@ -223,10 +223,8 @@ describe("plugin agent drivers, through the real plugin process", () => {
         { id: "fixture-harness", displayName: "Fixture Harness" },
       ]);
 
-      // MUTATION (driver.probe never reaches the plugin): the probe answers
-      // "cannot read" instead of the harness's own version and login state.
       const probe = await onlyDriver(fixture).probe();
-      expect(probe.installed).toBe(true);
+      expect(probe.installed, "driver.probe never reaches the plugin: the probe answers 'cannot read' instead of the harness's own version and login state.").toBe(true);
       expect(probe.version).toBe("fixture-harness 1.0.0");
       expect(probe.auth.status).toBe("unauthenticated");
       expect(probe.models).toEqual([
@@ -271,10 +269,8 @@ describe("plugin agent drivers, through the real plugin process", () => {
         "the harness to report itself ready",
       );
 
-      // MUTATION (driver.prompt never reaches the plugin): no answer comes
-      // back and this times out.
       const { turnId } = await session.prompt({ text: "hello" });
-      expect(turnId).toBe("turn-1");
+      expect(turnId, "driver.prompt never reaches the plugin: no answer comes back and this times out.").toBe("turn-1");
 
       const answer = await until(
         () => textOf(events, "answer"),
@@ -314,9 +310,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
           status: "completed",
         },
       });
-      // MUTATION (the boundary passes unknown keys through): `raw` arrives
-      // with the harness's provider payload in it.
-      expect(JSON.stringify(item)).not.toContain("provider payload");
+      expect(JSON.stringify(item), "the boundary passes unknown keys through: `raw` arrives with the harness's provider payload in it.").not.toContain("provider payload");
 
       await session.dispose();
     },
@@ -371,9 +365,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
         "the permission request",
       );
       await new Promise((settle) => setTimeout(settle, 250));
-      // MUTATION (a null policy answers anyway): a resolution arrives that
-      // nobody decided.
-      expect(events.some((event) => event.kind === "permission-resolved")).toBe(false);
+      expect(events.some((event) => event.kind === "permission-resolved"), "a null policy answers anyway: a resolution arrives that nobody decided.").toBe(false);
 
       await session.answerPermission("permission-1", "reject_once");
       const resolved = await until(
@@ -401,9 +393,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
 
       const without = await startDriverPlugin("session-without-optional-members");
       const bare = await startSession(without);
-      // MUTATION (the host offers every optional member): setModel exists on
-      // a session that cannot serve it.
-      expect(bare.session.setModel).toBeUndefined();
+      expect(bare.session.setModel, "the host offers every optional member: setModel exists on a session that cannot serve it.").toBeUndefined();
       await bare.session.dispose();
     },
     60_000,
@@ -474,8 +464,6 @@ describe("plugin agent drivers, through the real plugin process", () => {
       // dohc stops the plugin. Nothing asks the driver to co-operate.
       await fixture.host.stop("driver-plugin");
 
-      // MUTATION (the spawn teardown skips the broker): the harness keeps
-      // running after the plugin that started it is gone.
       await until(
         () => (isAlive(cursor.pid) ? undefined : true),
         "the harness process to die with its plugin",
@@ -483,7 +471,7 @@ describe("plugin agent drivers, through the real plugin process", () => {
       const beforeQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
       await new Promise((settle) => setTimeout(settle, 400));
       const afterQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
-      expect(afterQuiet).toBe(beforeQuiet);
+      expect(afterQuiet, "the spawn teardown skips the broker: the harness keeps running after the plugin that started it is gone.").toBe(beforeQuiet);
 
       // The session hears about it as its own failure, not as silence.
       expect(events.at(-1)).toMatchObject({ kind: "error", fatal: true });
@@ -642,9 +630,7 @@ describe("the plugin driver registry", () => {
     ).toThrow(
       `This workspace already has ${MAX_WORKSPACE_PLUGIN_DRIVERS} of ${MAX_WORKSPACE_PLUGIN_DRIVERS} plugin agent drivers`,
     );
-    // MUTATION (the cap counts only the arriving plugin): the merged list
-    // grows past what the agent panel's contract accepts.
-    expect(drivers.list()).toHaveLength(MAX_WORKSPACE_PLUGIN_DRIVERS);
+    expect(drivers.list(), "the cap counts only the arriving plugin: the merged list grows past what the agent panel's contract accepts.").toHaveLength(MAX_WORKSPACE_PLUGIN_DRIVERS);
   });
 
   it("counts a re-registering plugin's own drivers once", () => {
@@ -680,9 +666,7 @@ describe("the plugin driver registry", () => {
       event: { kind: "nonsense" },
     });
 
-    // MUTATION (the boundary trusts the plugin's shape): an event dohc has
-    // no case for reaches the surfaces, and nothing says why.
-    expect(warnings).toHaveLength(1);
+    expect(warnings, "the boundary trusts the plugin's shape: an event dohc has no case for reaches the surfaces, and nothing says why.").toHaveLength(1);
     expect(warnings[0]).toContain("cannot read");
     expect(events).toEqual([]);
   });

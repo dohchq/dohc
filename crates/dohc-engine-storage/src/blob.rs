@@ -33,7 +33,7 @@ pub fn hex_sha256(bytes: &[u8]) -> String {
 /// "deduplicated" against. Bounded by [`MAX_BLOB_BYTES`]; over-cap input is a
 /// typed error, never a silent truncation. `conn` may be a plain connection or
 /// a `&Transaction` (which derefs to `&Connection`), so a caller can put a
-/// blob in the SAME transaction as the domain mutation that references it.
+/// blob in the same transaction as the domain mutation that references it.
 pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, StorageError> {
     if bytes.len() > MAX_BLOB_BYTES {
         return Err(StorageError::BlobTooLarge {
@@ -49,7 +49,7 @@ pub fn put_binary_blob(conn: &Connection, bytes: &[u8]) -> Result<String, Storag
 /// redundant full pass over the bytes is pure contention).
 ///
 /// The digest is the blob store's content address, so a wrong `sha256` would
-/// poison the store: only ever pass a digest THIS process computed (or
+/// poison the store: only ever pass a digest this process computed (or
 /// verified) from these exact bytes, never one received from outside — an
 /// untrusted claim goes through [`put_binary_blob_verified`]. Debug builds
 /// recompute and assert the digest, so the whole debug test fleet checks every

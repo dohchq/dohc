@@ -68,7 +68,7 @@ describe("buildChatCollaboration", () => {
 
 // ---------------------------------------------------------------------------
 // Workspace-switch no-repaint invariant (AGENTS.md, non-negotiable): a slow
-// presence response for workspace A must NEVER repaint workspace B after a
+// presence response for workspace A must never repaint workspace B after a
 // switch. Driven end-to-end through the IPC transport: rebuilding the
 // collaboration per workspace tears the old transport down (abort → cancel),
 // and a late-resolving poll for A is dropped.
@@ -189,7 +189,7 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
     const pollIdB = pollIdForWorkspace("ws-b");
     expect(pollIdB).not.toBe(pollIdA);
 
-    // A SLOW response for the old workspace A now arrives with a ghost peer…
+    // A slow response for the old workspace A now arrives with a ghost peer…
     act(() => {
       pollControls.get(pollIdA)?.resolve({
         ok: true,
@@ -200,7 +200,7 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
       });
     });
     await flush();
-    // …and it must NEVER repaint B: no ghost, still zero others.
+    // …and it must never repaint B: no ghost, still zero others.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 
@@ -224,9 +224,9 @@ describe("workspace-switch no-repaint (through the IPC transport)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Scope-switch no-repaint: the SAME workspace, but a conversation switches
+// Scope-switch no-repaint: the same workspace, but a conversation switches
 // scope (a joined/shared channel in a SHARE scope -> a plain channel in the
-// WORKSPACE scope). Both the transport AND the topic change, and the old
+// WORKSPACE scope). Both the transport and the topic change, and the old
 // scope's parked poll must be aborted and its late response dropped — the same
 // invariant as the ws->ws switch, mirrored for a scope change.
 // ---------------------------------------------------------------------------
@@ -292,8 +292,8 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     const sharePollId = pollIdForScopeKind("share");
     expect(pollControls.get(sharePollId)?.topic).toBe("wire-joined");
 
-    // Switch to a plain owned channel: WORKSPACE scope, on that channel's OWN
-    // topic — both the scope AND the topic change at once.
+    // Switch to a plain owned channel: WORKSPACE scope, on that channel's own
+    // topic — both the scope and the topic change at once.
     view.rerender(
       <ScopeHarness
         collaboration={collab}
@@ -308,11 +308,11 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
     expect(cancelledPollIds).toContain(sharePollId);
     const wsPollId = pollIdForScopeKind("workspace");
     expect(wsPollId).not.toBe(sharePollId);
-    // The new poll runs under the NEW scope AND the NEW topic.
+    // The new poll runs under the new scope and the new topic.
     expect(pollControls.get(wsPollId)?.scope.kind).toBe("workspace");
     expect(pollControls.get(wsPollId)?.topic).toBe("wire-owned");
 
-    // A slow response for the OLD share scope arrives with a ghost peer…
+    // A slow response for the old share scope arrives with a ghost peer…
     act(() => {
       pollControls.get(sharePollId)?.resolve({
         ok: true,
@@ -323,7 +323,7 @@ describe("scope-switch no-repaint (joined share -> plain workspace)", () => {
       });
     });
     await flush();
-    // …and it must NEVER repaint the workspace-scoped view.
+    // …and it must never repaint the workspace-scoped view.
     expect(screen.queryByLabelText("Ghost is here")).toBeNull();
     expect(screen.getByTestId("count").textContent).toBe("0");
 

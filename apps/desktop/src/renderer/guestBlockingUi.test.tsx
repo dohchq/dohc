@@ -153,14 +153,11 @@ describe("the guest-blocking UI signal", () => {
     // instead of racing it (the frame alone does not prove a bounds report).
     await waitFor(() => expect(lastVisible()).toBe(true));
 
-    // MUTATION (Overlay stops registering, or the shell goes back to listing
-    // its own flags): this confirm paints over the guest, the guest keeps
-    // compositing above it, and "Restore this file?" cannot be answered.
     await act(async () => {
       screen.getByText("Restore").click();
       await Promise.resolve();
     });
-    expect(screen.getByTestId("engine-diff-restore-confirm")).toBeTruthy();
+    expect(screen.getByTestId("engine-diff-restore-confirm"), "(Overlay stops registering, or the shell goes back to listing its own flags): this confirm paints over the guest, the guest keeps compositing above it, and 'Restore this file?' cannot be answered.").toBeTruthy();
     expect(lastVisible()).toBe(false);
 
     await act(async () => {
@@ -182,9 +179,6 @@ describe("the guest-blocking UI signal", () => {
     // instead of racing it (the frame alone does not prove a bounds report).
     await waitFor(() => expect(lastVisible()).toBe(true));
 
-    // MUTATION (drop the registration from AgentPermissionRequests): the card
-    // floats over the guest, its Allow button eats nothing, and the run stays
-    // blocked with no way to unblock it.
     await act(async () => {
       view.rerender(
         <Shell>
@@ -225,15 +219,11 @@ describe("the guest-blocking UI signal", () => {
     // instead of racing it (the frame alone does not prove a bounds report).
     await waitFor(() => expect(lastVisible()).toBe(true));
 
-    // MUTATION (drop the registration): the warning paints inside the guest's
-    // rectangle, the guest keeps compositing above it, and neither "Go back"
-    // nor "Close anyway" takes its click — the user cannot answer the dialog
-    // blocking their own exit.
     await act(async () => {
       window.dispatchEvent(new Event("beforeunload", { cancelable: true }));
       await Promise.resolve();
     });
-    expect(screen.getByTestId("recovery-close-warning")).toBeTruthy();
+    expect(screen.getByTestId("recovery-close-warning"), "drop the registration: the warning paints inside the guest's rectangle, the guest keeps compositing above it, and neither 'Go back' nor 'Close anyway' takes its click — the user cannot answer the dialog blocking their own exit.").toBeTruthy();
     expect(lastVisible()).toBe(false);
 
     await act(async () => {
@@ -296,14 +286,12 @@ describe("the guest-blocking UI signal", () => {
     }
     render(<Nested />);
 
-    // MUTATION (register the floating ask in the Escape stack too): the
-    // topmost overlay stops answering Escape while a card floats over it.
     await act(async () => {
       document.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
       );
       await Promise.resolve();
     });
-    expect(closed).toEqual(["inner"]);
+    expect(closed, "register the floating ask in the Escape stack too: the topmost overlay stops answering Escape while a card floats over it.").toEqual(["inner"]);
   });
 });

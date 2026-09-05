@@ -154,14 +154,16 @@ fn attachment_heading_triplet_is_all_or_none() {
     let mut malformed = attachment("object");
     malformed.heading_text = Some("Heading".to_owned());
     let result = start_with(&mut store, "thread", "message", vec![malformed], 20);
-    // MUTATION: allowing a partial heading triplet -> malformed section target is persisted.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-path",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-path",
+                ..
+            })
+        ),
+        "allowing a partial heading triplet -> malformed section target is persisted."
+    );
 }
 
 #[test]
@@ -187,21 +189,24 @@ fn attachment_targets_dedupe_before_insert_and_journal() {
             ))
             })
             .expect("counts");
-    // MUTATION: deduping only at INSERT (or not at all) -> a second replication op escapes.
-    assert_eq!((rows, ops), (1, 1));
+    assert_eq!(
+        (rows, ops),
+        (1, 1),
+        "deduping only at INSERT (or not at all) -> a second replication op escapes."
+    );
 }
 
 #[test]
 fn attachment_id_matches_whole_file_and_section_oracles() {
-    // MUTATION: adding separators to the legacy whole-file formula -> oracle hash differs.
     assert_eq!(
         attachment_id_for("message-1", "object-1", None, None),
-        "98d07738824d67bb04e6d2656fc621fb6dcc9ea57c266624f13432e236d8ddac"
+        "98d07738824d67bb04e6d2656fc621fb6dcc9ea57c266624f13432e236d8ddac",
+        "adding separators to the legacy whole-file formula -> oracle hash differs.",
     );
-    // MUTATION: omitting any NUL separator in the section formula -> oracle hash differs.
     assert_eq!(
         attachment_id_for("message-1", "object-1", Some("heading-anchor"), Some(3)),
-        "0a93bfb0192c909a1498046c107c6f12f8fbe46415b0a7b9c3be59cc9d6699d9"
+        "0a93bfb0192c909a1498046c107c6f12f8fbe46415b0a7b9c3be59cc9d6699d9",
+        "omitting any NUL separator in the section formula -> oracle hash differs.",
     );
 }
 
@@ -242,7 +247,6 @@ fn attachment_insert_and_replication_op_commit_together() {
             ))
         })
         .expect("counts");
-    // MUTATION: attachment/log writes escape the enclosing transaction -> partial durable state.
     assert_eq!(
         (attachments, ops),
         (0, 1),
@@ -279,8 +283,10 @@ fn attachment_read_hides_orphans_without_deleting_them() {
             )
         })
         .expect("retained");
-    // MUTATION: removing the message inner join -> an orphan leaks through the read.
-    assert!(visible.is_empty());
+    assert!(
+        visible.is_empty(),
+        "removing the message inner join -> an orphan leaks through the read."
+    );
     assert_eq!(retained, 1);
 }
 
@@ -295,13 +301,13 @@ fn file_mentions_prefer_object_id_over_path_hint() {
     let mentions = LinkedChatStore::new(&mut store)
         .list_file_mentions(WS, Some("wanted"), Some("notes/wanted.md"), None, 10)
         .expect("mentions");
-    // MUTATION: OR-combining object and path selectors -> the reused path broadens identity.
     assert_eq!(
         mentions
             .iter()
             .map(|mention| mention.message.message_id.as_str())
             .collect::<Vec<_>>(),
-        ["m1"]
+        ["m1"],
+        "OR-combining object and path selectors -> the reused path broadens identity.",
     );
 }
 
@@ -320,8 +326,11 @@ fn file_mentions_hydrate_all_message_attachments() {
     let mentions = LinkedChatStore::new(&mut store)
         .list_file_mentions(WS, Some("wanted"), None, None, 10)
         .expect("mentions");
-    // MUTATION: hydrating only the selected attachment -> Message.attachments is incomplete.
-    assert_eq!(mentions[0].message.attachments.len(), 2);
+    assert_eq!(
+        mentions[0].message.attachments.len(),
+        2,
+        "hydrating only the selected attachment -> Message.attachments is incomplete."
+    );
 }
 
 #[test]
@@ -349,14 +358,16 @@ fn file_mentions_fail_closed_on_missing_hydration_entity() {
         .expect("tamper");
     let result =
         LinkedChatStore::new(&mut store).list_file_mentions(WS, Some("object"), None, None, 10);
-    // MUTATION: best-effort channel hydration -> corrupt ownership is returned as valid data.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "state-corrupt",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "state-corrupt",
+                ..
+            })
+        ),
+        "best-effort channel hydration -> corrupt ownership is returned as valid data."
+    );
 }
 
 #[test]
@@ -374,14 +385,16 @@ fn file_thread_requires_exactly_one_linked_owner() {
         },
         &NO_FAULTS,
     );
-    // MUTATION: accepting a missing linked identity -> ownerless thread is persisted.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-path",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-path",
+                ..
+            })
+        ),
+        "accepting a missing linked identity -> ownerless thread is persisted."
+    );
 }
 
 #[test]
@@ -409,15 +422,16 @@ fn local_file_thread_create_refuses_newline_in_linked_object_id() {
             ))
         })
         .expect("counts");
-    // MUTATION: dropping the control-character gate mints a thread op that its
-    // own replicated apply contract refuses.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-path",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-path",
+                ..
+            })
+        ),
+        "dropping the control-character gate mints a thread op that its own replicated apply contract refuses."
+    );
     assert_eq!(counts, (0, 0));
 }
 
@@ -454,8 +468,11 @@ fn file_thread_create_search_and_replication_are_atomic() {
             ))
         })
         .expect("counts");
-    // MUTATION: splitting row/search/op across transactions -> any partial count becomes nonzero.
-    assert_eq!(counts, (0, 0, 0));
+    assert_eq!(
+        counts,
+        (0, 0, 0),
+        "splitting row/search/op across transactions -> any partial count becomes nonzero."
+    );
 }
 
 #[test]
@@ -491,8 +508,11 @@ fn file_thread_create_request_replay_is_exact() {
             )
         })
         .expect("ops");
-    // MUTATION: replay reruns creation -> timestamp/result changes or a second op is appended.
-    assert_eq!((first, ops), (second, 1));
+    assert_eq!(
+        (first, ops),
+        (second, 1),
+        "replay reruns creation -> timestamp/result changes or a second op is appended."
+    );
 }
 
 #[test]
@@ -525,11 +545,13 @@ fn attachment_idempotency_fingerprint_includes_canonical_targets() {
         },
         &NO_FAULTS,
     );
-    // MUTATION: omitting attachments from the request fingerprint -> mismatched replay succeeds.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::IdempotencyKeyReuseMismatch)
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::IdempotencyKeyReuseMismatch)
+        ),
+        "omitting attachments from the request fingerprint -> mismatched replay succeeds."
+    );
 }
 
 #[test]
@@ -557,17 +579,20 @@ fn send_message_returns_authoritative_attachments() {
             &NO_FAULTS,
         )
         .expect("send");
-    // MUTATION: returning the pre-insert message DTO -> authoritative attachments remain empty.
-    assert_eq!(message.attachments.len(), 1);
+    assert_eq!(
+        message.attachments.len(),
+        1,
+        "returning the pre-insert message DTO -> authoritative attachments remain empty."
+    );
 }
 
 #[test]
 fn mention_parser_matches_unicode_boundary_punctuation_and_case_oracle() {
     let body = "@YOU (@agent.ops_v2) [@you] ice@you.dev @unknown @K @ſ @agent...";
-    // MUTATION: ASCII-only case folding or an email boundary match changes this oracle vector.
     assert_eq!(
         parse_mention_handles(body),
-        vec!["you", "agent.ops_v2", "unknown", "k", "ſ", "agent"]
+        vec!["you", "agent.ops_v2", "unknown", "k", "ſ", "agent"],
+        "ASCII-only case folding or an email boundary match changes this oracle vector.",
     );
 }
 
@@ -575,11 +600,16 @@ fn mention_parser_matches_unicode_boundary_punctuation_and_case_oracle() {
 fn mention_parser_ignores_inline_and_fenced_code() {
     // The oracle keeps the first opener armed and ignores different-length
     // runs, so neither pair of double/single runs becomes an independent span.
-    // MUTATION: pairing each run with a later equal-length run hides @agent.
-    assert_eq!(parse_mention_handles("` x `` @agent `` y"), vec!["agent"]);
+    assert_eq!(
+        parse_mention_handles("` x `` @agent `` y"),
+        vec!["agent"],
+        "pairing each run with a later equal-length run hides @agent."
+    );
     assert_eq!(parse_mention_handles("`` x ` @agent ` y"), vec!["agent"]);
-    // MUTATION: ignoring the armed opener makes a matched outer span visible.
-    assert!(parse_mention_handles("` x `` @agent `` y `").is_empty());
+    assert!(
+        parse_mention_handles("` x `` @agent `` y `").is_empty(),
+        "ignoring the armed opener makes a matched outer span visible."
+    );
 
     let body = [
         "@you outside",
@@ -592,8 +622,11 @@ fn mention_parser_ignores_inline_and_fenced_code() {
         "~~~~",
     ]
     .join("\n");
-    // MUTATION: scanning code spans/fences adds three inert handles.
-    assert_eq!(parse_mention_handles(&body), vec!["you"]);
+    assert_eq!(
+        parse_mention_handles(&body),
+        vec!["you"],
+        "scanning code spans/fences adds three inert handles."
+    );
 }
 
 #[test]
@@ -616,8 +649,10 @@ fn mention_index_dedupes_handles_per_message() {
             conn.query_row("SELECT COUNT(*) FROM chat_mentions", [], |row| row.get(0))
         })
         .expect("count");
-    // MUTATION: omitting per-message dedupe leaves multiple logical index cells.
-    assert_eq!(count, 1);
+    assert_eq!(
+        count, 1,
+        "omitting per-message dedupe leaves multiple logical index cells."
+    );
 }
 
 #[test]
@@ -651,8 +686,11 @@ fn local_start_and_send_index_mentions_atomically() {
             stmt.query_map([], |row| row.get(0))?.collect()
         })
         .expect("handles");
-    // MUTATION: indexing only one local insertion path loses one handle.
-    assert_eq!(handles, vec!["one", "two"]);
+    assert_eq!(
+        handles,
+        vec!["one", "two"],
+        "indexing only one local insertion path loses one handle."
+    );
 
     let failed = LinkedChatStore::new(&mut store).send_message(
         &SendMessage {
@@ -682,8 +720,10 @@ fn local_start_and_send_index_mentions_atomically() {
             )
         })
         .expect("leaked count");
-    // MUTATION: indexing outside the message transaction leaks the failed send.
-    assert_eq!(leaked, 0);
+    assert_eq!(
+        leaked, 0,
+        "indexing outside the message transaction leaks the failed send."
+    );
 }
 
 #[test]
@@ -727,10 +767,10 @@ fn mention_backfill_covers_all_existing_rust_and_imported_messages() {
             stmt.query_map([], |row| row.get(0))?.collect()
         })
         .expect("handles");
-    // MUTATION: filtering the backfill by writer/origin misses one pre-existing row.
     assert_eq!(
         (inserted, handles),
-        (2, vec!["imported".to_owned(), "rust".to_owned()])
+        (2, vec!["imported".to_owned(), "rust".to_owned()]),
+        "filtering the backfill by writer/origin misses one pre-existing row.",
     );
 }
 
@@ -762,8 +802,11 @@ fn mention_backfill_is_idempotent() {
     let second = LinkedChatStore::new(&mut store)
         .backfill_mentions(WS, &NO_FAULTS)
         .expect("second");
-    // MUTATION: plain INSERT makes readiness fail on every reopen/retry.
-    assert_eq!((first, second), (1, 0));
+    assert_eq!(
+        (first, second),
+        (1, 0),
+        "plain INSERT makes readiness fail on every reopen/retry."
+    );
 }
 
 #[test]
@@ -797,8 +840,11 @@ fn mention_backfill_completes_before_first_read_and_scanner() {
     let dispatched = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, None, 50, &NO_FAULTS)
         .expect("scan");
-    // MUTATION: advancing the scan before readiness permanently skips this row.
-    assert_eq!((mentions.len(), dispatched), (1, 1));
+    assert_eq!(
+        (mentions.len(), dispatched),
+        (1, 1),
+        "advancing the scan before readiness permanently skips this row."
+    );
 }
 
 #[test]
@@ -826,8 +872,10 @@ fn mention_read_requires_present_message_and_thread() {
     let rows = LinkedChatStore::new(&mut store)
         .list_mentions_for_handle(WS, "agent", false, None, 10)
         .expect("list");
-    // MUTATION: dropping either inner join leaks a local derived orphan.
-    assert!(rows.is_empty());
+    assert!(
+        rows.is_empty(),
+        "dropping either inner join leaks a local derived orphan."
+    );
 }
 
 #[test]
@@ -870,12 +918,12 @@ fn mention_unread_filter_uses_agent_coordinate_tie_break() {
             10,
         )
         .expect("unread mentions");
-    // MUTATION: timestamp-only unread comparison hides the equal-time later id.
     assert_eq!(
         rows.iter()
             .map(|row| row.message_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["b-message"]
+        vec!["b-message"],
+        "timestamp-only unread comparison hides the equal-time later id.",
     );
 }
 
@@ -913,8 +961,10 @@ fn eligible_scan_overlaps_high_water_timestamp_by_one_ms() {
     let inserted = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, None, 40, &NO_FAULTS)
         .expect("overlap scan");
-    // MUTATION: scanning strictly after the prior maximum misses a late equal-time row.
-    assert_eq!(inserted, 1);
+    assert_eq!(
+        inserted, 1,
+        "scanning strictly after the prior maximum misses a late equal-time row."
+    );
 }
 
 #[test]
@@ -938,8 +988,11 @@ fn eligible_scan_ledger_pk_makes_overlap_idempotent() {
     let second = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, None, 40, &NO_FAULTS)
         .expect("retry");
-    // MUTATION: losing INSERT OR IGNORE makes overlap create or count a duplicate.
-    assert_eq!((first, second), (1, 0));
+    assert_eq!(
+        (first, second),
+        (1, 0),
+        "losing INSERT OR IGNORE makes overlap create or count a duplicate."
+    );
 }
 
 #[test]
@@ -974,8 +1027,10 @@ fn eligible_scan_accepts_agent_channel_or_indexed_agent_mention() {
     let inserted = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
         .expect("scan");
-    // MUTATION: requiring both predicates, or only one, changes the union cardinality.
-    assert_eq!(inserted, 2);
+    assert_eq!(
+        inserted, 2,
+        "requiring both predicates, or only one, changes the union cardinality."
+    );
 }
 
 #[test]
@@ -1007,8 +1062,10 @@ fn eligible_scan_rejects_agent_authored_and_cli_messages() {
     let inserted = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, None, 30, &NO_FAULTS)
         .expect("scan");
-    // MUTATION: removing either author/origin gate admits an invalid trigger.
-    assert_eq!(inserted, 0);
+    assert_eq!(
+        inserted, 0,
+        "removing either author/origin gate admits an invalid trigger."
+    );
 }
 
 #[test]
@@ -1043,8 +1100,11 @@ fn eligible_scan_enforces_verified_author_when_present() {
     let alice = LinkedChatStore::new(&mut store)
         .record_eligible_triggers(WS, Some("alice"), 40, &NO_FAULTS)
         .expect("alice overlap");
-    // MUTATION: trusting display name or requiring identity for NULL changes these counts.
-    assert_eq!((bob, alice), (1, 1));
+    assert_eq!(
+        (bob, alice),
+        (1, 1),
+        "trusting display name or requiring identity for NULL changes these counts."
+    );
 }
 
 #[test]
@@ -1074,8 +1134,11 @@ fn eligible_scan_advances_over_ineligible_messages() {
             )
         })
         .expect("cursor");
-    // MUTATION: MAX over eligible-only rows leaves the scanner pinned behind noise.
-    assert_eq!((inserted, cursor), (0, 123));
+    assert_eq!(
+        (inserted, cursor),
+        (0, 123),
+        "MAX over eligible-only rows leaves the scanner pinned behind noise."
+    );
 }
 
 #[test]
@@ -1105,8 +1168,11 @@ fn eligible_trigger_created_time_is_message_time_and_updated_time_is_scan_time()
             )
         })
         .expect("times");
-    // MUTATION: stamping both fields with scan time breaks pending ordering semantics.
-    assert_eq!(times, (123, 900));
+    assert_eq!(
+        times,
+        (123, 900),
+        "stamping both fields with scan time breaks pending ordering semantics."
+    );
 }
 
 #[test]
@@ -1147,6 +1213,9 @@ fn eligible_scan_rolls_back_ledger_and_cursor_together() {
             ))
         })
         .expect("counts");
-    // MUTATION: splitting ledger/cursor writes can strand exactly one durable half.
-    assert_eq!(counts, (0, 0));
+    assert_eq!(
+        counts,
+        (0, 0),
+        "splitting ledger/cursor writes can strand exactly one durable half."
+    );
 }

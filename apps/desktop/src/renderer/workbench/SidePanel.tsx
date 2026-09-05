@@ -35,7 +35,7 @@ export function SidePanel(props: {
       className="relative flex shrink-0 flex-col border-r border-line bg-panel-2"
       style={{ width }}
     >
-      {/* h-9: ONE header band height across panel, tab strip, and history
+      {/* h-9: one header band height across panel, tab strip, and history
           rail — all three bottom hairlines land on the same pixel row. */}
       <header className="flex h-9 shrink-0 items-center gap-1.5 border-b border-line px-3">
         <SectionLabel>{props.title}</SectionLabel>

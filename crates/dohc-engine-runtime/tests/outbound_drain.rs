@@ -3278,7 +3278,7 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
     assert_eq!(replication_journal_count(&db), 30);
 }
 
-// #646 PR3-1 — a share view's FILE writes. The share lane is the only one it
+// A share view's FILE writes. The share lane is the only one it
 // has, so `journal_moment_outbound_in_tx` reads
 // `workspace_journals_file_moments_in_tx` and every sibling journal keeps the
 // owner-lane answer.
@@ -3354,9 +3354,9 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
         ops.iter().any(|op| op.op_kind == "moment.append"
             && op.origin_id == "origin-share-view"
             && op.payload["momentId"] == "moment-share-view"),
-        "MUTATION: an enrolled share view must journal its file writes: {ops:?}",
+        "an enrolled share view must journal its file writes: {ops:?}",
     );
-    // Deliberately NOT asserting the absence of a `ydoc.update` here. This
+    // Deliberately not asserting the absence of a `ydoc.update` here. This
     // write opens no live session and claims no lineage, so none could be
     // journaled whatever the Y.Doc gate reads — the assertion would pass with
     // the gate widened and prove nothing. The lane boundary is pinned where it
@@ -3366,15 +3366,15 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     // in `crates/dohc-engine-sync/src/tests.rs`.
     assert!(
         ops.iter().all(|op| op.op_kind != "version.create"),
-        "MUTATION: a share view creates no versions, so none may journal: {ops:?}",
+        "a share view creates no versions, so none may journal: {ops:?}",
     );
 }
 
 /// The safety property behind the identity conjunct.
 ///
-/// `journal_local_payload_json_in_tx` REFUSES without a sync identity, and
+/// `journal_local_payload_json_in_tx` Refuses without a sync identity, and
 /// that refusal rolls the user's edit back with it. So a predicate that
-/// answered true for a share view WITHOUT an identity would not journal the
+/// answered true for a share view without an identity would not journal the
 /// write — it would destroy it. View and Comment share views are exactly that
 /// state.
 #[tokio::test]
@@ -3394,11 +3394,11 @@ async fn a_read_only_share_view_journals_nothing_and_its_write_still_commits() {
             CancellationToken::new(),
         )
         .await
-        .expect("MUTATION: a read-only share view's write must still commit");
+        .expect("a read-only share view's write must still commit");
     supervisor.close(&db).expect("close actor");
 
     assert!(
         local_ops(&db).is_empty(),
-        "MUTATION: a share view with no identity must journal nothing",
+        "a share view with no identity must journal nothing",
     );
 }

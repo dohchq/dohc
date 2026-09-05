@@ -130,7 +130,7 @@ export function JoinSyncedWorkspace(props: {
       <div className="flex items-center gap-2">
         {warning === null ? (
           // Gated while a join is in flight (the request cannot be
-          // cancelled) and GONE once the workspace exists (warning state):
+          // cancelled) and gone once the workspace exists (warning state):
           // the workspace was durably created, so "back as if nothing
           // happened" would strand an invisible registration — the only
           // honest affordance left is "Open workspace" below.

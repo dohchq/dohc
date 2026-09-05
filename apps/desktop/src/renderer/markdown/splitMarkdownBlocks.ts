@@ -1,7 +1,7 @@
 // Splits markdown source into block-safe chunks for incremental rendering
 // (Phase 16: a 250KB document parses ~575ms as one tree; the first visible
 // window parses in single-digit ms). Chunk boundaries sit only at blank lines
-// OUTSIDE fenced code, so each chunk parses to the same blocks it would inside
+// outside fenced code, so each chunk parses to the same blocks it would inside
 // the full document. Reference-style link definitions are collected doc-wide
 // and appended to every chunk (definitions render nothing), so links keep
 // resolving across chunk boundaries.

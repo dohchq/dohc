@@ -136,7 +136,7 @@ fn enumerate(
             let relative = path.strip_prefix(root).map_err(|_| RehearsalError::State)?;
             let relative = portable_path(relative)?;
             files.push((relative, path, metadata.len()));
-            // Enforced DURING the walk so an oversized clone fails closed
+            // Enforced during the walk so an oversized clone fails closed
             // before it can exhaust memory.
             if files.len() > MAX_FILES {
                 return Err(RehearsalError::Io {

@@ -60,13 +60,13 @@ export function sameShareViewProposalScope(
  *
  * 1. PRESENCE — the same question `sharedViewOf` asks before a write. A
  *    workspace with no share marker has no share at all.
- * 2. The pinned grant must READ BACK completely, through the same function
+ * 2. The pinned grant must read back completely, through the same function
  *    the pull uses, so this gate and the pull cannot disagree about what the
  *    share grants.
  * 3. The marker must name the share. A marker that lost its share id cannot
  *    address a route, and guessing one is not available.
  *
- * This is what LISTING and WITHDRAWING already-sent changes need, and
+ * This is what listing and withdrawing already-sent changes need, and
  * deliberately all they need. Submitting is a reversible state change, and a
  * reverse path a downgrade removes is not a reverse path — it would strand
  * work in front of a granter who may never answer it. The relay draws the
@@ -87,7 +87,7 @@ export function requireShareViewMembership(
 }
 
 /**
- * The same scope, for SENDING: the level must positively be `edit`, and the
+ * The same scope, for sending: the level must positively be `edit`, and the
  * share must not have ended.
  */
 export function requireShareViewProposalScope(
@@ -110,7 +110,7 @@ export function requireShareViewProposalScope(
  * Where one proposed change lands, for a surface that shows one path per row.
  *
  * A write states its after path; a delete states the path it removes. The
- * granter's CURRENT path is the last resort, for the case where the relay
+ * granter's current path is the last resort, for the case where the relay
  * described a change whose own two paths it could not state — a row worth
  * showing as damaged rather than dropping from the review.
  */

@@ -2,8 +2,8 @@
 //
 // Two coupled responsibilities in one plugin:
 //
-//   1. PILL RENDERING. Each `[[path]]` (or `\[\[path]]`) in the doc
-//      gets visually REPLACED by a styled chip showing the linked
+//   1. Pill RENDERING. Each `[[path]]` (or `\[\[path]]`) in the doc
+//      gets visually replaced by a styled chip showing the linked
 //      page's title with an icon prefix. The underlying text stays
 //      as literal markdown (no schema change) so a path rename can
 //      rewrite `[[path]]` directly in the file body and the body
@@ -15,7 +15,7 @@
 //      still in the document for the cursor + serialization; it
 //      just renders invisibly.
 //
-//   2. AUTOCOMPLETE STATE. When the user types `[[` and starts a
+//   2. Autocomplete STATE. When the user types `[[` and starts a
 //      query before the closing `]]`, the plugin notifies a
 //      callback with `{active, from, query}` describing the
 //      incomplete wikilink. A parent React component subscribes
@@ -85,7 +85,7 @@ export function isCodeBlock(node: PMNodeLike | null) {
   )
 }
 
-/** PURE: walk text nodes, return wikilink decoration ranges +
+/** Pure: walk text nodes, return wikilink decoration ranges +
  *  resolved targets. Offsets are absolute doc coordinates. */
 export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
   const ranges: WikilinkRange[] = []
@@ -109,7 +109,7 @@ export function computeWikilinkRanges(doc: PMDocLike): WikilinkRange[] {
   return ranges
 }
 
-/** PURE: detect an incomplete wikilink at the cursor. Looks at the
+/** Pure: detect an incomplete wikilink at the cursor. Looks at the
  *  text in the current text node UP TO the selection start; if the
  *  trailing characters match `\?[\?[query` (no closing `]]`), we
  *  emit the autocomplete state. */
@@ -125,11 +125,11 @@ export function detectAutocomplete(
     const nodeStart = pos
     const nodeEnd = pos + node.text.length
     if (cursorPos < nodeStart || cursorPos > nodeEnd) return
-    // Slice from node start up to cursor. Find the LAST `[[` (or
+    // Slice from node start up to cursor. Find the last `[[` (or
     // `\[\[`) in this slice without a closing `]]` between it and
     // the cursor.
     const before = node.text.slice(0, cursorPos - nodeStart)
-    // Reject if the slice contains `]]` AFTER the opener — that
+    // Reject if the slice contains `]]` After the opener — that
     // means the `[[` already closed (it's a complete wikilink).
     const re = /\\?\[\\?\[([^\]\n[]*)$/
     const m = re.exec(before)
@@ -155,7 +155,7 @@ function makePillElement(
   span.className =
     'dohc-wikilink-pill' + (resolved ? '' : ' dohc-wikilink-pill--broken')
   span.setAttribute('data-wikilink-target', target)
-  // The pill is NOT editable. PM treats contentEditable=false as
+  // The pill is not editable. PM treats contentEditable=false as
   // an atom — clicks land on the widget itself; cursor skips past.
   span.contentEditable = 'false'
 
@@ -204,9 +204,9 @@ function buildWikilinkDecorations(
   const decorations: Decoration[] = []
   for (const r of ranges) {
     // D4.8c — Obsidian-style live preview toggle. When the cursor
-    // is INSIDE the wikilink range, render it as SOURCE (the raw
+    // is inside the wikilink range, render it as SOURCE (the raw
     // [[path]] text styled lightly) so the user can see + edit
-    // the link in place. When the cursor is OUTSIDE, render the
+    // the link in place. When the cursor is outside, render the
     // pill (preview mode). Without this toggle, the cursor was
     // invisible whenever it landed inside the hidden-text region.
     const cursorInside = cursorPos >= r.from && cursorPos <= r.to
@@ -225,7 +225,7 @@ function buildWikilinkDecorations(
       Decoration.widget(
         r.from,
         () => makePillElement(r.target, display, resolved),
-        // side:-1 places the widget BEFORE the underlying text so
+        // side:-1 places the widget before the underlying text so
         // clicks land on the widget, not on the hidden text behind.
         { side: -1, ignoreSelection: true },
       ),
@@ -270,7 +270,7 @@ export function makeWikilinkPlugin(
         )
       },
       apply(tr, old, _oldState, newState) {
-        // D4.8c — rebuild on EITHER doc changes (new wikilinks
+        // D4.8c — rebuild on either doc changes (new wikilinks
         // appeared) OR selection changes (cursor moved into/out
         // of an existing wikilink range — toggle source/preview).
         if (!tr.docChanged && !tr.selectionSet) return old

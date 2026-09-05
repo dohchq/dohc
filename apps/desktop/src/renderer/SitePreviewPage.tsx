@@ -70,7 +70,7 @@ function availableModes(
   return modes;
 }
 
-// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring MUST
+// Reference-stable no-op for the 1s dev-log poll: an unchanged log ring must
 // keep the previous array so setState bails out instead of re-rendering the
 // page every second. Compare every entry: once the ring is at its cap the
 // length stays pinned, and multi-line chunks share one `at`, so length plus
@@ -284,7 +284,7 @@ export function SitePreviewPage(props: {
   }, [props.workspaceId, props.siteRoot]);
 
 
-  // getSitePackage intentionally returns the deepest CONTAINING site for a
+  // getSitePackage intentionally returns the deepest containing site for a
   // path (see requireExactSiteRoot's doc comment), so a stale tab whose own
   // root stopped being a detected site can still get back a detected
   // ANCESTOR above it — offering that ancestor's modes here would let this
@@ -360,7 +360,7 @@ export function SitePreviewPage(props: {
         effectivePreviewMode: preview?.mode ?? runningMode ?? null,
       });
       if (!isCurrent()) return;
-      // getSitePackage intentionally returns the deepest CONTAINING site for
+      // getSitePackage intentionally returns the deepest containing site for
       // a path (see requireExactSiteRoot's doc comment), so a stale tab whose
       // own root stopped being a detected site can still get back a detected
       // ANCESTOR above it. Sharing that ancestor would offer someone else's

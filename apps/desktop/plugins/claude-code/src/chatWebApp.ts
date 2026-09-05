@@ -150,7 +150,7 @@ function isLoopbackHost(header: string | string[] | undefined): boolean {
   return raw.split(":")[0].toLowerCase() === "127.0.0.1";
 }
 
-/** True for a mutating request carrying the per-start bearer token AND a
+/** True for a mutating request carrying the per-start bearer token and a
  * real `application/json` content type. Both together: a CORS-simple
  * request (a hostile page's cross-origin POST that skips preflight) can
  * only ever use a simple content type, so requiring the real one forces a
@@ -639,8 +639,8 @@ export function createChatWebApp(
       (error: unknown) => ({ ok: false as const, error }),
     );
     // A Stop that arrived while the probe was still in flight has no
-    // sessionStart yet for stop() to abandon on its own -- pendingPrompt
-    // .stopRequested is the only record of it, and this is the first point
+    // sessionStart yet for stop() to abandon on its own -- pendingPrompt.
+    // StopRequested is the only record of it, and this is the first point
     // after that await where message() can honor it, before this attempt
     // goes on to start a session nobody wants anymore. Nothing async
     // separates this line from the decision, a few lines down, to actually
@@ -725,7 +725,7 @@ export function createChatWebApp(
       };
       eventLog.push(reserved);
       trimLog();
-      // Drops the reservation and the rest of this orphaned turn's OWN
+      // Drops the reservation and the rest of this orphaned turn's own
       // events (a stray "running" state, deltas) -- while
       // pendingPrompt/turnActive gate every other /message, nothing but
       // this turn's own driver can have added anything past this point.
@@ -734,7 +734,7 @@ export function createChatWebApp(
       // (fatal error, or session-state closed/error) can already be
       // sitting in that same tail -- the session's own onEvent handler
       // published it independently of this call, before prompt() ever
-      // settled -- and it is the ONLY place a reconnect ever sees why the
+      // settled -- and it is the only place a reconnect ever sees why the
       // session ended, so it is kept, in its original position, not swept
       // away with the rest of the orphaned turn.
       const dropOrphanedReservation = (): void => {
@@ -1079,7 +1079,7 @@ export function createChatWebApp(
     // call itself eventually settles (which can be indefinite, against a
     // hung driver). message()'s own identity-checked finally
     // (`pendingPrompt === inFlight`) still no-ops safely if a request from
-    // AFTER the restart has already reclaimed the slot by the time the
+    // after the restart has already reclaimed the slot by the time the
     // old one settles.
     pendingPrompt = null;
     syncControls();

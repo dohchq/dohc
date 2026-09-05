@@ -11,7 +11,7 @@ import { createWorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createCaptureLiveStores } from "./workspaceEngineCaptureLiveStore";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 
-// The watch handle is the ONE collaborator faked here, because the window
+// The watch handle is the one collaborator faked here, because the window
 // under test is its timing: a batch that settles while the initial scan is
 // still running. That window is real — watchWorkspaceEvents arms its settle
 // timer from the first add/change event, while chokidar's `ready` waits for
@@ -60,7 +60,7 @@ describe("workspaceActivity startup ordering", () => {
             input: Parameters<typeof liveStore.listTextFileMetadata>[0],
           ) => {
             // Reconciliation's final phase, so its disk scan has already run.
-            // The batch's file lands HERE: a scan that saw live.md would
+            // The batch's file lands here: a scan that saw live.md would
             // reconcile it itself and the batch would dedupe to nothing, a
             // sequence that says nothing about which task reached the chain
             // first. Created after the scan, the path can only be written by

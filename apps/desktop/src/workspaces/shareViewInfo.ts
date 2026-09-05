@@ -13,7 +13,7 @@ import {
 export interface ShareViewSelector {
   paths: string[];
   versionId: string | null;
-  // The level the relay states for this share (#646). Required: it is pinned
+  // The level the relay states for this share. Required: it is pinned
   // with the rest of the selector and travels to the engine on every pull.
   access: ShareAccess;
 }
@@ -26,7 +26,7 @@ export interface ShareViewInfo {
   /**
    * The effective selector composed from the relay's stored scope and grant
    * access, or null when the share grants a chat channel and has no file
-   * selector at all. NEVER a softened stand-in for an unreadable response. See
+   * selector at all. Never a softened stand-in for an unreadable response. See
    * `ShareSelectorInvalidError`.
    */
   selector: ShareViewSelector | null;
@@ -71,7 +71,7 @@ async function shareFetch(
   return response;
 }
 
-// Strict, because this value BECOMES the pinned grant every later pull is
+// Strict, because this value becomes the pinned grant every later pull is
 // enforced against. `null` means "a chat-channel grant, no file selector";
 // anything unreadable throws rather than degrading into a wider grant.
 function parseSelector(
@@ -94,7 +94,7 @@ function parseSelector(
   if (!isShareablePathList(record.paths)) {
     throw new ShareSelectorInvalidError(shareId);
   }
-  // The version dimension is held to the relay's OWN rule, from the one
+  // The version dimension is held to the relay's own rule, from the one
   // place that states it. A version id the relay could not have issued is a
   // response this client cannot enforce, not a share that follows main:
   // reading it as `null` would silently downgrade a version share.
@@ -112,7 +112,7 @@ function parseSelector(
   if (record.paths.length === 0 && versionId === null) {
     throw new ShareSelectorInvalidError(shareId);
   }
-  // The level is held to the relay's OWN rule, from the same one place as the
+  // The level is held to the relay's own rule, from the same one place as the
   // version dimension. A missing or unrecognized level is refused, never read
   // as `view`: the narrowest guess is still a guess, and the record it would
   // pin outlives the response it came from.

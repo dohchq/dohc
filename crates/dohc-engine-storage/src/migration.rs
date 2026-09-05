@@ -18,7 +18,7 @@
 //!   checksum is skipped; a completed row with a *different* checksum fails
 //!   closed (tampered/incompatible ledger); a missing or incomplete row is
 //!   applied. A transactional migration commits its body, its `user_version`
-//!   stamp, its integrity result, and its ledger row in ONE transaction, so a
+//!   stamp, its integrity result, and its ledger row in one transaction, so a
 //!   crash mid-apply rolls back to the prior consistent state and restart
 //!   re-runs from the ledger. A partially-applied migration recovers correctly
 //!   on reopen — the point of the two named fault points.
@@ -314,7 +314,7 @@ CREATE INDEX idx_materialization_jobs_status ON materialization_jobs(status);
 /// lengths are stored; plaintext never enters any column. `STRICT` + `INTEGER`
 /// timestamps follow the R04 baseline convention (the TS `REAL` columns are an
 /// engine-internal detail; cross-engine parity rides the AEAD ciphertext, not
-/// the SQLite column affinity — see `LANGUAGE_SEMANTICS_MATRIX.md` §10.5).
+/// the SQLite column affinity).
 const V1_SECRETS_DDL: &str = "\
 CREATE TABLE secret_files (
     workspace_id     TEXT    NOT NULL,
@@ -377,7 +377,7 @@ pub(crate) const SECRETS_MIGRATION_ID: &str = "v1-secrets";
 /// marker with its head pointers, the content-addressed durable update log, and
 /// the folded full-state snapshots — whose logical shapes match the TS engine's
 /// `ydoc_docs` / `ydoc_updates` / `ydoc_snapshots` (`engineDbSchema.ts`
-/// `ENGINE_YDOC_DDL`). Update and snapshot BYTES are content-addressed into the
+/// `ENGINE_YDOC_DDL`). Update and snapshot bytes are content-addressed into the
 /// existing `binary_blobs` table; these tables carry only the sha references and
 /// the head pointers. `STRICT` + `INTEGER` timestamps follow the R04 baseline
 /// convention (the TS `REAL` columns are an engine-internal detail; the CRDT
@@ -484,7 +484,7 @@ pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
 /// day-one Rust store equals a fully-upgraded TS store.
 ///
 /// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention. TS stores
-/// SOME chat timestamps as `REAL` (`chat_threads`/`chat_channels`/read-state/
+/// some chat timestamps as `REAL` (`chat_threads`/`chat_channels`/read-state/
 /// reactions/follows/feed/bookmarks) and some as `INTEGER`
 /// (`chat_decisions`/`chat_mentions`/`chat_dispatch_*`/`agent_run_records`); the
 /// affinity is an engine-internal detail (semantics matrix §2.4). Cross-engine
@@ -498,11 +498,10 @@ pub(crate) const YDOC_MIGRATION_ID: &str = "v1-ydoc";
 /// `chat_bookmark_outbox.projection_state`, `chat_dispatch_ledger.state`) so a
 /// corrupt/forward value can never be stored and later silently misread.
 ///
-/// The trailing block is the deferred-chat-parent repair (BEHAVIOR_DELTA §D2 /
-/// `engineDbSchema.ts:779-837`): it moves replicated replies whose parent has
+/// The trailing block is the deferred-chat-parent repair: it moves replicated replies whose parent has
 /// not arrived into `chat_pending_message_parents` and NULLs cross-thread/self
 /// parent links. Because this migration CREATEs `chat_messages` empty in the
-/// same transaction immediately before, the repair is ALWAYS a no-op on a Rust
+/// same transaction immediately before, the repair is always a no-op on a Rust
 /// store (and a foreign/TS `engine.db` never reaches this runner — the v1-vs-v2
 /// fingerprint fence in `schema.rs` rejects it before any migration runs). It is
 /// folded in as a keyed, checksum-gated record of the exact TS repair SQL — the
@@ -751,7 +750,7 @@ CREATE INDEX idx_chat_bookmark_outbox_pending
     ON chat_bookmark_outbox(workspace_id, projection_state, updated_at_ms, bookmark_id);
 
 -- Durable agent-dispatch ledger + private run records (single-writer
--- replacement for the desktop's raw second connection, STATE_OWNERSHIP DELETED).
+-- replacement for the desktop's raw second connection).
 CREATE TABLE chat_dispatch_ledger (
     workspace_id       TEXT    NOT NULL,
     trigger_message_id TEXT    NOT NULL,
@@ -812,7 +811,7 @@ CREATE TABLE chat_dispatch_pause (
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
 
--- Deferred-chat-parent repair (BEHAVIOR_DELTA §D2). No-op on a fresh store;
+-- Deferred-chat-parent repair. No-op on a fresh store;
 -- keyed to the `v1-chats` ledger row so it runs exactly once per database.
 INSERT OR IGNORE INTO chat_pending_message_parents (
     workspace_id, child_message_id, thread_id, parent_message_id
@@ -859,7 +858,7 @@ pub(crate) const CHATS_MIGRATION_ID: &str = "v1-chats";
 /// `-DSQLITE_ENABLE_FTS5`; the trigram tokenizer ships since SQLite 3.34 and the
 /// bundle is 3.50.2) — no extra `rusqlite` feature is required, and the
 /// migration's own `quick_check` gate proves the CREATE VIRTUAL TABLE succeeded
-/// on THIS build before the ledger row is written. A build lacking FTS5 would
+/// on this build before the ledger row is written. A build lacking FTS5 would
 /// fail this migration closed rather than silently ship a searchless store.
 ///
 /// `engine_search_index_state.indexed_at_ms` is `INTEGER` here where TS uses
@@ -956,7 +955,7 @@ WHERE m.before_present = 2 AND m.before_latest_moment_id IS NULL;
 /// The `id` of the R05 moment-preimage-link migration.
 pub(crate) const MOMENT_BEFORE_LINK_MIGRATION_ID: &str = "v1-moment-before-link";
 
-/// Ordinal 6 (R10). R10's durable replication substrate. Cursor advancement is
+/// Ordinal 6. R10's durable replication substrate. Cursor advancement is
 /// deliberately separate from imported-op application: `replication_log` plus
 /// `replication_peers` commit with the domain mutation, while relay/share
 /// cursors advance only after downstream materialization succeeds. Appended
@@ -1038,7 +1037,7 @@ CREATE TABLE share_view_cursors (
 /// The `id` of the R10 sync migration.
 pub(crate) const SYNC_MIGRATION_ID: &str = "v1-sync";
 
-/// Ordinal 7 (R06 compare/merge/conflicts shard). Adds durable conflict objects
+/// Ordinal 7. Adds durable conflict objects
 /// plus the materialization operation needed by merge and resolution deletes.
 /// `STRICT` + `INTEGER` timestamps follow the R04 baseline convention; TS
 /// `REAL` affinity is internal because conflict rows are never cross-engine
@@ -1219,7 +1218,7 @@ pub(crate) const BINARY_CONFLICT_SIDES_MIGRATION_ID: &str = "v1-binary-conflict-
 /// those copies also re-validate historical references and fail closed by
 /// rolling the whole migration back when a referent is missing.
 ///
-/// INVARIANT: the fail-closed FK re-validation depends on the CALLER having set
+/// INVARIANT: the fail-closed FK re-validation depends on the caller having set
 /// `PRAGMA foreign_keys=ON` before the runner opens the migration transaction
 /// (`schema.rs:181`), not on this migration. The migration deliberately does not
 /// toggle the pragma itself — a `PRAGMA foreign_keys` inside the active
@@ -1372,7 +1371,7 @@ pub(crate) const PATH_ALIASES_OBJECT_INDEX_MIGRATION_ID: &str = "v1-path-aliases
 
 /// Deferred replicated Y.Doc coordinates: rows acked while a live lease held
 /// the doc, pending replay into `ydoc_updates`. The imported replication log
-/// keeps the payload; this table records WHICH coordinates are actually
+/// keeps the payload; this table records which coordinates are actually
 /// pending, so drains replay only genuinely-deferred rows (never the whole
 /// history, which after compaction would re-append non-dedupable updates).
 const V1_YDOC_DEFERRED_DDL: &str = "CREATE TABLE ydoc_deferred_updates (
@@ -1419,11 +1418,11 @@ pub(crate) const ENGINE_REQUEST_KIND_MIGRATION_ID: &str = "v1-engine-request-kin
 /// stamps itself, replacing the `metadata_origin = 'local-file'` test three
 /// capture decisions used to key on. `local-file` is a member of the closed
 /// origin set an RPC caller or a replication peer may supply, so that test both
-/// let a remote writer claim ownership it never had AND denied it to an
+/// let a remote writer claim ownership it never had and denied it to an
 /// API-written secret the materializer really did put on disk.
 ///
 /// The backfill uses the same disk truth the writers now stamp: a write moment
-/// owns its plaintext exactly when its materialization job COMPLETED — either
+/// owns its plaintext exactly when its materialization job completed — either
 /// because capture recorded the completed marker for plaintext it read off the
 /// workspace file, or because the materializer wrote that file. That
 /// reclassifies existing rows instead of carrying the origin-string rule
@@ -1884,7 +1883,7 @@ CREATE INDEX idx_materialization_jobs_workspace_path_status_generation
 
 pub(crate) const MATERIALIZATION_WORKSPACE_MIGRATION_ID: &str = "v1-materialization-workspace";
 
-/// #325: the local bootstrap wrote the main version's display name as 'main'
+/// The local bootstrap wrote the main version's display name as 'main'
 /// while the TS engine and the replication applier write 'Main'. New stores
 /// are fixed in `dohc-engine-domain`; this renames rows bootstrapped by older
 /// builds. Scoped to `kind = 'main'` so user-named versions — even one
@@ -2714,8 +2713,8 @@ ALTER TABLE ydoc_recovery_decisions_v35 RENAME TO ydoc_recovery_decisions;
 
 pub(crate) const YDOC_SCENE_RECOVERY_KIND_MIGRATION_ID: &str = "v1-ydoc-scene-recovery-kind";
 
-/// Ordinal 36. Which share views may drain a FILE MOMENT through their share
-/// (#646 PR3-1). A row here is written only by `record_share_view_identity`,
+/// Ordinal 36. Which share views may drain a FILE MOMENT through their share.
+/// A row here is written only by `record_share_view_identity`,
 /// and only for an `edit` grant, in the same transaction as the identity it
 /// records — so the row's existence means both "this is a share view that may
 /// send file changes" and "it has the identity such a journal append needs".
@@ -2845,9 +2844,9 @@ SELECT d.workspace_id, d.version_id, d.object_id,
 pub(crate) const YDOC_RELAY_ARBITRATION_MIGRATION_ID: &str = "v1-ydoc-relay-arbitration";
 
 /// Ordinal 37. A recipient of an edit-level file share submits its own changes
-/// to the granter as a proposal (#646 PR3a), and a submit must know where the
+/// to the granter as a proposal, and a submit must know where the
 /// last one stopped reading the local journal. That position is its own fact:
-/// `shared_channel_push_state` records what a share has PUSHED, and a proposal
+/// `shared_channel_push_state` records what a share has pushed, and a proposal
 /// pushes nothing until the recipient decides to submit.
 const V1_SHARE_PROPOSAL_PUSH_STATE_DDL: &str = "\
 CREATE TABLE share_proposal_push_state (
@@ -2860,7 +2859,7 @@ CREATE TABLE share_proposal_push_state (
 
 pub(crate) const SHARE_PROPOSAL_PUSH_STATE_MIGRATION_ID: &str = "v1-share-proposal-push-state";
 
-/// Ordinal 38. The captured head a lineage's seed update imported (#815).
+/// Ordinal 38. The captured head a lineage's seed update imported.
 /// Set only when the client's declared seed append commits; a lineage whose
 /// entire durable history is that one seed, with the recorded source still
 /// the captured head, settles and prunes without writing the file.
@@ -3137,7 +3136,7 @@ CREATE INDEX idx_automation_claims_state
 pub(crate) const AUTOMATION_CLAIMS_MIGRATION_ID: &str = "v1-automation-claims";
 
 /// Ordinal 47. The record-event decision a drained parked `ydoc.update`
-/// committed, persisted on its still-parked coordinate (#1004). The drain
+/// committed, persisted on its still-parked coordinate. The drain
 /// derives a parked update's collection record facts inside the same
 /// transaction that commits the update and its field history; if the drain's
 /// final projection then fails, those facts would otherwise vanish — the
@@ -3274,7 +3273,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        // Ordinal 16 is taken by v1-replication-pending-resolves (#242).
+        // Ordinal 16 is taken by v1-replication-pending-resolves.
         // Schema shards serialize through this list; this one appends at 17.
         ordinal: 17,
         id: CHAT_PENDING_REPLICATION_MIGRATION_ID,
@@ -3283,7 +3282,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[
         sets_user_version: None,
     },
     Migration {
-        // Ordinal 17 is taken by v1-chat-pending-replication (#244). Schema
+        // Ordinal 17 is taken by v1-chat-pending-replication. Schema
         // shards serialize through this list; this one appends at 18.
         ordinal: 18,
         id: MOMENT_METADATA_MIGRATION_ID,
@@ -3591,7 +3590,7 @@ pub(crate) fn run_migrations(
     ctx: &MigrationContext,
     faults: &dyn FaultInjector,
 ) -> Result<MigrationOutcome, StorageError> {
-    // Fail closed on a malformed migration list BEFORE touching the store.
+    // Fail closed on a malformed migration list before touching the store.
     validate_migration_order(migrations)?;
 
     let mut newly_applied = 0u32;
@@ -3614,7 +3613,7 @@ pub(crate) fn run_migrations(
             }
             LedgerStatus::Incomplete { checksum } => {
                 // A started-but-unfinished migration whose DDL changed between
-                // builds must NOT be re-run: the new body would apply over the
+                // builds must not be re-run: the new body would apply over the
                 // partial effects of the old one. Fail closed; only a
                 // checksum-matching incomplete row is resumed.
                 if checksum != migration_checksum(migration.sql) {
@@ -3735,7 +3734,7 @@ fn apply_non_transactional(
     )
     .map_err(StorageError::migration)?;
 
-    // The body MUST be idempotent (e.g. `CREATE TABLE IF NOT EXISTS`) because a
+    // The body must be idempotent (e.g. `CREATE TABLE IF NOT EXISTS`) because a
     // crash-and-resume re-runs it against a partially-applied store.
     conn.execute_batch(migration.sql)
         .map_err(StorageError::migration)?;
@@ -3763,7 +3762,7 @@ fn apply_non_transactional(
 mod tests {
     use super::*;
 
-    /// The REAL ledger is well-formed. `validate_migration_order` runs before
+    /// The real ledger is well-formed. `validate_migration_order` runs before
     /// every migration, so a malformed list already fails closed at runtime —
     /// but nothing asserted it against `BASELINE_MIGRATIONS` itself, so a
     /// duplicate ordinal would first be seen by whoever opened a store.
@@ -3774,7 +3773,7 @@ mod tests {
     #[test]
     fn the_real_migration_ledger_has_unique_increasing_ordinals_and_ids() {
         validate_migration_order(BASELINE_MIGRATIONS).expect(
-            "MUTATION: the shipped migration list must have strictly increasing ordinals \
+            "the shipped migration list must have strictly increasing ordinals \
              and unique ids, or a migration never applies and DDL runs out of order",
         );
     }
@@ -3840,7 +3839,7 @@ mod tests {
     /// Count of frozen baseline migrations.
     const BASELINE_COUNT: u32 = BASELINE_MIGRATIONS.len() as u32;
 
-    /// One past the LAST ordinal, which is what a synthetic test migration must
+    /// One past the last ordinal, which is what a synthetic test migration must
     /// use. Ordinals only have to strictly increase — they are not required to
     /// be contiguous — so `BASELINE_COUNT` stops equalling "next free ordinal"
     /// the moment a shard lands a gap (as one did, appending at 16 because 15
@@ -4086,7 +4085,7 @@ mod tests {
         let path = dir.join("main-version-name.db");
         let ctx = MigrationContext::current(1_400);
         let mut conn = open_bare(&path);
-        // Everything BEFORE the rename, so these rows model a store
+        // Everything before the rename, so these rows model a store
         // bootstrapped by a pre-#325 build.
         let migration_index = BASELINE_MIGRATIONS
             .iter()
@@ -4314,8 +4313,8 @@ mod tests {
             )
             .expect("scene recovery migration ledger row");
         assert_eq!(scene_recovery_migration, 1);
-        // The upgrade runs every LATER migration too: ordinal 38 adds
-        // `seed_source_sha256` (#815), which a pre-38 row gains as NULL. The
+        // The upgrade runs every later migration too: ordinal 38 adds
+        // `seed_source_sha256`, which a pre-38 row gains as NULL. The
         // scene migration itself must still preserve every pre-existing value.
         let docs_expected: Vec<Vec<(String, rusqlite::types::Value)>> = docs_before
             .into_iter()
@@ -4500,7 +4499,7 @@ mod tests {
         let path = dir.join("capture-ownership.db");
         let ctx = MigrationContext::current(1_300);
         let mut conn = open_bare(&path);
-        // Everything BEFORE ordinal 14, so these rows model an existing store
+        // Everything before ordinal 14, so these rows model an existing store
         // at the exact point where the ownership backfill first runs.
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..14], &ctx, &NoFaults)
             .expect("pre-ownership migrations");
@@ -4580,7 +4579,7 @@ mod tests {
         let path = dir.join("secret-fork-base-timestamp.db");
         let ctx = MigrationContext::current(1_500);
         let mut conn = open_bare(&path);
-        // Everything BEFORE ordinal 26, so this row models a fork base an
+        // Everything before ordinal 26, so this row models a fork base an
         // existing store already holds, in its pre-migration shape (no
         // `updated_at_ms` column yet).
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..26], &ctx, &NoFaults)
@@ -4769,7 +4768,7 @@ mod tests {
         let path = dir.join("provenance.db");
         let ctx = MigrationContext::current(1_400);
         let mut conn = open_bare(&path);
-        // Everything BEFORE the provenance migration, so the rows below are
+        // Everything before the provenance migration, so the rows below are
         // exactly what an existing store holds when it upgrades.
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..15], &ctx, &NoFaults)
             .expect("pre-provenance migrations");
@@ -4845,23 +4844,24 @@ mod tests {
         };
         let some = |v: &str| Some(v.to_owned());
 
-        // MUTATION: drop the `before_present = 2` guard -> a first write gains a
-        // payload-before it never had.
-        assert_eq!(row("m1"), (None, None, None, some("a.md")));
+        assert_eq!(
+            row("m1"),
+            (None, None, None, some("a.md")),
+            "drop the `before_present = 2` guard -> a first write gains a payload-before it never had."
+        );
         assert_eq!(
             row("m2"),
             (some("a.md"), some("text"), some("sha-one"), some("a.md"))
         );
-        // MUTATION: backfill the rename's payload-before path from `path` -> the
-        // source path is lost and this reads "b.md".
         assert_eq!(
             row("m3"),
-            (some("a.md"), some("text"), some("sha-two"), some("b.md"))
+            (some("a.md"), some("text"), some("sha-two"), some("b.md")),
+            "backfill the rename's payload-before path from `path` -> the source path is lost and this reads 'b.md'.",
         );
-        // A binary preimage's digest belongs in the BINARY column.
+        // A binary preimage's digest belongs in the binary column.
         assert_eq!(
             row("m4"),
-            // The BINARY preimage digest lands in the SHARED column, tagged by
+            // The binary preimage digest lands in the shared column, tagged by
             // kind — the oracle's shape.
             (
                 some("c.bin"),
@@ -4875,7 +4875,7 @@ mod tests {
         // digest with no path — the oracle keys presence on the path alone.
         assert_eq!(row("m5"), (None, None, None, some("d.md")));
 
-        // The payload-AFTER pair backfills to ONE digest selected by kind.
+        // The payload-AFTER pair backfills to one digest selected by kind.
         let after = |moment_id: &str| -> (Option<String>, Option<String>) {
             conn.query_row(
                 "SELECT payload_after_content_kind, payload_after_blob_sha256 \
@@ -4973,8 +4973,6 @@ mod tests {
                 },
             )
             .expect("backfilled rollback preimage");
-        // MUTATION: remove the fork-base fallback from the ordinal-19 copier
-        // and the shipped identity can no longer be reconstructed.
         assert_eq!(
             preimage,
             (
@@ -4985,7 +4983,8 @@ mod tests {
                 Some("sync".to_owned()),
                 Some("shipped summary".to_owned()),
                 Some("shipped correlation".to_owned()),
-            )
+            ),
+            "remove the fork-base fallback from the ordinal-19 copier and the shipped identity can no longer be reconstructed.",
         );
     }
 
@@ -5028,25 +5027,38 @@ mod tests {
                 )
                 .expect("legacy kind")
             };
-            // MUTATION: remove the negative-sequence classification -> fails.
-            assert_eq!(kind("ydoc").as_deref(), Some("ydoc"));
-            // MUTATION: classify by positive result_seq before JSON shape -> fails.
-            assert_eq!(kind("merge").as_deref(), Some("merge"));
-            // MUTATION: guess that zero belongs to chats or versioning -> fails.
-            assert_eq!(kind("chat-or-versioned-noop"), None);
-            // MUTATION: guess that -1 belongs to chats or Y.Doc -> fails.
-            assert_eq!(kind("chat-or-first-ydoc"), None);
+            assert_eq!(
+                kind("ydoc").as_deref(),
+                Some("ydoc"),
+                "remove the negative-sequence classification -> fails."
+            );
+            assert_eq!(
+                kind("merge").as_deref(),
+                Some("merge"),
+                "classify by positive result_seq before JSON shape -> fails."
+            );
+            assert_eq!(
+                kind("chat-or-versioned-noop"),
+                None,
+                "guess that zero belongs to chats or versioning -> fails."
+            );
+            assert_eq!(
+                kind("chat-or-first-ydoc"),
+                None,
+                "guess that -1 belongs to chats or Y.Doc -> fails."
+            );
             kind("positive")
         };
 
-        // MUTATION: ignore the documents-table discriminator -> this becomes
-        // `versioned` and can later evict an ambiguous compound ledger row.
-        assert_eq!(migrate("with-documents", true), None);
-        // MUTATION: invert the zero-documents branch -> the provably versioned
-        // positive row remains unclassified.
+        assert_eq!(
+            migrate("with-documents", true),
+            None,
+            "ignore the documents-table discriminator -> this becomes `versioned` and can later evict an ambiguous compound ledger row."
+        );
         assert_eq!(
             migrate("without-documents", false).as_deref(),
-            Some("versioned")
+            Some("versioned"),
+            "invert the zero-documents branch -> the provably versioned positive row remains unclassified.",
         );
     }
 
@@ -6473,12 +6485,12 @@ mod tests {
 
         run_migrations(&mut conn, &BASELINE_MIGRATIONS[..9], &ctx, &NoFaults)
             .expect("migrate through ordinal 8");
-        // Row 'a-full': EVERY v8 column carries a distinct non-default value —
+        // Row 'a-full': every v8 column carries a distinct non-default value —
         // including resolution = '' (the NULL-vs-empty trap) and non-default
         // *_content_kind — so any dropped, swapped, or re-defaulted column in
         // the rebuild's INSERT..SELECT shows up as a value mismatch.
         // Row 'b-null-kinds': all three *_content_kind explicitly NULL; the
-        // copy must NOT re-default them to 'text'.
+        // copy must not re-default them to 'text'.
         // Row 'c-defaults': omits the *_content_kind columns, relying on the
         // v8 DEFAULT 'text'.
         conn.execute_batch(
@@ -7105,7 +7117,7 @@ mod tests {
         .expect("binary moment with NULL after_blob_sha256 must be accepted post-v10");
     }
 
-    /// PROBE: the NEW binary_sha256 -> binary_blobs FKs are actually ENFORCED
+    /// PROBE: the new binary_sha256 -> binary_blobs FKs are actually enforced
     /// (a dangling reference is rejected) and a valid one is accepted.
     #[test]
     fn probe_v10_binary_sha256_fk_is_enforced() {
@@ -7170,7 +7182,7 @@ mod tests {
 
     /// PROBE: foreign_key_check is clean after the whole rebuild, and the
     /// migrated schema is byte-identical to a freshly created v10 store for
-    /// all three tables (column defs + indexes + STRICT).
+    /// all three tables (column defs + indexes + strict).
     #[test]
     fn probe_v10_schema_matches_fresh_and_fk_check_clean() {
         // Migrated store: through v9, seed a row, then to v10.
@@ -7274,7 +7286,7 @@ mod tests {
                 "{table} index list must match fresh"
             );
 
-            // STRICT flag must match (sqlite_schema.sql retains the keyword).
+            // Strict flag must match (sqlite_schema.sql retains the keyword).
             let sql: String = migrated
                 .query_row(
                     "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
@@ -7400,7 +7412,7 @@ mod tests {
             let mut conn = open_bare(&path);
             let out = run_migrations(&mut conn, &migrations, &ctx, &faults).expect("run");
             assert_eq!(out, MigrationOutcome::Crashed);
-            // Baseline committed; probe migration did NOT run.
+            // Baseline committed; probe migration did not run.
             let probe: Option<i64> = conn
                 .query_row(
                     "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -7430,7 +7442,7 @@ mod tests {
         // sync migration (6), conflicts migration (7), shadow-clone migration
         // (8), binary-conflict-sides migration (9), binary-head migration (10),
         // reverse alias index migration (11), deferred Y.Doc coordinates
-        // migration (12), request-ledger kind migration (13), AND the probe
+        // migration (12), request-ledger kind migration (13), and the probe
         // (14).
         let mut conn = open_bare(&path);
         let out = run_migrations(&mut conn, &migrations, &ctx, &NoFaults).expect("resume");
@@ -7457,7 +7469,7 @@ mod tests {
         let ctx = MigrationContext::current(3_000);
 
         // Ordinals [0, 2, 1]: a dev appended out of order. Must fail closed
-        // BEFORE applying anything (no partial out-of-order DDL).
+        // before applying anything (no partial out-of-order DDL).
         let a = Migration {
             ordinal: 1,
             id: "a",
@@ -7550,7 +7562,7 @@ mod tests {
             assert_eq!(out, MigrationOutcome::Crashed);
         }
 
-        // A later build DEFINES the same migration id with different DDL. The
+        // A later build defines the same migration id with different DDL. The
         // incomplete row's checksum no longer matches: re-running would apply
         // the new body over the old body's partial effects, so fail closed.
         let mut changed = BASELINE_MIGRATIONS.to_vec();

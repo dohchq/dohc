@@ -9,7 +9,7 @@ import { isSingletonEditorTabPath } from "./workbenchState";
 
 // Real implementations, spied: every TreeRow render names its row through
 // leafOf, so its call count shows which rows actually re-rendered (the
-// chatFileMentions precedent). The fixtures keep every OTHER leafOf caller
+// chatFileMentions precedent). The fixtures keep every other leafOf caller
 // quiet — no open editors, no pins, no inline edit, no delete dialog — so a
 // delta is TreeRow renders and nothing else.
 vi.mock("./path-tree", { spy: true });

@@ -400,7 +400,7 @@ export function SlashCommandMenu({
     <div
       className="dohc-slash-menu"
       data-placement={state.placement}
-      // Above the cursor the menu anchors by its BOTTOM edge: filtering
+      // Above the cursor the menu anchors by its bottom edge: filtering
       // changes its content height, and a top-anchored box (whose top assumes
       // the full maxHeight) would leap up and down with every keystroke.
       style={

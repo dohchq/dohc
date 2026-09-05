@@ -47,7 +47,7 @@ describe("mergeMarkdown (safe auto-merge)", () => {
   });
 
   it("conflicts when a local replacement shares a base offset with a remote insertion", () => {
-    // Local REPLACES B at base offset 1; remote INSERTS a new line at the same
+    // Local replaces B at base offset 1; remote inserts a new line at the same
     // offset 1. Applying both blindly lets the stable sort reset the cursor
     // backwards and reintroduce the stale base line B — data loss. Must conflict.
     const result = mergeMarkdown({

@@ -5,13 +5,13 @@ import * as Y from "yjs";
 import type { EngineDocSaveState } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
-// WS-G2-C-2 (CodeRabbit fix): the engine Y.Doc is the PRIMARY editing surface,
+// WS-G2-C-2: the engine Y.Doc is the PRIMARY editing surface,
 // so its in-flight/settling save state must reach the SHELL TAB's dirty dot via
 // onSaveStateChange — not just the header. The local saveState never leaves
 // "saved" on the engine path, so before the fix the tab dot was dead while the
 // engine was settling.
 //
-// The real hook publishes save-state transitions through its OWN React state
+// The real hook publishes save-state transitions through its own React state
 // (useEngineDoc's publish()), re-rendering FileInspector from inside — a memo
 // on the component cannot elide it. The mock must deliver the same way, so it
 // is a subscribable store read via useSyncExternalStore, not a mutable module
@@ -124,7 +124,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   });
 
   it("names the blocker when another program holds the file", async () => {
-    // #554: a file-locked settle is transient by contract — the engine keeps
+    // A file-locked settle is transient by contract — the engine keeps
     // the write pending and retries by itself. The chip must name the blocker
     // and say the edits are safe, not advise another edit.
     engineDocStore.set({ saveState: "file-locked" });
@@ -138,7 +138,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
     expect(header.textContent).toBe("File in use");
     // The copy claims the durable Y.Doc state, never a completed History
     // entry: with typing continuing under a held lock, the newest edits are
-    // journaled but not yet settled into a moment (#595 round 5).
+    // journaled but not yet settled into a moment.
     expect(header.getAttribute("title")).toContain("Another program has this file open");
     expect(header.getAttribute("title")).toContain("dohc has your edits saved");
     expect(header.getAttribute("title")).not.toContain("history");
@@ -150,7 +150,7 @@ describe("engine save-state lifts to the shell tab dirty dot", () => {
   });
 
   it("names the outside edit when the file changed on disk", async () => {
-    // #338: the settle committed, but the FILE holds an edit made outside dohc
+    // The settle committed, but the FILE holds an edit made outside dohc
     // that dohc refuses to overwrite. "Couldn't save" would be wrong twice —
     // the document IS saved, and another edit cannot help.
     engineDocStore.set({ saveState: "changed-on-disk" });

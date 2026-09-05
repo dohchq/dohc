@@ -176,7 +176,7 @@ export function isFileLockedRefusal(error: unknown): boolean {
   return refusalMessageOf(error, "OVERLOADED") === "file-locked";
 }
 
-// The engine's OWN database was busy and its bounded retry budget ran out
+// The engine's own database was busy and its bounded retry budget ran out
 // (`StorageError::FileLocked`, which the store documents as intact and the
 // operation as retryable). Not the artifact lock above and not the user's
 // file: nothing outside dohc holds anything, and there is nothing a person
@@ -192,7 +192,7 @@ export function isEngineStoreBusyRefusal(error: unknown): boolean {
 // the artifact, and dohc's own writers meeting inside SQLite. MEMBERSHIP of
 // that class lives here, at the protocol boundary, because three layers ask
 // the question — the settle ladder that re-arms, the journal write that must
-// be resent, and the session that must NOT be quarantined for one.
+// be resent, and the session that must not be quarantined for one.
 export function isTransientEngineRefusal(error: unknown): boolean {
   return isFileLockedRefusal(error) || isEngineStoreBusyRefusal(error);
 }
@@ -210,7 +210,7 @@ export function engineStoreRefusalOf(error: unknown): EngineStoreRefusal | null 
 }
 
 // Remote edits drained under this session's lease while this settle was in
-// flight, so the doc is BEHIND the durable lineage and the engine refuses
+// flight, so the doc is behind the durable lineage and the engine refuses
 // rather than materializing content this editor never saw
 // (`DomainError::InvalidInput { reason: "ydoc-remote-updates-pending" }`).
 //

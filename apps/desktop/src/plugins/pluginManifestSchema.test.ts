@@ -672,7 +672,7 @@ describe("DohcPluginManifest", () => {
     // parses anything, so a manifest this large is refused by size with the
     // cap named. Measured here so the note above the schema states the real
     // relationship instead of an arithmetic sum that drifts every time a
-    // field is added. Do NOT "fix" this by raising the reader's cap.
+    // field is added. Do not "fix" this by raising the reader's cap.
     const fill = (length: number) => "a".repeat(length);
     const largest = {
       version: 1,

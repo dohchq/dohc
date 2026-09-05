@@ -3,12 +3,11 @@ import { Fragment, useMemo, useState } from "react";
 import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { chatAuthorLabel } from "./LinkedChats";
 
-// Engine history timeline (PR 0M-5, workspace-engine alpha). Flagged
-// workspaces read ENGINE moments instead of legacy change sets; this renders
-// them with their real summaries ("Saved latest edits", "Merged version X
-// into Main", "Reconciled offline edits", ...) and groups a multi-file pass
-// (reconcile, switch, merge, restore) into one expandable item via its
-// correlationId. Product vocabulary only — no git terms.
+// Engine history timeline. Renders engine moments with their summaries
+// ("Saved latest edits", "Merged version X into Main", "Reconciled offline
+// edits", ...) and groups a multi-file pass (reconcile, switch, merge,
+// restore) into one expandable item via its correlationId. Product
+// vocabulary only, no git terms.
 
 interface EngineHistoryGroup {
   key: string;
@@ -61,8 +60,8 @@ export function engineOriginLabel(origin: EngineMomentRecord["origin"]): string 
   }
 }
 
-// PR 0N-1: a moment authored by a dohc-tracked agent run displays as
-// "<User Name>'s agent" (the SAME formatting rule the chat rail uses via
+// A moment authored by a dohc-tracked agent run displays as
+// "<User Name>'s agent" (the same formatting rule the chat rail uses via
 // chatAuthorLabel); everything else keeps its actor-neutral origin label.
 export function engineMomentSourceLabel(
   moment: Pick<EngineMomentRecord, "origin" | "agentAuthorName">,
@@ -85,7 +84,7 @@ export function groupAgentAuthorName(
     : undefined;
 }
 
-// Groups CONSECUTIVE moments that share a correlationId (the list is newest
+// Groups consecutive moments that share a correlationId (the list is newest
 // first, and one pass records its per-file moments contiguously on the
 // capture chain). Moments without a correlationId stay singletons.
 export function groupEngineMoments(
@@ -186,7 +185,7 @@ function MomentRow(props: {
     >
       <span className="flex min-w-0 items-start gap-2">
         {moment.protected ? (
-          // Secret-backed file moment (PR 08): the lock is the affordance —
+          // Secret-backed file moment: the lock is the affordance —
           // the row is metadata-only and its page shows no contents.
           <Lock
             size={12}
@@ -343,8 +342,8 @@ export function EngineHistoryView(props: {
     [groups, normalizedQuery],
   );
 
-  // A KNOWN page with no moments. The caller renders this view only when it
-  // HAS a page (#593): "No changes yet" states something about the workspace,
+  // A known page with no moments. The caller renders this view only when it
+  // has a page: "No changes yet" states something about the workspace,
   // and a read still in flight or a read that failed may not state it.
   if (props.moments.length === 0) {
     return (

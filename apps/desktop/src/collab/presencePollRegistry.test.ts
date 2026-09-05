@@ -7,7 +7,7 @@ const WINDOW_A = 1;
 const WINDOW_B = 2;
 
 describe("createPresencePollRegistry", () => {
-  it("aborts a poll only for its OWNING sender (cross-window cancel is a no-op)", () => {
+  it("aborts a poll only for its owning sender (cross-window cancel is a no-op)", () => {
     const registry = createPresencePollRegistry();
     const a = registry.begin(WINDOW_A, "p", "key-a");
 
@@ -27,7 +27,7 @@ describe("createPresencePollRegistry", () => {
     const b = registry.begin(WINDOW_B, "p", "key-b");
 
     // A finishing (release) must not remove B's controller: each handle only
-    // ever deletes its OWN entry, so B stays cancellable.
+    // ever deletes its own entry, so B stays cancellable.
     a.release();
     expect(b.signal.aborted).toBe(false);
     registry.cancel(WINDOW_B, "p");
@@ -67,7 +67,7 @@ describe("createPresencePollRegistry", () => {
 
   it("aborts a poll cancelled during setup (before its body runs)", () => {
     const registry = createPresencePollRegistry();
-    // Models the handler registering the controller BEFORE awaiting scope
+    // Models the handler registering the controller before awaiting scope
     // resolution: a cancel arriving during that await must abort promptly.
     const handle = registry.begin(WINDOW_A, "p", "key-a");
     registry.cancel(WINDOW_A, "p");

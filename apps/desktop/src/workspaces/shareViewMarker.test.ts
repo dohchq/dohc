@@ -10,7 +10,7 @@ import {
 // tested as the security predicate it is, not as a formatting helper.
 
 describe("share-view marker presence", () => {
-  it("treats only an ABSENT field as an ordinary workspace", () => {
+  it("treats only an absent field as an ordinary workspace", () => {
     expect(shareViewIsPresent(undefined)).toBe(false);
   });
 
@@ -21,7 +21,7 @@ describe("share-view marker presence", () => {
     for (const raw of [null, "", 0, false, "nonsense", 7, [], {}]) {
       expect(
         shareViewIsPresent(raw),
-        `MUTATION: shareView ${JSON.stringify(raw)} must stay refused for writes`,
+        `shareView ${JSON.stringify(raw)} must stay refused for writes`,
       ).toBe(true);
     }
   });

@@ -16,8 +16,8 @@ import { recordedShareSelector } from "./shareViewRecords";
 // So presence and readability are separate questions, and only presence
 // decides the restriction:
 //
-//   ABSENT  -> an ordinary workspace.
-//   PRESENT -> a share view, restricted, whether or not it can be read.
+//   Absent -> an ordinary workspace.
+//   Present -> a share view, restricted, whether or not it can be read.
 //
 // A stored `null` is PRESENT. It is a share-view field that lost its value,
 // not a workspace that never had one, and `?? null` used to read the two as

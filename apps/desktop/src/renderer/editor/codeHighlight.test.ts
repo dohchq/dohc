@@ -143,7 +143,7 @@ function stateWithCodeBlock(language: string, text: string): EditorState {
 }
 
 // `Decoration.inline(from, to, attrs)` renders `attrs` straight into the DOM
-// but does NOT expose it back through the public `.spec` getter (`.spec` is
+// but does not expose it back through the public `.spec` getter (`.spec` is
 // a separate, unset 4th constructor argument) — so decoration content isn't
 // introspectable from outside ProseMirror/view internals. `highlightSpans`
 // already covers class-name correctness (above); these plugin-level checks

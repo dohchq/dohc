@@ -14,7 +14,7 @@ import {
 // has been — reading a field off a row that turned out to be `null` is how
 // one bad row used to take the whole workspace list with it.
 //
-// Damage is contained, and contained DIFFERENTLY for the two share kinds,
+// Damage is contained, and contained differently for the two share kinds,
 // because they fail closed in opposite directions:
 //
 //   A share VIEW marker is RESTRICTIVE. It is what tells the shell this
@@ -24,7 +24,7 @@ import {
 //   keeps its marker, loses only its level, and carries `damaged` so the
 //   shell can say what happened.
 //
-//   A share MOUNT row carries no RESTRICTION — read-only enforcement for
+//   A share MOUNT row carries no restriction — read-only enforcement for
 //   `shared-with-me/` is path-based and independent of these records — but it
 //   does carry MANAGEABILITY. The mount's folder is on disk, and the row is
 //   what the Remove action is addressed by, so an unreadable row is kept and
@@ -43,7 +43,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// Every field carried into a DAMAGED shape has to satisfy the schema that
+// Every field carried into a damaged shape has to satisfy the schema that
 // shape is parsed against. Twice now, a value the schema refused turned the
 // fallback into the failure it was written to prevent — so damaged shapes are
 // built from bounded reads, never from raw ones.
@@ -66,7 +66,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
   const rawShareView: unknown = entry.shareView;
   let shareView: Record<string, unknown> | undefined;
   if (shareViewIsPresent(rawShareView)) {
-    // PRESENT, so restricted — readable or not. A non-object value here is
+    // Present, so restricted — readable or not. A non-object value here is
     // still a share view that lost its marker, never an ordinary workspace.
     const raw = isRecord(rawShareView) ? rawShareView : {};
     // AUTHORITATIVE fields only. `damaged` means "this grant cannot be read",
@@ -100,7 +100,7 @@ export function workspaceSummaryFor(entry: RegistryEntry): WorkspaceSummary {
         .map((row: unknown) => {
           if (!isRecord(row)) return row;
           // Same split as the share view. A mount's authoritative fields are
-          // its identity and its grant — and its LABEL is part of that
+          // its identity and its grant — and its label is part of that
           // identity: it names the folder on disk, and a label this app would
           // never materialize through cannot be trusted to address one.
           const shareId = boundedString(row.shareId, 1, 200);

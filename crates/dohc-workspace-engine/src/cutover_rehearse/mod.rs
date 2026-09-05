@@ -61,7 +61,7 @@ impl Paths {
 }
 
 /// The per-root advisory lock file. Held exclusively for a whole rehearsal
-/// invocation, so every traversal must SKIP it — reading a locked range fails
+/// invocation, so every traversal must skip it — reading a locked range fails
 /// on Windows, and its bytes are never part of the workspace.
 pub(crate) const ROOT_LOCK_FILE: &str = "CUTOVER_REHEARSAL_LOCK";
 
@@ -82,20 +82,20 @@ pub(crate) fn fsync_dir(dir: &std::path::Path) -> Result<(), RehearsalError> {
 }
 
 /// NOTE on the residual check-then-use window: these gates validate by
-/// PATHNAME and callers then re-open/hash/rename by pathname, so a concurrent
+/// pathname and callers then re-open/hash/rename by pathname, so a concurrent
 /// replacement between check and use remains possible. That residue is
 /// bounded by the per-root `CUTOVER_REHEARSAL_LOCK` (rehearsals are
 /// serialized) and the shadow-rehearsal threat model (trusted local machine,
-/// clone-marked fixture — an attacker racing writes INSIDE the fixture
+/// clone-marked fixture — an attacker racing writes inside the fixture
 /// mid-run is out of scope). The DB opens are additionally atomic via
 /// `SQLITE_OPEN_NOFOLLOW`; full fd-based atomicity for every operation is
 /// deferred to the real signed `--cutover` tier, where it matters.
 ///
-/// The alias-safe file gate: `Ok(Some(metadata))` for a REAL regular file —
+/// The alias-safe file gate: `Ok(Some(metadata))` for a real regular file —
 /// not a symlink, not a special file, and (Unix) not hard-linked — `Ok(None)`
 /// when absent, `Err(code)` for an alias/special file or a metadata error.
 /// Every attacker-influenceable file the rehearsal opens, hashes, copies, or
-/// renames must pass through this BEFORE the operation.
+/// renames must pass through this before the operation.
 pub(crate) fn require_real_file(
     path: &std::path::Path,
     code: &'static str,
@@ -116,7 +116,7 @@ pub(crate) fn require_real_file(
     }
 }
 
-/// The alias-safe directory gate: `Ok(true)` for a REAL directory (never a
+/// The alias-safe directory gate: `Ok(true)` for a real directory (never a
 /// symlink/junction), `Ok(false)` when absent, `Err(code)` otherwise.
 pub(crate) fn require_real_dir(
     path: &std::path::Path,
@@ -164,7 +164,7 @@ pub(crate) fn open_sqlite_read_only_nofollow(
     .map_err(|_| RehearsalError::Io { code })
 }
 
-/// Flush a just-published file's CONTENTS (rename durability alone is not
+/// Flush a just-published file's contents (rename durability alone is not
 /// enough when the writer never synced the bytes).
 pub(crate) fn fsync_file(path: &std::path::Path, code: &'static str) -> Result<(), RehearsalError> {
     let file = std::fs::OpenOptions::new()

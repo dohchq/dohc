@@ -126,7 +126,7 @@ fn inject_row(store: &mut EngineStore, key: &DocKey, bytes: &[u8], seq: i64) {
     committed(outcome);
 }
 
-/// Prune every CRDT row and rewind the head to 0 WITHOUT touching the cache —
+/// Prune every CRDT row and rewind the head to 0 without touching the cache —
 /// the raw shape of a local-only prune whose reset hook was skipped.
 fn raw_prune(store: &mut EngineStore, key: &DocKey) {
     let outcome = store
@@ -206,8 +206,6 @@ fn local_appends_install_then_hit_and_advance_the_cache() {
 
 #[test]
 fn frontier_fold_retires_a_live_identity_covered_by_delete() {
-    // MUTATION: drop identity retirement from the fold and the frontier no
-    // longer equals the store re-encode after the delete.
     let (mut ts, key) = setup("frontier-retire-identity", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "ab");
@@ -294,8 +292,6 @@ fn frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
 
 #[test]
 fn frontier_fold_retires_a_deleted_scalar_interior() {
-    // MUTATION: drop unsafe-interior retirement and the retained interior clock
-    // survives after the scalar itself is deleted.
     let (mut ts, key) = setup("frontier-retire-interior", Regime::LocalOnly);
     let producer = Ydoc::wire();
     let insert = producer.plaintext_insert(0, "😀");
@@ -473,7 +469,7 @@ fn tuple_probe_rejects_a_hostile_candidate_after_raw_sql_injection() {
 
 #[test]
 fn tuple_probe_detects_a_replaced_head_row() {
-    // Same head seq, same claim fields, DIFFERENT head-row bytes: only the
+    // Same head seq, same claim fields, different head-row bytes: only the
     // head-row sha probe can see this. Delete that probe and (in debug) the
     // differential check panics this test; the probe keeps it a plain miss.
     let (mut ts, key) = setup("cache-t1-head-row", Regime::LocalOnly);
@@ -535,8 +531,8 @@ fn tuple_probe_detects_a_replaced_head_row() {
 #[test]
 #[should_panic(expected = "CACHE-VALID")]
 fn differential_check_catches_a_prune_aba_that_matches_the_tuple() {
-    // A prune + re-append that reaches the SAME head coordinates with the
-    // SAME head bytes over DIFFERENT earlier history is invisible to the
+    // A prune + re-append that reaches the same head coordinates with the
+    // same head bytes over different earlier history is invisible to the
     // tuple — exactly why every prune path must call the remove hook. With
     // the hook deliberately skipped, the debug differential check is the
     // last line and must fire.
@@ -767,7 +763,7 @@ fn a_pruned_lineage_with_the_reset_hook_rejects_a_hostile_re_encode() {
 
 #[test]
 fn a_guarded_error_after_the_gate_evicts_only_the_mutated_scratch() {
-    // (a) The guarded closure fails AFTER the gate passed: the transaction
+    // (a) The guarded closure fails after the gate passed: the transaction
     // rolls back. The writer doc/frontier must not advance, while the scratch
     // that already applied the candidate must be evicted.
     let (mut ts, key) = setup("cache-t3-guarded-err", Regime::LocalOnly);
@@ -1170,12 +1166,12 @@ fn the_byte_budget_charges_the_persistent_scratch() {
     );
 }
 
-// ---- forced-close containment (#851) ----------------------------------------
+// ---- forced-close containment ----------------------------------------
 
 #[test]
 fn a_warmed_cache_does_not_change_forced_close_corruption_detection() {
     // Forced compaction (threshold 0 — the call close_session makes on a
-    // replicated lineage) must ALWAYS fully reconstruct: close is the audit
+    // replicated lineage) must always fully reconstruct: close is the audit
     // point where blob corruption surfaces. A warm cache entry for the same
     // lineage must not change that verdict.
     let (mut ts, key) = setup("cache-forced-close-pin", Regime::Replicated);

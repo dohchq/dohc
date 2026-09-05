@@ -74,8 +74,8 @@ function assertSharedWithMeFolder(existing: Stats): void {
   }
 }
 
-// Rolls a FAILED join back to an empty folder (0P-C gate fix). The join
-// handler verified the folder was EMPTY before creating anything, so every
+// Rolls a failed join back to an empty folder (0P-C gate fix). The join
+// handler verified the folder was empty before creating anything, so every
 // entry inside it was produced by this join attempt — identity scaffolding
 // (.dohc, shared-with-me), the engine store, and any partially materialized
 // pull output (all of which still lives on the relay). Removing them restores
@@ -94,13 +94,13 @@ export async function resetFailedJoinFolder(rootPath: string): Promise<void> {
 export async function createWorkspaceFolder(input: {
   rootPath: string;
   kind: Extract<WorkspaceKind, "personal" | "shared">;
-  // Join flow (0P-C): a fresh folder adopting a SYNCED workspace's identity
+  // Join flow (0P-C): a fresh folder adopting a synced workspace's identity
   // gets the sync id instead of a random one, so the local engine store and
   // the relay bucket agree from the first pull. Ignored when the folder is
   // already a dohc workspace (an existing manifest's identity always wins —
   // silently rebinding it would sever history and sync).
   workspaceId?: string;
-  // "join" creates identity/metadata ONLY — no starter user files (0P-C gate
+  // "join" creates identity/metadata only — no starter user files (0P-C gate
   // fix). The joined workspace's real files arrive with the first pull;
   // seeding .context/me.md here would let reconciliation capture boilerplate
   // that then pushes into the remote workspace or conflicts with its own

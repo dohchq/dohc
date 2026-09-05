@@ -29,7 +29,7 @@ function pushUpdate(nodeView: NodeView, node: ProseMirrorNode): void {
 // open, a concurrent REMOTE tex change advances the node's attrs (update()),
 // and a naive commit-on-blur would overwrite that remote edit with the stale
 // field value even though the local user typed nothing. The commit must gate
-// on whether the FIELD actually diverged from its edit-start baseline.
+// on whether the field actually diverged from its edit-start baseline.
 
 type MarkupCall = { pos: number; attrs: { tex: string } };
 
@@ -74,7 +74,7 @@ function sourceField(nodeView: NodeView): HTMLInputElement {
 }
 
 describe("makeMathNodeView — concurrent remote edits while the source field is open", () => {
-  it("does NOT overwrite a remote tex change when the user made no local edit", () => {
+  it("does not overwrite a remote tex change when the user made no local edit", () => {
     const { nodeView, dispatched } = makeNodeView("a");
 
     // User opens the source editor (no typing).

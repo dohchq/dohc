@@ -686,9 +686,9 @@ type TurnIntoDropdownPosition = {
 
 /**
  * Flip side + viewport-fitted max height for the bubble menu's turn-into
- * dropdown. Unlike the other editor popovers this one stays ANCHORED to its
- * trigger with position: absolute — the bubble menu is appended inside
- * .dohc-editor-surface, whose container-type makes it the containing block
+ * dropdown. Unlike the other editor popovers this one stays anchored to its
+ * trigger with position: absolute — the bubble menu is appended inside.
+ * Dohc-editor-surface, whose container-type makes it the containing block
  * for fixed descendants, so position: fixed viewport coordinates would be
  * re-based onto the pane (see the .dohc-editor-surface comment in
  * styles.css). Only placement/maxHeight from the shared floating-menu math
@@ -756,7 +756,7 @@ export function TurnIntoMenu({ editor }: { editor: Editor }) {
         (current + delta + TURN_INTO_ENTRIES.length) % TURN_INTO_ENTRIES.length,
     );
 
-  // Measure ONCE, at open — the dropdown is anchored to the trigger, so it
+  // Measure once, at open — the dropdown is anchored to the trigger, so it
   // never repositions while open; only the flip side and max height are
   // resolved here (offscreen/jsdom rects fall back to below/full height).
   const openMenu = () => {

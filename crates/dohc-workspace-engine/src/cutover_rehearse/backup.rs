@@ -31,7 +31,7 @@ pub struct DirectoryBackupEntry {
 pub struct DirectoryBackupManifest {
     pub verified: bool,
     pub files: Vec<DirectoryBackupEntry>,
-    /// Every source engine subdirectory (`engine/<rel>`), so EMPTY dirs are
+    /// Every source engine subdirectory (`engine/<rel>`), so empty dirs are
     /// part of the restore-tested backup rather than silently lost.
     #[serde(default)]
     pub directories: Vec<String>,
@@ -57,7 +57,7 @@ pub fn load_valid_directory_backup(
         serde_json::from_slice(&bytes).map_err(|_| RehearsalError::Io {
             code: "directory-manifest-malformed",
         })?;
-    // NOTE: an empty file list also rejects a LEGITIMATELY minimal clone (no
+    // NOTE: an empty file list also rejects a legitimately minimal clone (no
     // non-triplet engine files, no sibling snapshots). Unreachable in this
     // fixture harness (markers + sibling stand-ins always exist); relaxing it
     // safely is a real `--cutover` consideration.
@@ -111,7 +111,7 @@ pub fn load_valid_directory_backup(
             Err(error) => return Err(RehearsalError::io("directory-backup-metadata", error)),
         }
     }
-    // The backup dir must contain EXACTLY the declared set — files AND
+    // The backup dir must contain exactly the declared set — files and
     // directories: an undeclared extra file, empty dir, alias, or special
     // file leaves the manifest hash unchanged and must invalidate the backup
     // rather than ride along into a restore.
@@ -155,7 +155,7 @@ fn add_ancestor_dirs(relative: &str, output: &mut BTreeSet<String>) {
     }
 }
 
-/// Walk the published backup dir collecting files AND directories;
+/// Walk the published backup dir collecting files and directories;
 /// `Ok(false)` means the tree contains an alias/special/hard-linked/non-UTF-8
 /// entry and the backup is invalid.
 fn collect_backup_paths(
@@ -207,15 +207,15 @@ pub(crate) fn create_restore_tested_backup(
     ensure_outside_root(&paths.root, recovery_dir)?;
     create_private_dir_all(recovery_dir)?;
 
-    // A pre-existing DB backup at this stem must be a REAL file pair, and is
+    // A pre-existing DB backup at this stem must be a real file pair, and is
     // never adopted OR overwritten unless the copy itself proves — via its
-    // own shadow_clone binding — that it came from THIS clone.
+    // own shadow_clone binding — that it came from this clone.
     require_real_backup_pair(recovery_dir)?;
     if let Some(existing) = load_valid_backup(recovery_dir, DB_BACKUP_STEM)? {
         verify_reused_backup_binding(&existing.backup_path, shadow_token)?;
     }
 
-    // The directory-backup freshness gate runs BEFORE the DB republish, so a
+    // The directory-backup freshness gate runs before the DB republish, so a
     // stale restore point is refused while the previous DB/directory pair is
     // still coherent.
     let directory_fresh = match load_valid_directory_backup(recovery_dir)? {
@@ -237,7 +237,7 @@ pub(crate) fn create_restore_tested_backup(
         }
     };
 
-    // The DB backup is ALWAYS rebuilt from the current live source (the
+    // The DB backup is always rebuilt from the current live source (the
     // staged same-stem republish never destroys the prior valid copy until
     // the new one verifies), so the recorded restore point can never be a
     // stale first-pass artifact.
@@ -261,7 +261,7 @@ pub(crate) fn create_restore_tested_backup(
         }
     }
     drop(store);
-    // The backup pair's CONTENTS (the storage helper publishes by rename
+    // The backup pair's contents (the storage helper publishes by rename
     // without a file sync) and its directory entries must all be durable
     // before the BackedUp marker can ever be recorded over them. The pair is
     // re-gated first — these fsyncs open by path.
@@ -288,7 +288,7 @@ fn db_manifest_path(recovery_dir: &Path) -> PathBuf {
     recovery_dir.join(format!("{DB_BACKUP_STEM}.manifest.json"))
 }
 
-/// The DB backup pair may only be trusted (or replaced) as REAL files inside
+/// The DB backup pair may only be trusted (or replaced) as real files inside
 /// the recovery dir; a symlinked/hard-linked half is an external dependency.
 fn require_real_backup_pair(recovery_dir: &Path) -> Result<(), RehearsalError> {
     super::require_real_file(&db_backup_path(recovery_dir), "backup-db-alias-refused")?;
@@ -372,7 +372,7 @@ fn collect_directory_sources(paths: &Paths) -> Result<Vec<(String, PathBuf)>, Re
 /// the backup was taken must fail the rehearsal, not silently leave a stale
 /// restore point behind a Complete marker.
 ///
-/// NOTE: a NEW unbacked file appearing under `.dohc/engine` between BackedUp
+/// NOTE: a new unbacked file appearing under `.dohc/engine` between BackedUp
 /// and Capturing is not detected here — bounded by the single-writer per-root
 /// lock; full engine-tree set-compare is a real `--cutover` follow-up.
 pub(crate) fn verify_protected_snapshots(
@@ -385,7 +385,7 @@ pub(crate) fn verify_protected_snapshots(
     let mut manifested = BTreeSet::new();
     for entry in &manifest.files {
         // Every manifested protected file is re-proven — the `dohc/` siblings
-        // AND the non-triplet `engine/` files (the user inventory skips the
+        // and the non-triplet `engine/` files (the user inventory skips the
         // whole `.dohc` tree, so drift there is invisible to it).
         let live = if let Some(name) = entry.relative_path.strip_prefix("dohc/") {
             manifested.insert(name);
@@ -431,7 +431,7 @@ pub(crate) fn verify_protected_snapshots(
             });
         }
     }
-    // Set compare, not just entry re-hash: a protected sibling that APPEARED
+    // Set compare, not just entry re-hash: a protected sibling that appeared
     // after the backup has no restore point and must fail the capture.
     for sibling in SIBLING_SNAPSHOTS {
         match std::fs::symlink_metadata(paths.root.join(".dohc").join(sibling)) {
@@ -449,7 +449,7 @@ pub(crate) fn verify_protected_snapshots(
 }
 
 /// The recorded original-store identity from the DB backup's manifest — the
-/// reference a freshly-reset store must DIFFER from.
+/// reference a freshly-reset store must differ from.
 pub(crate) fn recorded_backup_engine_uuid(recovery_dir: &Path) -> Result<String, RehearsalError> {
     require_real_backup_pair(recovery_dir)?;
     if load_valid_backup(recovery_dir, DB_BACKUP_STEM)?.is_none() {
@@ -457,7 +457,7 @@ pub(crate) fn recorded_backup_engine_uuid(recovery_dir: &Path) -> Result<String,
             code: "backup-db-not-valid",
         });
     }
-    // The identity comes from the BACKUP DB BYTES (covered by the recorded
+    // The identity comes from the backup DB bytes (covered by the recorded
     // checksum), never from the editable manifest JSON — an edited
     // `engine_uuid` field must not be able to evade the stale-store refusal.
     let conn = super::open_sqlite_read_only_nofollow(
@@ -502,7 +502,7 @@ pub(crate) fn create_private_dir_all(dir: &Path) -> Result<(), RehearsalError> {
     Ok(())
 }
 
-/// Open the backup COPY read-only and require its `shadow_clone` binding to
+/// Open the backup copy read-only and require its `shadow_clone` binding to
 /// match this run's validated token — a valid backup from another workspace or
 /// clone must never be adopted as this rehearsal's safety net.
 fn verify_reused_backup_binding(
@@ -530,7 +530,7 @@ fn verify_reused_backup_binding(
 
 /// `EngineStore::open` applies any pending migration to the store it opens.
 /// The backup source must be opened write-free, so a source whose applied
-/// migration ledger differs from this build's expectation is refused BEFORE
+/// migration ledger differs from this build's expectation is refused before
 /// the read-write open. The expectation comes from a throwaway probe store
 /// created by the same build in the recovery dir.
 fn ensure_no_pending_migrations(
@@ -624,7 +624,7 @@ pub(crate) fn fingerprint_backup(recovery_dir: &Path) -> Result<BackupFingerprin
 }
 
 /// The resume gate in front of every destructive step: the recovery dir passed
-/// to THIS invocation must be the recorded one, and both backups there must
+/// to this invocation must be the recorded one, and both backups there must
 /// still validate byte-for-byte against the recorded fingerprint.
 pub(crate) fn verify_recorded_backup(
     recovery_dir: &Path,
@@ -689,7 +689,7 @@ fn create_directory_backup(
     }
     std::fs::create_dir(&staging)
         .map_err(|e| RehearsalError::io("directory-backup-staging-create", e))?;
-    // Recreate every source engine subdirectory up front, so EMPTY dirs are
+    // Recreate every source engine subdirectory up front, so empty dirs are
     // carried by the backup instead of silently lost.
     let mut directories = Vec::new();
     collect_engine_dirs(&paths.engine, &paths.engine, &mut directories)?;
@@ -729,7 +729,7 @@ fn create_directory_backup(
         files: entries,
         directories,
     };
-    // Every directory entry in the staged tree must be durable BEFORE the
+    // Every directory entry in the staged tree must be durable before the
     // publish rename can be recorded; otherwise a power loss could keep the
     // manifest while dropping the files it describes.
     fsync_tree(&staging)?;

@@ -41,7 +41,7 @@ export function PluginsView(props: {
   /** The plugin whose details tab is the active editor tab, so the list can
    * carry the same selected read-out the explorer gives the open file.
    * Directory, not only id: a discovered row's id can coincide with some
-   * OTHER, unrelated plugin's real id, so id alone cannot tell two rows
+   * other, unrelated plugin's real id, so id alone cannot tell two rows
    * apart. */
   activePluginId: string | null;
   activePluginDirectoryName: string | null;

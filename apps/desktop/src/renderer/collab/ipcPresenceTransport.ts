@@ -7,7 +7,7 @@ import type { PresenceSnapshot, PresenceTransport } from "./presenceChannel";
 
 // MU-C5 — the IPC-PROXIED presence transport.
 //
-// SECURITY: the renderer NEVER holds the relay bearer token. This transport
+// SECURITY: the renderer never holds the relay bearer token. This transport
 // implements the same PresenceTransport contract as createRelayPresenceTransport
 // but makes NO relay request itself — it calls the presence IPC handlers, and
 // MAIN (the sole token holder) makes the actual relay presence call. The renderer
@@ -73,7 +73,7 @@ export function createIpcPresenceTransport(
       if (signal.aborted) throw new DOMException("Aborted", "AbortError");
       const pollId = nextPollId();
       const onAbort = () => {
-        // Tell main to abort the in-flight relay long-poll for THIS poll id.
+        // Tell main to abort the in-flight relay long-poll for this poll id.
         void bridge().presenceCancel({ pollId }).catch(() => undefined);
       };
       signal.addEventListener("abort", onAbort, { once: true });

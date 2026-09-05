@@ -12,7 +12,7 @@ import { ShareAccessBadge } from "./ShareAccessBadge";
 
 // "Shared with me" (share mounts): the receive-side inventory. Lives in
 // Settings → Cloud beside SharedByMeList. Each row is a path/version share
-// addressed to this account; "Add to workspace" mounts it into the CURRENT
+// addressed to this account; "Add to workspace" mounts it into the current
 // workspace as a read-only shared-with-me/<label>/ folder, and an
 // already-mounted share says so with a way to remove it.
 
@@ -20,7 +20,7 @@ type MountInfo = {
   shareId: string;
   label: string;
   granterEmail?: string | null;
-  // The pinned level (#646), so a mount the relay no longer lists still says
+  // The pinned level, so a mount the relay no longer lists still says
   // what it grants. Absent when `damaged` says the grant could not be read.
   access?: ShareAccess;
   // The stored grant is unreadable. The row stays so the mount can still be
@@ -118,7 +118,7 @@ export function SharedWithMeList(props: {
   // slower older refresh must never overwrite a newer list, and nothing may
   // set state after unmount or a workspace switch.
   const refreshToken = useRef(0);
-  // A SECOND token, for the registry-only lane. One counter cannot answer two
+  // A second token, for the registry-only lane. One counter cannot answer two
   // questions — "may this response land?" and "is that other reader
   // superseded?" — and sharing `refreshToken` made an activity signal cancel
   // the initial load's relay lookup, leaving the panel in `loading` until
@@ -130,12 +130,12 @@ export function SharedWithMeList(props: {
   const mountsCommitted = useRef(0);
   // The freshest mounts the registry lane has seen, held whatever the surface
   // is doing. A read that lands while the panel is still loading has nowhere
-  // to paint, and dropping it would consume the ONE activity signal a newly
+  // to paint, and dropping it would consume the one activity signal a newly
   // recorded refusal gets — the warning would then wait for an unrelated
   // event. Held here, the full refresh publishes it when it lands.
   const pendingMounts = useRef<MountInfo[] | null>(null);
-  // Workspace epoch: bumped ONLY by unmount/workspace switch (refresh bumps
-  // its own token per call), so in-flight ACTIONS can tell "still the same
+  // Workspace epoch: bumped only by unmount/workspace switch (refresh bumps
+  // its own token per call), so in-flight actions can tell "still the same
   // panel" apart from "my own follow-up refresh ran".
   const workspaceEpoch = useRef(0);
 
@@ -207,7 +207,7 @@ export function SharedWithMeList(props: {
     // row keeps showing the snapshot it loaded and says nothing until
     // Settings is reopened.
     //
-    // The REGISTRY only. Workspace activity fires on every settled watcher
+    // The registry only. Workspace activity fires on every settled watcher
     // batch, and a full refresh would put a `/sync/shares` request on the
     // wire for each one; the token stops a stale answer landing but not the
     // request. The skip record is registry-local, so nothing here needs the
@@ -239,7 +239,7 @@ export function SharedWithMeList(props: {
         shareCode: share.shareCode,
       });
       // The panel may have unmounted / switched workspaces mid-action: the
-      // follow-up refresh and files-changed callback belong to the OLD
+      // follow-up refresh and files-changed callback belong to the old
       // workspace and must not run against the new one.
       if (!live()) return;
       await refresh();

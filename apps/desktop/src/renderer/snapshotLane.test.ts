@@ -20,7 +20,7 @@ function lane<T>(initial: T) {
 
 describe("snapshot lane", () => {
   // Latest-COMMITTED-wins. A request that is merely in flight has answered
-  // nothing, and one that FAILS never will, so only an answer OLDER than what
+  // nothing, and one that fails never will, so only an answer older than what
   // is displayed is dropped.
   it("writes a newer answer and drops an older one", () => {
     const it0 = lane<string | null>(null);
@@ -36,7 +36,7 @@ describe("snapshot lane", () => {
     expect(it0.handle().latest()).toBe("newer");
   });
 
-  // The user acted AFTER every request in flight was issued, so counting only
+  // The user acted after every request in flight was issued, so counting only
   // responses would let one of those answers undo what they just did.
   it("keeps a local write from being undone by a request already in flight", async () => {
     const it0 = lane(false);
@@ -74,7 +74,7 @@ describe("snapshot lane", () => {
       );
       await Promise.resolve();
     });
-    // Asserted on what the lane WROTE, not on what it rendered: an unmounted
+    // Asserted on what the lane wrote, not on what it rendered: an unmounted
     // hook never re-renders, so the rendered value cannot move whether the
     // invalidation happened or not. `latest` is set by the write itself.
     expect(it0.handle().latest()).toBeNull();

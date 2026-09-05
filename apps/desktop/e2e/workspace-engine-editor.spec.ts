@@ -22,7 +22,7 @@ import {
 // WS-G2-C-2 editor-on-engine round trip. A rich markdown file on an engine-
 // flagged workspace edits through the engine Y.Doc provider (recordUpdate +
 // debounced settle). The load-bearing proof: a
-// live edit journals ONLY as ydoc.update — NOT a duplicate moment.append that
+// live edit journals only as ydoc.update — not a duplicate moment.append that
 // would collide (P0D) with the ydoc.update stream on a shared workspace — and
 // the .md + engine.db reflect it, and a reopen resumes the rich content. The
 // SQLite readers (withEngineDb / ydocUpdateCount / replication* / moment*) live
@@ -74,7 +74,7 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
     await page.keyboard.press("ControlOrMeta+End");
     await page.keyboard.type(sentinel);
 
-    // The debounced settle projects the edit into engine.db AND writes the .md.
+    // The debounced settle projects the edit into engine.db and writes the.md.
     await expect
       .poll(async () => await readFile(join(temp.rootPath, "notes/rich.md"), "utf8").catch(() => ""), {
         timeout: 20_000,
@@ -90,16 +90,16 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
       })
       .toBe(true);
 
-    // THE load-bearing assertion: the edit replicates as ydoc.update ops, and
-    // the watcher's observation of the settle's own .md write was DEFERRED — so
+    // The load-bearing assertion: the edit replicates as ydoc.update ops, and
+    // the watcher's observation of the settle's own.md write was deferred — so
     // the typed sentence never became a moment.append (a double-journal that on
     // a shared workspace would collide as a P0D). Since a ydoc.update payload is
     // opaque, the sentinel plaintext must appear in NO replication op at all.
     // Post-cutover a LOCAL workspace journals no outbound replication ops at
     // all (emit_outbound requires Regime::Replicated), so on this fixture the
     // replication-op assertions below are structural only — the LOAD-BEARING
-    // double-journal check is the moments table: the settle projects EXACTLY
-    // ONE sentinel moment, and a capture re-observing the settle's own .md
+    // double-journal check is the moments table: the settle projects exactly
+    // one sentinel moment, and a capture re-observing the settle's own.md
     // self-write (the P0D class) would append a second.
     expect(
       momentTextsForPath(temp.rootPath, "notes/rich.md").filter((t) =>
@@ -143,15 +143,15 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
   }
 });
 
-// WS-G2-C-2 gate fix 1 — a GENUINE external edit to a LIVE doc must NOT be
-// silently dropped. The old blanket live-path skip discarded EVERY watcher event
+// WS-G2-C-2 gate fix 1 — a genuine external edit to a live doc must not be
+// silently dropped. The old blanket live-path skip discarded every watcher event
 // for a live path, so an agent/other editor writing the .md while the editor was
 // open lost its change (the next settle overwrote it from the CRDT). Now only the
 // settle's own sha-matched self-write is suppressed; a genuine external write is
 // captured as a moment (on a shared workspace it would surface as a real
 // conflict — correct, not silent loss). Folding it into the live doc as CRDT
 // deltas is G2-C-3; here the bar is not-dropping.
-test("an external edit to a LIVE engine doc is captured (moment.append), not silently dropped", async () => {
+test("an external edit to a live engine doc is captured (moment.append), not silently dropped", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const external = "External agent wrote this straight to disk while the editor was open.";
@@ -169,14 +169,14 @@ test("an external edit to a LIVE engine doc is captured (moment.append), not sil
 
     const workspace = await openWorkspaceFromFirstRun(page, temp);
     await waitForWorkspaceFile(page, workspace.workspaceId, "notes/rich.md");
-    // Open the doc so its engine Y.Doc session goes LIVE (the path enters the
-    // live-session registry). Do NOT type: a quiescent live session issues no
+    // Open the doc so its engine Y.Doc session goes live (the path enters the
+    // live-session registry). Do not type: a quiescent live session issues no
     // settle, so nothing re-projects the CRDT over the external write — the
     // deterministic form of the loss the old blanket live-path skip caused.
     await openEngineDoc(page, "notes/rich.md");
 
     // An external writer (agent / other editor) replaces the .md while the
-    // session is live. The old code dropped EVERY watcher event for a live path;
+    // session is live. The old code dropped every watcher event for a live path;
     // now this genuine edit (a sha that matches no settle self-write) is captured.
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: `# Rich\n\n${external}\n` },
@@ -197,7 +197,7 @@ test("an external edit to a LIVE engine doc is captured (moment.append), not sil
   }
 });
 
-// WS-G2-C-2 gate fix 2 — a version op while a rich doc is LIVE must settle +
+// WS-G2-C-2 gate fix 2 — a version op while a rich doc is live must settle +
 // close the session FIRST. Otherwise the live session keeps its old versionId
 // and a later settle writes a stale projection into the now-active version
 // (two-canonical / two-lineage corruption). Here a version is created through
@@ -229,7 +229,7 @@ test("creating a version while a rich doc is live flushes + closes the session (
     await page.keyboard.type(sentinel);
 
     // Create a version through the bridge while the doc is still live. The main-
-    // process version op awaits settleAndCloseLiveYDocSessions FIRST — the call
+    // process version op awaits settleAndCloseLiveYDocSessions first — the call
     // only resolves after the live session flushed + released.
     const created = await page.evaluate(async (workspaceId) => {
       const api = (window as unknown as {
@@ -243,7 +243,7 @@ test("creating a version while a rich doc is live flushes + closes the session (
     expect(created).toBe(true);
 
     // The in-flight edit was flushed by the forced settle-on-close (not lost to
-    // the fork-from-disk), so it is a durable moment AND on disk.
+    // the fork-from-disk), so it is a durable moment and on disk.
     await expect
       .poll(() => momentTextsForPath(temp.rootPath, "notes/rich.md").some((t) => t.includes(sentinel)), {
         timeout: 20_000,

@@ -104,7 +104,7 @@ function encodedDraftText(): string {
   return durableMarkdownFromSnapshot(doc, Y.encodeStateAsUpdate(doc));
 }
 
-// MUST run before any test that lets a real projection load complete: a
+// Must run before any test that lets a real projection load complete: a
 // resolved import is cached for the lifetime of this file, and neither the
 // failure nor the gate below can act on it afterwards.
 it("reports a failed projection instead of copying the readable half", async () => {
@@ -114,20 +114,18 @@ it("reports a failed projection instead of copying the readable half", async () 
   const writeText = vi.spyOn(navigator.clipboard, "writeText");
   render(<RecoveryList rows={[rowFor(text)]} />);
 
-  // The bytes are intact, so the readable half is NOT the answer here: taking
+  // The bytes are intact, so the readable half is not the answer here: taking
   // it would let the user dismiss the row believing they have their document.
-  // MUTATION: fold the projection failure back into the crude fallback — the
-  // button reports Copied and the lossy text reaches the clipboard.
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(() =>
-    expect(screen.getByTestId("recovery-list-copy").textContent).toBe(
+    expect(screen.getByTestId("recovery-list-copy").textContent, "fold the projection failure back into the crude fallback — the button reports Copied and the lossy text reaches the clipboard.").toBe(
       "Couldn't copy",
     ),
   );
   expect(writeText).not.toHaveBeenCalled();
 
   // The failure was transient, and the row still holds the canonical snapshot.
-  // The next copy retries the import and WAITS for it.
+  // The next copy retries the import and waits for it.
   projectionShouldFail = false;
   const release = armProjectionGate();
   await user.click(screen.getByTestId("recovery-list-copy"));
@@ -159,9 +157,7 @@ it("copies the projected document, not the encoded recovery snapshot", async () 
   await user.click(screen.getByTestId("recovery-list-copy"));
   await waitFor(async () => {
     const copied = await navigator.clipboard.readText();
-    // MUTATION: copy `row.draft.text` straight through — the user gets the
-    // opaque blob, and the list, the table and the link stay locked in it.
-    expect(copied).not.toContain("dohc-ydoc-recovery-v1");
+    expect(copied, "copy `row.draft.text` straight through — the user gets the opaque blob, and the list, the table and the link stay locked in it.").not.toContain("dohc-ydoc-recovery-v1");
     expect(copied).toContain("# My Heading");
     expect(copied).toContain("[linked](https://example.test)");
     expect(copied).toMatch(/\| Cell\s*\|/u);
@@ -179,7 +175,7 @@ it("copies the readable half when the recovery snapshot cannot be decoded", asyn
   await waitFor(async () =>
     expect(await navigator.clipboard.readText()).toBe("Crude fallback text"),
   );
-  // Unrecoverable bytes are the ONE case where the readable half is the whole
+  // Unrecoverable bytes are the one case where the readable half is the whole
   // answer, so this copy succeeded and the row can be dismissed.
   await waitFor(() =>
     expect(screen.getByTestId("recovery-list-copy").textContent).toBe("Copied"),

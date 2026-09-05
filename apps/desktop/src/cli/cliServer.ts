@@ -166,7 +166,7 @@ export interface CliRegistryWorkspace {
 // `setCollectionRecordFields` / `createCollectionRecord` in
 // `apps/desktop/src/workspaces/collectionRecordEdits.ts` exactly, so main's
 // wiring is a closure over that module's workspace-scoped edit context. The
-// author is derived HERE, main-side, from the workspace identity plus the
+// author is derived here, main-side, from the workspace identity plus the
 // behavior-bearing actor kind; the request never supplies one. Field values
 // are plain JSON: they land in the record's frontmatter Y.Doc map. Both
 // functions throw on refusal (invalid path, engine off, "id" field, a held
@@ -249,7 +249,7 @@ export interface CliServerOptions {
     target?: { channelId: string } | { threadId: string },
   ): void | Promise<void>;
   // A chat read has no renderer poll behind it — with no window open, nothing
-  // else ever runs a sync pass for it (#731). AWAITED (up to a bound — see
+  // else ever runs a sync pass for it. Awaited (up to a bound — see
   // CHAT_READ_SYNC_BUDGET_MS) before the verb reads the store, the same
   // bounded rotating pass the renderer's reads trigger. `target` names the
   // read's own channel or thread, when the verb's args carry one, so that
@@ -990,7 +990,7 @@ async function queryFtsCandidates(
   try {
     // The daemon is the only reader. It is unconditionally present -- main.ts
     // quits the app if startRustEngineDaemon fails, before the CLI server is
-    // even registered -- so the legacy branch here, which opened a SECOND
+    // even registered -- so the legacy branch here, which opened a second
     // sqlite connection to the daemon-owned engine.db, was unreachable.
     //
     // Thrown rather than silently degraded: a missing daemon reader is an
@@ -1120,7 +1120,7 @@ const CHAT_READ_SYNC_BUDGET_MS = 10_000;
 
 // A pass past the budget keeps running detached (see notifyRead below). A
 // slow relay behind a stream of reads would otherwise start one detached pass
-// PER READ — main.ts's own serializer only stops them running concurrently,
+// per read — main.ts's own serializer only stops them running concurrently,
 // not from queueing up unboundedly. One in-flight pass per (options,
 // workspace) is tracked here so a read that finds one already running joins
 // its race instead of starting another.
@@ -1142,7 +1142,7 @@ async function notifyRead(
   const inFlight = chatReadSyncInFlightFor(options);
   let pending = inFlight.get(context.workspaceId);
   if (!pending) {
-    // `target` names the pass THIS call starts. A read that instead joins an
+    // `target` names the pass this call starts. A read that instead joins an
     // already-running pass gets whatever priority that pass already
     // committed to — the same tradeoff a rotation-only pass always had.
     pending = Promise.resolve()
@@ -1166,7 +1166,7 @@ async function notifyRead(
   });
   // Past the budget, the read proceeds on whatever the store already has —
   // `pending` keeps running (tracked above, so a concurrent read joins it
-  // instead of starting a second one) and the NEXT read benefits from what it
+  // instead of starting a second one) and the next read benefits from what it
   // finishes.
   await Promise.race([pending, budget]);
   clearTimeout(timer);
@@ -1190,7 +1190,7 @@ function isChatReadVerb(verb: CliRequest["verb"]): boolean {
 
 // The chat/show/threads verbs name their target directly in their args — no
 // resolution against the (not-yet-synced) local channel/thread list needed,
-// the way #725's write side already resolves it. A wrong or unresolvable
+// the way the write side already resolves it. A wrong or unresolvable
 // guess is harmless: syncSharedChannelsForChatTarget falls back to a plain
 // pass, so this can only add coverage, never remove it.
 function chatReadTarget(
@@ -1214,7 +1214,7 @@ type RunMessageLinkInput = {
   messageId: string;
 };
 
-// A daemon refusal carries the engine's domain code as its message (#418).
+// A daemon refusal carries the engine's domain code as its message.
 // Two of those codes can never succeed on a retry: a malformed message or run
 // id ("invalid-input"), and a run that is not in this workspace
 // ("run-not-found"). Retryability does not select them — a persist failure is

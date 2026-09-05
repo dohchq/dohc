@@ -314,7 +314,7 @@ describe("workspace filesystem projection", () => {
 
       await applyFsDiff({ backend, actor, rootDir: dir, diff: await scanWorkspaceDiff(dir) });
 
-      // Updating an EXISTING asset routes through updateAsset (saveAsset is
+      // Updating an existing asset routes through updateAsset (saveAsset is
       // create-only) so the expectedRevision arbitrates.
       expect(calls.map((call) => call.method)).toEqual(["updateAsset"]);
       expect(calls[0].input).toMatchObject({

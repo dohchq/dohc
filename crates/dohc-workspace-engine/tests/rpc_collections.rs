@@ -2251,7 +2251,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     );
 }
 
-/// A replicated write that REMOVES parseable frontmatter must clear the
+/// A replicated write that removes parseable frontmatter must clear the
 /// record's indexed values in the same apply. The materialized disk write is a
 /// suppressed self-write, so no capture pass or reconciliation runs later —
 /// without an apply-time clear the old field values stay queryable forever.
@@ -2394,7 +2394,7 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     );
 }
 
-/// #1002 harness: an adopted, replicated collection record whose one synced
+/// Harness: an adopted, replicated collection record whose one synced
 /// `status` update is durably parked behind the live session's lease, with an
 /// automation subscribed to the collection so the drain's no-claim rule
 /// (ADR 0008) is observable.
@@ -2586,8 +2586,8 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         matches!(applied, ApplyOutcome::Applied(result) if result.deferred),
         "the live device must defer the remote update"
     );
-    // ADR 0008 pin: a subscribed automation must NOT be claimed by the drain
-    // of this SYNCED update; only its origin device claims.
+    // ADR 0008 pin: a subscribed automation must not be claimed by the drain
+    // of this synced update; only its origin device claims.
     store
         .write_with(&NoFaults, |tx| {
             subscribe_automation_in_tx(tx, WORKSPACE_ID, "plugin:triage", "tasks", 20)
@@ -2681,7 +2681,7 @@ fn assert_no_automation_claims(scratch: &ScratchDir) {
     );
 }
 
-/// #1002: a parked synced update drained by `ydoc.open` fires its record
+/// A parked synced update drained by `ydoc.open` fires its record
 /// events on the daemon event channel — the previous session ended with
 /// `workspace.close`, which skips the per-session drain.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2736,7 +2736,7 @@ async fn a_parked_update_drained_on_open_fires_record_events() {
     .await;
 }
 
-/// #1002: a parked synced update drained by `ydoc.close` (no settle) fires
+/// A parked synced update drained by `ydoc.close` (no settle) fires
 /// its record events on the daemon event channel.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_drained_on_close_fires_record_events() {
@@ -2763,7 +2763,7 @@ async fn a_parked_update_drained_on_close_fires_record_events() {
     .await;
 }
 
-/// #1002: a settle whose drain lands remote content refuses with
+/// A settle whose drain lands remote content refuses with
 /// `ydoc-remote-updates-pending` — and still fires the drained updates'
 /// record events, whose queue rows the drain already consumed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2819,9 +2819,9 @@ fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
         .expect("count deferred updates")
 }
 
-/// #1008: the engine-internal collection reconcile pass (record-id adoption,
+/// The engine-internal collection reconcile pass (record-id adoption,
 /// relation cleanup) has no event route for drained record facts, so its open
-/// and settle must LEAVE a parked synced update queued. The next `ydoc.open`
+/// and settle must leave a parked synced update queued. The next `ydoc.open`
 /// drains it and fires the events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record_events() {
@@ -3168,7 +3168,7 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
         .expect("main version");
     // A pathological but honestly parsed degradation: each unknown root key
     // yields one UnknownProperty reason with a long path, so the reason COUNT
-    // cap alone cannot bound the serialized reasons - the #990 shape.
+    // cap alone cannot bound the serialized reasons - the shape.
     for (index, name) in COLLECTIONS.iter().enumerate() {
         let mut schema = format!(
             "name: {name}
@@ -3357,7 +3357,7 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     assert!(in_band.blob_egress.is_none());
 
     // At a negotiated 1 MiB frame the same response must ride blob egress
-    // sized to the NEGOTIATED cap, not the daemon default.
+    // sized to the negotiated cap, not the daemon default.
     let negotiated_cap = NEGOTIATED as usize - 64 * 1024;
     let over = ProtocolEngineService::call(
         service.as_ref(),

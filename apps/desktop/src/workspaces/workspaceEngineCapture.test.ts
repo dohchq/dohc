@@ -183,7 +183,7 @@ describe("probeEngineStoreRefusal", () => {
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
 // VersionedLoopbackEngine behind it holds real state and real sha256 — so the
 // history these tests read back is recorded engine state, not a hand-written
-// responder. Passing the SAME loopback to two captures models two sessions
+// responder. Passing the same loopback to two captures models two sessions
 // against one workspace, the way two sessions shared one engine.db before.
 function liveCapture(
   root: string,
@@ -199,11 +199,11 @@ function liveCapture(
 
 // The daemon-path equivalent of readEngineMoments: the same six facts, read
 // through the engine's own timeline API. Oldest first, matching the raw
-// `ORDER BY moment_order` query. PROTECTED (secret) rows are dropped here
+// `ORDER BY moment_order` query. Protected (secret) rows are dropped here
 // exactly as a query against the text `moments` table dropped them.
 async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMomentRow[]> {
   // DRAINED, not capped. An earlier draft asked for one 500-row page, which
-  // returns the NEWEST 500 — so the moment a test recorded more, the reversed
+  // returns the newest 500 — so the moment a test recorded more, the reversed
   // array stopped being oldest-first and every count and sequence assertion
   // below would have compared against a truncated page without saying so. A cap
   // here is a limit rejecting valid work; paging costs nothing and removes the
@@ -222,7 +222,7 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   for (const summary of [...summaries].reverse()) {
     if (summary.protected) continue;
     const detail = await engine.readMoment(summary.id);
-    // A null detail must FAIL, not collapse to an empty body: `text: ""` for a
+    // A null detail must fail, not collapse to an empty body: `text: ""` for a
     // missing read makes a readMoment regression look like an empty file, which
     // several assertions below would accept.
     if (detail === null) {
@@ -380,10 +380,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const flushIndex = requests.findIndex(
       (request) => request.method === "capture.flush",
     );
-    // MUTATION: omit the daemon flush in switchVersion. Source metadata is
-    // listed without a capture settlement between the target preflight and
-    // the before/after comparison.
-    expect(flushIndex).toBeGreaterThanOrEqual(0);
+    expect(flushIndex, "omit the daemon flush in switchVersion. Source metadata is listed without a capture settlement between the target preflight and the before/after comparison.").toBeGreaterThanOrEqual(0);
     expect(
       requests
         .slice(flushIndex + 1)
@@ -422,9 +419,7 @@ describe("workspaceEngineCapture batch capture", () => {
       );
 
     expect(objectId).toBeTruthy();
-    // MUTATION: remove fileObjectIdForPath's flushCapture call. The read
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
     await engine.stop();
   });
 
@@ -1012,9 +1007,7 @@ describe("workspaceEngineCapture batch capture", () => {
           method === "capture.flush" || method === VERSIONED_METHOD.versionsList,
       );
 
-    // MUTATION: remove mergeVersionIntoMain's daemon flush. The versions read
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.versionsList]);
+    expect(relevant, "remove mergeVersionIntoMain's daemon flush. The versions read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.versionsList]);
     await engine.stop();
   });
 
@@ -1036,9 +1029,7 @@ describe("workspaceEngineCapture batch capture", () => {
         (method) => method === "capture.flush" || method === "conflicts.list",
       );
 
-    // MUTATION: remove resolveConflict's daemon flush. The conflict lookup
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", "conflicts.list"]);
+    expect(relevant, "remove resolveConflict's daemon flush. The conflict lookup remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "conflicts.list"]);
     await engine.stop();
   });
 
@@ -1061,9 +1052,7 @@ describe("workspaceEngineCapture batch capture", () => {
           method === "capture.flush" || method === VERSIONED_METHOD.momentsGet,
       );
 
-    // MUTATION: remove restoreFileToBeforeMoment's daemon flush. The moment
-    // read remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.momentsGet]);
+    expect(relevant, "remove restoreFileToBeforeMoment's daemon flush. The moment read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.momentsGet]);
     await engine.stop();
   });
 
@@ -1089,9 +1078,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toContain("did not settle");
-    // MUTATION: await the final flush outside try/finally. Its rejection skips
-    // both adapter closes, so this count is zero.
-    expect(closeWorkspace).toHaveBeenCalledTimes(2);
+    expect(closeWorkspace, "await the final flush outside try/finally. Its rejection skips both adapter closes, so this count is zero.").toHaveBeenCalledTimes(2);
   });
 
   it("flushes daemon capture before closing production workspace stores", async () => {
@@ -1236,11 +1223,11 @@ describe("workspaceEngineCapture batch capture", () => {
     ]);
   });
 
-  // #338. The engine owns the .md: it materializes a changed projection and
+  // The engine owns the.md: it materializes a changed projection and
   // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was
   // open vanished from disk. The desktop no longer writes here at all, and
-  // every case below drives the REAL onSettled against a REAL file; only the
+  // every case below drives the real onSettled against a real file; only the
   // daemon session is a fake, and it calls onSettled exactly where
   // ydocProviderSession's runSettle does.
   function driftFixture(settled: {
@@ -1303,14 +1290,12 @@ describe("workspaceEngineCapture batch capture", () => {
     const outside = "written outside dohc\n";
     await write(root, "note.md", outside);
 
-    // MUTATION: restore the mirror write and the file reads "typed in dohc" —
-    // the outside edit is gone from disk.
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
       content: EDITOR_TEXT,
     });
 
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    expect(await readFile(join(root, "note.md"), "utf8"), "restore the mirror write and the file reads 'typed in dohc' — the outside edit is gone from disk.").toBe(outside);
     expect(states).toEqual(["changed-on-disk"]);
   });
 
@@ -1370,7 +1355,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // the settled artifact, so its size answers the question and its bytes are
   // never read — a close must not wait on an unbounded read. The deny-read ACE
   // is the proof: reading would fail (EPERM), which would report "error"
-  // instead. MUTATION: drop the size check and this reports ["error"].
+  // instead.
   itNonRoot("answers an oversized file from its size, without reading it", async () => {
     const root = await tempRoot();
     const absolute = join(root, "note.md");
@@ -1453,13 +1438,11 @@ describe("workspaceEngineCapture batch capture", () => {
     await session.close();
     await engine.stop();
 
-    // MUTATION: drop the containment check and the matching file OUTSIDE the
-    // workspace reports ["saved"].
-    expect(states).toEqual(["error"]);
+    expect(states, "drop the containment check and the matching file outside the workspace reports ['saved'].").toEqual(["error"]);
     expect(String(errors[0]?.error)).toContain("outside the workspace");
   });
 
-  // The narrowness guard: the refusal above must fire ONLY on a drifted file.
+  // The narrowness guard: the refusal above must fire only on a drifted file.
   it("still reports a plain saved settle when nothing changed the file", async () => {
     const root = await tempRoot();
     await write(root, "note.md", EDITOR_TEXT);
@@ -1474,7 +1457,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   // A settle that agrees with the file registers its sha, so the watcher event
-  // for the ENGINE's own write is recognized. A settle that does NOT agree
+  // for the ENGINE's own write is recognized. A settle that does not agree
   // must register nothing: those bytes are on no disk, and an armed
   // suppression would swallow the next event that happens to carry that sha.
   it("arms the self-write suppression only for a settle the file agrees with", async () => {
@@ -1574,7 +1557,7 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
-  // #874: the engine refusing the workspace's DATABASE is not a degraded
+  // The engine refusing the workspace's database is not a degraded
   // watcher. The outcome carries the fence's classification so the product
   // offers the move-aside rebuild instead of "History paused" — and a later
   // pass that reaches the store clears it.
@@ -2000,7 +1983,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
 
-    // Two rapid writes settle into ONE watcher batch carrying the final
+    // Two rapid writes settle into one watcher batch carrying the final
     // content — the engine records exactly one moment for it.
     await write(root, "a.md", "draft 1\n");
     await write(root, "a.md", "draft 2\n");
@@ -2009,7 +1992,7 @@ describe("workspaceEngineCapture batch capture", () => {
     expect(await liveMoments(engine)).toHaveLength(1);
     expect((await liveMoments(engine))[0].text).toBe("draft 2\n");
 
-    // A second batch observing the SAME content (e.g. touch, re-save) is a
+    // A second batch observing the same content (e.g. touch, re-save) is a
     // no-op — never a duplicate engine record for one physical state.
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
@@ -2095,9 +2078,9 @@ describe("workspaceEngineCapture batch capture", () => {
     await engine.stop();
   });
 
-  // Symlink containment (CodeRabbit arc gate): the live watcher can emit a
+  // Symlink containment: the live watcher can emit a
   // symlink LEAF path even though the scanner skips symlinks, and stat()
-  // would dereference it OUTSIDE the workspace — foreign content must never
+  // would dereference it outside the workspace — foreign content must never
   // enter durable engine history as owned text.
   it("never captures a symlink leaf, even when it dereferences outside the workspace", async () => {
     const root = await tempRoot();
@@ -2337,7 +2320,7 @@ describe("workspaceEngineCapture expected engine events", () => {
       { path: "a.md", operation: "write", sha256: sha256Utf8("engine content\n") },
     ]);
     // The user overwrote the path before the batch settled: content differs,
-    // so the registration must NOT swallow the user's edit.
+    // so the registration must not swallow the user's edit.
     await write(root, "a.md", "user content\n");
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
@@ -2384,7 +2367,7 @@ describe("workspaceEngineCapture expected engine events", () => {
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
     await engine.flush();
 
-    // Engine restore deleted the file on disk AND recorded its own moment;
+    // Engine restore deleted the file on disk and recorded its own moment;
     // the watcher's observation must not double-record the delete.
     await unlink(join(root, "a.md"));
     engine.registerExpectedEngineEvents([{ path: "a.md", operation: "delete" }]);
@@ -2395,7 +2378,7 @@ describe("workspaceEngineCapture expected engine events", () => {
   });
 });
 
-describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+describe("workspaceEngineCapture relay sync materialization", () => {
   async function deliverRelayPage<T extends {
     fastForwardedPaths: readonly RelayMaterializedPath[];
   }>(
@@ -2571,7 +2554,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.flush();
     expect(await liveMoments(engine)).toHaveLength(momentsBefore);
 
-    // A later REAL user edit on the same path is still captured.
+    // A later real user edit on the same path is still captured.
     await write(root, "notes/remote.md", "user follow-up\n");
     engine.captureBatch([{ path: "notes/remote.md", operation: "update" }]);
     await engine.flush();
@@ -2824,7 +2807,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.stop();
   });
 
-  // Data-safety gate finding: the relay fetch cursor must only commit AFTER
+  // Data-safety gate finding: the relay fetch cursor must only commit after
   // the pulled state is safely on disk. A failed materialization leaves the
   // cursor un-advanced so the next pass retries the same ops.
   it("commits the relay fetch cursor only after disk materialization succeeds", async () => {
@@ -2982,7 +2965,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
             input: Parameters<typeof liveStore.listTextFileMetadata>[0],
           ) => {
             // Reconciliation's final phase, so its disk scan has already run.
-            // The watcher's file lands HERE, not before start(): a scan that
+            // The watcher's file lands here, not before start(): a scan that
             // saw live.md would reconcile it itself, and the pass would then
             // write both paths in scan order (live.md, offline.md) with the
             // batch deduped to nothing — a sequence that says nothing about
@@ -3009,7 +2992,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
 
     // "Daemon path" here means the daemon-BACKED STORE, not daemon-owns-
     // capture. Production's only construction (engineCaptureGate.ts) passes
-    // daemonOwnsCapture: true, and under that flag BOTH enqueues below return
+    // daemonOwnsCapture: true, and under that flag both enqueues below return
     // early — the daemon captures on its own side and settles through
     // flushCapture. So this pins the client-side chain contract, not the
     // capture ownership production actually runs.
@@ -3083,7 +3066,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
     await first.stop();
 
     // Second session: the directory is unreadable. Absent-from-a-degraded-
-    // listing is NOT deletion evidence — no delete moment may be recorded.
+    // listing is not deletion evidence — no delete moment may be recorded.
     await denyRead(join(root, "locked"), "dir");
     const outcomes: boolean[] = [];
     let recorded: EngineMomentRow[] = [];
@@ -3135,7 +3118,7 @@ describe("workspaceEngineCapture startup reconciliation", () => {
 });
 
 describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundary)", () => {
-  it("throws a TYPED unsupported-name error only when the host is Windows", () => {
+  it("throws a typed unsupported-name error only when the host is Windows", () => {
     // Windows-illegal names that can arrive from a sync peer and cannot be
     // materialized on a Windows disk.
     for (const path of ["nul.md", "notes.md:hidden.md", "DOHC~1.md"]) {
@@ -3164,7 +3147,7 @@ describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundar
   });
 });
 
-describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
+describe("workspaceEngineCapture sole recorder", () => {
   it("records flagged-workspace batches into the engine only — no legacy change set", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
@@ -3196,7 +3179,7 @@ describe("workspaceEngineCapture sole recorder (PR 0M-5)", () => {
     await engine.stop();
   });
 
-  it("records NOTHING without an engine capture (retirement Phase C: opt-out has no recorder)", async () => {
+  it("records nothing without an engine capture: opt-out has no recorder", async () => {
     const root = await tempRoot();
     const workspace: CreatedWorkspace = {
       workspaceId: "opted-out-no-recorder",
@@ -3303,7 +3286,7 @@ describe("workspaceEngineCapture failure isolation", () => {
   });
 });
 
-describe("workspaceEngineCapture capture-failure notice (PR 0M-7)", () => {
+describe("workspaceEngineCapture capture-failure notice", () => {
   it("reports a failed outcome per failing capture pass and success on recovery", async () => {
     const root = await tempRoot();
     await write(root, "note.md", "v1\n");
@@ -3598,7 +3581,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
   }, 15_000);
 });
 
-describe("workspaceEngineCapture loopback scale coverage (PR 0M-3)", () => {
+describe("workspaceEngineCapture loopback scale coverage", () => {
   it("processes a 100-file burst through the loopback adapter", async () => {
     const root = await tempRoot();
     const events = [] as Array<{ path: string; operation: "update" }>;
@@ -3698,11 +3681,10 @@ describe("createDefaultDiskWriter symlink containment", () => {
   });
 
   it("writes into a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await tempRoot();
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "..cache", "c.md"), "cached\n");
-    expect(await readFile(join(root, "..cache", "c.md"), "utf8")).toBe("cached\n");
+    expect(await readFile(join(root, "..cache", "c.md"), "utf8"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe("cached\n");
   });
 
   it("deleting a symlink leaf removes the link, not its target", async () => {
@@ -3940,7 +3922,7 @@ describe("workspaceEngineCapture agent attribution", () => {
           request.method === "capture.setAuthor",
       )
       .map((request) => request.method);
-    // The guarantee is that authorship is never CLEARED behind an unsettled
+    // The guarantee is that authorship is never cleared behind an unsettled
     // flush — not how many times the flush was asked. flushCapture now polls
     // for quiescence, as the daemon documents and every Rust consumer does,
     // so pinning the exact call count would fail on the retries while proving
@@ -4017,7 +3999,7 @@ describe("workspaceEngineCapture agent attribution", () => {
 
     // Batch settles (captureBatch called) while the run is active...
     engine.captureBatch([{ path: "a.md", operation: "update" }]);
-    // ...and the run ends BEFORE the capture chain executes the batch.
+    // ...and the run ends before the capture chain executes the batch.
     active = null;
     await engine.flush();
     expect(await liveMomentAuthors(engine)).toEqual([
@@ -4119,7 +4101,7 @@ describe("Rust engine session selection", () => {
   });
 });
 
-// #493. A Y.Doc session's version binding and its registry entry are decided
+// A Y.Doc session's version binding and its registry entry are decided
 // one daemon round trip apart: `openYDocSession` reads the active version,
 // opens the provider, and only then records the session as live. Off the
 // capture chain, a version operation running inside that gap swept a registry
@@ -4128,9 +4110,9 @@ describe("Rust engine session selection", () => {
 // typed into it settled into that version's lineage and materialized its
 // projection over the folder the operation had just written.
 //
-// Both tests STAGE the interleaving rather than race it. The daemon request
+// Both tests stage the interleaving rather than race it. The daemon request
 // that marks "this version operation is past its live-session sweep" blocks,
-// the open is issued INSIDE that window, and the window is then held open for
+// the open is issued inside that window, and the window is then held open for
 // a full daemon round trip the test drives itself (`listVersions`) — strictly
 // more turns than an unserialized open needs to reach the provider. So an
 // empty provider log at that point is PROOF the open is queued behind the
@@ -4340,7 +4322,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     const openedVersionIds: string[] = [];
     const switchReachedMaterialization = deferred();
     const releaseSwitch = deferred();
-    // The daemon materializes the entered version INSIDE versions.setActive,
+    // The daemon materializes the entered version inside versions.setActive,
     // so blocking that request holds the switch exactly where the issue puts
     // it: past the live-session sweep, still rewriting the folder.
     const sessions = mockLiveSessions(
@@ -4380,11 +4362,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     // return.
     await engine.listVersions();
     await engine.listVersions();
-    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
-    // reads the active version while set-active is still blocked and opens the
-    // provider on [draftVersionId] — a live session on the version the user
-    // left, which the switch's sweep had already passed and could not vacate.
-    expect(openedVersionIds).toEqual([]);
+    expect(openedVersionIds, "drop the enqueueResult wrapper from openYDocSession. The open reads the active version while set-active is still blocked and opens the provider on [draftVersionId] — a live session on the version the user left, which the switch's sweep had already passed and could not vacate.").toEqual([]);
 
     releaseSwitch.resolve();
     const session = await opening;
@@ -4399,7 +4377,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   // The loopback has no conflict ledger, and mergeVersionIntoMain reads one
   // unconditionally to resume an already-open conflict. An empty page is the
   // honest answer for a workspace that has never conflicted, and it keeps the
-  // merge under test a REAL merge instead of a rejected one.
+  // merge under test a real merge instead of a rejected one.
   class MergeableLoopbackEngine extends VersionedLoopbackEngine {
     override async sendRequest(request: Request): Promise<Response> {
       if (request.method === "conflicts.list") {
@@ -4459,12 +4437,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     // drives itself, so an unserialized open has provably reached the provider.
     await engine.listVersions();
     await engine.listVersions();
-    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
-    // lands INSIDE the merge, so this reads
-    // ["merge:reads-heads", "ydoc:open"] — a session seeded from a head the
-    // merge is in the middle of replacing, and invisible to the sweep that was
-    // supposed to vacate it.
-    expect(order).toEqual(["merge:reads-heads"]);
+    expect(order, "drop the enqueueResult wrapper from openYDocSession. The open lands inside the merge, so this reads ['merge:reads-heads', 'ydoc:open'] — a session seeded from a head the merge is in the middle of replacing, and invisible to the sweep that was supposed to vacate it.").toEqual(["merge:reads-heads"]);
 
     releaseMerge.resolve();
     const session = await opening;
@@ -4508,12 +4481,12 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 });
 
-// #534, codex P1. The absent-head refusal reads the DISK, and that read is
+// The absent-head refusal reads the disk, and that read is
 // awaited. On a shared workspace a replicated `onRemoteUpdate` can land inside
 // that await: a peer is writing this very path. Two things then stop being
-// true at once — the version DOES have the document, so "not in this version"
+// true at once — the version does have the document, so "not in this version"
 // is false; and the lineage is dirty, so the refusal's `close({settle:false})`
-// is answered with UnsettledClose and the provider escalates it to a SETTLING
+// is answered with UnsettledClose and the provider escalates it to a settling
 // close, materializing the path the refusal was about to call missing. The
 // refusal would create the phantom it exists to prevent.
 describe("workspaceEngineCapture absent-head refusal against replication", () => {
@@ -4534,15 +4507,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
       openRustYDocProviderSession: async (options) => {
-        // AFTER the open resolves, INSIDE the awaited disk check. A timer beats
+        // After the open resolves, inside the awaited disk check. A timer beats
         // an lstat round trip, so the update lands where the race puts it —
         // which is what makes the recheck's POSITION testable, not just its
         // existence.
-        // Delivered DURING the open, which the generation buffers and replays
+        // Delivered during the open, which the generation buffers and replays
         // the moment it installs — after the daemon has answered
         // head/lineage absent, before the guard runs. That is deterministic.
         // The window codex named (arrival inside the awaited disk check) is the
-        // same defect one tick later, and the guard reads the count ONCE after
+        // same defect one tick later, and the guard reads the count once after
         // that await, so both arrivals take the identical path. Racing an lstat
         // with a timer is not stageable, so this stages the half that is.
         options.onRemoteUpdate(peerUpdate);
@@ -4568,7 +4541,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
       },
     });
 
-    // The path is in NEITHER the version nor on disk — every input the refusal
+    // The path is in neither the version nor on disk — every input the refusal
     // keys on says "missing". Only the peer's update says otherwise.
     const session = await engine.openYDocSession({
       path: "peer-created.md",
@@ -4597,14 +4570,14 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // Two things must be true of the answer, and #665 changed which refusal
     // carries them. It may never call the path missing — something IS writing
     // it — and it may never leave the surface writable over a session the
-    // daemon still holds (#564, codex r17).
+    // daemon still holds.
     //
-    // The orphan now EVICTS when its close is refused, so the daemon no longer
+    // The orphan now evicts when its close is refused, so the daemon no longer
     // holds the session and the second hazard is gone with it. What remains is
     // the first, and `YDocOpenRacedError` is exactly it: this open's answer is
     // already stale, open it again — and the next open binds the lineage the
     // eviction preserved. The path this test guards is that the refusal is
-    // decided by the REFUSED CLOSE, not by a second look at the disk.
+    // decided by the refused close, not by a second look at the disk.
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
@@ -4669,10 +4642,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: drop the `dischargedByEvict` arm (#665) -> the recheck finds
-    // the path still absent and the refusal claims the version does not have a
-    // file a peer is writing into it.
-    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(refusal, "drop the `dischargedByEvict` arm (#665) -> the recheck finds the path still absent and the refusal claims the version does not have a file a peer is writing into it.").toBeInstanceOf(YDocOpenRacedError);
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
     // The lease is gone, so the surface may fall back — that is what makes the
     // raced refusal safe here where #564 needed the unreleased one.
@@ -4761,13 +4731,10 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.
-    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(refusal, "delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.").toBeInstanceOf(YDocOpenRacedError);
     expect(opens).toBe(2);
     expect(outcomes).toEqual([false, true]);
-    // MUTATION: drop the `releaseObligation` branch from the wrapper's
-    // `evict()` -> the obligated session's lease remains held forever.
-    expect(evicts).toBe(1);
+    expect(evicts, "drop the `releaseObligation` branch from the wrapper's `evict()` -> the obligated session's lease remains held forever.").toBe(1);
     await engine.stop();
   });
 
@@ -4910,10 +4877,10 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
   });
 
   it("keeps refusing an uncaptured artifact even when a replicated update arrived", async () => {
-    // Replication-as-existence is safe for a path with NOTHING on disk. It is
-    // NOT safe when the file is there with bytes capture has not ingested: this
+    // Replication-as-existence is safe for a path with nothing on disk. It is
+    // not safe when the file is there with bytes capture has not ingested: this
     // bind carries no seed, so its doc holds only the replicated update, and
-    // settling it would write that OVER the user's file — while this same
+    // settling it would write that over the user's file — while this same
     // capture chain is what keeps the watcher from ingesting those bytes.
     const root = await tempRoot();
     const loopback = new VersionedLoopbackEngine();
@@ -5034,8 +5001,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     expect(evicts).toBe(1);
     expect(await readFile(join(root, path), "utf8")).toBe(original);
 
-    // MUTATION: revert to `head === "absent" && lineage === "absent"` -> the
-    // second open binds the resurrected doc and its settle clobbers the file.
     await expect(
       engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
     ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);

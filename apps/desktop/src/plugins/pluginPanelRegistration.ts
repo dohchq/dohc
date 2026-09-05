@@ -104,7 +104,7 @@ export function forgetUninstalledPlugin(input: {
 
 /**
  * Forgets a plugin the pipeline reports as removed or renamed. A rename's
- * OLD registration is just as stale as an uninstalled one — its pluginRoot
+ * old registration is just as stale as an uninstalled one — its pluginRoot
  * still points at the vacated directory — so every panel of the renamed
  * plugin would throw "already running from another root" until the
  * workspace reopened, the same failure an uninstalled plugin's stale
@@ -182,7 +182,7 @@ async function loadValidatedPluginManifest(input: {
     // the manifest straight off disk) or "this plugin's replacement just
     // failed and nothing could be recovered" (not fine — that raw manifest
     // is the failed candidate's own, the exact thing the null was refusing
-    // to serve). Only the second one refuses here (#779 round 23 finding 1).
+    // to serve). Only the second one refuses here.
     if (input.pluginRegistration?.hasUnrecoverableFailedReplacement(input.pluginId)) {
       throw new Error(
         `dohc could not recover plugin "${input.pluginId}"'s last working build to open this. Fix the plugin and retry.`,

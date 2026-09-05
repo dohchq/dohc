@@ -76,7 +76,7 @@ describe("AgentPermissionRequests", () => {
       expect(screen.queryByTestId("agent-permission-request")).toBeNull(),
     );
 
-    // Poll confirms the answer (request gone), then a LATER ask reuses the
+    // Poll confirms the answer (request gone), then a later ask reuses the
     // provider request id — it must render, not stay hidden forever.
     rerender(<AgentPermissionRequests workspaceId="ws-1" runId="run-1" requests={[]} />);
     rerender(
@@ -101,7 +101,7 @@ describe("AgentPermissionRequests", () => {
       expect(screen.queryByTestId("agent-permission-request")).toBeNull(),
     );
 
-    // A LATER session reuses the provider request id WITHOUT the poll ever
+    // A later session reuses the provider request id without the poll ever
     // observing an empty list — the run changed, so it must ask again.
     rerender(
       <AgentPermissionRequests

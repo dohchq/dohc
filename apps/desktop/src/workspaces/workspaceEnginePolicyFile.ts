@@ -64,9 +64,9 @@ async function readPolicyFile<T>(
 
 // Search-side policy decision (WS-D). Capture stays FLOOR-ONLY when a policy
 // file is malformed (WS-F's documented rule: writes are never dropped), but
-// search must FAIL CLOSED: resolveEffectivePolicy defaults tracked paths to
+// search must fail closed: resolveEffectivePolicy defaults tracked paths to
 // searchable, so feeding it null rules from an unparseable policy file would
-// WIDEN search and resurface content the (broken) rules meant to hide. Any
+// widen search and resurface content the (broken) rules meant to hide. Any
 // parse/read error therefore blocks engine search outright — the caller
 // returns an empty result set and surfaces the error.
 export type EngineSearchPolicyDecision =

@@ -11,18 +11,17 @@
 //!
 //! Segment comparison is normalized **per platform**. On Windows, Win32 strips
 //! trailing dots/spaces on open and NTFS is case-insensitive, so `.dohc ` and
-//! `.DOHC` both alias the reserved `.dohc` and must be excluded
-//! (`LANGUAGE_SEMANTICS_MATRIX.md` 7.3 / 7.5). On case-sensitive POSIX hosts
+//! `.DOHC` both alias the reserved `.dohc` and must be excluded. On
+//! case-sensitive POSIX hosts
 //! those are **distinct real inodes** — a user's `.DOHC`, `.Dohc`, or `.dohc.`
-//! directory is legitimate content, NOT the engine floor — so the strip and the
-//! case-fold are gated behind `cfg(windows)` and only the EXACT `.dohc` (etc.)
+//! directory is legitimate content, not the engine floor — so the strip and the
+//! case-fold are gated behind `cfg(windows)` and only the exact `.dohc` (etc.)
 //! is reserved on POSIX. The retired reference accelerator lowercased + stripped
 //! unconditionally, which silently omitted those real POSIX directories from the
 //! scan; Rust is corrected here per the plan's "Rust is right, TS is
-//! platform-buggy → approved delta, don't reproduce the bug" rule (recorded in
-//! `BEHAVIOR_DELTA.md`, CAL-3 section).
+//! platform-buggy → approved delta, don't reproduce the bug" rule.
 //!
-//! We deliberately do NOT re-open the ADS-colon (7.2), device-name (7.10), or
+//! We deliberately do not re-open the ADS-colon (7.2), device-name (7.10), or
 //! 8.3-short-name (7.12) hazards here: those are `validateWorkspacePath`
 //! admission concerns, not scan-floor concerns, and each is a separate
 //! NEEDS-DECISION owned elsewhere. The floor's only job is to decide, given a
@@ -49,8 +48,8 @@ const DB_BASE_EXTENSIONS: &[&str] = &[".db", ".sqlite", ".sqlite3"];
 
 /// Preserve-both recovery artifacts written by the materialization pipeline
 /// (`<base>.<job-id>.conflict`) are excluded from auto-capture: they stay
-/// VISIBLE on disk for a human/agent to inspect and resolve, but the scanner
-/// must NOT churn a recovery artifact into a new tracked document (that would
+/// visible on disk for a human/agent to inspect and resolve, but the scanner
+/// must not churn a recovery artifact into a new tracked document (that would
 /// fork provenance on a conflict). `dohc-engine-files::materialize` writes them;
 /// the floor keeps them out of the workspace's tracked set.
 const CONFLICT_ARTIFACT_SUFFIX: &str = ".conflict";
@@ -60,9 +59,8 @@ const CONFLICT_ARTIFACT_SUFFIX: &str = ".conflict";
 /// On Windows: strip trailing `.`/` ` (Win32 open-time aliasing), then
 /// lowercase (NTFS case-insensitivity), so `.DOHC` / `.dohc ` alias `.dohc`.
 /// On POSIX (case-sensitive): identity — the segment is compared exactly, so a
-/// real `.DOHC` directory is user content, not the floor. (See module docs and
-/// `BEHAVIOR_DELTA.md` CAL-3: this diverges from — and corrects — the TS
-/// kernel, which strips+folds unconditionally.)
+/// real `.DOHC` directory is user content, not the floor. This diverges from,
+/// and corrects, the TS kernel, which strips and folds unconditionally.
 pub fn normalize_segment(segment: &str) -> String {
     #[cfg(windows)]
     {
@@ -83,7 +81,7 @@ pub fn segment_is_ignored(normalized: &str) -> bool {
             .any(|prefix| normalized.starts_with(prefix))
 }
 
-/// Whether a workspace-relative, forward-slash path has ANY ignored segment.
+/// Whether a workspace-relative, forward-slash path has any ignored segment.
 /// This is the `.dohc/**` (and `.git/**`, `node_modules/**`) exclusion.
 pub fn has_ignored_segment(rel_path: &str) -> bool {
     rel_path
@@ -148,7 +146,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn posix_case_and_trailing_variants_are_distinct_content() {
-        // Corrected POSIX behavior: only the EXACT reserved name is the floor.
+        // Corrected POSIX behavior: only the exact reserved name is the floor.
         assert!(has_ignored_segment(".dohc/internal"));
         assert!(!has_ignored_segment(".DOHC/x.md"));
         assert!(!has_ignored_segment(".Dohc/x.md"));
@@ -165,7 +163,7 @@ mod tests {
     #[test]
     fn conflict_artifacts_excluded_from_capture() {
         // The materialization preserve-both artifact `<base>.<job>.conflict` is
-        // a recovery artifact: visible on disk, but NOT auto-captured.
+        // a recovery artifact: visible on disk, but not auto-captured.
         assert!(is_conflict_artifact("notes.md.j1.conflict"));
         assert!(is_excluded_file("notes/x.md.abc123.conflict"));
         assert!(is_excluded_file("x.md.job-9.conflict"));

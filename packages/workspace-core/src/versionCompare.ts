@@ -5,12 +5,12 @@ import type {
   WorkspaceId,
 } from "@dohc/workspace-contracts/engine";
 
-// UI-facing whole-version comparison, page-shaped (#562). The per-file
+// UI-facing whole-version comparison, page-shaped. The per-file
 // three-way comparison (compareTextFileVersions) answers "how do these sides
-// relate for ONE path"; this hydrates the engine's differing-path listing
+// relate for one path"; this hydrates the engine's differing-path listing
 // (`versions.compareFiles`) into the shape the compare surface needs: one page
 // of differing paths, with both texts for diffing, and a continuation for the
-// rest. The old shape hydrated EVERY file of BOTH versions and returned one
+// rest. The old shape hydrated every file of both versions and returned one
 // unbounded array; nothing between the store and the renderer bounded it.
 //
 // Status reads from the SOURCE version's perspective against the TARGET
@@ -54,7 +54,7 @@ export interface VersionComparePage {
 }
 
 /**
- * Path order as the ENGINE orders paths: SQLite's BINARY collation compares
+ * Path order as the ENGINE orders paths: SQLite's binary collation compares
  * UTF-8 bytes, and UTF-8 byte order is code-point order. JavaScript's `<`
  * compares UTF-16 code units, which disagrees for any path holding a
  * character above U+FFFF (surrogates sort below U+E000..U+FFFF) — a cursor
@@ -76,7 +76,7 @@ export function compareEnginePaths(a: string, b: string): number {
 }
 
 // TextEncoder, not Buffer.byteLength: workspace-core is imported by renderer
-// bundles, and a Node builtin here is the #272 failure mode (neither
+// bundles, and a Node builtin here is the failure mode (neither
 // typecheck nor vitest would catch it). The encode allocates a transient
 // copy, which native encoding makes cheap; a hand-rolled code-point loop was
 // measured ~29x slower on the multi-megabyte bodies this counts.
@@ -107,7 +107,7 @@ export async function compareVersionFilesPage(
 ): Promise<VersionComparePage> {
   const budget = input.byteBudget ?? COMPARE_PAGE_TEXT_BYTE_BUDGET;
   // The listing may answer a window in which nothing differed: an empty
-  // entries array WITH a continuation. Walk through those here — cheap, no
+  // entries array with a continuation. Walk through those here — cheap, no
   // text rides them — so a returned page is empty only when the comparison
   // is exhausted. Surfaces read an empty page as "no differences", and an
   // empty page with a continuation would hide every difference past it.
@@ -166,7 +166,7 @@ export async function compareVersionFilesPage(
   // differing behind it, and the surface would then claim "more than N" over
   // a Show more that appends nothing. Peek ahead through identical windows —
   // metadata only, no text — and drop the cursor when nothing differs past
-  // it. A nonempty peek keeps the ORIGINAL cursor; the peeked window is
+  // it. A nonempty peek keeps the original cursor; the peeked window is
   // re-fetched by the next page, which costs one duplicate metadata call at
   // a true page boundary.
   let peekAfterPath: string = delta.nextAfterPath;

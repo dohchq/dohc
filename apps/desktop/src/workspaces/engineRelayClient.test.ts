@@ -42,7 +42,7 @@ import {
 import { syncJoinedSharedChannels } from "./sharedChannels";
 
 // Every test in this file pulls with the selector its share record pins. The
-// damaged-record path has its own tests in sharedView.test.ts. This is a REAL
+// damaged-record path has its own tests in sharedView.test.ts. This is a real
 // selector — no paths and no version selects nothing at all, which the engine
 // refuses.
 const PINNED_SELECTOR = {
@@ -237,7 +237,7 @@ function expectStatefulRequestsScoped(requests: Request[]): void {
     if (request.method === "workspace.open") continue;
     expect(
       request.workspace,
-      `MUTATION: ${request.method} must retain its daemon workspace handle`,
+      `${request.method} must retain its daemon workspace handle`,
     ).toBe("ws-mock");
   }
 }
@@ -708,7 +708,7 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // What a submit LEFT BEHIND is not optional. A missing field read as zero
+  // What a submit left behind is not optional. A missing field read as zero
   // would tell the recipient everything went when some of it did not.
   it("refuses a share proposal submit that does not say what it left behind", async () => {
     for (const [label, reply] of [
@@ -733,7 +733,7 @@ describe("EngineRelayClient", () => {
           grantedSelector: EDIT_SELECTOR,
           submitId: `submit-${label}`,
         }),
-        `MUTATION: ${label} softened to a default hides work that was not sent`,
+        `${label} softened to a default hides work that was not sent`,
       ).rejects.toThrow(/share\.proposal\.submit\./u);
       await sessions.closeAll();
     }
@@ -813,7 +813,7 @@ describe("EngineRelayClient", () => {
       (error: unknown) => error,
     );
     expect(refusal).toBeInstanceOf(SharedFileReadOnlyError);
-    // The noun, not just the class: the relay answers ONE code for chat and
+    // The noun, not just the class: the relay answers one code for chat and
     // for changes, so this name is the only thing that carries which one.
     expect((refusal as Error).name).toBe("SharedFileReadOnlyError");
     await sessions.closeAll();
@@ -964,7 +964,7 @@ describe("EngineRelayClient", () => {
   // Both dimensions of the accepted selector reach the engine intact. Dropping
   // either one widens the grant: no paths reads as "the whole workspace", and
   // no version reads as "any version's fork".
-  it("sends the accepted selector's paths AND version to the engine", async () => {
+  it("sends the accepted selector's paths and version to the engine", async () => {
     const { rootPath, attachmentId, daemon, sessions, client, relay } =
       await harness();
     const store = createCaptureLiveStores(
@@ -989,7 +989,7 @@ describe("EngineRelayClient", () => {
     expect(
       daemon.requests.find((request) => request.method === "share.view.pull")
         ?.params,
-      "MUTATION: dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
+      "dropping any dimension on the wire widens the accepted grant, or leaves one the engine cannot read",
     ).toEqual({
       workspaceId: "workspace-a",
       shareId: "share-view",
@@ -998,9 +998,9 @@ describe("EngineRelayClient", () => {
     await sessions.closeAll();
   });
 
-  // The engine SKIPS an op it refuses and keeps pulling, so the refusal is the
+  // The engine skips an op it refuses and keeps pulling, so the refusal is the
   // only signal that the share stopped carrying part of what the granter
-  // shares. It must survive the wire, and it must survive PAGING: a refusal on
+  // shares. It must survive the wire, and it must survive paging: a refusal on
   // an early page is exactly the one a caller would otherwise never see.
   it("carries every page's share-view refusals through to the caller", async () => {
     let pulls = 0;
@@ -1038,7 +1038,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       pull.refusals.map((refusal) => refusal.originSeq),
-      "MUTATION: keeping only the last page's refusals loses the earlier ones entirely",
+      "keeping only the last page's refusals loses the earlier ones entirely",
     ).toEqual([4, 9]);
     expect(pull.skipped).toBe(2);
     expect(pull.refusals[0].detail).toContain("version-other");
@@ -1088,7 +1088,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       pull.refusals.length,
-      "MUTATION: an unbounded aggregate lets a relay grow memory in proportion to its log",
+      "an unbounded aggregate lets a relay grow memory in proportion to its log",
     ).toBe(MAX_REPORTED_REFUSALS);
     // The count is still the truth, and every page still reached the record.
     expect(pull.refusalCount).toBe(pages);
@@ -1097,7 +1097,7 @@ describe("EngineRelayClient", () => {
   });
 
   // The pull commits each intermediate page's cursor as it goes. So an early
-  // page's refusals must be RECORDED BEFORE that commit: if a later page
+  // page's refusals must be recorded before that commit: if a later page
   // fails, the retry starts past the refused op and the only remaining record
   // of why that content is missing is the one written here.
   it("records a page's refusals before committing its cursor, even when a later page fails", async () => {
@@ -1141,7 +1141,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       recorded,
-      "MUTATION: recording after the commit loses the reason while the cursor stays past the op",
+      "recording after the commit loses the reason while the cursor stays past the op",
     ).toEqual([
       "the share granted version main, the relay offered version version-other",
     ]);
@@ -1187,7 +1187,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       calls,
-      "MUTATION: recording after the commit could lose a collision the crashed page already found",
+      "recording after the commit could lose a collision the crashed page already found",
     ).toEqual(["recordCollisions", "commitCursor"]);
     await sessions.closeAll();
   });
@@ -1231,7 +1231,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       calls,
-      "MUTATION: recording after the commit could lose projection debt for an applied page",
+      "recording after the commit could lose projection debt for an applied page",
     ).toEqual(["recordChangedPaths:docs/page-one.md", "commitCursor"]);
     await sessions.closeAll();
   });
@@ -1482,7 +1482,7 @@ describe("EngineRelayClient", () => {
 
     expect(
       routes.modeFor("workspace-a"),
-      "MUTATION: a rooted workspace must never bind the legacy TypeScript relay",
+      "a rooted workspace must never bind the legacy TypeScript relay",
     ).toBe("daemon");
     expect(
       daemon.requests,
@@ -2022,7 +2022,7 @@ describe("EngineRelayClient", () => {
     });
     expect(
       workspacePulls,
-      "MUTATION: stopping after the first hasMore page strands remote data",
+      "stopping after the first hasMore page strands remote data",
     ).toBe(2);
     expect(
       daemon.requests.filter(

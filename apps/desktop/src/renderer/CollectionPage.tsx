@@ -34,7 +34,7 @@ import { rewriteCollectionSchema } from "./collections/schemaWrite";
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
 // bridge. Reads come from the engine's index; writes ride the record's live
-// document frontmatter map — the SAME path agents and the PropertiesPanel
+// document frontmatter map — the same path agents and the PropertiesPanel
 // take, so attribution and history stay parallel.
 
 // The live document field PropertiesPanel writes; one name for one thing.
@@ -92,7 +92,7 @@ export function frontmatterWriteValue(value: CollectionValue): unknown {
 }
 
 /**
- * Applies ONE cell change through the record's live document: open the
+ * Applies one cell change through the record's live document: open the
  * engine doc session, set the field on the frontmatter map inside a
  * transaction, then hold the lease until the engine reports the save
  * settled (local updates are staged and flushed asynchronously, so
@@ -151,7 +151,7 @@ export function CollectionRecordFieldWrite({
         sawSaving.current = true;
         return;
       case "saved":
-        // Only a "saved" AFTER our own edit was staged counts: the session
+        // Only a "saved" After our own edit was staged counts: the session
         // opens in "saved", and releasing on that one would race the flush.
         if (sawSaving.current) onDone();
         return;
@@ -415,7 +415,7 @@ export function CollectionPage({
   );
 
   // A typed select value not in the options yet: the option lands in the
-  // schema FIRST; the cell write is enqueued only after that write settles.
+  // schema first; the cell write is enqueued only after that write settles.
   const createOption = useCallback(
     async (create: CollectionOptionCreate) => {
       const failure = await applySchemaChange((schema) =>

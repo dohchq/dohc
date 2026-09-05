@@ -266,7 +266,7 @@ pub fn unsubscribe_automation_in_tx(
 /// this call inserted.
 ///
 /// A change already at the chain depth cap runs nothing: instead of a
-/// pending claim, each would-have-triggered automation records a FAILED
+/// pending claim, each would-have-triggered automation records a failed
 /// claim with [`AUTOMATION_CHAIN_STOPPED`], so the stop reaches the owner
 /// through the same failure surface a throwing handler uses. The remote
 /// apply path never calls this — ADR 0008's origin-device rule is

@@ -5,7 +5,7 @@ import {
   pathShareLanes,
 } from "./relayShareLanes";
 
-// Ending a share is only possible from the manager that LISTS it, so the
+// Ending a share is only possible from the manager that lists it, so the
 // split between the two managers has to be exhaustive for granted rows.
 // These trace both managers over the same listing.
 
@@ -55,7 +55,7 @@ describe("relay share lanes", () => {
 
   // The regression this rule exists for. The chat manager scopes by
   // selector.kind and channelWireId, which a damaged row does not have, so
-  // dropping it here too left it in NEITHER manager and unendable.
+  // dropping it here too left it in neither manager and unendable.
   it("keeps a damaged chat-channel grant listed, because no other manager can", () => {
     const damaged = damagedChatRow("s-damaged-chat");
     // Traced: the chat manager cannot take this row.
@@ -65,7 +65,7 @@ describe("relay share lanes", () => {
     const lanes = pathShareLanes({ granted: [damaged], received: [damaged] });
     expect(
       lanes.granted.map((row) => row.shareId),
-      "MUTATION: a damaged chat-channel grant reaches neither manager and cannot be ended",
+      "a damaged chat-channel grant reaches neither manager and cannot be ended",
     ).toEqual(["s-damaged-chat"]);
     // The receive side has nothing to accept, so it is dropped there.
     expect(lanes.received).toEqual([]);
@@ -78,7 +78,7 @@ describe("relay share lanes", () => {
     expect(lanes.received.map((row) => row.shareId)).toEqual(["s-damaged-path"]);
   });
 
-  // The property the split owes: every GRANTED row is listed by exactly one
+  // The property the split owes: every granted row is listed by exactly one
   // manager, so none is left without a way to end it.
   it("leaves no granted row without a manager", () => {
     const granted = [

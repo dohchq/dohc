@@ -4,8 +4,8 @@
 //!
 //! The walk is an explicit bounded stack (no recursion — a deep tree cannot
 //! blow the call stack) and never follows a symlink: a symlinked directory is
-//! not descended and a symlink leaf is untracked (`lstat`, never `stat` —
-//! `LANGUAGE_SEMANTICS_MATRIX.md` 8.1, `PORTING.md` §10). A file that vanishes
+//! not descended and a symlink leaf is untracked (`lstat`, never `stat`). A
+//! file that vanishes
 //! mid-walk is a benign race and is skipped. Other per-entry readability
 //! failures are bounded and reported in [`ScanListing::failed`] while the walk
 //! continues, matching the TS capture posture. The workspace root and all
@@ -113,7 +113,7 @@ pub enum ScanOutcome {
 }
 
 /// Owns the fixed hash-worker pool and the resource bounds. One scanner per
-/// workspace actor (`PORTING.md` §14: pool created once, reused, bounded).
+/// workspace actor (pool created once, reused, bounded).
 pub struct Scanner {
     bounds: ScanBounds,
     pool: HashPool,
@@ -162,12 +162,12 @@ impl Scanner {
         self.scan_with_prior(root, &ScanManifest::empty(), token)
     }
 
-    /// Scan `root`, short-circuiting the hash for any file whose size AND
+    /// Scan `root`, short-circuiting the hash for any file whose size and
     /// mtime both match its `prior` manifest entry: the entry's recorded hash
     /// is reused and the file is never read. A zero mtime on either side
     /// always hashes (no recorded pairing exists — see the amended N8 rule on
     /// [`FileEntry`]). A reused file cannot surface a read failure, so a file
-    /// that became unreadable WITHOUT changing size or mtime stays tracked at
+    /// that became unreadable without changing size or mtime stays tracked at
     /// its last-known-good content instead of degrading the scan.
     pub fn scan_with_prior(
         &self,
@@ -199,7 +199,7 @@ impl Scanner {
         };
 
         // The hash-reuse short-circuit (amended N8): a candidate whose size
-        // AND mtime both match its prior entry keeps the recorded hash; every
+        // and mtime both match its prior entry keeps the recorded hash; every
         // other candidate becomes a hash input. Inputs stay in candidate
         // order, so `outcomes` (indexed by input) can be consumed sequentially
         // against the non-reused candidates below.
@@ -275,7 +275,7 @@ impl Scanner {
                 } => {
                     // The candidate mtime comes from the enumerate-time stat,
                     // but the hashed bytes come from a later read. A same-size
-                    // write inside that gap would pair the STALE mtime with the
+                    // write inside that gap would pair the stale mtime with the
                     // new bytes' hash, and an mtime-preserving restore of the
                     // original bytes would then reuse the wrong hash forever.
                     // Re-stat after hashing: the entry carries the enumerate
@@ -569,7 +569,7 @@ enum EnumOutcome {
 }
 
 /// Resolve the root to a readable directory. Mirrors the kernel's
-/// `canonical_workspace_root` intent (reject a non-directory), but does NOT
+/// `canonical_workspace_root` intent (reject a non-directory), but does not
 /// canonicalize to a `\\?\` path — the scan works with the caller's root and
 /// produces root-relative paths, so canonicalization (and its 7.4 prefix
 /// hazard) is unnecessary here.

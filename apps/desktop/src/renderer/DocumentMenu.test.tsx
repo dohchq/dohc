@@ -8,7 +8,7 @@ import { DocumentMenu, FEEDBACK_MS } from "./DocumentMenu";
 // path. Import it here so vitest transforms and executes that graph while
 // collecting this file, not in the middle of a test. Leaving it on the test's
 // own clock put ~600ms of module load inside the assertion, and a busy machine
-// pushed it past the window (#522).
+// pushed it past the window.
 import "./editor/documentExport";
 
 type ExportDocumentFileCall = {
@@ -64,7 +64,7 @@ vi.mock("./bridge", () => ({
 const MARKDOWN = "---\ntitle: Plan\n---\n\n# Plan\n\nBody text.\n";
 
 function stubClipboard() {
-  // navigator.clipboard is a getter-only property in jsdom; define it AFTER
+  // navigator.clipboard is a getter-only property in jsdom; define it after
   // userEvent.setup() so its own stub doesn't shadow this one.
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText },
@@ -193,7 +193,7 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  it("exports as Markdown through the bridge with the RAW document source", async () => {
+  it("exports as Markdown through the bridge with the raw document source", async () => {
     const user = userEvent.setup();
     renderMenu();
     await user.click(screen.getByTestId("document-menu-trigger"));
@@ -209,8 +209,8 @@ describe("DocumentMenu", () => {
     expect(screen.queryByRole("menu")).toBeNull();
   });
 
-  // #564: an engine-backed document whose editor has not mounted (or failed
-  // to) cannot be serialized — the markdown cache beside it is EMPTY on the
+  // An engine-backed document whose editor has not mounted (or failed
+  // to) cannot be serialized — the markdown cache beside it is empty on the
   // failed-read recovery path, and falling back to it copied and exported an
   // empty document while telling the user it worked. Every action refuses.
   it("refuses to copy or export a document it cannot serialize", async () => {
@@ -229,14 +229,12 @@ describe("DocumentMenu", () => {
     // Same settle the copy test uses: let the component's own await chain
     // finish and React repaint before reading the label.
     await act(async () => {});
-    // MUTATION: fall back to the empty cache -> "Copied", and the clipboard
-    // holds nothing.
     const copyItem = screen.getByTestId("document-menu-item-copy-markdown");
-    expect(copyItem.textContent).toBe("Document not open");
+    expect(copyItem.textContent, "fall back to the empty cache -> 'Copied', and the clipboard holds nothing.").toBe("Document not open");
     // The label states the fact; the next step is stated in the menu's status
     // line, because an inline label that swaps for 1.2s has no room for it.
     // It was a tooltip, and a keyboard user never saw it: focus stays on the
-    // role="menu" container, so the item's title never presents (#666).
+    // role="menu" container, so the item's title never presents.
     const status = screen.getByTestId("document-menu-status");
     expect(status.getAttribute("role")).toBe("status");
     expect(status.textContent).toBe("You can copy this document when it opens.");
@@ -246,24 +244,22 @@ describe("DocumentMenu", () => {
     // The refusal leaves the menu open, so the export item is right there.
     await user.click(screen.getByTestId("document-menu-item-export-markdown"));
     await act(async () => {});
-    // ONE label, on the item the user just clicked. There is one timer, so a
+    // One label, on the item the user just clicked. There is one timer, so a
     // second refusal inside its window retires the first item's label as it
     // replaces the timer — otherwise the copy item keeps its refusal with
-    // nothing left to clear it (codex r14).
+    // nothing left to clear it.
     expect(screen.getAllByText("Document not open")).toHaveLength(1);
     const exportItem = screen.getByTestId("document-menu-item-export-markdown");
     expect(exportItem.textContent).toBe("Document not open");
-    // Each action names its OWN next step, and one status line carries the
+    // Each action names its own next step, and one status line carries the
     // one feedback the menu holds.
     expect(screen.getByTestId("document-menu-status").textContent).toBe(
       "You can export this document when it opens.",
     );
-    // MUTATION: the same fallback -> a .md file containing one newline,
-    // written as if it were the user's document.
-    expect(exportDocumentFile).not.toHaveBeenCalled();
+    expect(exportDocumentFile, "the same fallback -> a .md file containing one newline, written as if it were the user's document.").not.toHaveBeenCalled();
   });
 
-  // #666: the instruction was a tooltip, so a keyboard user never got it —
+  // The instruction was a tooltip, so a keyboard user never got it —
   // focus stays on the role="menu" container and the item's title never
   // presents. A live region only announces reliably when it was already in
   // the accessibility tree before its text arrived, so the region mounts with
@@ -296,8 +292,8 @@ describe("DocumentMenu", () => {
     expect(screen.getByTestId("document-menu-status")).toBe(status);
   });
 
-  // #666, codex r1 on #684: moving the instruction into the status region is
-  // not enough while it rides the label's 1.2s timer — and that timer CLOSED
+  // Moving the instruction into the status region is
+  // not enough while it rides the label's 1.2s timer — and that timer closed
   // the menu, so the instruction left the screen with it. A keyboard or
   // low-vision user gets 1.2s to find and read it, which is the same failure
   // the tooltip had, one mechanism along.
@@ -330,7 +326,7 @@ describe("DocumentMenu", () => {
       { timeout: FEEDBACK_MS * 4 },
     );
 
-    // The two things that must NOT retire with it.
+    // The two things that must not retire with it.
     expect(screen.queryByRole("menu")).not.toBeNull();
     expect(screen.getByTestId("document-menu-status").textContent).toBe(
       "You can copy this document when it opens.",
@@ -344,7 +340,7 @@ describe("DocumentMenu", () => {
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
   });
 
-  // The other half of that branch: a CONFIRMATION is over once it is read, so
+  // The other half of that branch: a confirmation is over once it is read, so
   // its timer still retires the label and closes the menu. Without this,
   // keeping every menu open forever passes the test above.
   it("still closes on the timer after a confirmation", async () => {
@@ -403,9 +399,7 @@ describe("DocumentMenu", () => {
       await write.promise;
     });
 
-    // MUTATION: let it speak -> the instruction is erased, the export item
-    // reads "Copied", and the menu closes 1.2s later.
-    expect(screen.getByTestId("document-menu-status").textContent).toBe(
+    expect(screen.getByTestId("document-menu-status").textContent, "let it speak -> the instruction is erased, the export item reads 'Copied', and the menu closes 1.2s later.").toBe(
       "You can export this document when it opens.",
     );
     expect(
@@ -442,9 +436,7 @@ describe("DocumentMenu", () => {
       await write.promise;
     });
 
-    // MUTATION: let it speak -> this menu shows "Copied" for an attempt that
-    // belonged to the last one, and closes on its timer.
-    expect(screen.queryByText("Copied")).toBeNull();
+    expect(screen.queryByText("Copied"), "let it speak -> this menu shows 'Copied' for an attempt that belonged to the last one, and closes on its timer.").toBeNull();
     expect(
       screen.getByTestId("document-menu-item-copy-markdown").textContent,
     ).toBe("Copy as Markdown");
@@ -483,9 +475,7 @@ describe("DocumentMenu", () => {
     await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
     await act(async () => {});
 
-    // MUTATION: clear only when the retry ANSWERS -> the menu tells the user
-    // to wait for a document that is open, while the copy of it runs.
-    expect(writeText).toHaveBeenCalledTimes(1);
+    expect(writeText, "clear only when the retry answers -> the menu tells the user to wait for a document that is open, while the copy of it runs.").toHaveBeenCalledTimes(1);
     expect(screen.getByTestId("document-menu-status").textContent).toBe("");
     expect(
       screen.getByTestId("document-menu-item-copy-markdown").textContent,
@@ -502,7 +492,7 @@ describe("DocumentMenu", () => {
   });
 
   // The other consequence of leaving the last answer standing: its timer runs
-  // too, and that timer CLOSES the menu after a confirmation. A retry started
+  // too, and that timer closes the menu after a confirmation. A retry started
   // inside the window had the menu shut under it while it was still pending.
   it("cannot be closed by a previous result's timer once a new attempt starts", async () => {
     const user = userEvent.setup();
@@ -523,17 +513,14 @@ describe("DocumentMenu", () => {
     await act(async () => {});
 
     // The one wall-clock wait in this file, and it is safe in the direction
-    // that matters: the timer under test was armed BEFORE this wait started,
+    // that matters: the timer under test was armed before this wait started,
     // so a slow machine gives it more chances to fire, never fewer. With it
     // cancelled there is no timer left to wait for at all.
     //
-    // MUTATION: leave the previous timer running -> it closes the menu on
-    // behalf of an attempt that is over, while this one is still waiting on
-    // the clipboard.
     await act(async () => {
       await new Promise((resolve) => setTimeout(resolve, FEEDBACK_MS * 2));
     });
-    expect(screen.queryByRole("menu")).not.toBeNull();
+    expect(screen.queryByRole("menu"), "leave the previous timer running -> it closes the menu on behalf of an attempt that is over, while this one is still waiting on the clipboard.").not.toBeNull();
     expect(
       screen.getByTestId("document-menu-item-copy-markdown").textContent,
     ).toBe("Copy as Markdown");
@@ -545,7 +532,7 @@ describe("DocumentMenu", () => {
     expect(screen.getByText("Copied")).toBeTruthy();
   });
 
-  // codex r23: NULL is the refusal this menu expects; a THROW is not. The
+  // codex r23: NULL is the refusal this menu expects; a throw is not. The
   // serializer reads a live editor, and reading it can fail — and once the
   // call moved outside the action's try boundary, that rejected the action's
   // promise into nothing: no feedback, no log, and the menu still open as
@@ -570,10 +557,9 @@ describe("DocumentMenu", () => {
       await user.click(screen.getByTestId("document-menu-item-copy-markdown"));
       await act(async () => {});
 
-      // MUTATION: call `getMarkdown()` outside the boundary -> an unhandled
-      // rejection, and the user sees the menu sit there.
       expect(
         screen.getByTestId("document-menu-item-copy-markdown").textContent,
+        "call `getMarkdown()` outside the boundary -> an unhandled rejection, and the user sees the menu sit there.",
       ).toBe("Couldn't copy");
       expect(logged).toHaveBeenCalledWith("Copy as Markdown failed", failure);
       expect(writeText).not.toHaveBeenCalled();

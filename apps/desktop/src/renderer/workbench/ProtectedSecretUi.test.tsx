@@ -5,7 +5,7 @@ import type { EngineMomentRecord } from "../../ipc/bridgeContract";
 import { EngineHistoryView } from "./EngineHistory";
 import { VersionComparePage } from "./WorkspaceVersions";
 
-// Secret-backed file UI (PR 08): protected history rows carry a lock and the
+// Secret-backed file UI: protected history rows carry a lock and the
 // compare view shows "Protected file changed" — contents never render.
 
 const SECRET_VALUE = "UI_SECRET_MARKER_555";

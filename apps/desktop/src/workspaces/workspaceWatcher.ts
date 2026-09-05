@@ -11,7 +11,7 @@ import { desktopMarks } from "../performance/desktopMarks";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 
-// Retirement Phase C (WS-H1): the legacy .dohc/history change-set recorder is
+// The legacy.dohc/history change-set recorder is
 // gone. The watcher has exactly one recording sink — the workspace engine
 // capture. A workspace that explicitly opted out of the engine has NO history
 // recorder at all (the honest consequence of retiring the legacy stack); the
@@ -90,7 +90,7 @@ export function startWorkspaceWatch(
     onSettledBatch?: (events: WatcherEvent[]) => void;
     // Read at the moment a batch settles: a non-null capture records the
     // batch as engine moments. Null (explicit engine opt-out, or a failed
-    // capture build) means NOTHING records — retirement Phase C removed the
+    // capture build) means nothing records — retirement Phase C removed the
     // legacy recorder. Enqueue-only: the watcher never waits on the engine.
     engineCapture?: () => Pick<WorkspaceEngineCapture, "captureBatch"> | null;
   } = {},

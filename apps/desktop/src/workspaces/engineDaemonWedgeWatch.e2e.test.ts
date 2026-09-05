@@ -7,7 +7,7 @@ import type { Request } from "@dohc/workspace-engine-client";
 import { afterEach, describe, expect, it } from "vitest";
 import { requireEngineBinaryOrSkip } from "../testing/engineBinary";
 
-// The lifecycle unit suite drives a FAKE client. A fake cannot prove that the
+// The lifecycle unit suite drives a fake client. A fake cannot prove that the
 // real daemon serves engine.ping, nor that the real client reports its answer
 // as an answer — and the gap is not hypothetical. A first draft of the wedge
 // detector passed every unit test and could never have fired in production,
@@ -56,7 +56,7 @@ describe("engine.ping against a real daemon", () => {
             onEvent: (handler) => client.onEvent(handler),
             onBlob: (handler) => client.onBlob(handler),
             close: () => client.close(),
-            // Forwarded so this e2e drives the REAL kill path. A wrapper that
+            // Forwarded so this e2e drives the real kill path. A wrapper that
             // dropped it would send the supervisor down the close() fallback
             // and prove nothing about what a wedge kill reports.
             closeUnresponsive: () => client.closeUnresponsive(),

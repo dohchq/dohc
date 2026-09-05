@@ -26,7 +26,7 @@ struct VerifiedTripletEntry {
     size_bytes: u64,
 }
 
-/// Phase A: acquire every present triplet handle, retain the platform's
+/// Acquire every present triplet handle, retain the platform's
 /// exclusive lock while streaming each source into the proof copy, then close
 /// all handles. The returned proof is the close-to-rename race baseline.
 pub(crate) fn acquire_copy_hash_close(
@@ -45,7 +45,7 @@ pub(crate) fn acquire_copy_hash_close(
     let mut held = Vec::new();
     for name in DB_TRIPLET {
         let source = paths.engine.join(name);
-        // Validate the path BEFORE opening: a sidecar replaced by a
+        // Validate the path before opening: a sidecar replaced by a
         // FIFO/device would block a plain open forever instead of failing.
         match std::fs::symlink_metadata(&source) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
@@ -94,7 +94,7 @@ pub(crate) fn acquire_copy_hash_close(
     Ok(VerifiedTriplet { entries })
 }
 
-/// Phase B: immediately move the old live files into the retained sibling and
+/// Immediately move the old live files into the retained sibling and
 /// verify the moved bytes against Phase A. On any rename or verification
 /// failure, missing live paths are restored from the proof copies; moved files
 /// are retained for diagnosis and never deleted.
@@ -122,11 +122,11 @@ pub(crate) fn swap_and_verify(
     }
 
     let moved = paths.engine.join(MOVED_ASIDE_DIR);
-    // CRITICAL alias gate: an ALIASED moved-aside dir would receive the live
-    // triplet OUTSIDE the clone root — prove it is a real directory (or
+    // CRITICAL alias gate: an aliased moved-aside dir would receive the live
+    // triplet outside the clone root — prove it is a real directory (or
     // absent) before read_dir and before any rename lands in it.
     if super::require_real_dir(&moved, "moved-aside-alias-refused")? {
-        // An EMPTY leftover dir is the crash window right after create_dir —
+        // An empty leftover dir is the crash window right after create_dir —
         // nothing was moved, so reuse it. A non-empty one is a real partial
         // move and stays a refusal.
         let mut entries =
@@ -149,9 +149,9 @@ pub(crate) fn swap_and_verify(
         }
     }
 
-    // EVERY verification failure — including an IO error while inspecting the
+    // Every verification failure — including an IO error while inspecting the
     // moved bytes — must route through the rollback, never bypass it. The
-    // parent-dir fsyncs make the renames durable BEFORE the MovedAside state
+    // parent-dir fsyncs make the renames durable before the MovedAside state
     // is recorded, so a power loss cannot persist the marker without the move.
     if let Err(error) = verify_moved_entries(&moved, verified)
         .and_then(|()| super::fsync_dir(&paths.engine))
@@ -183,7 +183,7 @@ fn verify_moved_entries(moved: &Path, verified: &VerifiedTriplet) -> Result<(), 
 }
 
 /// Roll back after a failed swap without masking the swap error. Only when the
-/// rollback ITSELF also fails is a combined code surfaced instead. The engine
+/// rollback itself also fails is a combined code surfaced instead. The engine
 /// dir is fsynced so the recreated live entries are durable before the caller
 /// can persist a terminal Failed over them.
 fn fail_swap(verified: &VerifiedTriplet, primary: RehearsalError) -> RehearsalError {
@@ -353,7 +353,7 @@ fn to_hex(digest: &[u8]) -> String {
     output
 }
 
-/// Whether the retained (moved-aside) old store is genuinely present: a REAL
+/// Whether the retained (moved-aside) old store is genuinely present: a real
 /// regular `engine.db` (symlink_metadata — `is_file` would follow a symlink)
 /// and nothing but real regular triplet files beside it. A symlinked,
 /// hard-linked, or foreign entry means the retained store cannot be trusted.
@@ -395,9 +395,9 @@ pub(crate) fn moved_aside_store_retained(
     if !db_present {
         return Ok(false);
     }
-    // The retained file must BE the preserved ORIGINAL store, not junk (or a
+    // The retained file must BE the preserved original store, not junk (or a
     // fresh/stale sibling) with the right name: opened read-only, its own
-    // shadow_clone binding AND its engine identity must both match.
+    // shadow_clone binding and its engine identity must both match.
     let Ok(conn) = super::open_sqlite_read_only_nofollow(
         &moved.join("engine.db"),
         "moved-aside-db-open-failed",

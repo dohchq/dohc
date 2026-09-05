@@ -5,10 +5,10 @@
 //
 // Drop semantics (VSCode + Finder convention):
 //   • Source = file, target = folder ⇒ move file INTO folder.
-//   • Source = file, target = file ⇒ move source NEXT TO target
+//   • Source = file, target = file ⇒ move source next TO target
 //     (i.e., into target's parent folder).
 //   • Source = folder, target = folder ⇒ move source INTO target.
-//   • Source = folder, target = file ⇒ move source NEXT TO target
+//   • Source = folder, target = file ⇒ move source next TO target
 //     (i.e., into target's parent folder).
 //   • Target = root (no row, just the tree container) ⇒ move to
 //     workspace root.
@@ -34,7 +34,7 @@ export type DragSource = {
 }
 
 /** The target as resolved by the drop handler. `parentDir` is the
- *  folder that will CONTAIN the moved item — '' means workspace
+ *  folder that will contain the moved item — '' means workspace
  *  root. Computed by the caller based on what the user dropped on
  *  (a folder row, a file row's parent, or the root container). */
 type DropTarget = {

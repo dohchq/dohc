@@ -1,4 +1,4 @@
-// Tiny named mark/measure recorder used by BOTH the Electron main process and
+// Tiny named mark/measure recorder used by both the Electron main process and
 // the renderer (each bundle gets its own instance). Marks store absolute
 // wall-clock epochs (Date.now()) so durations remain comparable across the
 // two processes; measures store computed durations between marks. The

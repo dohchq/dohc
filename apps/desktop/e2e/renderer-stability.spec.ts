@@ -13,10 +13,10 @@ import {
 //
 //   1. An aggressive click-around session (open/close/switch tabs across
 //      every file kind, toggle panels and views, quick-open, history rail)
-//      must leave the shell mounted with ZERO uncaught renderer errors —
+//      must leave the shell mounted with zero uncaught renderer errors —
 //      any pageerror here is exactly the class of throw that used to unmount
 //      the whole React tree to a blank window.
-//   2. A real renderer-process crash must RECOVER: main's render-process-gone
+//   2. A real renderer-process crash must recover: main's render-process-gone
 //      handler reloads the window instead of leaving it permanently blank.
 
 function rendererErrors(logs: DesktopLogEntry[]): string[] {
@@ -140,7 +140,7 @@ test("a crashed renderer reloads back to the workspace instead of staying blank"
     });
 
     // Assert recovery from the MAIN process (the Playwright page object is
-    // attached to the crashed renderer). executeJavaScript can HANG when the
+    // attached to the crashed renderer). executeJavaScript can hang when the
     // webContents is mid-crash/mid-reload, so every probe races a short
     // in-main timeout — the next poll tick simply asks again.
     await expect

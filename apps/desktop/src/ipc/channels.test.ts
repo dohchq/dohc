@@ -44,7 +44,7 @@ const workspaceModeDriftGuard: Assert<
 > = true;
 
 // The preload boundary for main→renderer menu events. These cases are the
-// codex-review attack set: the check must accept ONLY exact primitive members
+// codex-review attack set: the check must accept only exact primitive members
 // of the closed tuple — not String objects, toString tricks, case variants,
 // or lookalikes — because this predicate is all that stands between an ipc
 // event payload and renderer code.
@@ -291,7 +291,7 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
     expect(
       parseUpdateStateEvent(Object.create({ status: "ready", message: "x" })),
     ).toBeNull();
-    // One own + one inherited still fails: BOTH fields must be own.
+    // One own + one inherited still fails: both fields must be own.
     const halfOwn = Object.create({ message: "x" }) as { status?: string };
     halfOwn.status = "ready";
     expect(parseUpdateStateEvent(halfOwn)).toBeNull();
@@ -304,9 +304,9 @@ describe("parseUpdateStateEvent (preload boundary)", () => {
   });
 });
 
-// The preload boundary for main→renderer search-result events (Phase E5.0) —
+// The preload boundary for main→renderer search-result events —
 // same attack set as parseUpdateStateEvent: only a plain object with a
-// bounded primitive searchId and entries that ALL pass the closed shape gets
+// bounded primitive searchId and entries that all pass the closed shape gets
 // through, rebuilt field by field so nothing extra ever crosses.
 describe("parseSearchResultsEvent (preload boundary)", () => {
   const entry = {

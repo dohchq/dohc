@@ -23,7 +23,7 @@ mkdirSync(outputDir, { recursive: true });
 // oracle imports `@dohc/workspace-core`, whose link pnpm writes to
 // `packages/security-contract/node_modules/`, so a checkout without its own
 // install cannot run this generator no matter where tsx is found. Resolving tsx
-// elsewhere would only turn a clear "install the dependencies" SKIP into a
+// elsewhere would only turn a clear "install the dependencies" Skip into a
 // module-not-found stack trace.
 const require = createRequire(join(repoRoot, "package.json"));
 const tsxBases = [
@@ -122,7 +122,7 @@ const vectors = inputs.map(([path, rustClaimed]) => ({
 
 // The selector's VERSION dimension, asked of the same oracle. The share
 // boundary refuses a served moment whose claimed `versionId` is not one the
-// relay could have issued, and it must refuse EXACTLY the ids the TypeScript
+// relay could have issued, and it must refuse exactly the ids the TypeScript
 // rule refuses. One vector per clause, plus the two characters where
 // JavaScript's trim set and Rust's `char::is_whitespace` disagree: a twin that
 // splits on those is not a twin.
@@ -144,14 +144,14 @@ const versionIdInputs = [
   "\u0085kept",
   "x".repeat(MAX_SHARE_VERSION_ID_CHARS),
   "x".repeat(MAX_SHARE_VERSION_ID_CHARS + 1),
-  // One astral character is TWO UTF-16 code units, which is the unit the
+  // One astral character is two UTF-16 code units, which is the unit the
   // budget counts.
   "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2),
   "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1),
 ];
 
 // The share-access level rule, asked of the same oracle. Both sides must
-// accept EXACTLY the three lowercase values the relay issues and refuse
+// accept exactly the three lowercase values the relay issues and refuse
 // everything else — case variants, padding, and unrelated strings included
 // — so a widened or narrowed rule on either side moves a vector here.
 const shareAccessInputs = [

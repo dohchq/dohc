@@ -90,7 +90,7 @@ describe('isMermaidBlockCollapsed', () => {
     expect(isMermaidBlockCollapsed(block, 35)).toBe(true)
   })
 
-  it('is NOT collapsed anywhere inside the inclusive block range', () => {
+  it('is not collapsed anywhere inside the inclusive block range', () => {
     expect(isMermaidBlockCollapsed(block, 10)).toBe(false)
     expect(isMermaidBlockCollapsed(block, 20)).toBe(false)
     expect(isMermaidBlockCollapsed(block, 30)).toBe(false)
@@ -158,7 +158,7 @@ describe('MermaidRenderScheduler', () => {
     vi.useRealTimers()
   })
 
-  it('debounces rapid schedule() calls into a single render of the LATEST source', async () => {
+  it('debounces rapid schedule() calls into a single render of the latest source', async () => {
     const render = vi.fn(async (_id: string, source: string) => ({ svg: `<svg>${source}</svg>` }))
     const results: MermaidRenderResult[] = []
     const scheduler = new MermaidRenderScheduler(render, (_key, r) => results.push(r))
@@ -399,7 +399,7 @@ describe('makeMermaidPreviewPlugin — DOM wiring', () => {
     )
     const renderCallsAfterPaint = render.mock.calls.length
 
-    // Type a character into the paragraph ABOVE the fence — this shifts the
+    // Type a character into the paragraph above the fence — this shifts the
     // fence's doc position. Pre-fix, the position-derived key changed and PM
     // destroyed the widget, leaving an empty canvas until a re-render.
     editor.view.dispatch(editor.state.tr.insertText('X', 1))

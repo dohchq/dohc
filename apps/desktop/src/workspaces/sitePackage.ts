@@ -119,7 +119,7 @@ export function shareMountRootForSite(root: string): string | null {
     return null;
   }
   // isSharedWithMePath recognizes case variants and Windows aliases (a
-  // trailing dot, etc.) as the SAME reserved segment — but the returned
+  // trailing dot, etc.) as the same reserved segment — but the returned
   // mount root must still be a literal PREFIX of the original root string,
   // or downstream validation that checks root.startsWith(mountRoot) rejects
   // an otherwise-legitimate site. Preserve parts[0]'s own spelling instead
@@ -136,7 +136,7 @@ function pathRelativeToArtifact(artifactRoot: string, path: string): string | nu
 
 // The core join both resolveArtifactRelativePath (an ordinary reference) and
 // htmlBaseDirectoryFromDocument (a <base href>) share: a browser resolves a
-// root-absolute reference ("/x") against the SERVED root (artifactRoot), and
+// root-absolute reference ("/x") against the served root (artifactRoot), and
 // a document-relative one against whichever directory the referring
 // document's own base names.
 function joinAgainstArtifact(artifactRoot: string, decoded: string, directory: string): string {
@@ -168,7 +168,7 @@ function resolveArtifactRelativePath(
   base: HtmlBaseResolution,
 ): string | null {
   // A browser's URL parser normalizes `\` to `/` in the path of a special
-  // scheme (http/https/file) before resolution — on EVERY platform, not
+  // scheme (http/https/file) before resolution — on every platform, not
   // just Windows. Do the same here, on the raw reference, before any
   // path-joining, so a site authored with backslash separators resolves
   // the way it would in a real browser instead of naming a literal
@@ -242,7 +242,7 @@ function isHtml5Element(node: Html5Node): node is Html5Node & { tagName: string;
 // but that fragment is not part of the document tree. A browser fetches
 // nothing inside inert template content until it's cloned and inserted, and
 // a `<base>` inside one never affects the containing document's base URL —
-// exclude it entirely, from base selection AND from reference scanning.
+// exclude it entirely, from base selection and from reference scanning.
 function html5ChildNodes(node: Html5Node): Html5Node[] {
   return node.content ? [] : (node.childNodes ?? []);
 }
@@ -254,8 +254,8 @@ function html5TextContent(node: Html5Node): string {
     .join("");
 }
 
-// "module" is never a MIME type essence (no "type/subtype" shape) — the
-// spec matches it as an exact keyword on its OWN, never through MIME
+// "module" is never a mime type essence (no "type/subtype" shape) — the
+// spec matches it as an exact keyword on its own, never through mime
 // parsing, so it's deliberately excluded from this list.
 const JS_SCRIPT_TYPE_PATTERN =
   /^(?:text\/javascript|application\/javascript|text\/ecmascript|application\/ecmascript|text\/jscript|text\/x-javascript|text\/x-ecmascript)$/i;
@@ -264,18 +264,18 @@ const JS_SCRIPT_TYPE_PATTERN =
  * a <script> a data block — its own `src` attribute never fires a request
  * (src only applies to classic and module scripts) and its body is data,
  * never code a browser executes. A missing type, the exact `module`
- * keyword, and a classic JS MIME essence are all executable. */
+ * keyword, and a classic JS mime essence are all executable. */
 function isExecutableScriptType(attrs: ReadonlyMap<string, string>): boolean {
   const type = attrs.get("type");
   if (!type) return true;
   const trimmed = type.trim();
-  // The exact keyword check runs BEFORE MIME parsing, on the whole trimmed
-  // value — `type="module;foo"` is neither this keyword nor a MIME
+  // The exact keyword check runs before mime parsing, on the whole trimmed
+  // value — `type="module;foo"` is neither this keyword nor a mime
   // essence, so it's a data block, not a module. An essence-first check
   // would wrongly reduce "module;foo" to essence "module" and match it
   // here.
   if (trimmed.toLowerCase() === "module") return true;
-  // A `type` is otherwise a MIME type — only its ESSENCE (the type/subtype
+  // A `type` is otherwise a mime type — only its essence (the type/subtype
   // before any `;parameter=value`) is what a browser compares against the
   // JS list. `text/javascript; charset=utf-8` is exactly as executable as
   // `text/javascript` alone.
@@ -309,10 +309,10 @@ function isSubmitControlElement(tagName: string, attrs: ReadonlyMap<string, stri
 
 /** Being a submit control isn't enough on its own — activating one with no
  * owner form performs no navigation at all, so `formaction` is inert on
- * it. A control owns a form either by DESCENDING from one, or by a
+ * it. A control owns a form either by descending from one, or by a
  * `form="id"` attribute naming one anywhere in the document (the HTML
  * spec's form-association rule isn't limited to ancestors). Ids can be
- * declared AFTER the control that references them, so every `<form id>`
+ * declared after the control that references them, so every `<form id>`
  * in the document is collected in its own pass before the main walk
  * needs to check any of them. */
 function collectFormIds(document: Html5Node): Set<string> {
@@ -350,7 +350,7 @@ function metaRefreshTarget(content: string): string | undefined {
 // reference to: img-src, script-src, style-src, connect-src, worker-src,
 // with default-src as the fallback each falls back to when absent. Only
 // the unambiguous "this whole class is 'none'" case is recognized — a
-// source list with host patterns, nonces, hashes, or 'self' is NOT
+// source list with host patterns, nonces, hashes, or 'self' is not
 // evaluated (implementing real CSP source matching is out of this bound),
 // so it never narrows what gets shared; the classes above are still exactly
 // what the finding's own example ("script-src 'none'" hiding
@@ -369,7 +369,7 @@ function parseCspDirectives(content: string): Map<string, string[]> {
     const tokens = rawDirective.trim().split(/\s+/).filter(Boolean);
     const name = tokens[0]?.toLowerCase();
     if (!name) continue;
-    // A directive name repeated within the SAME policy: only the first
+    // A directive name repeated within the same policy: only the first
     // occurrence is honored, later repeats are ignored, per the CSP spec.
     if (!directives.has(name)) directives.set(name, tokens.slice(1));
   }
@@ -379,12 +379,12 @@ function parseCspDirectives(content: string): Map<string, string[]> {
 /** The CSP classes a document's meta policies rule out entirely (an
  * effective source list of exactly 'none' OR EMPTY). Every collected policy
  * is evaluated and the results unioned — under CSP's own intersection
- * semantics, ANY policy saying 'none' (or nothing at all) for a class truly
+ * semantics, any policy saying 'none' (or nothing at all) for a class truly
  * blocks it, regardless of what a different policy on the same document
  * allows. A directive present with no source expressions at all
  * (`<meta ... content="img-src">`, parseCspDirectives leaves it `[]`) is as
  * unambiguous a block as an explicit 'none' — a real browser permits
- * NOTHING for a class whose list has zero sources, the same as 'none'. */
+ * nothing for a class whose list has zero sources, the same as 'none'. */
 function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<CspClass> {
   const blocked = new Set<CspClass>();
   for (const content of cspPolicyContents) {
@@ -400,8 +400,8 @@ function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<Cs
   return blocked;
 }
 
-// CSP's own grammar for a nonce-source's value is base64-value = 1*(ALPHA /
-// DIGIT / "+" / "/" / "-" / "_") *2("=") — a token outside that charset
+// CSP's own grammar for a nonce-source's value is base64-value = 1*(alpha /
+// digit / "+" / "/" / "-" / "_") *2("=") — a token outside that charset
 // ('nonce-!!!') is syntactically invalid and Chromium drops it entirely,
 // the same way an unrecognized keyword is dropped, rather than treating it
 // as a wildcard nonce any script's own (equally malformed) nonce attribute
@@ -411,7 +411,7 @@ function blockedCspClasses(cspPolicyContents: readonly string[]): ReadonlySet<Cs
 const NONCE_SOURCE_PATTERN = /^'nonce-([A-Za-z0-9+/_-]+={0,2})'$/i;
 
 // CSP nonce VALUES are meant to be unguessable tokens — two nonces that
-// differ only in case are NOT the same one, so unlike the keyword prefix
+// differ only in case are not the same one, so unlike the keyword prefix
 // above, the value itself must compare case-SENSITIVELY.
 function nonceSourceMatches(sourceList: readonly string[], nonce: string): boolean {
   return sourceList.some((token) => NONCE_SOURCE_PATTERN.exec(token)?.[1] === nonce);
@@ -423,7 +423,7 @@ const HASH_SOURCE_PATTERN = /^'sha(256|384|512)-([A-Za-z0-9+/]+=*)'$/i;
 // <style> body) or the attribute's exact value (style=""/an on* handler,
 // only reached when 'unsafe-hashes' also permits attribute matching —
 // see isInlineBlockPermitted) — UTF-8 encoded, base64-digested. Multiple
-// hash-source tokens can name the SAME algorithm; the digest for each
+// hash-source tokens can name the same algorithm; the digest for each
 // algorithm actually present is computed once and reused.
 function hashSourceMatches(sourceList: readonly string[], text: string): boolean {
   const digests = new Map<string, string>();
@@ -441,20 +441,20 @@ function hashSourceMatches(sourceList: readonly string[], text: string): boolean
   return false;
 }
 
-/** Whether a SPECIFIC inline block — a <script>/<style> element's own text
+/** Whether a specific inline block — a <script>/<style> element's own text
  * (with its own `nonce` attribute, if any) or a style=""/on* handler
  * ATTRIBUTE's own value (`isAttribute: true`, `nonce: undefined` — an
  * attribute is never itself an element with a nonce) — is permitted to
  * execute/apply under every policy collected so far in document order
- * (CSP intersection: ANY one policy that doesn't permit it blocks the
+ * (CSP intersection: any one policy that doesn't permit it blocks the
  * block document-wide, the same rule blockedCspClasses' external-resource
  * check already follows). `script-src 'self'` (or any source list at
- * all) blocks inline content UNLESS 'unsafe-inline' or a matching nonce-/
+ * all) blocks inline content unless 'unsafe-inline' or a matching nonce-/
  * hash-source is also present — unlike blockedCspClasses, 'self' alone is
  * enough to block here. A hash-source only covers an ATTRIBUTE's value
  * when the list also carries 'unsafe-hashes' (CSP3); nonce-sources never
  * do, since only an ELEMENT — never an attribute value — carries a nonce
- * of its own. 'unsafe-inline' is ignored the instant the list carries ANY
+ * of its own. 'unsafe-inline' is ignored the instant the list carries any
  * nonce- or hash-source token at all, per CSP2+, even for a content type
  * (an attribute against a nonce-only list) that token can never itself
  * satisfy — a real, if surprising, spec-correct lockout. */
@@ -467,7 +467,7 @@ function isInlineBlockPermitted(
 ): boolean {
   for (const content of cspPolicyContents) {
     const directives = parseCspDirectives(content);
-    // Chromium picks the MOST specific directive that's actually present —
+    // Chromium picks the most specific directive that's actually present —
     // script-src-elem for a <script> element, script-src-attr for an on*
     // handler (style-src-elem/style-src-attr the same way for style) —
     // before falling back to the generic script-src/style-src, and only
@@ -527,7 +527,7 @@ const URL_ATTRIBUTE_ELEMENTS: Readonly<Record<string, ReadonlySet<string>>> = {
 // actually fetches for — an alternate/canonical/author/search/etc. link
 // never triggers a request the way a stylesheet or icon does. `rel` is a
 // space-separated token list. `preload` only fetches when paired with `as`
-// (it names WHAT is being preloaded, and without it the browser treats the
+// (it names what is being preloaded, and without it the browser treats the
 // link as inert); `modulepreload` needs no `as` — a missing `as` there
 // defaults to the "script" destination and the fetch still happens.
 const LINK_REL_RESOURCE_TOKENS = new Set([
@@ -605,7 +605,7 @@ function htmlBaseDirectoryFromDocument(
   document: Html5Node,
   fromPath: string,
   artifactRoot: string,
-  // A real file's own <base href> resolves relative to ITS OWN directory
+  // A real file's own <base href> resolves relative to its own directory
   // (the default, "none"). A srcdoc pseudo-document has no file of its own —
   // its <base href>, if it declares one, resolves against the EMBEDDING
   // document's base instead, so a caller threading that base in as
@@ -614,7 +614,7 @@ function htmlBaseDirectoryFromDocument(
 ): HtmlBaseResolution {
   // parse5 already decoded any HTML character reference in the href value —
   // only the URL-level percent-encoding below is still this function's job.
-  // Trimmed BEFORE any classification: leading whitespace (" https://evil")
+  // Trimmed before any classification: leading whitespace (" https://evil")
   // would otherwise fail both the "//" network-path check and
   // URI_SCHEME_PATTERN's anchored match below, letting an external URL
   // fall through and resolve as an ordinary local directory instead —
@@ -623,7 +623,7 @@ function htmlBaseDirectoryFromDocument(
   const rawHref = firstBaseHref(document)?.trim();
   if (!rawHref || rawHref.startsWith("#")) return { kind: "none" };
   // Same browser-URL-parser backslash normalization as
-  // resolveArtifactRelativePath, applied BEFORE the external-base check —
+  // resolveArtifactRelativePath, applied before the external-base check —
   // a browser normalizes `\\host\...` to the network-path reference
   // `//host/...` and resolves it against that external host. Checking for
   // "//" on the raw, unnormalized href would instead let it fall through
@@ -676,7 +676,7 @@ function referencesFromWebManifest(text: string): Array<{ value: string; documen
     }
   };
 
-  // start_url is where the browser NAVIGATES when the installed PWA
+  // start_url is where the browser navigates when the installed PWA
   // launches, and a shortcut's own url navigates there the same way when
   // its menu item is activated — both are document destinations, the
   // same as an <a href>, not merely fetched bytes.
@@ -743,8 +743,8 @@ export interface BrowserTextReference {
   // genuinely differ.
   documentRelative: boolean;
   // True only for a Worker/SharedWorker/serviceWorker.register target: that
-  // script runs in its OWN global scope with its own location, so anything
-  // IT references (once loaded) resolves against ITS directory, not the
+  // script runs in its own global scope with its own location, so anything
+  // IT references (once loaded) resolves against its directory, not the
   // document that launched it.
   entersOwnContext?: boolean;
   // True for a <link rel="manifest"> target: the browser treats it as a web
@@ -754,27 +754,27 @@ export interface BrowserTextReference {
   isManifest?: boolean;
   // The grammar a JS target parses with once reached — "module" only for an
   // import/export/dynamic-import specifier (the only constructs that can
-  // ONLY appear in a module); every other JS-reaching reference (a classic
+  // only appear in a module); every other JS-reaching reference (a classic
   // <script src>, Worker/serviceWorker/importScripts targets, a fetched or
   // assigned .js file) defaults to "classic" when unset. An ordinary
-  // <script src> with module-only syntax is a syntax error in a REAL
+  // <script src> with module-only syntax is a syntax error in a real
   // browser — parsing with the wrong grammar would accept it anyway.
   scriptKind?: ScriptKind;
   // True for a <link rel="stylesheet"> href, and for every reference
   // cssReferences() itself produces (its url()/@import targets are read out
   // of text a browser is already applying as CSS, the same way a nested
   // @import target is itself an applied stylesheet). A .css file reached
-  // ONLY via fetch()/an asset-style attribute never sets this — the browser
+  // only via fetch()/an asset-style attribute never sets this — the browser
   // fetches its bytes but never parses or applies them as a stylesheet, so
   // its own url()/@import text is never read as CSS either.
   appliesAsStylesheet?: boolean;
   // True for an <object data>/<embed src>/<iframe src> reference: the
   // browser loads the target AS A NESTED DOCUMENT (a plugin/browsing
   // context), not merely as bytes or a raster-like image. An SVG target
-  // reached this way is itself parsed for ITS OWN references (<image
+  // reached this way is itself parsed for its own references (<image
   // href>, <use href>, inline <style>) the same way a real browser resolves
   // them — an SVG reached only via <img src> or a CSS url() stays an
-  // unexpanded leaf asset, since a browser never processes ITS internal
+  // unexpanded leaf asset, since a browser never processes its internal
   // references as separate requests in that context.
   documentDestination?: boolean;
   // The CSP fetch-directive class this reference belongs to, for the
@@ -785,32 +785,32 @@ export interface BrowserTextReference {
   // bounded set (navigation, form-action, manifest-src, frame-src, ...) —
   // those are never filtered by CSP here, regardless of policy.
   cspClass?: CspClass;
-  // The import map that was ACTIVE when this <script src>/modulepreload
+  // The import map that was active when this <script src>/modulepreload
   // reference was reached in document order — set only where scriptKind is
   // (an inline block's own importMap field does the equivalent job for
   // inline script text; this is that same capture for an EXTERNAL script
   // reference). Unset for every other reference kind, which never resolves
   // bare specifiers against an import map at all. The queue that turns this
-  // reference into a scan target uses this INSTEAD of the document's final
+  // reference into a scan target uses this instead of the document's final
   // resolved map, so a module script reached before a later <script
   // type="importmap"> still scans without one, matching a real browser.
   importMap?: ImportMapResolution;
-  // A srcdoc pseudo-document is its OWN document with its OWN <meta CSP>
+  // A srcdoc pseudo-document is its own document with its own <meta CSP>
   // policies, entirely separate from the embedding document's — a
   // reference this srcdoc's own scan discovered (see htmlReferencesFromDocument's
-  // srcdoc handling) carries THAT document's own blockedCspClasses forward,
+  // srcdoc handling) carries that document's own blockedCspClasses forward,
   // so a further file it points to (an external <script src>) is filtered
   // by the policy that actually governs the srcdoc's realm, not by
   // whatever the embedding document's own policy happens to allow.
   // Unset — and the queue falls back to the embedding document's own
-  // state, unchanged from before — for every reference NOT sourced from a
+  // state, unchanged from before — for every reference not sourced from a
   // srcdoc scan.
   blockedCspClasses?: ReadonlySet<CspClass>;
 }
 
 type CspClass = "img" | "script" | "style" | "connect" | "worker";
 
-// CSS still isn't parsed with a real parser (out of this round's scope) —
+// CSS still isn't parsed with a real parser —
 // url()/@import stay pattern-matched, but only over text a browser's CSS
 // parser would actually read: a real <style> element's content, a style=""
 // attribute value, or an entire external .css file. A CSS comment produces
@@ -820,7 +820,7 @@ type CspClass = "img" | "script" | "style" | "connect" | "worker";
 const CSS_COMMENT_PATTERN = /\/\*[\s\S]*?(?:\*\/|$)/g;
 // A quoted string token that ISN'T itself url()'s or @import's own argument
 // is just a CSS value (`content: 'url("x")'`) — the tokenizer never
-// re-reads inside it for url()/@import syntax. Blanking every OTHER string
+// re-reads inside it for url()/@import syntax. Blanking every other string
 // token before matching (like comments) keeps that text a browser's CSS
 // parser would never treat as a reference from minting one; a string
 // immediately preceded by "url(" or "@import " is left alone so the
@@ -833,7 +833,7 @@ const CSS_URL_PATTERN =
 // unquoted CSS syntax (`@import url(theme.css)` is as valid as
 // `@import url("theme.css")` or `@import "theme.css"`). Without the
 // unquoted alternative, CSS_URL_PATTERN's own generic (and looser) match
-// on the SAME text would classify it img-src instead of style-src.
+// on the same text would classify it img-src instead of style-src.
 const CSS_IMPORT_PATTERN =
   /@import\s+(?:url\(\s*(?:"([^"]{1,2048})"|'([^']{1,2048})'|([^"')\s][^)]{0,2047}))\s*\)|"([^"]{1,2048})"|'([^']{1,2048})')/gi;
 // A bare url() destination depends on the CSS property it sits in —
@@ -852,7 +852,7 @@ function fontFaceBlockSpans(cssText: string): Array<[number, number]> {
 }
 
 // `@import url(theme.css)` contains a real url(...) call CSS_URL_PATTERN
-// ALSO matches on its own generic pass — without excluding it, the SAME
+// also matches on its own generic pass — without excluding it, the same
 // span mints two references for the same target: one classified "style"
 // (correct — @import pulls in a stylesheet) and one classified "img" (the
 // generic pass's default). A policy like `img-src 'self'; style-src
@@ -879,15 +879,15 @@ function blankCssStrings(cssText: string): string {
 // image-set(<candidate> <descriptor>?, ...) — each candidate can be a
 // quoted STRING url (not just url(...)), and the browser fetches whichever
 // one it selects for the device. Extracted from the comment-stripped text
-// BEFORE blankCssStrings runs: a candidate string isn't preceded by url(
+// before blankCssStrings runs: a candidate string isn't preceded by url(
 // or @import, so blanking would otherwise erase it as an ordinary,
 // resource-free CSS string.
 const CSS_IMAGE_SET_OPEN_PATTERN = /(?:-webkit-)?image-set\(/gi;
 const CSS_IMAGE_SET_CANDIDATE_PATTERN = /"([^"]{1,2048})"|'([^']{1,2048})'/g;
 
-/** Every image-set(...) call's FULL, balanced body — a candidate list like
+/** Every image-set(...) call's full, balanced body — a candidate list like
  * `url("one.png") 1x, "two.png" 2x` can itself contain a nested url(...)
- * call with its OWN closing paren before image-set's own, so a single
+ * call with its own closing paren before image-set's own, so a single
  * non-greedy "stop at the first )" regex truncates the body early and
  * silently drops every candidate after that nested call. This walks the
  * text manually to track paren depth instead. */
@@ -911,12 +911,12 @@ function imageSetBodies(cssText: string): string[] {
 // uses to pick the candidate, not a second image to fetch. Its string
 // argument looks identical to a real quoted candidate to
 // CSS_IMAGE_SET_CANDIDATE_PATTERN — blanking type(...) text out of the
-// body BEFORE matching (the earlier approach) has no notion of "inside a
-// string": a REAL candidate whose own text happens to contain the
+// body before matching has no notion of "inside a
+// string": a real candidate whose own text happens to contain the
 // substring "type(...)" (e.g. `"icons/type('dark').png"`) gets corrupted
 // before extraction, same as blankCssStrings would corrupt an
 // unrelated string if it didn't check what precedes a match. Checking
-// what immediately PRECEDES each already-matched quoted string — the
+// what immediately precedes each already-matched quoted string — the
 // same technique blankCssStrings already uses — distinguishes a real
 // type() hint (preceded by "type(") from a candidate whose own content
 // merely contains that text, without needing to blank anything first.
@@ -949,7 +949,7 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
     const value = (match[1] ?? match[2] ?? match[3])?.trim();
     if (!value) continue;
     const start = match.index ?? 0;
-    // @import's OWN url(...) call is handled by the @import pass below,
+    // @import's own url(...) call is handled by the @import pass below,
     // with the correct style-src classification — matching it again here
     // would mint a second, wrongly-classified reference for the same span.
     if (cssImportSpans.some(([spanStart, spanEnd]) => start >= spanStart && start < spanEnd)) continue;
@@ -970,7 +970,7 @@ function cssReferences(rawCssText: string): BrowserTextReference[] {
   }
   for (const match of cssText.matchAll(CSS_IMPORT_PATTERN)) {
     const value = (match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5])?.trim();
-    // @import pulls in a whole further STYLESHEET — style-src, not img-src.
+    // @import pulls in a whole further stylesheet — style-src, not img-src.
     if (value) references.push({ value, documentRelative: false, appliesAsStylesheet: true, cspClass: "style" });
   }
   return references;
@@ -1049,26 +1049,26 @@ function isImportMetaUrl(node: unknown): boolean {
   return isAstNode(property) && property.type === "Identifier" && astString(property, "name") === "url";
 }
 
-// Finding 2/3's stance: a property assignment (`X.src = lit`) or
+// A property assignment (`X.src = lit`) or
 // `X.setAttribute("src", lit)` only counts as a real browser-consumed
-// reference when X is PROVABLY a DOM element of a tag the HTML spec
+// reference when X is provably a DOM element of a tag the HTML spec
 // actually fires that property/attribute from — the result of
 // document.createElement("TAG")/body/head with a known tag, or a variable
-// assigned from one. DOM provenance alone does NOT prove resource semantics
+// assigned from one. DOM provenance alone does not prove resource semantics
 // (`document.createElement("div").src` is an inert expando, no request
 // happens); querySelector/getElementById produce a real element but an
-// UNKNOWN tag, so they can never satisfy the (tag, property) check either —
+// unknown tag, so they can never satisfy the (tag, property) check either —
 // unprovable stays out, the same rule (tag, property) already enumerates
 // for markup via URL_ATTRIBUTE_ELEMENTS, reused here rather than duplicated.
 // For a share manifest, under-inclusion breaks a share visibly (a missing
 // asset 404s in the open tab); over-inclusion discloses a file silently.
 type DomProducingTag = string | "unknown";
 
-// Finding 3: the browser globals this scanner trusts by identifier name —
+// The browser globals this scanner trusts by identifier name —
 // document, fetch, Worker, SharedWorker, URL, importScripts,
-// XMLHttpRequest — must be the REAL globals, not a same-named local.
+// XMLHttpRequest — must be the real globals, not a same-named local.
 // Over-conservative by design: if the
-// program declares ANY binding for the name anywhere (a function, a var/
+// program declares any binding for the name anywhere (a function, a var/
 // let/const, a parameter, a class, or an import specifier), the whole file
 // treats that name as shadowed and excludes every use of it, rather than
 // attempting real lexical scope resolution for a heuristic scanner.
@@ -1085,7 +1085,7 @@ const TRUSTED_GLOBAL_NAMES = new Set([
   "XMLHttpRequest",
 ]);
 // window.X / globalThis.X are the same real global as bare X — an object
-// merely NAMED "window" that isn't provably the browser global proves
+// merely named "window" that isn't provably the browser global proves
 // nothing (and isn't reachable outside a shadowed binding anyway, since
 // "window"/"globalThis" are themselves tracked as trusted names above).
 const GLOBAL_OBJECT_NAMES = new Set(["window", "globalThis"]);
@@ -1149,9 +1149,9 @@ function collectShadowedGlobalNames(program: AstNode): Set<string> {
 }
 
 /** Whether `node` is a bare global identifier `name`, or `window.name` /
- * `globalThis.name` — an arbitrary object merely NAMED `name` as a property
+ * `globalThis.name` — an arbitrary object merely named `name` as a property
  * (`fake.document`, `app.serviceWorker`) proves nothing about the real
- * browser global. Every step (the global object AND the final identifier)
+ * browser global. Every step (the global object and the final identifier)
  * must be unshadowed. */
 function isGlobalReceiver(node: unknown, name: string, shadowedGlobals: ReadonlySet<string>): boolean {
   if (shadowedGlobals.has(name) || !isAstNode(node)) return false;
@@ -1173,7 +1173,7 @@ function isDocumentReceiver(node: unknown, shadowedGlobals: ReadonlySet<string>)
   return isGlobalReceiver(node, "document", shadowedGlobals);
 }
 
-/** Whether `node` is `navigator.serviceWorker` — the ONLY receiver a real
+/** Whether `node` is `navigator.serviceWorker` — the only receiver a real
  * service-worker registration ever has. `navigator` itself must be the
  * unshadowed browser global (bare, window., or globalThis.-prefixed); an
  * arbitrary object merely named "serviceWorker" (`app.serviceWorker`) is
@@ -1241,7 +1241,7 @@ function domProducingTag(
   return undefined;
 }
 
-/** Every identifier PROVABLY bound to a DOM-producing expression somewhere
+/** Every identifier provably bound to a DOM-producing expression somewhere
  * in the file, and the tag it's known to produce — a small fixed-point pass
  * (not real lexical scoping) so a chain like
  * `const a = document.createElement("img"); const b = a;` still resolves,
@@ -1252,9 +1252,9 @@ function domProducingTag(
  * `const img = document.createElement("img")` share a map key with no
  * scope resolver to tell them apart. Per the unprovable-stays-out rule,
  * the conservative fix wins over a real scope resolver a heuristic scanner
- * has no business building: a name declared or assigned ANYWHERE in the
+ * has no business building: a name declared or assigned anywhere in the
  * file with a non-DOM-producing value (or with two DIFFERENT DOM tags) is
- * invalidated file-wide, never trusted again even where its OWN binding
+ * invalidated file-wide, never trusted again even where its own binding
  * really is DOM-producing. */
 /** Every identifier name a destructuring/parameter pattern binds, however
  * nested — `{ img }`, `[img]`, `img = {}`, `...img` all still bind `img`. */
@@ -1288,7 +1288,7 @@ function collectPatternNames(pattern: unknown, into: Set<string>): void {
   }
 }
 
-/** Every name bound by ANY function's parameter list in the file — a
+/** Every name bound by any function's parameter list in the file — a
  * parameter's runtime value is never provable statically (the caller
  * decides it, default value or not), so it can never be trusted as
  * DOM-producing even where a SAME-named variable elsewhere in the file
@@ -1314,7 +1314,7 @@ function collectFunctionParameterNames(program: AstNode): Set<string> {
  * A function parameter's value is never provable statically, so its name is
  * invalidated up front and can never re-enter `proven`. A bare declaration
  * (`let x;`, source null/undefined) proves nothing but doesn't invalidate
- * either — only an ACTUAL, differently-classified value does. Two DIFFERENT
+ * either — only an actual, differently-classified value does. Two different
  * proven values for the same name is the same cross-scope collision, just
  * between two proven bindings instead of one proven and one not — neither
  * is trustworthy, so both classifiers that carry more than one possible
@@ -1324,7 +1324,7 @@ function collectFunctionParameterNames(program: AstNode): Set<string> {
  *
  * `maxPasses` > 1 lets `proveValue` read the accumulator being built, for a
  * classifier (collectDomProducingTags': `let a = document.createElement(
- * "img"); let b = a;`) whose own proof can depend on an EARLIER proof from
+ * "img"); let b = a;`) whose own proof can depend on an earlier proof from
  * the same walk. Passes stop as soon as one makes no further change.
  */
 function collectProvenBindings<T>(
@@ -1384,12 +1384,12 @@ function collectDomProducingTags(
   );
 }
 
-// Knowing an expression CREATES a script/link/etc. element doesn't prove
+// Knowing an expression creates a script/link/etc. element doesn't prove
 // assigning its src/href performs a request — `document.createElement
 // ("script")` alone never connects it to the document; only an insertion
 // call does, and only THEN does a later src/href assignment (or one that
 // already ran before insertion — order doesn't matter, the request fires
-// once BOTH have happened) actually fetch anything.
+// once both have happened) actually fetch anything.
 const DOM_INSERTION_METHOD_NAMES = new Set([
   "appendChild",
   "insertBefore",
@@ -1399,15 +1399,15 @@ const DOM_INSERTION_METHOD_NAMES = new Set([
   "replaceChildren",
 ]);
 
-/** Every identifier name EVER passed as an argument to a DOM insertion
+/** Every identifier name ever passed as an argument to a DOM insertion
  * call (appendChild/insertBefore/append/prepend/replaceWith/
- * replaceChildren) whose RECEIVER is itself a proven DOM node — a plain,
+ * replaceChildren) whose receiver is itself a proven DOM node — a plain,
  * non-fixed-point pass over the already-resolved provenTags map, since
  * insertion is a terminal fact (not something that itself needs to
  * propagate through further chained assignments the way a DOM tag does).
  * Like provenTags itself, this is a flat, name-keyed check with the same
  * residual cross-scope imprecision the whole file already accepts: an
- * unrelated function's own same-named variable passed to some OTHER
+ * unrelated function's own same-named variable passed to some other
  * insertion call can't be told apart from ours without real lexical
  * scoping, which this heuristic scanner deliberately doesn't build. */
 function collectInsertedIdentifierNames(
@@ -1445,9 +1445,9 @@ const URL_FETCH_WITHOUT_INSERTION_TAGS = new Set(["img", "video", "audio"]);
 
 /** Whether `object.property = lit` or `object.setAttribute("property", lit)`
  * is a proven, resource-consuming (tag, property) pair — reuses
- * URL_ATTRIBUTE_ELEMENTS, the SAME allowlist markup attributes already go
+ * URL_ATTRIBUTE_ELEMENTS, the same allowlist markup attributes already go
  * through, so a DOM element's real tag is held to the identical rule.
- * Also requires proof the element was actually INSERTED somewhere in the
+ * Also requires proof the element was actually inserted somewhere in the
  * document for every tag that genuinely needs it — an unattached
  * `document.createElement("script")` never connects to anything, and
  * assigning its src is inert until it does. */
@@ -1463,14 +1463,14 @@ function isProvenUrlReceiver(
     return false;
   }
   if (URL_FETCH_WITHOUT_INSERTION_TAGS.has(tag)) return true;
-  // document.body/document.head are ALWAYS already in the document — a
+  // document.body/document.head are always already in the document — a
   // MemberExpression is the only shape domProducingTag ever returns "body"/
   // "head" for, so this can't also match a fresh document.createElement(...)
   // chain.
   if (isAstNode(object) && object.type === "MemberExpression") return true;
   // An identifier-bound element (document.createElement(...) assigned to a
-  // variable, or a chain resolving to one) needs its OWN insertion proven.
-  // A FRESH document.createElement(...) chain that was never bound to a
+  // variable, or a chain resolving to one) needs its own insertion proven.
+  // A fresh document.createElement(...) chain that was never bound to a
   // variable at all (object.type !== "Identifier" here) has no way to be
   // traced to a later insertion call either — unprovable, so it's declined
   // the same as an identifier that fails the insertion check, not treated
@@ -1482,12 +1482,12 @@ function isProvenUrlReceiver(
 
 // A worker script (reached via Worker/SharedWorker/serviceWorker.register)
 // runs in its own global scope where importScripts exists; an ordinary
-// document-linked script never has it. Finding 4: importScripts only counts
+// document-linked script never has it. importScripts only counts
 // in that context.
 type JsScanContext = "document" | "worker";
 
 // A browser parses an ordinary classic <script> and a <script type="module">
-// with DIFFERENT grammars — module-only syntax (import/export declarations)
+// with different grammars — module-only syntax (import/export declarations)
 // is a SYNTAX ERROR in a classic script, so the browser never requests
 // anything a classic script's own import statement names. Guessing via a
 // dual-attempt parse (module first, falling back to script) would accept
@@ -1502,14 +1502,14 @@ function parseJavaScript(code: string, scriptKind: ScriptKind): AstNode | null {
     }) as unknown as AstNode;
   } catch {
     // Not parseable with this exact grammar — scan nothing rather than
-    // guess a different one. The old regex-based scanner would still match
+    // guess a different one. A regex-based scanner would still match
     // patterns in garbage text; a real parser correctly finds no code to
     // have references at all, and a browser wouldn't execute it either.
     return null;
   }
 }
 
-// Finding 9: an inline <script type="importmap"> remaps bare module
+// An inline <script type="importmap"> remaps bare module
 // specifiers before the browser resolves them — an unmapped bare specifier
 // is not a relative filesystem path at all (module resolution throws on
 // one), so it must not fall through to naive local-path joining the way a
@@ -1519,12 +1519,12 @@ interface ResolvedSpecifierMap {
   // A relative/root-relative import-map KEY ("./lib.js") is itself a
   // URL-like specifier, not a bare one — the spec normalizes it against the
   // map's own (declaring document) base the same way it normalizes the
-  // address it maps to, then matches an importer's specifier by its OWN
+  // address it maps to, then matches an importer's specifier by its own
   // normalized form. Keyed by the same artifact-root-absolute ("/"-prefixed)
   // convention resolveImportMapAddresses already uses for values.
   urlLikeImports: ReadonlyMap<string, string>;
   // A URL-like key whose address resolves to something this scanner can't
-  // reach locally (most commonly an external URL) is still a REAL mapping
+  // reach locally (most commonly an external URL) is still a real mapping
   // the browser follows — not an absent one. Recorded so
   // resolveModuleSpecifier can treat it as a TERMINAL resolution (mint
   // nothing) instead of falling through and treating the specifier as an
@@ -1534,11 +1534,11 @@ interface ResolvedSpecifierMap {
 }
 
 interface ImportMapResolution extends ResolvedSpecifierMap {
-  // `scopes` remaps specifiers only for modules whose OWN resolved path
+  // `scopes` remaps specifiers only for modules whose own resolved path
   // falls under a given prefix — keyed by that prefix (with its trailing
   // "/" preserved, so a boundary like "/feature/" can never also match
   // "/feature-other/..."), normalized the same "/"-prefixed way as a
-  // urlLikeImports key. The spec tries EVERY matching scope, longest
+  // urlLikeImports key. The spec tries every matching scope, longest
   // prefix first, before falling back to the top-level maps above — a
   // parent scope still applies when the most specific matching scope
   // doesn't map the specifier either.
@@ -1548,7 +1548,7 @@ interface ImportMapResolution extends ResolvedSpecifierMap {
 // A document can declare more than one <script type="importmap"> — the
 // HTML standard (and Chromium/WebKit as of the version this scanner
 // targets) merges each into a single global import map as it's parsed,
-// in document order: a key an EARLIER map already claimed (in imports,
+// in document order: a key an earlier map already claimed (in imports,
 // urlLikeImports, OR externalUrlLikeKeys — never more than one of those
 // three for the same key) keeps its original value; a later map only
 // ever fills in a key nothing has claimed yet.
@@ -1560,7 +1560,7 @@ function mergeSpecifierMaps(
   const imports = new Map(existing.imports);
   const urlLikeImports = new Map(existing.urlLikeImports);
   const externalUrlLikeKeys = new Set(existing.externalUrlLikeKeys);
-  // A key an EARLIER map already claims keeps its value; a key an earlier
+  // A key an earlier map already claims keeps its value; a key an earlier
   // MODULE already resolved (lockedKeys — see lockedModuleSpecifierKeys)
   // is just as unavailable to a later map, even one introducing it for
   // the very first time — a real browser's already-resolved specifier
@@ -1575,7 +1575,7 @@ function mergeSpecifierMaps(
 }
 
 // Scopes merge the same way, per prefix: a scope only the later map
-// declares is added wholesale; a scope BOTH declare merges its own
+// declares is added wholesale; a scope both declare merges its own
 // specifier map with the same earlier-wins-or-locked rule.
 function mergeImportMapResolutions(
   existing: ImportMapResolution,
@@ -1590,7 +1590,7 @@ function mergeImportMapResolutions(
   const scopes = new Map(existing.scopes);
   for (const [prefix, nextScope] of next.scopes) {
     const existingScope = scopes.get(prefix) ?? emptySpecifierMap;
-    // A brand-new scope prefix still needs its OWN keys checked against
+    // A brand-new scope prefix still needs its own keys checked against
     // lockedKeys — a scope this map never had before is not exempt from
     // "a key an earlier module already resolved stays fixed."
     scopes.set(prefix, mergeSpecifierMaps(existingScope, nextScope, lockedKeys));
@@ -1612,7 +1612,7 @@ function isBareModuleSpecifier(specifier: string): boolean {
  * maps don't rewrite those); a bare specifier resolves through the active
  * import map — an exact "imports" key first, then the longest matching
  * "prefix/" key — and an unmapped bare specifier resolves to nothing. */
-// Exact match first, then the LONGEST "prefix/" key the specifier starts
+// Exact match first, then the longest "prefix/" key the specifier starts
 // with — the same longest-prefix-match algorithm the spec applies to every
 // import-map entry, bare or URL-like alike.
 function resolveAgainstImportMapEntries(
@@ -1630,11 +1630,11 @@ function resolveAgainstImportMapEntries(
   return entries.get(bestPrefixKey)! + specifier.slice(bestPrefixKey.length);
 }
 
-/** The LONGEST scope whose prefix is an ancestor of the IMPORTING script's
+/** The longest scope whose prefix is an ancestor of the importing script's
  * own resolved path — the same longest-prefix-wins rule as everything
  * else here, applied to the importer's location instead of the specifier. */
-/** Every scope whose prefix is an ancestor of the IMPORTING script's own
- * resolved path, longest prefix FIRST — the spec tries each matching scope
+/** Every scope whose prefix is an ancestor of the importing script's own
+ * resolved path, longest prefix first — the spec tries each matching scope
  * in turn (most specific first) and only moves on when the current one
  * doesn't map the specifier either, so a PARENT scope still applies when
  * the closest matching scope doesn't have an entry. */
@@ -1657,7 +1657,7 @@ function matchingScopes(
 // use for this specifier: a bare specifier's own text, or a URL-like one's
 // normalized, artifact-root-relative "/"-prefixed form — the same
 // normalization the spec applies to a URL-like map KEY before matching it,
-// applied here to a REFERRING specifier so the two compare equal.
+// applied here to a referring specifier so the two compare equal.
 function moduleSpecifierKey(
   specifier: string,
   fromPath: string,
@@ -1671,11 +1671,11 @@ function moduleSpecifierKey(
 }
 
 // A real browser's module map permanently remembers a specifier's
-// resolution the FIRST time any earlier module resolves it (whether via an
+// resolution the first time any earlier module resolves it (whether via an
 // import map or a URL-like specifier's own natural relative target) — a
-// LATER <script type="importmap"> cannot retroactively remap that same
+// later <script type="importmap"> cannot retroactively remap that same
 // specifier for anything reached afterward either, even a brand-new key no
-// EARLIER map ever claimed. mergeImportMapResolutions' own "earlier map's
+// earlier map ever claimed. mergeImportMapResolutions' own "earlier map's
 // key wins" rule only covers two import maps declaring the same key; this
 // closes the other half by returning every specifier key an earlier BLOCK
 // already resolved, so a later map's new entry for that same key can be
@@ -1705,9 +1705,9 @@ function lockedModuleSpecifierKeys(
     }
     const specifier = stringLiteralValue(astChild(node, "source"))?.trim();
     if (!specifier) return;
-    // A path-like specifier always resolves to SOMETHING — its own natural
+    // A path-like specifier always resolves to something — its own natural
     // relative target, an explicit remap, or an external URL this scanner
-    // can't reach locally — every one of those outcomes is a REAL
+    // can't reach locally — every one of those outcomes is a real
     // resolution that locks it. A bare specifier has no natural
     // resolution at all: it locks only when an import map actually maps
     // it: an unmapped bare specifier fails to resolve, so nothing was
@@ -1731,7 +1731,7 @@ function resolveModuleSpecifier(
   const scopes = matchingScopes(importMap, fromPath, artifactRoot);
   if (!isBareModuleSpecifier(specifier)) {
     // A URL-like specifier still passes through the import map: the spec
-    // normalizes it against the IMPORTING script's own base and matches
+    // normalizes it against the importing script's own base and matches
     // that normalized form against the map's (already-normalized) keys —
     // an exact key OR the longest "prefix/" key it starts with. Unmatched,
     // it resolves to itself — same as before this lookup existed.
@@ -1771,7 +1771,7 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
   const imports = rawSpecifierMap((parsed as Record<string, unknown>).imports);
   const scopesField = (parsed as Record<string, unknown>).scopes;
-  // Raw, pre-normalization form — each scope's own key AND its specifier
+  // Raw, pre-normalization form — each scope's own key and its specifier
   // map both go through the same resolution resolveImportMapAddresses
   // already applies to the top-level maps, before this is used anywhere.
   const scopes = new Map<string, ResolvedSpecifierMap>();
@@ -1783,8 +1783,8 @@ function parseImportMap(text: string): ImportMapResolution | undefined {
   return { imports, urlLikeImports: new Map(), externalUrlLikeKeys: new Set(), scopes };
 }
 
-// Finding 8's stance: `new URL(lit, import.meta.url)` alone only
-// CONSTRUCTS a URL object — the browser performs no request until the
+// `new URL(lit, import.meta.url)` alone only
+// constructs a URL object — the browser performs no request until the
 // result reaches a consuming position (an inline argument to fetch/Worker/
 // SharedWorker/serviceWorker.register, or a proven DOM property assignment/
 // setAttribute value). `console.log(new URL(...))` or an otherwise-unused
@@ -1803,7 +1803,7 @@ function newUrlLiteral(node: unknown, shadowedGlobals: ReadonlySet<string>): str
   return first;
 }
 
-/** Every identifier PROVABLY initialized from `new URL(lit,
+/** Every identifier provably initialized from `new URL(lit,
  * import.meta.url)` — a one-hop pass (not real lexical scoping), the same
  * technique collectDomProducingTags uses: `const u = new URL(lit,
  * import.meta.url); fetch(u);` still counts once `u` reaches a consumer. */
@@ -1822,7 +1822,7 @@ function isNewXhrExpression(node: unknown, shadowedGlobals: ReadonlySet<string>)
   );
 }
 
-/** Every identifier PROVABLY bound to `new XMLHttpRequest()` — same
+/** Every identifier provably bound to `new XMLHttpRequest()` — same
  * conservative-kill shape as collectDomProducingTags/collectUrlLiteralNames:
  * a function parameter's value is never provable, and a name later bound
  * to something else anywhere in the file is untrustworthy everywhere. */
@@ -1888,23 +1888,23 @@ function jsReferencesFromCode(
   const urlLiteralNames = collectUrlLiteralNames(program, shadowedGlobals);
   const provenXhrNames = collectXhrInstanceNames(program, shadowedGlobals);
   // XMLHttpRequest.open(method, url, ...) only initializes a request — no
-  // network request happens until .send() is called on the SAME instance,
-  // and re-opening BEFORE sending discards the prior configuration (only
-  // the LAST open() before send() is ever actually requested). walkAst is
+  // network request happens until.send() is called on the same instance,
+  // and re-opening before sending discards the prior configuration (only
+  // the last open() before send() is ever actually requested). walkAst is
   // a single PRE-ORDER pass over the source text's own shape, not runtime
   // order. Straight-line code (`open(a); send(); open(b);`) visits opens
-  // and sends in the SAME order it runs them — the correct target for a
+  // and sends in the same order it runs them — the correct target for a
   // given send() is whichever open() was MOST RECENTLY VISITED before it,
-  // not the receiver's LAST open() anywhere in the file (a later re-open
+  // not the receiver's last open() anywhere in the file (a later re-open
   // with no send after it must not retroactively steal an earlier send's
-  // target). Each send() captures whatever open target is CURRENTLY on
+  // target). Each send() captures whatever open target is currently on
   // record for its receiver at that point in the walk.
   //
   // A capture that comes up empty means no open() had been visited yet
-  // for that receiver AT THAT POINT — e.g. a function DECLARED before a
-  // later open() and CALLED after it: walk order proves nothing there.
+  // for that receiver AT THAT POINT — e.g. a function declared before a
+  // later open() and called after it: walk order proves nothing there.
   // Falling back to the receiver's fully-resolved open target is only
-  // SOUND when that receiver only ever opens ONE distinct target in the
+  // sound when that receiver only ever opens one distinct target in the
   // whole file — with two or more distinct opens (`function issue(){
   // xhr.send() } xhr.open(a); issue(); xhr.open(b);`), no amount of
   // walk-order bookkeeping proves which one this particular unresolved
@@ -1923,13 +1923,13 @@ function jsReferencesFromCode(
     cspClass?: CspClass,
   ) => {
     const trimmed = value?.trim();
-    // Every reference this scan discovers is part of the SAME module graph
-    // this code itself was reached through — its OWN `importMap` parameter
+    // Every reference this scan discovers is part of the same module graph
+    // this code itself was reached through — its own `importMap` parameter
     // (a per-push-time snapshot for an inline block, or an inherited one
     // for an already-queued file) is the resolution context a real browser
     // would keep using for anything reachable from here, not whatever
     // import map the document happens to have by the time this reference's
-    // OWN target is later scanned.
+    // own target is later scanned.
     if (trimmed) {
       references.push({
         value: trimmed,
@@ -2026,7 +2026,7 @@ function jsReferencesFromCode(
           if (propertyName === "register" && isServiceWorkerReceiver(object, shadowedGlobals)) {
             // A registered service worker runs in its own global scope with
             // its own script URL, same as Worker/SharedWorker — including
-            // the SAME { type: "module" } registration option deciding its
+            // the same { type: "module" } registration option deciding its
             // grammar.
             const { value, scriptRelative } = consumedValue(args[0]);
             addReference(value, !scriptRelative, true, workerScriptKind(args[1]), "worker");
@@ -2046,8 +2046,8 @@ function jsReferencesFromCode(
             // as setAttribute("src", ...) — but URL_ATTRIBUTE_ELEMENTS is
             // keyed lowercase, so an uppercase/mixed-case literal here
             // would otherwise miss the lookup entirely and the reference
-            // never gets recorded. A DIRECT property assignment
-            // (`img.SRC = ...`, the OTHER addUrlAttributeReference call
+            // never gets recorded. A direct property assignment
+            // (`img.SRC =...`, the other addUrlAttributeReference call
             // site below) stays case-sensitive — that's real JS property
             // access, not an HTML attribute name.
             const attributeName = stringLiteralValue(args[0])?.toLowerCase();
@@ -2077,8 +2077,8 @@ function jsReferencesFromCode(
             provenXhrNames.has(astString(object, "name") ?? "")
           ) {
             // send() is what actually issues the request — capture
-            // whichever open target is on record for this receiver RIGHT
-            // NOW (see xhrOpenTargets above), not whatever it ends up
+            // whichever open target is on record for this receiver right
+            // now (see xhrOpenTargets above), not whatever it ends up
             // being by the end of the walk.
             const name = astString(object, "name") ?? "";
             xhrSendCaptures.push({ name, target: xhrOpenTargets.get(name) });
@@ -2110,7 +2110,7 @@ function jsReferencesFromCode(
     // A capture that came up empty means no open() had been visited yet
     // for this receiver AT THAT POINT in the walk — walk order can't
     // resolve it. Falling back to the receiver's fully-resolved open
-    // target is only sound when it's the ONLY distinct target that
+    // target is only sound when it's the only distinct target that
     // receiver ever opens — with two or more, no walk-order bookkeeping
     // proves which one this send() paired with at runtime, so it's
     // declined rather than guessed.
@@ -2129,9 +2129,9 @@ interface HtmlDocumentReferences {
   // for a plain document (never inherited: each HTML document is a fresh
   // realm, and only the module scripts IT loads share this map).
   importMap: ImportMapResolution | undefined;
-  // The FINAL (whole-document) set of CSP classes this document's own
+  // The final (whole-document) set of CSP classes this document's own
   // meta policies rule out — carried onto the scan queue so an external
-  // script/stylesheet THIS document references is scanned under the SAME
+  // script/stylesheet this document references is scanned under the same
   // policy, not treated as if the document had no CSP at all. A resource
   // reached only via such an external file is requested by the browser
   // under the referring document's policy, the same way document-level
@@ -2144,7 +2144,7 @@ interface HtmlDocumentReferences {
  * valid), not a module or program (always classic grammar — a handler
  * attribute can never declare module-only syntax), and joining every
  * handler with every script body into one string means one handler using
- * `return` would make the WHOLE combined parse fail. Parsing each handler
+ * `return` would make the whole combined parse fail. Parsing each handler
  * on its own also isolates a malformed handler's failure from every other
  * reference. */
 function jsReferencesFromEventHandler(
@@ -2166,9 +2166,9 @@ function jsReferencesFromEventHandler(
   );
 }
 
-/** Resolves each import-map address against the DECLARING document's own
+/** Resolves each import-map address against the declaring document's own
  * base, into an artifact-root-absolute ("/"-prefixed) path — so a later
- * bare-specifier match returns an address ANY importer resolves the same
+ * bare-specifier match returns an address any importer resolves the same
  * way, regardless of the importing script's own location. Matches the HTML
  * import-map processing model: addresses are normalized against the import
  * map's own base URL when the map is parsed, not the importer's. */
@@ -2212,7 +2212,7 @@ function resolveSpecifierMap(
       continue;
     }
     // A relative/root-relative key normalizes the same way its address
-    // does, against THIS document's own base — an importer's specifier is
+    // does, against this document's own base — an importer's specifier is
     // matched against this normalized form, not the raw key text.
     const normalizedKey = normalizedKeyOf(key);
     if (normalizedKey !== null) resolvedUrlLike.set(normalizedKey, resolvedValue);
@@ -2236,7 +2236,7 @@ function resolveImportMapAddresses(
   for (const [scopeKey, scopeMap] of importMap.scopes) {
     // A scope's own key is itself a URL-like prefix — normalized against
     // the declaring document's base the exact same way a urlLikeImports
-    // key is, so it can be compared against an importer's OWN normalized
+    // key is, so it can be compared against an importer's own normalized
     // path later. resolveArtifactRelativePath preserves a trailing "/" (a
     // scope key is written that way to mark a directory boundary), so
     // "/feature/" can never also match an importer under "/feature-other/".
@@ -2261,10 +2261,10 @@ function htmlReferencesFromDocument(
   const attributeReferences: BrowserTextReference[] = [];
   // Each block carries the blockedSoFar SNAPSHOT captured at the moment it
   // was collected — a real browser starts running/applying a block (and
-  // whatever it goes on to request) the instant it's parsed, so a LATER
-  // meta CSP must not retroactively remove a dependency the block's OWN
+  // whatever it goes on to request) the instant it's parsed, so a later
+  // meta CSP must not retroactively remove a dependency the block's own
   // execution already requested before that policy took effect. JS/handler
-  // blocks ALSO carry the import map that was ACTIVE at the moment they
+  // blocks also carry the import map that was active at the moment they
   // were collected — a module graph that already started before a later
   // <script type="importmap"> doesn't retroactively pick it up either (a
   // real browser only ever resolves specifiers against whichever map was
@@ -2282,13 +2282,13 @@ function htmlReferencesFromDocument(
       }
   > = [];
   // The HTML standard (and Chromium/WebKit's own current support) merges
-  // EVERY <script type="importmap"> into one global map, in document
+  // every <script type="importmap"> into one global map, in document
   // order, as each is parsed — grown via mergeImportMapResolutions
   // (earlier-key-wins) each time visit() reaches one, never replaced.
   let activeImportMap: ImportMapResolution | undefined;
-  // Every module specifier an EARLIER classic/module/handler block already
+  // Every module specifier an earlier classic/module/handler block already
   // resolved (see lockedModuleSpecifierKeys) — grown as each block is
-  // collected, consulted by mergeImportMapResolutions so a LATER import map
+  // collected, consulted by mergeImportMapResolutions so a later import map
   // can't retroactively remap a specifier a real browser already locked in.
   let lockedSpecifierKeys = new Set<string>();
   const nestedReferences: BrowserTextReference[] = [];
@@ -2296,22 +2296,22 @@ function htmlReferencesFromDocument(
   const formIds = collectFormIds(document);
   // Grows as visit() encounters each <meta> CSP in DOCUMENT order — a real
   // browser only starts enforcing a policy once it's actually parsed a
-  // meta tag declaring it, so a reference collected BEFORE that point
+  // meta tag declaring it, so a reference collected before that point
   // (e.g. <script src="early.js"></script> ahead of the policy that would
   // otherwise block script-src) was already requested and must not be
   // retroactively removed. Markup references (attributeReferences,
   // nestedReferences) are filtered AT PUSH TIME against this running
   // state below. CSS/JS TEXT content is collected as raw strings during
-  // the walk and only turned into references AFTER it finishes — applying
+  // the walk and only turned into references after it finishes — applying
   // per-block document-order precision there would mean tracking a
   // snapshot per <style>/<script> block instead of one joined string per
   // kind; the far more common case in practice (a page with a meta CSP
   // has it in <head>, before any meaningful inline block) is captured by
-  // applying the FINAL state to all of those collectively.
+  // applying the final state to all of those collectively.
   let blockedSoFar: ReadonlySet<CspClass> = new Set();
-  // A SEPARATE running snapshot of the RAW policy strings collected so far
+  // A separate running snapshot of the raw policy strings collected so far
   // in document order, for isInlineBlockPermitted's own per-block nonce/
-  // hash matching — 'self' blocks inline execution but does NOT make
+  // hash matching — 'self' blocks inline execution but does not make
   // blockedSoFar's external-resource check treat the class as blocked, so
   // gating inline collection on blockedSoFar alone missed this class of
   // block entirely, and a class-wide flag can't tell one script's nonce
@@ -2339,7 +2339,7 @@ function htmlReferencesFromDocument(
       // scanning its text for dependencies is wrong regardless of what
       // class those dependencies would themselves carry — script-src
       // 'none' blocking a <script> means a fetch() inside it never fires,
-      // even though connect-src (the fetch's OWN class) might allow it.
+      // even though connect-src (the fetch's own class) might allow it.
       // A style="" attribute is never itself an element with a nonce of
       // its own (isAttribute: true, nonce: undefined) — only 'unsafe-
       // inline', or a hash of its OWN value alongside 'unsafe-hashes',
@@ -2378,7 +2378,7 @@ function htmlReferencesFromDocument(
       const srcdoc = tagName === "iframe" ? attrs.get("srcdoc") : undefined;
       if (srcdoc !== undefined) {
         const nestedDocument = parseHtml(srcdoc);
-        // The nested document's OWN <base> (if it declares one) resolves
+        // The nested document's own <base> (if it declares one) resolves
         // relative to the EMBEDDING document's base — its "fallback base" —
         // and if it declares none, it falls back to that same base
         // directly (not the outer document's raw file path).
@@ -2394,8 +2394,8 @@ function htmlReferencesFromDocument(
         for (const reference of nestedResult.references) {
           // A srcdoc pseudo-document isn't a real file with its own
           // separate script-vs-document base distinction — every one of
-          // its references (markup, CSS, or script) resolves against ITS
-          // OWN base. Resolve NOW, against effectiveBase, and carry the
+          // its references (markup, CSS, or script) resolves against its
+          // own base. Resolve now, against effectiveBase, and carry the
           // result as an already-artifact-root-relative value the outer
           // scan's own base can't second-guess.
           const resolvedPath = resolveArtifactRelativePath(reference.value, documentPath, artifactRoot, effectiveBase);
@@ -2409,7 +2409,7 @@ function htmlReferencesFromDocument(
               value: `/${artifactRelative}`,
               documentRelative: false,
               // The srcdoc's OWN CSP state — not the embedding document's
-              // — governs anything THIS reference's own target points to.
+              // — governs anything this reference's own target points to.
               blockedCspClasses: nestedResult.blockedCspClasses,
             });
           }
@@ -2417,11 +2417,11 @@ function htmlReferencesFromDocument(
       }
       if (tagName === "meta" && attrs.get("http-equiv")?.toLowerCase() === "refresh") {
         const refreshTarget = metaRefreshTarget(attrs.get("content") ?? "");
-        // A meta-refresh is a real NAVIGATION — the browser loads the
+        // A meta-refresh is a real navigation — the browser loads the
         // target as a full document, the same as following an <a href>,
         // not merely fetching its bytes. Without documentDestination, the
         // queue treats it as an opaque leaf asset instead of parsing it
-        // for its OWN stylesheets/scripts/images, so a refreshed page's
+        // for its own stylesheets/scripts/images, so a refreshed page's
         // dependencies never make it into the share manifest.
         if (refreshTarget) {
           pushAttributeReference({ value: refreshTarget, documentRelative: true, documentDestination: true });
@@ -2431,7 +2431,7 @@ function htmlReferencesFromDocument(
         const policyContent = attrs.get("content");
         if (policyContent) {
           cspPolicyContents.push(policyContent);
-          // Takes effect from THIS point in document order onward — grows
+          // Takes effect from this point in document order onward — grows
           // the running state rather than replacing it, the same
           // union-of-all-policies reasoning blockedCspClasses itself uses.
           blockedSoFar = new Set([...blockedSoFar, ...blockedCspClasses([policyContent])]);
@@ -2440,10 +2440,10 @@ function htmlReferencesFromDocument(
       }
       // Trimmed the same way isExecutableScriptType's own "module" keyword
       // check is — `type=" module "` is still the exact module keyword to
-      // a real browser (only an ADDITIONAL, non-whitespace suffix like
+      // a real browser (only an additional, non-whitespace suffix like
       // "module;foo" makes it a data block instead). Without the trim
       // here, a module script's own src (or inline body) still gets
-      // pushed as executable, but with the WRONG grammar attached —
+      // pushed as executable, but with the wrong grammar attached —
       // classic instead of module — so a real static import/export in it
       // fails to parse as a syntax error and its dependencies are
       // silently dropped from the shared artifact.
@@ -2470,7 +2470,7 @@ function htmlReferencesFromDocument(
         ) continue;
         // The complementary case: <source srcset> only has meaning under
         // <picture> — an <audio>/<video> child's srcset is inert, the same
-        // way its OWN src is inert under <picture>.
+        // way its own src is inert under <picture>.
         if (attributeName === "srcset" && tagName === "source" && parentTagName !== "picture") continue;
         // With `srcdoc` present, the browser never fetches an iframe's own
         // `src` at all — srcdoc wins outright, it isn't a fallback.
@@ -2497,7 +2497,7 @@ function htmlReferencesFromDocument(
         // must yield to this, not require a ".webmanifest" spelling.
         const isManifest =
           attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("manifest");
-        // A modulepreload target is always fetched AND parsed as a module —
+        // A modulepreload target is always fetched and parsed as a module —
         // it has no <script> element of its own to carry that kind, so the
         // reference has to name it directly.
         const isModulePreload =
@@ -2509,11 +2509,11 @@ function htmlReferencesFromDocument(
           attributeName === "href" && tagName === "link" && (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes("stylesheet");
         // <object data>/<embed src>/<iframe src> load their target AS A
         // NESTED DOCUMENT (a plugin/browsing context), and <a href>/
-        // <area href> NAVIGATE the browser there — an SVG or HTML page
+        // <area href> navigate the browser there — an SVG or HTML page
         // reached either way is itself parsed for its own references, the
         // same way a real browser resolves them once it's the active
         // document. <img src>/CSS url() never do this. A form's own
-        // action (or a submit control's formaction override) is ALSO a
+        // action (or a submit control's formaction override) is also a
         // real navigation — the browser loads and parses whatever page
         // the submission response is, GET or POST alike — so a local
         // target page's own scripts/styles/images belong in the manifest
@@ -2534,7 +2534,7 @@ function htmlReferencesFromDocument(
           attributeName === "href" &&
           tagName === "link" &&
           ICON_LINK_REL_TOKENS.some((token) => (attrs.get("rel") ?? "").toLowerCase().split(/\s+/).includes(token));
-        // A validated rel="preload" as="..." destination carries its OWN
+        // A validated rel="preload" as="..." destination carries its own
         // CSP class the same way a real request from that destination
         // would — isResourceConsumingLinkRel already proved `as` names a
         // real destination before this reference is even reached.
@@ -2578,10 +2578,10 @@ function htmlReferencesFromDocument(
         if (attrs.get("type")?.toLowerCase() === "importmap") {
           // Merges into whatever's active so far — see
           // mergeImportMapResolutions — and takes effect (for the merged
-          // keys a strictly EARLIER map hadn't already claimed, and that
-          // lockedSpecifierKeys doesn't already lock) from THIS point in
+          // keys a strictly earlier map hadn't already claimed, and that
+          // lockedSpecifierKeys doesn't already lock) from this point in
           // document order onward. Routed through the merge even for the
-          // very FIRST map — a module reached before ANY import map still
+          // very first map — a module reached before any import map still
           // locks its own natural resolution against this one too.
           const rawImportMap = parseImportMap(html5TextContent(node));
           if (rawImportMap) {
@@ -2595,14 +2595,14 @@ function htmlReferencesFromDocument(
         } else if (
           isExecutableScriptElement(attrs) &&
           // Electron's Chromium always supports module scripts, so a
-          // classic script marked nomodule is SKIPPED — never fetched or
+          // classic script marked nomodule is skipped — never fetched or
           // executed — the same way an unsupported browser would be
           // expected to run it instead. A type="module" script ignores
           // nomodule per spec (nonsensical combination either way).
           !(attrs.has("nomodule") && scriptKind === "classic")
         ) {
           const scriptText = html5TextContent(node);
-          // isAttribute: false — a <script> element carries its OWN nonce
+          // isAttribute: false — a <script> element carries its own nonce
           // attribute, unlike a style=""/on* attribute.
           if (isInlineBlockPermitted(cspPolicyContentsSoFar, "script", attrs.get("nonce"), scriptText, false)) {
             for (const key of lockedModuleSpecifierKeys(
@@ -2647,15 +2647,15 @@ function htmlReferencesFromDocument(
   // `blocked` snapshot) is filtered against the CSP state that was
   // actually in effect at the moment IT was collected — a reference or
   // block reached before a later meta CSP stays approved, matching
-  // document order; blockedClasses (the FINAL, whole-document state) is
-  // used only as what this document hands FORWARD to files it references.
+  // document order; blockedClasses (the final, whole-document state) is
+  // used only as what this document hands forward to files it references.
   const blockedClasses = blockedCspClasses(cspPolicyContents);
   const filterByBlock = <T extends BrowserTextReference>(refs: T[], blocked: ReadonlySet<CspClass>): T[] =>
     blocked.size === 0 ? refs : refs.filter((reference) => !reference.cspClass || !blocked.has(reference.cspClass));
-  // Each <script> element parses on its OWN — the same way a browser runs
+  // Each <script> element parses on its own — the same way a browser runs
   // each script tag independently — so a syntax error in one script never
   // discards a later, syntactically valid script's own references. Each
-  // block resolves bare specifiers against the import map that was ACTIVE
+  // block resolves bare specifiers against the import map that was active
   // when Chromium reached it, not the document's final one — a module graph
   // that started before a later <script type="importmap"> never sees that
   // map.
@@ -2707,7 +2707,7 @@ function referencesFromNonHtmlFile(
   // is as real a manifest as a ".webmanifest" file.
   if (isManifest || /\.webmanifest$/i.test(sourcePath)) {
     // A web app manifest's URLs (icons, start_url, ...) resolve relative to
-    // the MANIFEST file itself, not the document that links it — the same
+    // the manifest file itself, not the document that links it — the same
     // rule CSS's url()/@import already follow. Not document-relative.
     return referencesFromWebManifest(text).map(({ value, documentDestination }) => ({
       value,
@@ -2716,7 +2716,7 @@ function referencesFromNonHtmlFile(
     }));
   }
   if (/\.css$/i.test(sourcePath)) {
-    // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
+    // Bytes the browser only ever fetches (fetch(), an asset-style URL
     // attribute pointing at a ".css" path) are never applied as a
     // stylesheet, so the browser never reads its url()/@import text either
     // — the file still shares as an asset, it just contributes no further
@@ -2724,7 +2724,7 @@ function referencesFromNonHtmlFile(
     return appliesAsStylesheet ? cssReferences(text) : [];
   }
   if (/\.(?:js|mjs)$/i.test(sourcePath)) {
-    // Bytes the browser only ever FETCHES (fetch(), an asset-style URL
+    // Bytes the browser only ever fetches (fetch(), an asset-style URL
     // attribute) are never executed, so their text is never parsed as code
     // — the file still shares as an asset (the caller already added it to
     // `approved`), it just contributes no further references of its own.
@@ -2746,13 +2746,13 @@ async function shareManifestForSite(
   effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SiteShareManifestResult> {
   // Share-what-you-previewed: a site actually being previewed as static —
-  // whether pinned by dohc.json or chosen for THIS tab — must select the
-  // SAME artifact the static preview serves — the site's own configured
+  // whether pinned by dohc.json or chosen for this tab — must select the
+  // same artifact the static preview serves — the site's own configured
   // entry — not a build output left over from an earlier build. Only when
   // the effective mode isn't "static" does a present build output take
   // priority (Build-mode preview/share). The shared-view rule in
   // staticPreviewTargetForSite (a recipient always gets a present build
-  // output) is a separate concern for the RECEIVING side and is unaffected.
+  // output) is a separate concern for the receiving side and is unaffected.
   const mode = effectiveMode ?? site.configuredPreviewMode;
   const preferConfiguredStaticEntry = mode === "static";
   const output = preferConfiguredStaticEntry ? null : presentBuildOutput(site);
@@ -2784,7 +2784,7 @@ async function shareManifestForSite(
         // A workspace-owned site's own files can never legitimately reference
         // into someone else's mounted share — the relay refuses a selector
         // that reaches outside the sharer's own authority, which would fail
-        // the WHOLE share rather than just dropping that one reference. The
+        // the whole share rather than just dropping that one reference. The
         // same rule the preview server boundary enforces (siteRunner).
         isPathAllowedForAuthority(site.authority, path),
     ),
@@ -2794,7 +2794,7 @@ async function shareManifestForSite(
   }
 
   const approved = new Set([entryPath]);
-  // Keyed by (path, documentBase): a file's OWN outgoing references only
+  // Keyed by (path, documentBase): a file's own outgoing references only
   // depend on its own content, but a document-relative reference inside it
   // resolves against whichever document's base reached it here — two
   // documents sharing one external script each need their own base's
@@ -2802,7 +2802,7 @@ async function shareManifestForSite(
   const scanned = new Set<string>();
   const documentBaseKey = (base: HtmlBaseResolution): string =>
     base.kind === "local" ? `local:${base.directory}` : base.kind;
-  // Two documents can each declare their OWN import map and both reference
+  // Two documents can each declare their own import map and both reference
   // the same external module — the map is part of what that module's own
   // `import` specifiers resolve against, so a fingerprint of its entries
   // has to be part of the dedupe key too, or the second document's map
@@ -2810,9 +2810,9 @@ async function shareManifestForSite(
   // claimed.
   const importMapKey = (importMap: ImportMapResolution | undefined): string => {
     if (!importMap) return "none";
-    // ONE structural serialization of every map together, not delimiter-
+    // One structural serialization of every map together, not delimiter-
     // joined text — `=`, `,`, and `|` are all legal in a resolved path or
-    // import-map key, so two DIFFERENT maps (e.g. one entry "a=/b,c=/d" vs.
+    // import-map key, so two different maps (e.g. one entry "a=/b,c=/d" vs.
     // two entries "a"->"/b" and "c"->"/d") could otherwise fingerprint
     // identically and collide in the scan key, silently dropping the
     // second document's own scan. A single JSON.stringify call over
@@ -2843,7 +2843,7 @@ async function shareManifestForSite(
   // and only counts, in the latter). scriptKind carries the classic/module
   // grammar to parse a JS target with, from the reference that named it — a
   // classic <script src> and a module <script type="module" src> reaching
-  // the SAME external file each parse it with THEIR OWN grammar (the dedupe
+  // the same external file each parse it with their own grammar (the dedupe
   // key below carries this too, so both scans happen). isManifest carries
   // that a target was reached through <link rel="manifest">, so the
   // extension gate below (and the file's own content dispatch) treats it as
@@ -2856,7 +2856,7 @@ async function shareManifestForSite(
     documentBase: HtmlBaseResolution;
     context: JsScanContext;
     scriptKind: ScriptKind;
-    // Whether the browser EXECUTES this target as code (a <script src>, a
+    // Whether the browser executes this target as code (a <script src>, a
     // module specifier, a Worker/service-worker script, importScripts) as
     // opposed to only fetching its bytes (fetch(), or an asset-style URL
     // attribute that happens to point at a ".js" path). A fetched-only
@@ -2866,7 +2866,7 @@ async function shareManifestForSite(
     // reached both ways (once via fetch, once via <script src>) needs both
     // scans, not one "using up" the path for the other.
     executesAsCode: boolean;
-    // Whether the browser APPLIES this target as a stylesheet (a <link
+    // Whether the browser applies this target as a stylesheet (a <link
     // rel="stylesheet"> href, or a nested @import reached from an already-
     // applied stylesheet) as opposed to only fetching its bytes (fetch(),
     // or an asset-style URL attribute that happens to point at a ".css"
@@ -2881,9 +2881,9 @@ async function shareManifestForSite(
     // internal references when it loads the SVG as a document.
     documentDestination: boolean;
     importMap: ImportMapResolution | undefined;
-    // The referring document's OWN final set of blocked CSP classes,
+    // The referring document's own final set of blocked CSP classes,
     // inherited by whatever it references — an external stylesheet/script
-    // is requested (and, if it in turn references further files, THOSE
+    // is requested (and, if it in turn references further files, those
     // are too) under the referring document's policy, not the empty
     // policy this field would default to if it weren't carried forward.
     blockedCspClasses: ReadonlySet<CspClass>;
@@ -2917,8 +2917,8 @@ async function shareManifestForSite(
       importMap: inheritedImportMap,
       blockedCspClasses: inheritedBlockedCspClasses,
     } = queue.shift()!;
-    // Two same-directory documents reaching the SAME external file under
-    // DIFFERENT CSPs (one blocking a class the other allows) need two
+    // Two same-directory documents reaching the same external file under
+    // different CSPs (one blocking a class the other allows) need two
     // independent scans — the same reasoning importMapKey/scriptKind/etc.
     // already carry, extended to CSP state.
     const blockedCspClassesKeyPart = [...inheritedBlockedCspClasses].sort().join(",");
@@ -2946,10 +2946,10 @@ async function shareManifestForSite(
       const text = await readFile(join(rootPath, current), "utf8");
       // parse5's HTML5 parser already handles SVG foreign content (an
       // <svg> root, self-closing <image>/<use> tags, xlink:href
-      // normalized to a plain href) correctly — reuse the SAME document
+      // normalized to a plain href) correctly — reuse the same document
       // scan path for an SVG reached as a document destination instead of
       // writing a second, separate XML extractor for it.
-      // A .html/.htm target reached ONLY as bytes (fetch(), an asset-style
+      // A.html/.htm target reached only as bytes (fetch(), an asset-style
       // attribute) is never parsed or rendered by a real browser as a
       // document — same reasoning as isSvgDocument above, applied to HTML.
       const isHtmlDocument = documentDestination && /\.html?$/i.test(current);
@@ -2977,7 +2977,7 @@ async function shareManifestForSite(
       const documentImportMap = htmlResult ? htmlResult.importMap : inheritedImportMap;
       const documentBlockedCspClasses = htmlResult ? htmlResult.blockedCspClasses : inheritedBlockedCspClasses;
       const references = htmlResult
-        ? // Already filtered internally against ITS OWN document-order CSP
+        ? // Already filtered internally against its own document-order CSP
           // state (see htmlReferencesFromDocument) — filtering it again
           // here, against the whole-document state, would retroactively
           // remove a reference collected before its own blocking meta tag.
@@ -3016,7 +3016,7 @@ async function shareManifestForSite(
         if (target) {
           approved.add(target);
           // A Worker/service-worker target runs in its own global scope with
-          // its own location, so what IT references resolves against ITS OWN
+          // its own location, so what IT references resolves against its own
           // directory, not the document that launched it — and it, and
           // everything it further references, scans in worker context.
           const propagatedDocumentBase: HtmlBaseResolution = reference.entersOwnContext
@@ -3035,10 +3035,10 @@ async function shareManifestForSite(
             // A reference that resolves as code (scriptKind set — an
             // external <script src>/modulepreload, a Worker/importScripts
             // target, or a module specifier jsReferencesFromCode already
-            // resolved) carries its OWN importMap, captured at push time to
+            // resolved) carries its own importMap, captured at push time to
             // whatever was active in document order right then — undefined
             // there is a deliberate "no map was active yet", not "unknown",
-            // so it must NOT fall back to the document's final resolved
+            // so it must not fall back to the document's final resolved
             // map. Every other reference kind never resolves anything
             // against an import map downstream, so documentImportMap (an
             // unused value for those) keeps prior behavior for them.
@@ -3048,8 +3048,8 @@ async function shareManifestForSite(
             // it — the creator's own CSP does not apply to what the
             // worker itself fetches, so it must not carry forward (this
             // wins outright, ahead of the srcdoc case below). A reference
-            // sourced from a srcdoc's OWN scan (reference.blockedCspClasses,
-            // set only there) carries THAT document's policy instead of
+            // sourced from a srcdoc's own scan (reference.blockedCspClasses,
+            // set only there) carries that document's policy instead of
             // the embedding document's own — every other reference kind
             // falls back to documentBlockedCspClasses, unchanged from
             // before this field existed.
@@ -3214,7 +3214,7 @@ async function mapWorkspaceSite(
 
 /**
  * A metadata file's content, bounded the same way sourceForFile bounds it at
- * detection time — this is a SEPARATE read of the same file (scripts are
+ * detection time — this is a separate read of the same file (scripts are
  * derived independently from site detection), so it needs its own guard.
  * `sourceForFile` already recorded the site's metadata-too-large diagnostic;
  * this one just silently declines to read rather than duplicating it.
@@ -3258,7 +3258,7 @@ async function packageScriptsForSite(
       if (name.length === 0) {
         // The bridge contract's SitePackageScripts schema requires every
         // key to have at least one character — an empty name here would
-        // make the WHOLE ListSitesResult fail Zod parsing and hide every
+        // make the whole ListSitesResult fail Zod parsing and hide every
         // other site in the response, the same class of producer-consumer
         // mismatch the oversized-script bound below already guards.
         diagnostics.push({
@@ -3328,7 +3328,7 @@ function hasTraversalSegment(relativePath: string): boolean {
 // generous well past that while bounding how much a single metadata file can
 // cost to read and parse. The number of such files in a workspace is bounded
 // by the number of real projects a user has (not attacker-controlled fan-out
-// the way file CONTENT is), so a concurrency cap on top of this byte bound
+// the way file content is), so a concurrency cap on top of this byte bound
 // would be machinery without a matching cost to bound.
 const MAX_METADATA_FILE_BYTES = 1024 * 1024;
 
@@ -3384,10 +3384,10 @@ export async function getSitePackage(
   anyPath: string,
   knownSites: readonly SitePackageInfo[],
   // See shareManifestForSite: overrides the matched site's own
-  // shareManifest to select the artifact THIS specific request's caller
+  // shareManifest to select the artifact this specific request's caller
   // is actually previewing, instead of listSitePackages' batch
   // (dohc.json-pin-only) computation. Scoped to just the one matched
-  // site — listSitePackages' own batch result for every OTHER site, and
+  // site — listSitePackages' own batch result for every other site, and
   // for callers that pass no mode, is unaffected.
   effectiveMode?: SitePackageInfo["configuredPreviewMode"],
 ): Promise<SitePackageInfo | null> {
@@ -3401,7 +3401,7 @@ export async function getSitePackage(
 }
 
 /**
- * `getSitePackage` intentionally returns the deepest CONTAINING site for a
+ * `getSitePackage` intentionally returns the deepest containing site for a
  * path, which is correct for ordinary lookups (a file inside a site still
  * belongs to it). Starting a preview is different: a stale tab can name a
  * root that stopped being a detected site while a detected ancestor still
@@ -3433,7 +3433,7 @@ function entryRelativeToSite(
 /**
  * Where an ordinary (non-shared, non-build-output) configured entry is
  * actually served from. A browser resolves the page's own root-absolute
- * asset URLs against the SERVED root, so an entry in a subdirectory
+ * asset URLs against the served root, so an entry in a subdirectory
  * (public/index.html) must be served from that subdirectory (public/), not
  * from site.root — otherwise its own relative assets resolve beside the
  * subdirectory instead of inside it. Both the static preview server

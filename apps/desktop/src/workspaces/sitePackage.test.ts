@@ -865,21 +865,21 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "prop-assign", "app.js"),
       [
-        // Provable, matching (tag, property), and actually INSERTED: img.src.
+        // Provable, matching (tag, property), and actually inserted: img.src.
         'const img = document.createElement("img");',
         "document.body.appendChild(img);",
         'img.src = "img.png";',
-        // Provable, matching (tag, property), and actually INSERTED: a.href
+        // Provable, matching (tag, property), and actually inserted: a.href
         // via setAttribute.
         'const link = document.createElement("a");',
         "document.body.appendChild(link);",
         'link.setAttribute("href", "linked.html");',
-        // Provable receiver, WRONG property for the tag — div.src is an
-        // inert expando, not a request (finding 2).
+        // Provable receiver, wrong property for the tag — div.src is an
+        // inert expando, not a request.
         'const div = document.createElement("div");',
         "document.body.appendChild(div);",
         'div.src = "wrong-tag.png";',
-        // Provably a DOM element, but querySelector's tag is UNKNOWN — an
+        // Provably a DOM element, but querySelector's tag is unknown — an
         // unknowable tag can never satisfy the (tag, property) check.
         'const queried = document.querySelector("a");',
         'queried.setAttribute("href", "queried.html");',
@@ -1162,10 +1162,10 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("fetched-bytes/private.txt");
   });
 
-  it("still parses the same .js file as code when a LATER reference to it (same path/context/kind) is executable", async () => {
+  it("still parses the same .js file as code when a later reference to it (same path/context/kind) is executable", async () => {
     // Both references to shared.js come from worker.js's own scan, sharing
     // the exact same documentBase/context/scriptKind — only executesAsCode
-    // differs — and fetch() is discovered (and queued) BEFORE importScripts,
+    // differs — and fetch() is discovered (and queued) before importScripts,
     // matching source order. Without executesAsCode in the dedupe key, the
     // first (non-executable) scan would "use up" shared.js's path and the
     // second (executable, importScripts) reference would be silently
@@ -1338,7 +1338,7 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "import-map-merge", "index.html"),
       [
-        // Chromium/WebKit merge EVERY <script type="importmap"> into one
+        // Chromium/WebKit merge every <script type="importmap"> into one
         // global map as each is parsed, in document order — a key an
         // earlier map already claims ("a") keeps its original value even
         // if a later map also declares it; a key only a later map
@@ -1356,21 +1356,21 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "import-map-merge",
     );
 
-    // "a" still resolves to the FIRST map's own value...
+    // "a" still resolves to the first map's own value...
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-first.js");
     expect(manifestOf(site)?.assets).not.toContain("import-map-merge/from-second.js");
-    // ...while "b", which only the SECOND map declares, is still merged in
+    // ...while "b", which only the second map declares, is still merged in
     // and resolves — not lost because a first map already existed.
     expect(manifestOf(site)?.assets).toContain("import-map-merge/from-second-b.js");
   });
 
   it("does not apply an import map to a module script referenced earlier in document order", async () => {
-    // "app.js" is referenced by src BEFORE the importmap tag — a real
+    // "app.js" is referenced by src before the importmap tag — a real
     // browser has already started fetching it under NO import map by the
     // time the later <script type="importmap"> is even parsed, so "x"
     // inside app.js must stay unmapped: nothing imports public.js in this
     // document, so it must not appear in the manifest at all. (Filtering
-    // against the document's FINAL resolved map instead would wrongly
+    // against the document's final resolved map instead would wrongly
     // resolve app.js's "x" to public.js and pull it in.)
     await mkdir(join(root, "import-map-order"), { recursive: true });
     await writeFile(
@@ -1474,9 +1474,9 @@ describe("listSitePackages", () => {
   });
 
   it("scans a shared module separately for each document's own import map", async () => {
-    // Both pages, shared.js, and both targets sit in the SAME directory —
+    // Both pages, shared.js, and both targets sit in the same directory —
     // so documentBase, context, scriptKind, and executesAsCode are
-    // IDENTICAL between the two references to shared.js. Only the active
+    // identical between the two references to shared.js. Only the active
     // import map differs, isolating that dimension of the dedupe key: with
     // separate subdirectories, documentBase alone would already force two
     // scans and this test would pass without exercising the fix at all.
@@ -1514,7 +1514,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).toContain("import-map-identity/from-b.js");
   });
 
-  it("treats a script type by its MIME essence, ignoring parameters like charset", async () => {
+  it("treats a script type by its mime essence, ignoring parameters like charset", async () => {
     await mkdir(join(root, "mime-essence"), { recursive: true });
     await writeFile(
       join(root, "mime-essence", "index.html"),
@@ -1596,7 +1596,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("network-base/host/dir/app.js");
   });
 
-  it("does not treat type=\"module;foo\" as executable — it is neither the exact module keyword nor a JS MIME essence", async () => {
+  it("does not treat type=\"module;foo\" as executable — it is neither the exact module keyword nor a JS mime essence", async () => {
     await mkdir(join(root, "module-param"), { recursive: true });
     await writeFile(
       join(root, "module-param", "index.html"),
@@ -1661,7 +1661,7 @@ describe("listSitePackages", () => {
     // {"a": "/b,c=/d"} (one entry, value contains "," and "=") and
     // {"a": "/b", "c": "/d"} (two entries) both fingerprint as the literal
     // text "a=/b,c=/d" under the old delimiter-joined scheme. Both pages,
-    // shared.js, and the ambiguous targets sit in the SAME directory so
+    // shared.js, and the ambiguous targets sit in the same directory so
     // only the import map differs between the two scans.
     await mkdir(join(root, "import-map-fingerprint"), { recursive: true });
     await writeFile(
@@ -1681,7 +1681,7 @@ describe("listSitePackages", () => {
     await writeFile(join(root, "import-map-fingerprint", "shared.js"), 'import "c";');
     // page-one's own map has no "c" key at all (its only mapping, "a", is
     // never imported), so its scan of shared.js correctly mints nothing —
-    // this file exists only to prove page-two's DIFFERENT scan (mapping
+    // this file exists only to prove page-two's different scan (mapping
     // "c" -> "./d") still runs and resolves it, rather than being deduped
     // away by the fingerprint collision.
     await writeFile(join(root, "import-map-fingerprint", "d"), "");
@@ -1827,7 +1827,7 @@ describe("listSitePackages", () => {
       ].join(""),
     );
     await writeFile(join(root, "import-map-scope", "feature", "mod.js"), 'import "lib";');
-    // A scoped address resolves against the DECLARING document (the
+    // A scoped address resolves against the declaring document (the
     // import map's own base), not against the scope key's own directory —
     // "./from-scope.js" is next to index.html, not inside feature/.
     await writeFile(join(root, "import-map-scope", "from-scope.js"), "export {};");
@@ -2113,7 +2113,7 @@ describe("listSitePackages", () => {
     // Invalid as a classic script (export is module-only syntax), so the
     // classic reference to shared.js contributes nothing; a scan keyed only
     // by path would let that failed classic parse "use up" shared.js and
-    // silently skip the later module reference that DOES parse.
+    // silently skip the later module reference that does parse.
     await writeFile(
       join(root, "dual-context", "shared.js"),
       'export {};\nfetch("target.txt");',
@@ -2691,8 +2691,8 @@ describe("listSitePackages", () => {
   });
 
   it("scans a shared script under each document's own scoped import map, not a cached result from the first", async () => {
-    // Two documents reach the SAME relative script with the SAME top-level
-    // import map but DIFFERENT scoped mappings for the module it imports —
+    // Two documents reach the same relative script with the same top-level
+    // import map but different scoped mappings for the module it imports —
     // if the scan-queue's dedupe fingerprint ignored scopes, the second
     // document's scan would be skipped as "already scanned", silently
     // dropping its own scope's dependency.
@@ -2875,7 +2875,7 @@ describe("listSitePackages", () => {
 
   // ---- round-18 review pins ----
 
-  it("does not treat an image-set() type() MIME string as a URL candidate", async () => {
+  it("does not treat an image-set() type() mime string as a URL candidate", async () => {
     await mkdir(join(root, "image-set-type-hint"), { recursive: true });
     await writeFile(
       join(root, "image-set-type-hint", "index.html"),
@@ -2972,7 +2972,7 @@ describe("listSitePackages", () => {
     expect(manifestOf(site)?.assets).not.toContain("csp-script-none/private.js");
   });
 
-  it("does not let a CSP-blocked class suppress an UNRELATED class's resources", async () => {
+  it("does not let a CSP-blocked class suppress an unrelated class's resources", async () => {
     await mkdir(join(root, "csp-script-none-img-ok"), { recursive: true });
     await writeFile(
       join(root, "csp-script-none-img-ok", "index.html"),
@@ -3464,7 +3464,7 @@ describe("listSitePackages", () => {
 
     // page2.html has no CSP of its own, so its own scan of style.css must
     // still approve shared.png even though index.html's img-src 'none'
-    // scan of the SAME file (same path, same directory) filtered it out.
+    // scan of the same file (same path, same directory) filtered it out.
     expect(manifestOf(site)?.assets).toContain("csp-dedup-key/shared.png");
   });
 
@@ -3535,7 +3535,7 @@ describe("listSitePackages", () => {
     );
 
     // The hoisted send() runs before either open() textually, and the
-    // receiver opens two DIFFERENT targets elsewhere in the file — no
+    // receiver opens two different targets elsewhere in the file — no
     // walk-order bookkeeping proves which one this send() actually paired
     // with at runtime, so neither is approved.
     expect(manifestOf(site)?.assets).not.toContain("xhr-ambiguous-open/public.json");
@@ -3580,8 +3580,8 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "csp-nonce-mismatch",
     );
 
-    // A source list carrying a nonce-source permits ONLY an element whose
-    // OWN nonce attribute matches it — a script with no nonce attribute at
+    // A source list carrying a nonce-source permits only an element whose
+    // own nonce attribute matches it — a script with no nonce attribute at
     // all is still blocked, the same way it would be under a plain
     // script-src 'self' with no nonce/hash present at all.
     expect(manifestOf(site)?.assets).not.toContain("csp-nonce-mismatch/private.json");
@@ -3643,7 +3643,7 @@ describe("listSitePackages", () => {
     );
 
     // A hash-source only covers an on* handler's own value when the list
-    // ALSO carries 'unsafe-hashes' (CSP3) — a nonce never applies to an
+    // also carries 'unsafe-hashes' (CSP3) — a nonce never applies to an
     // attribute at all, since an attribute is never itself an element with
     // a nonce of its own.
     expect(manifestOf(site)?.assets).not.toContain(
@@ -3687,7 +3687,7 @@ describe("listSitePackages", () => {
     );
 
     // Per CSP2+, 'unsafe-inline' is ignored entirely once a nonce- or
-    // hash-source is ALSO present — even for an on* handler, which neither
+    // hash-source is also present — even for an on* handler, which neither
     // a nonce (attributes have none) nor this list's hash-less nonce
     // source can ever cover.
     expect(manifestOf(site)?.assets).not.toContain(
@@ -3710,7 +3710,7 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "csp-inline-block-order",
     );
 
-    // The script block ran and started its fetch BEFORE the later meta
+    // The script block ran and started its fetch before the later meta
     // tag's connect-src 'none' took effect — filtering it against the
     // document's FINAL CSP state would wrongly remove it.
     expect(manifestOf(site)?.assets).toContain("csp-inline-block-order/needed.json");
@@ -3764,10 +3764,10 @@ describe("listSitePackages", () => {
     await writeFile(
       join(root, "css-import-not-double-matched", "index.html"),
       [
-        // The <link> is reached BEFORE the later meta CSP — it's approved
-        // under the permissive state active at THAT point in document
+        // The <link> is reached before the later meta CSP — it's approved
+        // under the permissive state active at that point in document
         // order, and style.css itself is queued and scanned regardless.
-        // Its OWN discovered references are then filtered against the
+        // Its own discovered references are then filtered against the
         // document's FINAL policy (style-src 'none', img-src 'self') —
         // exactly the ordering a link-then-restrict document produces.
         '<link rel="stylesheet" href="style.css">',
@@ -3784,8 +3784,8 @@ describe("listSitePackages", () => {
       (candidate) => candidate.root === "css-import-not-double-matched",
     );
 
-    // @import's own url(...) call ALSO matches the generic CSS_URL_PATTERN
-    // pass — without excluding that span, the same target mints a SECOND
+    // @import's own url(...) call also matches the generic CSS_URL_PATTERN
+    // pass — without excluding that span, the same target mints a second
     // reference classified "img" (permitted here) alongside the correctly
     // classified "style" one (blocked here), and the img-classified
     // duplicate would silently survive filtering even though a real
@@ -3808,7 +3808,7 @@ describe("listSitePackages", () => {
         // Tries to remap the ALREADY-resolved specifier — a real browser
         // ignores this for anything reached from this point on too.
         '<script type="importmap">{"imports": {"./dep.js": "./private.js"}}</script>',
-        // Reaches "./dep.js" again — must resolve the SAME way as the
+        // Reaches "./dep.js" again — must resolve the same way as the
         // first script, not pick up the new remap.
         '<script type="module">import "./dep.js";</script>',
       ].join(""),
@@ -3919,7 +3919,7 @@ describe("listSitePackages", () => {
 
     // app.js itself is a real, permitted reference from the srcdoc...
     expect(manifestOf(site)?.assets).toContain("srcdoc-own-csp/app.js");
-    // ...but its own fetch() is filtered by the SRCDOC's connect-src
+    // ...but its own fetch() is filtered by the srcdoc's connect-src
     // 'none', not the (unrestricted) outer document's policy.
     expect(manifestOf(site)?.assets).not.toContain("srcdoc-own-csp/private.json");
   });
@@ -4068,7 +4068,7 @@ describe("listSitePackages", () => {
 
   it("trims a <base href> before classifying it, so leading whitespace cannot hide an external base as a local directory", async () => {
     // Leading whitespace before "//evil.example/" would otherwise fail
-    // BOTH the "//" network-path check and the anchored URI_SCHEME_PATTERN
+    // both the "//" network-path check and the anchored URI_SCHEME_PATTERN
     // match, letting the href fall through to local-directory resolution —
     // joining the untrimmed, still-space-prefixed href onto the document's
     // own directory instead of recognizing it as external. Stage a real

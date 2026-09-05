@@ -139,7 +139,7 @@ function overCapBlobResult(
 
 /**
  * An over-cap body whose bytes and digest are the label's alone. Three of
- * these on one conflict make a side hydrated from ANOTHER side's digest read
+ * these on one conflict make a side hydrated from another side's digest read
  * back the wrong text, rather than passing on the coincidence that all three
  * sides named the same body.
  */
@@ -414,8 +414,6 @@ describe("createCaptureLiveStores", () => {
   // a raw `DaemonRefusalError` — the store's contract promises a
   // `VersionedTextStoreError`.
   //
-  // MUTATION: drop the `PAYLOAD_TOO_LARGE` wire-code branch in
-  // `domainErrorFrom` and this fails on the name and the code.
   it("translates a measured size refusal and keeps its measurements", async () => {
     const message =
       "payload exceeds MAX_TEXT_BYTES: limit 10485760 bytes, observed 10485761 bytes";
@@ -817,7 +815,7 @@ describe("createCaptureLiveStores", () => {
     },
     {
       name: "a distinct digest per side",
-      // Three different bodies, so a side hydrated from ANOTHER side's digest
+      // Three different bodies, so a side hydrated from another side's digest
       // reads back the wrong text instead of coinciding with the right one.
       sides: {
         base: BASE_BODY,
@@ -832,7 +830,7 @@ describe("createCaptureLiveStores", () => {
       // The scanned-past conflict names a digest this workspace does not
       // reference, so the blob fake refuses it the way the daemon refuses an
       // unauthorized digest. A scan that asked for bodies would hydrate this
-      // row on its way to the match and FAIL here, not merely read too much.
+      // row on its way to the match and fail here, not merely read too much.
       const DECOY_SHA256 = "d".repeat(64);
       const withheldSide = (body: { bytes: Uint8Array; sha256: string }) => ({
         path: snapshot.path,
@@ -946,7 +944,7 @@ describe("createCaptureLiveStores", () => {
       });
 
       if (result.kind !== "conflict") throw new Error("expected a conflict");
-      // Every side of the match carries ITS OWN body: the callers of this walk
+      // Every side of the match carries its own body: the callers of this walk
       // read them.
       for (const side of ["base", "current", "incoming"] as const) {
         expect(
@@ -1115,11 +1113,11 @@ describe("createCaptureLiveStores", () => {
     ]);
   });
 
-  // Every OTHER surface that returns a moment payload. `getMoment` and
+  // Every other surface that returns a moment payload. `getMoment` and
   // `writeTextFile` are pinned above; without these rows the hydration call at
   // each site below could be deleted and the suite would stay green.
   //
-  // `sides` is not cosmetic: a delete or rename records ONE digest on BOTH
+  // `sides` is not cosmetic: a delete or rename records one digest on both
   // sides (store.rs binds the same `before.blob_sha256` to `after_blob_sha256`
   // and `before_blob_sha256`), so those rows also pin that the body is fetched
   // once rather than streamed twice.
@@ -1530,7 +1528,7 @@ describe("createCaptureLiveStores", () => {
             metadataOrigin: "api",
           },
           // The daemon's delete shape: `delete_text_in_tx` (store.rs) binds the
-          // preimage digest to BOTH `after_blob_sha256` and
+          // preimage digest to both `after_blob_sha256` and
           // `before_blob_sha256`, and the read joins the same blob row per
           // side, so the removed body and its length repeat on the after side.
           moment: {
@@ -1570,7 +1568,7 @@ describe("createCaptureLiveStores", () => {
         payload: {
           before: { text: "newer content", sha256: "c".repeat(64) },
           // One digest covers both sides, which is what earns the single blob
-          // fetch when the body is over cap (#487). This pair being equal is
+          // fetch when the body is over cap. This pair being equal is
           // the daemon's shape, so it cannot show WHERE the after side came
           // from — the test below does that.
           after: { text: "newer content", sha256: "c".repeat(64) },
@@ -1581,7 +1579,7 @@ describe("createCaptureLiveStores", () => {
   });
 
   it("refuses a delete whose after side is absent instead of copying its preimage", async () => {
-    // The after side is READ, never reconstructed from the before side. The two
+    // The after side is read, never reconstructed from the before side. The two
     // agree on every daemon-written delete, so only a record that disagrees can
     // prove which one the store reports — and this one the daemon cannot write
     // at all: `map_moment_row` (store.rs) fails closed on a text moment missing

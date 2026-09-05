@@ -42,7 +42,7 @@ function createWorkspaceEngineCapture(
   });
 }
 
-// #564: one document open may not hold the capture chain for the whole
+// One document open may not hold the capture chain for the whole
 // six-attempt transport ladder. The deadline lives in the sessions layer
 // (engineWorkspaceSessions.test.ts proves what it does); these prove the
 // desktop passes it for exactly the open that holds the chain, and record
@@ -111,10 +111,10 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
   });
 }
 
-describe("the document open's capture-chain hold (#564)", () => {
-  it("bounds the WHOLE task, including the version read before the open", async () => {
+describe("the document open's capture-chain hold", () => {
+  it("bounds the whole task, including the version read before the open", async () => {
     // The hazard the reviewer instrumented: the task reads the active
-    // version FIRST, through the store's own six-attempt transport ladder.
+    // version first, through the store's own six-attempt transport ladder.
     // Bounding only the provider open left that read unbounded — a
     // daemon-down open failed there, held the chain for the full ladder,
     // and rejected with a rebind error the surface reads as an ordinary
@@ -168,10 +168,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
       .catch((error: unknown) => error);
 
-    // MUTATION: drop withRetryBudget from the task -> the version read runs
-    // its full ladder and this is an EngineWorkspaceRebindError instead,
-    // which main maps to a plain fallback rather than engineMayHoldDocument.
-    expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+    expect(refusal, "drop withRetryBudget from the task -> the version read runs its full ladder and this is an EngineWorkspaceRebindError instead, which main maps to a plain fallback rather than engineMayHoldDocument.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     expect((refusal as Error).message).toContain(
       `limit of ${YDOC_OPEN_RETRY_DEADLINE_MS}ms`,
     );
@@ -182,7 +179,7 @@ describe("the document open's capture-chain hold (#564)", () => {
   });
 
   it("frees the chain at the ydoc.open bound when the daemon never answers", async () => {
-    // #616. The retry budget above bounds RETRY WAITING, and a daemon that
+    // The retry budget above bounds retry waiting, and a daemon that
     // accepts `ydoc.open` and then says nothing never fails once — so before
     // this bound the chain was held for as long as the silence lasted.
     const root = await tempRoot();
@@ -256,11 +253,7 @@ describe("the document open's capture-chain hold (#564)", () => {
 
       await vi.advanceTimersByTimeAsync(1);
       const refusal = await opening;
-      // MUTATION: translate the deadline into a plain transport error -> the
-      // run ladder retries it, each retry costs another full bound, and the
-      // refusal that eventually reaches main names the retry budget instead of
-      // the limit that actually fired.
-      expect(refusal).toBeInstanceOf(YdocOpenTimedOutError);
+      expect(refusal, "translate the deadline into a plain transport error -> the run ladder retries it, each retry costs another full bound, and the refusal that eventually reaches main names the retry budget instead of the limit that actually fired.").toBeInstanceOf(YdocOpenTimedOutError);
       expect((refusal as Error).message).toContain(
         `The ydoc.open deadlineMs limit of ${YDOC_OPEN_DEADLINE_MS}ms was reached`,
       );
@@ -275,8 +268,8 @@ describe("the document open's capture-chain hold (#564)", () => {
     }
   });
 
-  it("keeps the RETRY read-only when the timed-out open had already taken the session", async () => {
-    // #616, codex P1. The deadline can fire over an open that SUCCEEDED: the
+  it("keeps the retry read-only when the timed-out open had already taken the session", async () => {
+    // The deadline can fire over an open that succeeded: the
     // daemon writes one output item at a time and its queue holds 64 of them,
     // any of which may be a frame-sized `ydoc.open` state
     // (engineDaemonLifecycle.ts). A reply stuck behind that queue is not a
@@ -286,13 +279,13 @@ describe("the document open's capture-chain hold (#564)", () => {
     // So the first open is read-only, which is right, and then "Try again"
     // meets `ydoc-session-busy` — the daemon saying it holds this document.
     // Classified as an ordinary refusal, that answered the retry with the
-    // WRITABLE plain editor over a daemon-held canonical Y.Doc: the double
+    // writable plain editor over a daemon-held canonical Y.Doc: the double
     // writer #533 exists to prevent, reached by way of the fix for #616.
     const root = await tempRoot();
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
     // A daemon that takes the lease and then cannot get its reply out. It is
-    // stateful on purpose: the busy refusal is a CONSEQUENCE of the first open
+    // stateful on purpose: the busy refusal is a consequence of the first open
     // landing, not a canned answer, so a fake that never took the session
     // could not produce it either.
     let leaseHeld = false;
@@ -362,10 +355,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
       expect((retry as Error).message).toBe("ydoc-session-busy");
-      // MUTATION: drop the busy refusal from the read-only family -> this is
-      // `false`, main answers a plain `available: false`, and the renderer puts
-      // a writable plain editor over a document the daemon still holds.
-      expect(isEngineWorkspaceOpenRefusedError(retry)).toBe(true);
+      expect(isEngineWorkspaceOpenRefusedError(retry), "drop the busy refusal from the read-only family -> this is `false`, main answers a plain `available: false`, and the renderer puts a writable plain editor over a document the daemon still holds.").toBe(true);
     } finally {
       vi.useRealTimers();
       await engine.stop();
@@ -387,7 +377,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     await session.close({ settle: false });
     await engine.stop();
 
-    // WHY the budget is a region rather than a per-call limit: the task
+    // Why the budget is a region rather than a per-call limit: the task
     // makes several daemon calls, and a limit on each would let their waits
     // add up to something no caller ever set.
     expect(runOptions.length).toBeGreaterThan(1);
@@ -395,7 +385,7 @@ describe("the document open's capture-chain hold (#564)", () => {
 
   it("sits beyond the measured healthy open on a busy chain", async () => {
     // AGENTS.md, measure limits that reject work: the deadline only ever
-    // interrupts transport-retry WAITING, but the honest floor is still the
+    // interrupts transport-retry waiting, but the honest floor is still the
     // healthy open itself. Eight opens, each queued behind a captureBatch of
     // three files (the chain traffic a busy workspace produces), through the
     // real chain + loopback RPCs with an instant provider stub. Real daemon
@@ -436,7 +426,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     expect(maxMs).toBeLessThan(YDOC_OPEN_RETRY_DEADLINE_MS);
   });
 
-  // #564, codex round 13. The absent-head branches REFUSE by releasing the
+  // The absent-head branches refuse by releasing the
   // session and then throwing a refusal that describes the DISK. That release
   // runs inside the same budget the task opened, so a flaky transport can
   // leave it spent — and then the close rejects with the deadline error, the
@@ -455,7 +445,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         workspaceId: WORKSPACE_ID,
         rootPath: root,
         rustEngineSessions: sessions,
-        // Absent head AND absent lineage: the bind the absent-head contract
+        // Absent head and absent lineage: the bind the absent-head contract
         // judges by what is on disk.
         openRustYDocProviderSession: async () => ({
           doc,
@@ -516,20 +506,16 @@ describe("the document open's capture-chain hold (#564)", () => {
         ),
       );
 
-      // MUTATION: attach the release failure as `refusal.cause` and throw the
-      // artifact refusal anyway -> main answers a bare `available:false` and
-      // the renderer opens the writable plain editor over a session the
-      // daemon still holds.
-      expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(refusal, "attach the release failure as `refusal.cause` and throw the artifact refusal anyway -> main answers a bare `available:false` and the renderer opens the writable plain editor over a session the daemon still holds.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
     });
 
     // The other half of the same defect, and the one the user feels. The
     // client stopped waiting; the daemon did not stop working. Its close runs
-    // in a SPAWNED task (crates/dohc-workspace-engine/src/lib.rs,
+    // in a spawned task (crates/dohc-workspace-engine/src/lib.rs,
     // ydoc_close_inner) that runs to completion whatever happens to the RPC
     // future, and a genuine close refusal — an update raced in, so the
-    // lineage is dirty — REINSERTS the session entry with its lease held.
+    // lineage is dirty — reinserts the session entry with its lease held.
     // The refusal that left this function was the last reference to that
     // session, so every later open answered ydoc-session-busy and "Try again"
     // could never work again. Retain it where a close can still reach it.
@@ -593,9 +579,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         .catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
 
-      // "Try again". MUTATION: drop the retention (or the discharge) -> the
-      // unreleased session is unreachable, and in production every open from
-      // here answers ydoc-session-busy until the app restarts.
+      // "Try again".
       const session = await engine.openYDocSession({
         path: "note.md",
         onRemoteUpdate: () => undefined,
@@ -603,10 +587,8 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(session.doc).toBe(doc);
       // The retry closed the stranded session before binding a new one.
       expect(closes).toBe(2);
-      // And it CLOSED it — a spent transport budget is waited out, never
-      // evicted. MUTATION: drop the `isEngineWorkspaceOpenRefusedError` arm
-      // from the evict condition (#665) -> the orphan is evicted over a
-      // transport hiccup that the very next attempt would have survived.
+      // And it closed it — a spent transport budget is waited out, never
+      // evicted.
       expect(evicts).toBe(0);
 
       await session.close({ settle: false });
@@ -620,7 +602,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // That verdict is one `main` answers with a bare `available: false`, so
       // the renderer opened the writable plain editor over the session this
       // very branch had just retained as an orphan, lease and all. The
-      // classification does not depend on WHAT refused the release: while the
+      // classification does not depend on what refused the release: while the
       // session is unreleased the engine may still own the document.
       const root = await tempRoot();
       await write(root, "note.md", "uncaptured bytes\n");
@@ -630,9 +612,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         new Error("ydoc close refused: unsettled-close"),
       );
 
-      // MUTATION: rethrow only budget refusals -> YDocUncapturedArtifactError,
-      // a plain fallback, and two writers on one path.
-      expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
+      expect(refusal, "rethrow only budget refusals -> YDocUncapturedArtifactError, a plain fallback, and two writers on one path.").toBeInstanceOf(YDocSessionUnreleasedError);
       expect(refusal).not.toBeInstanceOf(YDocUncapturedArtifactError);
       // Named for the agent reading it, with the daemon's own refusal kept.
       expect((refusal as Error).cause).toMatchObject({
@@ -647,16 +627,16 @@ describe("the document open's capture-chain hold (#564)", () => {
       // codex r20, and the last data-loss door. The discharge released on
       // easier terms than the release that orphaned the session: no
       // `settleOnRefusal: false`, so a repeated UnsettledClose escalated to a
-      // SETTLING close inside the provider. The doc this session holds was
+      // settling close inside the provider. The doc this session holds was
       // seeded from neither a head nor a snapshot — settling it writes what
-      // replication delivered OVER bytes the watcher has not captured yet,
+      // replication delivered over bytes the watcher has not captured yet,
       // which is exactly what rule 1 refuses the open to prevent.
       //
       // #665 closed the other end. A close that keeps refusing used to leave
       // the orphan retained, holding its lease, and on a path no capture will
       // ever reach — policy-excluded, or over the 10 MiB capture limit — the
       // document stayed read-only until the daemon restarted. The orphan now
-      // EVICTS: the daemon lets go of the session while its lineage stays
+      // evicts: the daemon lets go of the session while its lineage stays
       // durable, so nothing is written and nothing is discarded.
       const root = await tempRoot();
       const uncaptured = "bytes the watcher has not ingested yet\n";
@@ -708,12 +688,9 @@ describe("the document open's capture-chain hold (#564)", () => {
       const first = await engine
         .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
         .catch((error: unknown) => error);
-      // The session is gone, so the refusal may describe the DISK again: the
+      // The session is gone, so the refusal may describe the disk again: the
       // file is really there and the plain editor shows its real bytes.
-      // MUTATION: drop the evict fallback (#665) -> a
-      // YDocSessionUnreleasedError, an orphan holding its lease, and a path
-      // that stays read-only until the daemon restarts.
-      expect(first).toBeInstanceOf(YDocUncapturedArtifactError);
+      expect(first, "drop the evict fallback (#665) -> a YDocSessionUnreleasedError, an orphan holding its lease, and a path that stays read-only until the daemon restarts.").toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicts).toBe(1);
 
       // "Try again" binds a fresh session rather than discharging a retained
@@ -724,10 +701,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(retry).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicts).toBe(2);
 
-      // MUTATION: discharge with `{ settle: false }` alone -> the provider
-      // escalates the repeated refusal to a SETTLING close, and the doc lands
-      // on top of the user's uncaptured bytes.
-      expect(closeCalls).toEqual([
+      expect(closeCalls, "discharge with `{ settle: false }` alone -> the provider escalates the repeated refusal to a settling close, and the doc lands on top of the user's uncaptured bytes.").toEqual([
         { settle: false, settleOnRefusal: false },
         { settle: false, settleOnRefusal: false },
       ]);
@@ -737,13 +711,13 @@ describe("the document open's capture-chain hold (#564)", () => {
     });
 
     it("binds the lineage an evicted orphan left behind, with no restart", async () => {
-      // #665, the whole point. On a path no capture will ever reach — one
+      // On a path no capture will ever reach — one
       // `.dohc/files.toml` excludes, or a file above the engine text capture
       // limit and the 2 MiB editor limit — the orphan's close can never be
       // satisfied, because only a captured or settled artifact can satisfy it.
       // Evicting is what breaks that loop: the daemon lets go of the session
       // and keeps the lineage, so the next open finds the resurrected draft
-      // (head absent, lineage EXISTING) and binds it. Before this, the answer
+      // (head absent, lineage existing) and binds it. Before this, the answer
       // was ydoc-session-busy until the daemon restarted — and on these two
       // paths a restart did not help either, because the reopen still found
       // no head.
@@ -800,14 +774,11 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicted).toBe(true);
 
-      // MUTATION: drop the evict fallback in `closeEntry` (#665) -> this open
-      // answers YDocSessionUnreleasedError from the retained orphan, and every
-      // later one does too.
       const session = await engine.openYDocSession({
         path: "note.md",
         onRemoteUpdate: () => undefined,
       });
-      expect(session.doc).toBe(doc);
+      expect(session.doc, "drop the evict fallback in `closeEntry` (#665) -> this open answers YDocSessionUnreleasedError from the retained orphan, and every later one does too.").toBe(doc);
       expect(opens).toBe(2);
       // Nothing was written on the way out.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
@@ -817,7 +788,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     });
 
     // #710/#721 rider F6. The test above pins the disk-size clause of
-    // `captureWillReachPath`; a REAL `.dohc/files.toml` `tracked = false`
+    // `captureWillReachPath`; a real `.dohc/files.toml` `tracked = false`
     // rule is what exercises the `policyTracksPath` clause, and only this
     // fixture severs cleanly from that one alone — the file here is a few
     // plain bytes, well under every size cap.
@@ -879,15 +850,11 @@ describe("the document open's capture-chain hold (#564)", () => {
       expect(refusal).toBeInstanceOf(YDocUncapturedArtifactError);
       expect(evicted).toBe(true);
 
-      // MUTATION: sever the `policyTracksPath` clause of
-      // `captureWillReachPath` (treat every path as capture-reachable) ->
-      // this second open refuses again instead of binding, because the
-      // disk-size clause alone never excludes a few plain bytes.
       const session = await engine.openYDocSession({
         path: "note.md",
         onRemoteUpdate: () => undefined,
       });
-      expect(session.doc).toBe(doc);
+      expect(session.doc, "sever the `policyTracksPath` clause of `captureWillReachPath` (treat every path as capture-reachable) -> this second open refuses again instead of binding, because the disk-size clause alone never excludes a few plain bytes.").toBe(doc);
       expect(opens).toBe(2);
       // Nothing was written on the way out.
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(excluded);
@@ -902,7 +869,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // A registered orphan is visible to the lifecycle sweep every version
       // switch, merge, rename and delete runs, and that sweep closes with
       // `{ settle: false }` alone: the provider escalates a refused close into
-      // a SETTLING one, over the uncaptured file.
+      // a settling one, over the uncaptured file.
       const root = await tempRoot();
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
@@ -932,9 +899,9 @@ describe("the document open's capture-chain hold (#564)", () => {
             closeCalls.push({ ...closeOptions });
             throw new Error("unsettled-close");
           },
-          // The evict fails too, which is what RETAINS the orphan — the
+          // The evict fails too, which is what retains the orphan — the
           // precondition of this test. An orphan the daemon released is not
-          // registered, so no lifecycle sweep can reach it (#665).
+          // registered, so no lifecycle sweep can reach it.
           evict: async () => {
             throw new Error("evict failed: transport-error");
           },
@@ -954,11 +921,8 @@ describe("the document open's capture-chain hold (#564)", () => {
         .settleAndCloseLiveSessionsForPath("note.md")
         .catch(() => undefined);
 
-      // MUTATION: drop the entry-level policy -> the sweep's `{ settle: false }`
-      // arrives without `settleOnRefusal: false`, the provider escalates, and
-      // the doc lands on the user's uncaptured bytes.
       for (const call of closeCalls) {
-        expect(call).toMatchObject({ settle: false, settleOnRefusal: false });
+        expect(call, "drop the entry-level policy -> the sweep's `{ settle: false }` arrives without `settleOnRefusal: false`, the provider escalates, and the doc lands on the user's uncaptured bytes.").toMatchObject({ settle: false, settleOnRefusal: false });
       }
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
       await engine.stop();
@@ -967,7 +931,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     it("captures the file an orphan is waiting on, so the retry converges", async () => {
       // codex r21. Round 20 said the retry "converges once the watcher
       // captures the file" — and a retained orphan is marked failing-close,
-      // which made captureOnePath DROP that path's events. The capture the
+      // which made captureOnePath drop that path's events. The capture the
       // discharge waits for could never run: permanently read-only, with a
       // retry that could never succeed. The promise has to be reachable.
       const root = await tempRoot();
@@ -983,7 +947,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         openRustYDocProviderSession: async () => {
           opens += 1;
           // Open 1 binds absent-head over content and its release refuses,
-          // which orphans the session. Once the file is CAPTURED the lineage
+          // which orphans the session. Once the file is captured the lineage
           // is no longer dirty against it, so the discharge releases and the
           // reopen has a head to bind.
           const absent = !captured;
@@ -1002,9 +966,9 @@ describe("the document open's capture-chain hold (#564)", () => {
             close: async () => {
               if (!captured) throw new Error("unsettled-close");
             },
-            // The evict fails, so the orphan is RETAINED and the capture
+            // The evict fails, so the orphan is retained and the capture
             // exception below is what it still depends on. The daemon that
-            // lets go is the other test above (#665).
+            // lets go is the other test above.
             evict: async () => {
               throw new Error("evict failed: transport-error");
             },
@@ -1019,18 +983,16 @@ describe("the document open's capture-chain hold (#564)", () => {
         .catch((error: unknown) => error);
       expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
 
-      // THE STEP THAT COULD NOT HAPPEN: the watcher's event for the path the
-      // orphan is holding. Counted against a BEFORE, because the startup
+      // The step that could not happen: the watcher's event for the path the
+      // orphan is holding. Counted against a before, because the startup
       // capture of this file already left a moment — an "any moments at all"
       // assertion would pass whether or not this one ran.
       const before = (await engine.listMoments({ limit: 200 })).moments.length;
       await write(root, "note.md", "the user's bytes, edited outside dohc\n");
-      // MUTATION: defer capture for an orphan like any other failing-close
-      // entry -> this records nothing, and the retry below refuses forever.
       engine.captureBatch([{ path: "note.md", operation: "update" }]);
       await engine.flush();
       const after = (await engine.listMoments({ limit: 200 })).moments.length;
-      expect(after).toBeGreaterThan(before);
+      expect(after, "defer capture for an orphan like any other failing-close entry -> this records nothing, and the retry below refuses forever.").toBeGreaterThan(before);
       captured = true;
 
       // The retry discharges the orphan and binds.
@@ -1054,9 +1016,7 @@ describe("the document open's capture-chain hold (#564)", () => {
         new EngineWorkspaceShuttingDownError(),
       );
 
-      // MUTATION: keep `released = false` as the only classification -> the
-      // raced refusal downgrades a quitting app to the plain editor.
-      expect(isEngineWorkspaceOpenRefusedError(refusal)).toBe(true);
+      expect(isEngineWorkspaceOpenRefusedError(refusal), "keep `released = false` as the only classification -> the raced refusal downgrades a quitting app to the plain editor.").toBe(true);
       expect(refusal).not.toBeInstanceOf(YDocOpenRacedError);
     });
   });

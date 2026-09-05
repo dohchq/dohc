@@ -44,9 +44,9 @@ fn base_coordinate_reports_the_origin_id_byte_limit() {
     );
 }
 
-/// Mark a `settle()` call's OWN materialization job complete. Every test
-/// below that seeds an ADDITIONAL pending job to prove the close guard
-/// blocks on THAT job must call this first — the settle's own job (still
+/// Mark a `settle()` call's own materialization job complete. Every test
+/// below that seeds an additional pending job to prove the close guard
+/// blocks on that job must call this first — the settle's own job (still
 /// pending, same target path) would otherwise block the close by itself,
 /// and the seeded job would prove nothing: deleting it would flip no
 /// assertion.
@@ -394,13 +394,10 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     // until B drained. One workspace's backlog blocking another is the
     // invariant break, not the delay.
     //
-    // The fixture is the PREDICATE, not the scenario: two rows that differ
+    // The fixture is the predicate, not the scenario: two rows that differ
     // only by workspace. The job below is byte-identical to one that must
     // block this close, except that it belongs to someone else.
     //
-    // MUTATION: drop the `j.workspace_id` predicate from the pending-job
-    // check in `close_session` — this close returns UnsettledClose and the
-    // expect below fails.
     let mut ts = fresh_store("cross-workspace-pending");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -424,7 +421,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     let settle_outcome =
         committed(settle(&mut ts.store, &key, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
     // The settle's OWN job must land before this test's cross-workspace
-    // collision means anything — a still-pending job for THIS object's own
+    // collision means anything — a still-pending job for this object's own
     // path is correctly blocking (#715: the guard now reads any pending job
     // aimed at the path, not just certain job-id spellings), and asserting
     // through it would test that instead of the workspace-scoping bug below.
@@ -465,7 +462,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
                 ],
             )
             .map_err(dohc_engine_storage::StorageError::persist_public)?;
-            // ANOTHER workspace's pending resolution job, keyed off THIS
+            // Another workspace's pending resolution job, keyed off this
             // workspace's moment id — the collision the schema permits.
             let sha = dohc_engine_storage::put_binary_blob(tx, b"other workspace bytes")?;
             tx.execute(
@@ -490,7 +487,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
         "the settled local-only lineage prunes: {out:?}"
     );
 
-    // The same job under THIS workspace must still block — otherwise the
+    // The same job under this workspace must still block — otherwise the
     // fix would have been "ignore pending jobs", not "scope them".
     let mut ts2 = fresh_store("same-workspace-pending");
     let key2 = test_key();
@@ -521,8 +518,8 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     );
     let settle_outcome2 =
         committed(settle(&mut ts2.store, &key2, "notes/doc.md", &NoFaults, 1_200).expect("settle"));
-    // Land THIS settle's own job too — the seeded job below must be the
-    // ONLY thing this half blocks on, or it proves nothing either.
+    // Land this settle's own job too — the seeded job below must be the
+    // only thing this half blocks on, or it proves nothing either.
     land_settle_job(&mut ts2.store, &settle_outcome2);
     ts2.store
         .write_with(&NoFaults, |tx| {
@@ -580,7 +577,7 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
     );
 }
 
-/// #715. The local-only prune guard's pending-materialization check matched
+/// The local-only prune guard's pending-materialization check matched
 /// only the `ydoc-mat_` / `resolve-mat_` job-id prefixes. `enqueue_write`
 /// also mints `merge-mat_`, `sync-resolve-mat_`, and `secret-mat_` — a
 /// pending job under any of those three still targets this object's disk
@@ -593,14 +590,11 @@ fn another_workspaces_pending_job_cannot_block_this_close() {
 /// that kind, and require the close to refuse. `job_id_prefix` also names
 /// the scratch store — every prefix is a distinct valid identifier already.
 ///
-/// The settle's OWN job is landed (marked complete) before the seeded job:
+/// The settle's own job is landed (marked complete) before the seeded job:
 /// otherwise that still-pending job — same target path — would block the
 /// close by itself, and the seeded job would prove nothing (deleting it
 /// would flip no assertion).
 ///
-/// MUTATION: restore the `ydoc-mat_` / `resolve-mat_` job-id prefix match in
-/// `close_session`'s pending-job query — each of these three still-pending
-/// jobs stops blocking and the assert fails.
 fn assert_pending_job_of_kind_blocks_close(job_id_prefix: &str) {
     let mut ts = fresh_store(job_id_prefix);
     let key = test_key();
@@ -724,7 +718,7 @@ fn local_only_close_prunes_the_cache() {
     }
     assert_eq!(count(&ts.store, "ydoc_updates", &key), 3);
 
-    // A close BEFORE settling refuses to prune (would discard unsettled edits).
+    // A close before settling refuses to prune (would discard unsettled edits).
     assert!(matches!(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 1_500),
         Err(CollabError::UnsettledClose)
@@ -826,16 +820,13 @@ fn seed_head(
 
 #[test]
 fn a_captured_head_lets_a_never_settled_local_close_prune() {
-    // #665. The prune guard asks one question — does the artifact already hold
+    // The prune guard asks one question — does the artifact already hold
     // these bytes — and used to read one column, `last_settled_sha`, which only
-    // a SETTLE writes. A capture puts the document's own projection into the
+    // a settle writes. A capture puts the document's own projection into the
     // head and touches no column, so the guard refused a document that was
     // already on disk, and capture -> discharge -> open never converged: every
     // lap refused, and the file stayed read-only until the daemon restarted.
     //
-    // MUTATION: drop the `head_content_sha` arm from the `covered` check in
-    // `close_session` — this close returns UnsettledClose and the expect below
-    // fails.
     let mut ts = fresh_store("captured-head-prune");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -870,7 +861,7 @@ fn a_captured_head_lets_a_never_settled_local_close_prune() {
 
 #[test]
 fn a_head_holding_other_bytes_still_refuses_the_local_close() {
-    // The other half of the same rule, and the reason the fix is a COMPARISON
+    // The other half of the same rule, and the reason the fix is a comparison
     // rather than "a head exists". A file the user edited outside dohc has a
     // head too, and pruning against it would discard the document's own text
     // with nothing on disk holding it.
@@ -912,7 +903,7 @@ fn a_head_holding_other_bytes_still_refuses_the_local_close() {
 
 #[test]
 fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
-    // #713 review, P1-a. A settle advances the head AND writes
+    // A settle advances the head and writes
     // `last_settled_sha`, then its materialization job finds newer bytes on
     // the file. `ydoc_settle_on_store` marks that job terminal and NULLs
     // `last_settled_sha` — its own comment says why: "so close(settle:false)
@@ -930,9 +921,6 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
     // says whether the file ever received it — this state is exactly the one
     // where the settle withdrew that proof.
     //
-    // MUTATION: drop the `metadata_origin = CAPTURE_ORIGIN` predicate from
-    // `captured_head_sha` (answer "captured" for every head) — this close
-    // prunes and the assert below fails.
     let mut ts = fresh_store("engine-head-never-landed");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -968,7 +956,7 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
         "the refused close kept the cache"
     );
 
-    // A COMPLETED job is the same direction and refuses here too. That path
+    // A completed job is the same direction and refuses here too. That path
     // has its own proof — `last_settled_sha`, which a completed settle keeps
     // — and this fallback deliberately answers for captures only.
     let mut settled = fresh_store("engine-head-that-landed");
@@ -1015,11 +1003,11 @@ fn a_head_the_engine_wrote_but_never_landed_still_refuses_the_local_close() {
 
 #[test]
 fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
-    // #723. `captured_head_sha` used to answer "captured" with
+    // `captured_head_sha` used to answer "captured" with
     // `NOT EXISTS (materialization_jobs WHERE content+path match)`. An
-    // EARLIER, unrelated engine settle for this exact content and path
+    // earlier, unrelated engine settle for this exact content and path
     // leaves its job row behind after it completes — the table is a ledger,
-    // not a lease — so a LATER, genuine capture that reverts the disk to
+    // not a lease — so a later, genuine capture that reverts the disk to
     // those same bytes still finds that leftover row and reads as "not
     // captured", refusing a discharge the direction plainly allows.
     //
@@ -1027,9 +1015,6 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
     // flips `snapshots.metadata_origin` to "capture" and mints no job row at
     // all, so the fixed predicate sees the capture directly.
     //
-    // MUTATION: restore the `NOT EXISTS (materialization_jobs …)` predicate
-    // in `captured_head_sha` — this close returns UnsettledClose and the
-    // expect below fails.
     let mut ts = fresh_store("captured-reversion-leftover-job");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1070,20 +1055,18 @@ fn a_captured_reversion_discharges_despite_a_leftover_completed_job_row() {
 
 #[test]
 fn a_binary_head_refuses_the_close_by_name_instead_of_failing_internally() {
-    // #713 substitution review. `snapshots.blob_sha256` is NULL for a BINARY
+    // #713 substitution review. `snapshots.blob_sha256` is NULL for a binary
     // head (schema v10), which a live path reaches: write bytes that stop
     // round-tripping as UTF-8 and capture flips the head's kind. Reading that
     // column as a non-optional String makes rusqlite raise InvalidColumnType,
     // and `.optional()` absorbs only QueryReturnedNoRows — so the close
     // answered `Internal: workspace operation failed`.
     //
-    // It failed CLOSED, so nothing was lost. It was still the wrong answer:
+    // It failed closed, so nothing was lost. It was still the wrong answer:
     // an agent reading that cannot tell a corrupt store from a document it
     // simply has to settle first (AGENTS.md: show agents the limits they
     // hit). A NULL head sha covers nothing, and saying so is the whole fix.
     //
-    // MUTATION: read the column as `String` again -> this close returns
-    // Storage/Corrupt and the match below fails.
     let mut ts = fresh_store("binary-head-refusal");
     let key = test_key();
     seed_parents(&mut ts.store, &key, 1_000);
@@ -1187,9 +1170,9 @@ fn replicated_close_never_prunes_the_lineage() {
 
 #[test]
 fn local_to_shared_transition_keeps_the_base() {
-    // INDIVIDUAL-FIRST → shared (a CORE workflow, product invariant "open when
+    // INDIVIDUAL-FIRST → shared (a core workflow, product invariant "open when
     // shared"). A doc starts local-only; later it is shared, which claims a base.
-    // The claim MUST promote the marker to replicated so the next close compacts-
+    // The claim must promote the marker to replicated so the next close compacts-
     // not-prunes and the just-claimed base survives for peers.
     let mut ts = fresh_store("local-to-shared");
     let key = test_key();
@@ -1230,7 +1213,7 @@ fn local_to_shared_transition_keeps_the_base() {
     );
     assert_eq!(count(&ts.store, "ydoc_snapshots", &key), 1, "base claimed");
 
-    // Close must now COMPACT (not prune), preserving the base for peers.
+    // Close must now compact (not prune), preserving the base for peers.
     let out = committed(
         close_session(&mut ts.store, &key, false, None, &NoFaults, 2_000).expect("close"),
     );
@@ -1250,7 +1233,7 @@ fn local_to_shared_transition_keeps_the_base() {
 
 #[test]
 fn append_self_bounds_the_log_at_threshold() {
-    // The "everything bounded" invariant: a long-lived session that NEVER calls
+    // The "everything bounded" invariant: a long-lived session that never calls
     // maybe_compact/close_session must still keep a finite log — record_local_update
     // self-triggers compaction past the default threshold.
     let mut ts = fresh_store("self-bound");
@@ -1303,7 +1286,7 @@ fn append_self_bounds_the_log_at_threshold() {
 #[test]
 fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
     // #851 review finding: the cheap pending-count pre-check must never cover
-    // FORCED compaction (`threshold == 0`, the call `close_session` makes on
+    // forced compaction (`threshold == 0`, the call `close_session` makes on
     // a replicated/persist-closed lineage). A lineage that is already fully
     // compacted has `pending == 0`, which is exactly the case the cheap path
     // would report as a clean `Skipped { 0 }` — but forced compaction exists
@@ -1386,9 +1369,9 @@ fn forced_compaction_with_nothing_pending_still_validates_the_snapshot() {
 
 #[test]
 fn forced_close_on_a_compacted_lineage_skips_without_reminting() {
-    // #851 certification: the counterweight to the test above. Guards against
+    // Certification: the counterweight to the test above. Guards against
     // over-correcting the threshold==0 fix — forced compaction must still
-    // SUCCEED cleanly on a healthy, already-compacted lineage by reporting
+    // succeed cleanly on a healthy, already-compacted lineage by reporting
     // Skipped { 0 }, never re-minting a snapshot it does not need (a wasted
     // blob write) and never erroring. Two mutations would silently drop
     // this: removing `below_threshold`'s `|| pending <= 0` arm, or removing
@@ -1928,7 +1911,7 @@ fn base_is_claimed_exactly_once() {
         "exactly one base"
     );
 
-    // A second claim with the SAME bytes (crash-retry / redelivery) resumes.
+    // A second claim with the same bytes (crash-retry / redelivery) resumes.
     let second = committed(
         claim_base(
             &mut ts.store,
@@ -1986,7 +1969,7 @@ fn base_is_claimed_exactly_once() {
         matches!(after_compaction, ClaimOutcome::Resumed),
         "the permanent seq-0 proof survives compaction"
     );
-    // A claim with DIFFERENT base bytes must REFUSE — silently resuming (and
+    // A claim with different base bytes must refuse — silently resuming (and
     // acking) a divergent base would drop that lineage while the relay
     // cursor advances past it. Mutation check: drop the stored-sha
     // comparison in `claim_base_in_tx`'s resumed branch — this claim then
@@ -2012,7 +1995,7 @@ fn base_is_claimed_exactly_once() {
         2,
         "the rejected claim changes neither proof nor folded head"
     );
-    // The surviving base is the FIRST one (byte-intact).
+    // The surviving base is the first one (byte-intact).
     let base_sha_now = ts
         .store
         .read_with(|c| -> Result<String, CollabError> {
@@ -2816,7 +2799,7 @@ fn local_edit_on_replicated_lineage_requests_broadcast() {
 
 #[test]
 fn replicated_edit_before_base_is_not_broadcast() {
-    // A replicated marker whose base is NOT yet claimed must NOT broadcast local
+    // A replicated marker whose base is not yet claimed must not broadcast local
     // edits: a delta without the seed base leaves peers unable to reconstruct.
     let mut ts = fresh_store("repl-no-base");
     let key = test_key();
@@ -2846,8 +2829,8 @@ fn replicated_edit_before_base_is_not_broadcast() {
 #[test]
 fn resettle_of_edited_doc_expects_prior_content_preimage() {
     // The materializer must replace (not conflict-flag) an edited doc: the first
-    // settle expects the target ABSENT; a later settle of changed content expects
-    // the PREVIOUS settle's content still on disk.
+    // settle expects the target absent; a later settle of changed content expects
+    // the previous settle's content still on disk.
     use dohc_engine_storage::Preimage;
     let mut ts = fresh_store("resettle");
     let key = test_key();
@@ -2881,7 +2864,7 @@ fn resettle_of_edited_doc_expects_prior_content_preimage() {
         "first settle expects absent target"
     );
 
-    // Edit and re-settle: the new job must expect the FIRST content as preimage.
+    // Edit and re-settle: the new job must expect the first content as preimage.
     let d2 = doc.plaintext_insert(5, " second");
     committed(
         record_local_update(&mut ts.store, &mut ts.cache, &key, &d2, &NoFaults, 6_000)
@@ -2968,7 +2951,7 @@ fn truncated_update_is_rejected_and_never_journaled() {
 /// 0.27.3's uncatchable `char`-decode UB hard-abort
 /// (`known_crash_witness_yrs_char_decode_ub`,
 /// `fuzz/dohc-fuzz-targets/tests/ydoc_update.rs`) is rejected fail-closed
-/// through BOTH real ingestion choke points this crate exposes to untrusted
+/// through both real ingestion choke points this crate exposes to untrusted
 /// input: the local edit path (`record_local_update`) and the remote
 /// replication path (`apply_remote_update`). Before the fix, either call
 /// would abort the WHOLE PROCESS (not just fail this test) — this test
@@ -3068,7 +3051,7 @@ fn a_lease_is_exclusive_and_releases_on_drop() {
 
     let lease = registry.acquire(&key).expect("first lease");
     assert!(registry.is_held(&key));
-    // A second open of the SAME lineage is refused.
+    // A second open of the same lineage is refused.
     assert!(matches!(
         registry.acquire(&key),
         Err(CollabError::LeaseHeld)
@@ -3441,7 +3424,7 @@ mod crash {
                 1,
                 "job durable"
             );
-            // Retry with a DIFFERENT wall clock: the generation is a durable
+            // Retry with a different wall clock: the generation is a durable
             // per-doc counter, not now_ms, so this still dedups exactly-once.
             let retry =
                 committed(settle(&mut store, &key, "n.md", &NoFaults, 999_999).expect("retry"));
@@ -3605,7 +3588,7 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
     );
 }
 
-// #1001: a synced update past the first in its lineage must not replay on the
+// A synced update past the first in its lineage must not replay on the
 // seq-0 base. That replay re-deletes items earlier updates already replaced
 // while their inserts stay pending, so the authored pair reads a phantom
 // `field -> absent` removal and the resolved-away branch journals it.

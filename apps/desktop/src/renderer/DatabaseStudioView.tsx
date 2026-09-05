@@ -13,9 +13,9 @@ type Table = Snapshot["tables"][number];
 type Row = Record<string, unknown>;
 type SortState = { column: string; direction: "asc" | "desc" } | null;
 
-// Identity a row EDIT keys on. SQLite rowid (carried by the snapshot as
+// Identity a row edit keys on. SQLite rowid (carried by the snapshot as
 // __dohc_rowid) is always unique; a guessed "id" column may not be — editing
-// one visible row must never update several. WITHOUT ROWID tables fall back to
+// one visible row must never update several. Without rowid tables fall back to
 // a single-column declared primary key; with neither, edits are disabled.
 function editKeyFor(
   table: Table,
