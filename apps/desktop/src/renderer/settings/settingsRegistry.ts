@@ -11,7 +11,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 
-export type SettingsScope = "User" | "Workspace" | "Mixed";
+type SettingsScope = "User" | "Workspace" | "Mixed";
 
 type SettingsSection = {
   id: string;

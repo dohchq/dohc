@@ -18,7 +18,7 @@ import { bridge } from "../bridge";
 // That is deliberate: a details tab restored on launch must load without the
 // panel ever being opened.
 
-export type PluginAction =
+type PluginAction =
   | "install"
   | "disable"
   | "enable"
@@ -34,7 +34,7 @@ export type PluginAction =
 // already run their own dedicated flows below.
 type RunnablePluginAction = Exclude<PluginAction, "preflight" | "uninstall" | "add">;
 
-export type PluginLoadState =
+type PluginLoadState =
   | { status: "loading" }
   | { status: "ready"; plugins: PluginStatusRecord[] }
   | { status: "error"; message: string };
@@ -46,12 +46,12 @@ export type PluginLoadState =
 // effect that resets this state runs) — the render-time reader below checks
 // this tag against the current workspaceId argument rather than trusting
 // that ordering.
-export type OfferedPluginLoadState =
+type OfferedPluginLoadState =
   | { status: "loading" }
   | { status: "ready"; workspaceId: string; offers: OfferedPluginRecord[] }
   | { status: "error"; workspaceId: string; message: string };
 
-export type PluginUninstallConfirmation = {
+type PluginUninstallConfirmation = {
   plugin: PluginStatusRecord;
   confirmationToken: string;
   preflight: PluginUninstallPreflightRecord;
@@ -383,7 +383,7 @@ export interface PluginRenamedFact {
   to: string;
 }
 
-export interface PluginCatalog {
+interface PluginCatalog {
   load: PluginLoadState;
   busy: Record<string, PluginAction | undefined>;
   openingWebApp: string | null;

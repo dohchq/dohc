@@ -8,7 +8,7 @@
 // BUSY, not dead — and a busy renderer's drafts still count (#579 review,
 // r11). So the timeout never quits by itself: it asks the USER, main-side,
 // with the loss named. Only an explicit decision force-quits.
-export type QuitGuard = {
+type QuitGuard = {
   // Returns "proceed" when the quit is already approved (main must let it
   // run) and "asked" when it was intercepted and the renderer was asked.
   beforeQuit(event: { preventDefault(): void }): "proceed" | "asked";
@@ -23,7 +23,7 @@ export type QuitGuard = {
 
 // Bounds a silent renderer's ACK, never the user's decision — an answering
 // renderer resumes or holds within milliseconds.
-export const QUIT_ASK_TIMEOUT_MS = 3_000;
+const QUIT_ASK_TIMEOUT_MS = 3_000;
 
 // Which renderer answers for the quit. Not every window runs the workspace:
 // the PDF export creates a hidden, preload-less one, and asking IT about
@@ -31,7 +31,7 @@ export const QUIT_ASK_TIMEOUT_MS = 3_000;
 // dialog over drafts that were fully available (#579 review, r12). So the
 // workspace windows are TRACKED at creation, never guessed from a live-window
 // list.
-export type WorkspaceWindowRegistry<W> = {
+type WorkspaceWindowRegistry<W> = {
   track(window: W): W;
   forget(window: W): void;
   live(): W | undefined;
@@ -89,7 +89,7 @@ export function createWorkspaceWindowRegistry<W>(
 // `ask` already resolved on its answer, and resolving a promise twice does
 // nothing. Do not add sequencing here to "fix" that.
 
-export type RecoveryChecker = {
+type RecoveryChecker = {
   // True when unresolved set-aside drafts must stop the quit.
   ask(): Promise<boolean>;
   answer(requestId: number, blocked: boolean): void;

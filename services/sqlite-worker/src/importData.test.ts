@@ -1,9 +1,35 @@
 import { createHash } from 'node:crypto'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { createSqliteEngine } from './sqliteEngine'
 
+const require = createRequire(import.meta.url)
+
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex')
+}
+
+// Open the materialized bytes as a real SQLite file and read a table back.
+async function readTable(bytesBase64: string, table: string) {
+  const { DatabaseSync } = require('node:sqlite') as {
+    DatabaseSync: new (path: string) => {
+      prepare(sql: string): { all(): Array<Record<string, unknown>> }
+      close(): void
+    }
+  }
+  const dir = await mkdtemp(join(tmpdir(), 'dohc-import-test-'))
+  const file = join(dir, 'database.sqlite')
+  await writeFile(file, Buffer.from(bytesBase64, 'base64'))
+  const db = new DatabaseSync(file)
+  try {
+    return db.prepare(`SELECT * FROM "${table}" ORDER BY id`).all()
+  } finally {
+    db.close()
+    await rm(dir, { recursive: true, force: true })
+  }
 }
 
 describe('sqlite worker data imports', () => {
@@ -15,7 +41,7 @@ describe('sqlite worker data imports', () => {
       'tx_2,Cafe,250,true',
     ].join('\n')
 
-    const imported = await (engine as any).importData({
+    const imported = await engine.importData({
       name: 'transactions.csv',
       mediaType: 'text/csv',
       body,
@@ -41,25 +67,18 @@ describe('sqlite worker data imports', () => {
       bytesBase64: expect.any(String),
     })
 
-    const reingested = await engine.ingest({ bytesBase64: imported.bytesBase64 })
-    expect(reingested).toMatchObject({
-      ok: true,
-      snapshot: {
-        transactions: {
-          rows: [
-            expect.objectContaining({ id: 'tx_1', merchant: 'Grab', amount: 420, reviewed: 0 }),
-            expect.objectContaining({ id: 'tx_2', merchant: 'Cafe', amount: 250, reviewed: 1 }),
-          ],
-        },
-      },
-    })
+    if (!imported.ok) throw new Error(imported.message)
+    expect(await readTable(imported.bytesBase64, 'transactions')).toEqual([
+      expect.objectContaining({ id: 'tx_1', merchant: 'Grab', amount: 420, reviewed: 0 }),
+      expect.objectContaining({ id: 'tx_2', merchant: 'Cafe', amount: 250, reviewed: 1 }),
+    ])
   })
 
   it('imports JSON arrays, JSONL, markdown tables, and extracted PDF table text', async () => {
     const engine = await createSqliteEngine()
 
     await expect(
-      (engine as any).importData({
+      engine.importData({
         name: 'people.json',
         mediaType: 'application/json',
         body: JSON.stringify([
@@ -78,7 +97,7 @@ describe('sqlite worker data imports', () => {
     })
 
     await expect(
-      (engine as any).importData({
+      engine.importData({
         name: 'events.jsonl',
         mediaType: 'application/x-ndjson',
         body: '{"id":"e1","kind":"open"}\n{"id":"e2","kind":"close"}',
@@ -98,7 +117,7 @@ describe('sqlite worker data imports', () => {
     })
 
     await expect(
-      (engine as any).importData({
+      engine.importData({
         name: 'inventory.md',
         mediaType: 'text/markdown',
         body: '| id | sku | qty |\n| --- | --- | ---: |\n| r1 | A-1 | 3 |\n| r2 | B-2 | 5 |',
@@ -118,7 +137,7 @@ describe('sqlite worker data imports', () => {
     })
 
     await expect(
-      (engine as any).importData({
+      engine.importData({
         name: 'receipt.pdf',
         mediaType: 'application/pdf',
         body: '| id | item | amount |\n| --- | --- | ---: |\n| line_1 | notebook | 7.5 |',

@@ -36,11 +36,7 @@ export function chatAuthorLabel(
   author: Pick<ChatMessageRecord, "authorKind" | "authorDisplayName">,
 ): string {
   if (author.authorKind !== "agent") return author.authorDisplayName;
-  // Backward compatibility for rows written before agent authors stored the
-  // raw owner name; never turn "Ice's agent" into "Ice's agent's agent".
-  return /['’]s agent$/i.test(author.authorDisplayName)
-    ? author.authorDisplayName
-    : `${author.authorDisplayName}'s agent`;
+  return `${author.authorDisplayName}'s agent`;
 }
 
 export function ipcErrorMessage(error: unknown, fallback: string): string {
@@ -193,7 +189,7 @@ function sameHeading(
 // win, followed only by the explicit edge-space compatibility form. Never
 // bind by heading/order alone: CLI callers can attach an independent file that
 // happens to share a heading with a literal token in the message body.
-export function resolveFileMentionNavigationTargets(
+function resolveFileMentionNavigationTargets(
   tokens: readonly ChatFileReferenceToken[],
   attachments: readonly ChatAttachmentRecord[],
 ): Map<string, FileMentionNavigationTarget> {
@@ -348,7 +344,7 @@ export function MentionText(props: {
 // Reactions (WS-MU-C2). A small, calm quick-pick — obvious, not a full emoji
 // keyboard. Reacting to an agent's message is a first-class move, so this set
 // leans toward acknowledging work.
-export const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
+const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
 
 export interface ChatReactionControls {
   // Every ACTIVE reaction in the open thread (all messages).

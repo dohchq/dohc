@@ -200,7 +200,7 @@ type ShareReadFailure =
 // `keep` is the newest read's view: its own scope plus anything answered
 // locally since it was issued. Older reads pass null and evict nothing — they
 // are not entitled to say what the view shows.
-export function applyJoinedAnswers(
+function applyJoinedAnswers(
   current: readonly JoinedChannelAnswer[],
   answers: readonly JoinedChannelAnswer[],
   keep: ReadonlySet<string> | null,
@@ -224,7 +224,7 @@ type JoinedCommit = {
 };
 
 // What the joined lane remembers between reads.
-export type JoinedLaneOrder = {
+type JoinedLaneOrder = {
   // The workspace these entries are about. They are cleared when it changes,
   // and the state carries the identity rather than a caller remembering to
   // reset it: `local` is eviction-immune until a read NAMES its wire, and no
@@ -530,7 +530,7 @@ const IDLE_DISPATCH_STATE: ChatDispatchStateForThreadResult = {
 
 const EMPTY_MENTION_CANDIDATES: readonly MentionCandidate[] = [];
 
-export interface ChatsComposerReplyTarget {
+interface ChatsComposerReplyTarget {
   messageId: string;
   authorLabel: string;
 }

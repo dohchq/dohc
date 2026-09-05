@@ -1,7 +1,7 @@
 import type { CliActor } from "./protocol";
 import { DohcCliError } from "./errors";
 
-export interface ParsedCliBase {
+interface ParsedCliBase {
   actor: CliActor;
   json: boolean;
 }

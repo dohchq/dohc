@@ -4,7 +4,7 @@
 
 import { TITLEBAR_HEIGHT_PX } from "../renderer/tokens";
 
-export interface WindowBounds {
+interface WindowBounds {
   x: number;
   y: number;
   width: number;

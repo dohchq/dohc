@@ -13,7 +13,7 @@ export interface MarksSnapshot {
 
 export const SWITCH_TIMELINE_LIMIT = 20;
 
-export type SwitchTimelinePhase =
+type SwitchTimelinePhase =
   | "switch-start"
   | "session-admitted"
   | "files-painted"
@@ -27,7 +27,7 @@ export interface SwitchPhaseDetails {
   listingSource?: "cached" | "fresh";
 }
 
-export interface SwitchTimelineToken {
+interface SwitchTimelineToken {
   readonly ordinal: number;
   readonly selectionGeneration: number;
 }
@@ -180,7 +180,7 @@ export function createMarkRecorder(
   };
 }
 
-export type MarkRecorder = ReturnType<typeof createMarkRecorder>;
+type MarkRecorder = ReturnType<typeof createMarkRecorder>;
 
 // The main-process recorder. Renderer code must import rendererMarks instead.
 export const desktopMarks: MarkRecorder = createMarkRecorder();

@@ -889,34 +889,17 @@ describe("main-process chat authorization", () => {
       "genericChatWritable: workspace.shareView?.genericChatWritable === true",
     );
 
-    // main DELEGATES the share rule, so what is pinned here is that it still
-    // delegates — a re-implementation creeping back in is the drift this
-    // split exists to stop. The rule's own content is pinned against its
-    // module below, and driven behaviourally in mainChatIpcHandlers.test.ts
-    // against the REAL function.
+    // Every received share is refused unconditionally: no cached relay fact
+    // (level, generic-chat capability) may reopen a write.
     const gateAt = mainSource.indexOf("function assertChatWritable(");
     const gate = mainSource.slice(gateAt, mainSource.indexOf("\n  }", gateAt));
-    expect(gate).toContain("assertShareChatWritable(scope)");
-    expect(
-      gate,
-      "MUTATION: a second copy of the rule is a copy that drifts",
-    ).not.toContain('scope.access !==');
-
-    const shareGate = readFileSync(
-      new URL("./workspaces/shareChatGate.ts", import.meta.url),
-      "utf8",
-    );
-    expect(shareGate).not.toContain("if (!scope.genericChatWritable)");
-    expect(shareGate).not.toContain('scope.access !== "comment"');
-    expect(shareGate).toContain(
+    expect(gate).toContain(
       'throw new SharedFileReadOnlyError("Chats are read-only in this shared view.")',
     );
     expect(
-      shareGate,
+      gate,
       "MUTATION: cached generic chat authority reopened received-share writes",
-    ).toMatch(
-      /assertShareChatWritable[\s\S]*?throw new SharedFileReadOnlyError\("Chats are read-only in this shared view\."\);/u,
-    );
+    ).not.toMatch(/scope\.(access|genericChatWritable|ended)/u);
     expect(scope).not.toContain("resolveShareViewRelayAuthorId(");
   });
 
@@ -1281,8 +1264,7 @@ describe("main-process chat authorization", () => {
     expect(credentialsAt).toBeGreaterThan(operationAt);
     expect(metadataAt).toBeGreaterThan(credentialsAt);
     expect(recipient).toContain("rootPath: workspace.rootPath,");
-    expect(recipient).toContain("createShareProposalOperationScope({");
-    expect(recipient).toContain("same: sameScope,");
+    expect(recipient).toContain("sameScope(scope, resolve())");
     expect(recipient).not.toContain("workspace: RegistryEntry;");
     expect(recipient).not.toContain("requireWorkspace(workspaceId)");
   });

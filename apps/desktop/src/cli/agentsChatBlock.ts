@@ -152,7 +152,7 @@ function appendManagedBlock(source: string): string {
   return `${source}${separator}${AGENTS_CHAT_MANAGED_BLOCK}\n`;
 }
 
-export function updateAgentsChatBlock(source: string): string {
+function updateAgentsChatBlock(source: string): string {
   let endIndex = source.indexOf(AGENTS_CHAT_END_MARKER);
   let beginIndex = -1;
   while (endIndex !== -1) {

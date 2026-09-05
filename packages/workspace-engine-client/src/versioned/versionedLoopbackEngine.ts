@@ -105,7 +105,7 @@ export function conflictListRowForWire(conflict: JsonObject): JsonObject {
  * withheld, whatever its own size, each leaving the digest and the limit the
  * caller hydrates from.
  */
-export function withheldConflictForWire(conflict: JsonObject): JsonObject {
+function withheldConflictForWire(conflict: JsonObject): JsonObject {
   return mapConflictSnapshots(conflict, (snapshot) =>
     typeof snapshot.text === "string"
       ? { ...snapshot, text: null, inbandLimitBytes: MAX_DESKTOP_CAPTURE_TEXT_BYTES }
@@ -446,7 +446,7 @@ interface ParsedSecretDeleteFields {
   momentId: string;
 }
 
-export interface SeedVersionedTextInput {
+interface SeedVersionedTextInput {
   workspace: string;
   versionId?: string;
   path: string;
@@ -456,7 +456,7 @@ export interface SeedVersionedTextInput {
   origin?: VersionedOrigin;
 }
 
-export interface SeedVersionedBinaryInput {
+interface SeedVersionedBinaryInput {
   workspace: string;
   versionId?: string;
   path: string;
@@ -466,7 +466,7 @@ export interface SeedVersionedBinaryInput {
   origin?: VersionedOrigin;
 }
 
-export interface SeedSecretInput {
+interface SeedSecretInput {
   workspace: string;
   versionId?: string;
   path: string;

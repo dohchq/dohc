@@ -341,7 +341,7 @@ export class RelaySessionError extends Error {
 // as "there are no shares", or it clobbers whatever rows the renderer has
 // cached. A session failure is "signed-out": the caller has no account-scoped
 // rows, and cached ones must clear.
-export type RelayChatShareLanes =
+type RelayChatShareLanes =
   | {
       state: "answered";
       granted: ChatChannelShareGrantRow[];

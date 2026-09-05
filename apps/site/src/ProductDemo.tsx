@@ -575,6 +575,9 @@ export function ProductDemo() {
           onSelectView={(view) => {
             if (isViewId(view)) selectActivity(view);
           }}
+          // The demo has no Cloud account or Settings dialog behind the rail.
+          onOpenCloud={() => undefined}
+          onOpenSettings={() => undefined}
         />
 
         <DemoSidebar

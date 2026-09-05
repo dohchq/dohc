@@ -675,14 +675,10 @@ const bridge: DohcDesktopBridge = {
     }
     const raw = result as Record<string, unknown>;
     const state = parseUpdateStateEvent(raw.state);
-    if (
-      typeof raw.accepted !== "boolean" ||
-      typeof raw.completed !== "boolean" ||
-      !state
-    ) {
+    if (typeof raw.accepted !== "boolean" || !state) {
       throw new Error("Invalid update install result from main process.");
     }
-    return { accepted: raw.accepted, completed: raw.completed, state };
+    return { accepted: raw.accepted, state };
   },
   onQuitRequested: (listener: () => void) => {
     const handler = () => listener();

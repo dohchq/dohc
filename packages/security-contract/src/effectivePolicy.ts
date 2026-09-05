@@ -17,7 +17,7 @@ export type PolicyParseResult<T> =
   | { ok: true; rules: T[] }
   | { ok: false; errors: string[] };
 
-export interface EffectivePolicyInput {
+interface EffectivePolicyInput {
   path: string;
   filesPolicy?: readonly FilesPolicyRule[] | null;
   visibilityPolicy?: readonly VisibilityPolicyRule[] | null;
@@ -38,7 +38,7 @@ export interface EffectivePolicyResult {
   floor: "tracked" | "ignored" | "secret";
 }
 
-export type PolicyGlobValidation = { ok: true } | { ok: false; reason: string };
+type PolicyGlobValidation = { ok: true } | { ok: false; reason: string };
 
 type ParsedToml = Record<string, unknown>;
 type ParsedTable = Record<string, unknown>;

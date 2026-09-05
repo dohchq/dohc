@@ -46,9 +46,9 @@ export type IntraBlockMatch = {
 
 /** A range inside the document, in the same coordinates the block index is
  *  resolved in: `containerPos` is where the block starts. */
-export type DocRange = { from: number; to: number };
+type DocRange = { from: number; to: number };
 
-export type InlineTextRenderer = (source: string) => string;
+type InlineTextRenderer = (source: string) => string;
 
 // A list item's marker. Narrower than the list rules in lineBlocks.ts on
 // purpose: this only has to recognize a line that starts an item of a list

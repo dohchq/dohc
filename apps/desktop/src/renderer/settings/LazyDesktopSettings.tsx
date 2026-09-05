@@ -8,16 +8,16 @@ import {
   type ComponentType,
 } from "react";
 import { ErrorBoundary } from "../ErrorBoundary";
-import type { DesktopSettings } from "./DesktopSettings";
+import type { SettingsDialog } from "./SettingsDialog";
 
-export type DesktopSettingsProps = ComponentProps<typeof DesktopSettings>;
-export type DesktopSettingsLoader = () => Promise<{
+export type DesktopSettingsProps = ComponentProps<typeof SettingsDialog>;
+type DesktopSettingsLoader = () => Promise<{
   default: ComponentType<DesktopSettingsProps>;
 }>;
 
 const loadDesktopSettings: DesktopSettingsLoader = () =>
-  import("./DesktopSettings").then((mod) => ({
-    default: mod.DesktopSettings,
+  import("./SettingsDialog").then((mod) => ({
+    default: mod.SettingsDialog,
   }));
 
 function SettingsLoading() {

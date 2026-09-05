@@ -219,7 +219,7 @@ class StructuredPluginFailure {
   constructor(readonly result: unknown) {}
 }
 
-export function createBuiltinPluginOfferManifestCache(
+function createBuiltinPluginOfferManifestCache(
   read: BuiltinPluginOfferManifestReader,
 ): {
   read: BuiltinPluginOfferManifestReader;

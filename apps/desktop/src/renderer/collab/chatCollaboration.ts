@@ -16,7 +16,7 @@ import { createIpcPresenceTransport } from "./ipcPresenceTransport";
 // collaboration per workspace, so a switch tears the old transport down and
 // aborts its in-flight poll — the no-repaint invariant (AGENTS.md).
 
-export interface ChatCollaborationInput {
+interface ChatCollaborationInput {
   // From cloudStatus: a signed-in relay session is required for any presence.
   connected: boolean;
   relayUrl?: string;

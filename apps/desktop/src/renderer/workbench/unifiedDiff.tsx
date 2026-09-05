@@ -8,7 +8,7 @@
 // computeTextDiff does the work ONCE per pair of bodies (both callers memoize
 // it); buildUnifiedDiffLines and the counts only read the result.
 
-export type DiffLine = {
+type DiffLine = {
   kind: "context" | "added" | "removed";
   text: string;
 };
@@ -22,7 +22,7 @@ export type UnifiedDiffLine = {
 
 /// One pair of bodies, diffed. Everything expensive happened when this was
 /// built.
-export type TextDiff = {
+type TextDiff = {
   /// When set, the whole body is this one note and `lines` is empty.
   note: string | null;
   /// The diff lines that were built — never more than the display can show.

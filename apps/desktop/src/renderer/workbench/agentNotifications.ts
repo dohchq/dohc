@@ -130,7 +130,7 @@ export function deriveAgentActivity(params: {
   };
 }
 
-export function agentNotificationId(
+function agentNotificationId(
   workspaceId: string,
   runId: string,
   kind: AgentNotificationKind,
@@ -238,7 +238,7 @@ function build(
   };
 }
 
-export interface ReduceOptions {
+interface ReduceOptions {
   nowMs: number;
   // State keys the user has already seen/dismissed; a matching desired notice
   // is not re-raised. Keyed exactly like AgentNotification.id.

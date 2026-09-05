@@ -21,10 +21,6 @@ export type PublicUpdateState = {
 
 export type UpdateActionResult = {
   accepted: boolean;
-  // Electron applies updates by quitting the current process, so the running
-  // app can only report whether the restart handoff was accepted. The field is
-  // reserved for future installers that can confirm completion before exit.
-  completed: boolean;
   state: PublicUpdateState;
 };
 
@@ -271,7 +267,7 @@ export async function startAutoUpdates(options: {
   // (#579 review, r10).
   const installUpdate = async (): Promise<UpdateActionResult> => {
     if (stopped || state.status !== "ready") {
-      return { accepted: false, completed: false, state: publicState() };
+      return { accepted: false, state: publicState() };
     }
     if (restartStaged) {
       // The latch is spent, but the restart is not lost: electron-updater
@@ -281,7 +277,7 @@ export async function startAutoUpdates(options: {
       // reset while this latch stayed set, stranding the update for the rest
       // of the run.
       options.quitForStagedRestart?.();
-      return { accepted: true, completed: false, state: publicState() };
+      return { accepted: true, state: publicState() };
     }
     restartStaged = true;
     installErrorMessage = null;
@@ -289,14 +285,14 @@ export async function startAutoUpdates(options: {
     try {
       autoUpdater.quitAndInstall(false, true);
       if (installErrorMessage) {
-        return { accepted: false, completed: false, state: publicState() };
+        return { accepted: false, state: publicState() };
       }
-      return { accepted: true, completed: false, state: publicState() };
+      return { accepted: true, state: publicState() };
     } catch {
       restartStaged = false;
       installErrorMessage = INSTALL_RESTART_FAILURE;
       options.onState?.(state, publicState());
-      return { accepted: false, completed: false, state: publicState() };
+      return { accepted: false, state: publicState() };
     }
   };
 

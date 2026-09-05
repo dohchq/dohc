@@ -11,7 +11,7 @@ type SitesIpcHandler<Event, Result = unknown> = (
   payload: unknown,
 ) => Promise<Result>;
 
-export interface SitesIpcHandlers<Event> {
+interface SitesIpcHandlers<Event> {
   listSites: SitesIpcHandler<Event>;
   getSitePackage: SitesIpcHandler<Event>;
 }

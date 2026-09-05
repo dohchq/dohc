@@ -42,7 +42,7 @@ export type WikilinkFile = {
   fileId?: string | null
 }
 
-export type WikilinkRange = {
+type WikilinkRange = {
   from: number
   to: number
   /** The path text written between `[[` and `]]`, with `.md`
