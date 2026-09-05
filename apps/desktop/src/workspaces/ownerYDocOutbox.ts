@@ -4,6 +4,7 @@ import type {
   OwnerYDocOutboxEntry,
   OwnerYDocOutboxLimits,
 } from "@dohc/workspace-engine-client";
+import { OwnerYDocOutboxReadChangedError } from "@dohc/workspace-engine-client";
 import type { HostEpoch } from "@dohc/live-session-contract/host-control";
 import type { LiveUpdateReceipt } from "@dohc/live-session-contract/live-update-admission";
 
@@ -111,7 +112,14 @@ export class OwnerYDocOutboxDrainer {
 
   async drainOnce(): Promise<OwnerYDocDrainResult> {
     if (this.disposed) return "retry";
-    const pending = await this.outbox.readPending(this.outboxId);
+    let pending: Awaited<ReturnType<OwnerYDocOutbox["readPending"]>>;
+    try {
+      pending = await this.outbox.readPending(this.outboxId);
+    } catch (error) {
+      if (error instanceof OwnerYDocOutboxReadChangedError) return "retry";
+      throw error;
+    }
+    if (this.disposed) return "retry";
     if (pending.state !== "active") return "frozen";
     const entry = pending.entries[0];
     if (entry === undefined) return "empty";
@@ -125,6 +133,7 @@ export class OwnerYDocOutboxDrainer {
     }
 
     const authority = await this.delivery.freshOwnerAuthority(pending.binding);
+    if (this.disposed) return "retry";
     if (authority.kind === "retry") return "retry";
     if (authority.kind === "quarantine") {
       await this.outbox.quarantine({
@@ -141,6 +150,7 @@ export class OwnerYDocOutboxDrainer {
       authority.authority,
       envelopeFor(pending, entry),
     );
+    if (this.disposed) return "retry";
     if (result.kind === "retry") return "retry";
     if (result.kind === "quarantine") {
       await this.outbox.quarantine({

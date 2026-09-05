@@ -32,6 +32,107 @@ const LIMITS = {
   maxPendingAgeMs: 86_400_000,
 } as const;
 
+it("maps an interrupted outbox snapshot to caller-scheduled retry without authority, delivery, or ACK", async () => {
+  const methods: string[] = [];
+  const outbox = new OwnerYDocOutbox({
+    async sendRequest(request) {
+      methods.push(request.method);
+      return { id: request.id, result: { kind: "readChanged" } };
+    },
+  }, "test-workspace");
+  const calls: string[] = [];
+  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", LIMITS, {
+    async freshOwnerAuthority() { calls.push("authority"); return { kind: "retry" }; },
+    async deliver() { calls.push("delivery"); return { kind: "retry" }; },
+  });
+  try {
+    await expect(drainer.drainOnce()).resolves.toBe("retry");
+    expect(methods).toEqual(["ydoc.ownerOutbox.readPending"]);
+    expect(calls).toEqual([]);
+  } finally {
+    drainer.dispose();
+    outbox.dispose();
+  }
+});
+
+it.each([
+  { stage: "read", outcome: "receipt" },
+  { stage: "authority", outcome: "receipt" },
+  { stage: "authority", outcome: "quarantine" },
+  { stage: "delivery", outcome: "receipt" },
+  { stage: "delivery", outcome: "quarantine" },
+] as const)("stops after disposal during $stage with a $outcome result", async ({ stage, outcome }) => {
+  let markReached!: () => void;
+  const reached = new Promise<void>((resolve) => { markReached = resolve; });
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const calls: string[] = [];
+  const boundary = async (current: typeof stage) => {
+    calls.push(current);
+    if (current === stage) {
+      markReached();
+      await held;
+    }
+  };
+  class TestOutbox extends OwnerYDocOutbox {
+    override async readPending(): Promise<Awaited<ReturnType<OwnerYDocOutbox["readPending"]>>> {
+      await boundary("read");
+      return {
+        outboxId: "outbox-1",
+        binding: {
+          workspaceId: "workspace-1", mainVersionId: "main", objectId: "object-1",
+          lineageClaimId: "lineage-1", currentPath: "owner.md", selectorPaths: ["owner.md"],
+          restoreFenceGeneration: 0,
+        },
+        baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "a".repeat(64),
+        state: "active", pendingBytes: 1, oldestEntryAtMs: 0,
+        quarantineReason: null, observedBinding: null,
+        entries: [{ sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
+          update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 }],
+      };
+    }
+
+    override async acknowledge() {
+      calls.push("ACK");
+      return { acknowledged: 1, pendingBytes: 0, oldestEntryAtMs: null };
+    }
+
+    override async quarantine(): Promise<void> {
+      calls.push("quarantine");
+    }
+  }
+  const outbox = new TestOutbox({ async sendRequest() { throw new Error("Unexpected daemon request."); } }, "test-workspace");
+  const drainer = new OwnerYDocOutboxDrainer(outbox, "outbox-1", LIMITS, {
+    async freshOwnerAuthority() {
+      await boundary("authority");
+      return stage === "authority" && outcome === "quarantine"
+        ? { kind: "quarantine", reason: "binding changed" }
+        : { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
+    },
+    async deliver() {
+      await boundary("delivery");
+      return outcome === "quarantine"
+        ? { kind: "quarantine", reason: "binding changed" }
+        : { kind: "receipt", receipt: { deliveryId: "delivery-1", updateDigest: "b".repeat(64),
+          journalCursor: 1, acceptingHostEpoch: parseHostEpoch(1) } };
+    },
+  }, () => 0);
+  const draining = drainer.drainOnce();
+  try {
+    await reached;
+    drainer.dispose();
+    release();
+    await expect(draining).resolves.toBe("retry");
+    expect(calls).toEqual(stage === "read" ? ["read"]
+      : stage === "authority" ? ["read", "authority"] : ["read", "authority", "delivery"]);
+  } finally {
+    drainer.dispose();
+    release();
+    await draining.catch(() => undefined);
+    outbox.dispose();
+  }
+});
+
 class AppendGate implements DaemonRequesterClient {
   private releaseGate: (() => void) | null = null;
   private readonly gate = new Promise<void>((resolve) => {
@@ -67,6 +168,68 @@ class AppendGate implements DaemonRequesterClient {
     this.releaseGate?.();
   }
 }
+
+it.skipIf(engine.missing)("reads an owner queue larger than a daemon control frame through complete verified pages", async () => {
+  const root = await createTestScratch("dohc-owner-outbox-pages-");
+  await mkdir(join(root, ".dohc", "engine"), { recursive: true });
+  await writeFile(join(root, ".dohc", "engine", "SHADOW_CLONE"),
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", "utf8");
+  await writeFile(join(root, "owner.md"), "Owner outbox frame fixture", "utf8");
+  const lifecycle = new EngineDaemonLifecycle({ command: engine.require(), maxRestarts: 0 });
+  const sessions = createRealDaemonWorkspaceSessions(lifecycle);
+  const workspace = { workspaceId: "owner-outbox-frame", rootPath: root, attachmentId: Symbol("owner-pages") };
+  const capture = createWorkspaceEngineCapture({
+    ...workspace, rustEngineSessions: sessions, daemonOwnsCapture: true,
+  });
+  try {
+    await lifecycle.start();
+    capture.captureBatch([{ path: "owner.md", operation: "update" }]);
+    await capture.flush();
+    const main = (await capture.listVersions()).versions.find((version) => version.kind === "main");
+    const objectId = await capture.fileObjectIdForPath("owner.md");
+    if (main === undefined || objectId === null) throw new Error("Fixture main or object is missing.");
+    await sessions.run(workspace, async ({ client, workspace: handle }) => {
+      const pageResponses: Response[] = [];
+      const outbox = new OwnerYDocOutbox({
+        async sendRequest(request) {
+          const response = await client.sendRequest(request);
+          if (request.method === "ydoc.ownerOutbox.readPending") pageResponses.push(response);
+          return response;
+        },
+      }, handle);
+      try {
+        const binding: LiveObjectBinding = {
+          workspaceId: workspace.workspaceId, mainVersionId: main.id, objectId,
+          lineageClaimId: `lineage-${objectId}`, currentPath: "owner.md", selectorPaths: ["owner.md"],
+          restoreFenceGeneration: 0,
+        };
+        let outboxId = "";
+        const update = new Uint8Array(1_048_576).fill(37);
+        for (let index = 0; index < 7; index += 1) {
+          const appended = await outbox.append({
+            binding, baseUpdate: new Uint8Array([0, 0]), update, appendKey: `frame-${index}`,
+            limits: { maxPendingBytes: update.length * 8, maxPendingAgeMs: 86_400_000 },
+          });
+          outboxId = appended.outboxId;
+        }
+        const pending = await outbox.readPending(outboxId);
+        expect(pending.entries).toHaveLength(7);
+        expect(pending.pendingBytes).toBe(update.length * 7);
+        expect(pending.entries.map((entry) => entry.sequence)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+        for (const entry of pending.entries) expect(entry.update).toEqual(update);
+        const wireSizes = pageResponses.map((response) => Buffer.byteLength(JSON.stringify({ type: "response", ...response })));
+        expect(Math.max(...wireSizes)).toBeLessThanOrEqual(8 * 1_048_576);
+        expect(wireSizes.reduce((sum, length) => sum + length, 0)).toBeGreaterThan(8 * 1_048_576);
+      } finally {
+        outbox.dispose();
+      }
+    });
+  } finally {
+    await capture.stop().catch(() => undefined);
+    await sessions.closeAll().catch(() => undefined);
+    await lifecycle.stop().catch(() => undefined);
+  }
+}, 120_000);
 
 class FakeOwnerHost implements OwnerYDocDelivery {
   readonly journal: { deliveryId: string; updateDigest: string }[] = [];

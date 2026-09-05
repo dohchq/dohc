@@ -1479,19 +1479,19 @@ impl EngineService {
                 .await?
             }
             "ydoc.ownerOutbox.append" => {
-                self.owner_ydoc_outbox_append(request.workspace, request.params)
+                self.owner_ydoc_outbox_append(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.ownerOutbox.readPending" => {
-                self.owner_ydoc_outbox_read_pending(request.workspace, request.params)
+                self.owner_ydoc_outbox_read_pending(&ctx, request.workspace, request.params, id)
                     .await?
             }
             "ydoc.ownerOutbox.acknowledge" => {
-                self.owner_ydoc_outbox_acknowledge(request.workspace, request.params)
+                self.owner_ydoc_outbox_acknowledge(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.ownerOutbox.quarantine" => {
-                self.owner_ydoc_outbox_quarantine(request.workspace, request.params)
+                self.owner_ydoc_outbox_quarantine(&ctx, request.workspace, request.params)
                     .await?
             }
             "ydoc.settle" => {
@@ -8293,6 +8293,7 @@ impl EngineService {
 
     async fn owner_ydoc_outbox_append(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
@@ -8311,7 +8312,10 @@ impl EngineService {
         }
         let base_update = decode_owner_outbox_base64(&params.base_update_base64)?;
         let update = decode_owner_outbox_base64(&params.update_base64)?;
-        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.append (queued)")
+            .await?;
         let open = self.open(Some(&handle))?;
         let result = open
             .actor
@@ -8328,9 +8332,13 @@ impl EngineService {
                     },
                     created_at_ms: now_ms()?,
                 },
+                cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.append"),
+                error => map_runtime(error),
+            })?
             .map_err(map_owner_outbox)?;
         Ok(json!({
             "outboxId": result.outbox_id,
@@ -8345,51 +8353,87 @@ impl EngineService {
 
     async fn owner_ydoc_outbox_read_pending(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
+        request_id: u64,
     ) -> Result<Value, WireError> {
         let params: OwnerYDocOutboxIdParams = parse(params)?;
+        // Base64 consumes four bytes per three input bytes. The existing
+        // collection cap reserves envelope space; the final check below uses
+        // the actual response envelope and this request's negotiated limit.
+        let max_bytes = collection_in_band_cap(ctx) / 4 * 3;
+        if max_bytes == 0 {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "owner-outbox-page-exceeds-wire-limit",
+            ));
+        }
         let open = self.open(handle.as_ref())?;
         let workspace_id = open.workspace_id;
         let db_path = open.db_path;
-        let pending = tokio::task::spawn_blocking(move || {
-            let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)?;
-            dohc_engine_collab::read_pending_owner_outbox(&store, &workspace_id, &params.outbox_id)
-        })
-        .await
-        .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-worker-failed"))?
-        .map_err(map_owner_outbox)?;
-        let entries = pending
-            .entries
-            .into_iter()
-            .map(|entry| {
-                json!({
-                    "sequence": entry.sequence,
-                    "appendKey": entry.append_key,
-                    "deliveryId": entry.delivery_id,
-                    "updateDigest": entry.update_digest,
-                    "updateBase64": base64::engine::general_purpose::STANDARD.encode(entry.update),
-                    "byteLength": entry.byte_length,
-                    "createdAtMs": entry.created_at_ms,
-                })
+        let cancellation = OperationCancellation::new(ctx);
+        let read = async move {
+            tokio::task::spawn_blocking(move || {
+                let store = dohc_engine_storage::EngineStore::open_read_only(&db_path)?;
+                dohc_engine_collab::read_pending_owner_outbox_page(
+                    &store,
+                    &workspace_id,
+                    &params.outbox_id,
+                    params.cursor,
+                    max_bytes,
+                )
             })
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "outboxId": pending.outbox_id,
-            "binding": pending.binding,
-            "baseUpdateDigest": pending.base_update_digest,
-            "baseUpdateBase64": base64::engine::general_purpose::STANDARD.encode(pending.base_update),
-            "state": pending.state.as_str(),
-            "pendingBytes": pending.pending_bytes,
-            "oldestEntryAtMs": pending.oldest_entry_at_ms,
-            "entries": entries,
-            "quarantineReason": pending.quarantine_reason,
-            "observedBinding": pending.observed_binding,
-        }))
+            .await
+            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-worker-failed"))?
+            .map_err(map_owner_outbox)
+        };
+        let pending = tokio::select! {
+            biased;
+            () = cancellation.token.cancelled() => {
+                return Err(cancellation.interruption("ydoc.ownerOutbox.readPending"));
+            }
+            result = read => result?,
+        };
+        let result = match pending {
+            dohc_engine_collab::OwnerOutboxPageResult::ReadChanged => {
+                json!({ "kind": "readChanged" })
+            }
+            dohc_engine_collab::OwnerOutboxPageResult::Page(page) => json!({
+                "kind": "page",
+                "snapshot": page.cursor.snapshot,
+                "part": page.cursor.part,
+                "sequence": page.cursor.sequence,
+                "offset": page.cursor.offset,
+                "totalBytes": page.total_bytes,
+                "digest": page.digest,
+                "bytesBase64": base64::engine::general_purpose::STANDARD.encode(page.bytes),
+                "nextCursor": page.next_cursor,
+            }),
+        };
+        let envelope = dohc_engine_protocol::wire::Envelope::Response(Response {
+            id: request_id,
+            result,
+        });
+        if serde_json::to_vec(&envelope)
+            .map_err(|_| wire(ErrorCode::Internal, "owner-outbox-state-corrupt"))?
+            .len()
+            > ctx.max_frame_bytes as usize
+        {
+            return Err(wire(
+                ErrorCode::LimitExceeded,
+                "owner-outbox-page-exceeds-wire-limit",
+            ));
+        }
+        let dohc_engine_protocol::wire::Envelope::Response(response) = envelope else {
+            unreachable!()
+        };
+        Ok(response.result)
     }
 
     async fn owner_ydoc_outbox_acknowledge(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
@@ -8418,13 +8462,30 @@ impl EngineService {
             .collect::<Vec<_>>();
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
-        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(
+                &open,
+                &cancellation,
+                "ydoc.ownerOutbox.acknowledge (queued)",
+            )
+            .await?;
         let open = self.open(Some(&handle))?;
         let result = open
             .actor
-            .owner_ydoc_outbox_acknowledge(open.workspace_id.clone(), params.outbox_id, receipts)
+            .owner_ydoc_outbox_acknowledge(
+                open.workspace_id.clone(),
+                params.outbox_id,
+                receipts,
+                cancellation.token(),
+            )
             .await
-            .map_err(map_runtime)?
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => {
+                    cancellation.interruption("ydoc.ownerOutbox.acknowledge")
+                }
+                error => map_runtime(error),
+            })?
             .map_err(map_owner_outbox)?;
         Ok(json!({
             "acknowledged": result.acknowledged,
@@ -8435,6 +8496,7 @@ impl EngineService {
 
     async fn owner_ydoc_outbox_quarantine(
         &self,
+        ctx: &RequestContext,
         handle: Option<WorkspaceHandle>,
         params: Value,
     ) -> Result<Value, WireError> {
@@ -8444,7 +8506,10 @@ impl EngineService {
         }
         let handle = handle.ok_or_else(workspace_unavailable)?;
         let open = self.open(Some(&handle))?;
-        let _serial = Arc::clone(&open.session_ops).lock_owned().await;
+        let cancellation = OperationCancellation::new(ctx);
+        let _serial = self
+            .mutation_session_guard(&open, &cancellation, "ydoc.ownerOutbox.quarantine (queued)")
+            .await?;
         let open = self.open(Some(&handle))?;
         open.actor
             .owner_ydoc_outbox_quarantine(
@@ -8454,9 +8519,13 @@ impl EngineService {
                     reason: params.reason,
                     observed_binding: params.observed_binding,
                 },
+                cancellation.token(),
             )
             .await
-            .map_err(map_runtime)?
+            .map_err(|error| match error {
+                RuntimeError::Cancelled => cancellation.interruption("ydoc.ownerOutbox.quarantine"),
+                error => map_runtime(error),
+            })?
             .map_err(map_owner_outbox)?;
         Ok(json!({ "quarantined": true }))
     }
@@ -10816,6 +10885,7 @@ struct OwnerYDocOutboxAppendParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct OwnerYDocOutboxIdParams {
     outbox_id: String,
+    cursor: Option<dohc_engine_collab::OwnerOutboxReadCursor>,
 }
 
 #[derive(Deserialize)]
@@ -13937,6 +14007,7 @@ mod tests {
         async fn refusal(service: &EngineService, epoch: Value, cursor: Value) -> WireError {
             service
                 .owner_ydoc_outbox_acknowledge(
+                    &RequestContext::unbounded(),
                     None,
                     json!({
                         "outboxId": "missing-outbox",
@@ -14035,7 +14106,7 @@ mod tests {
         params["binding"]["mainVersionId"] = json!("other-main");
 
         let error = service
-            .owner_ydoc_outbox_append(Some(handle.clone()), params)
+            .owner_ydoc_outbox_append(&RequestContext::unbounded(), Some(handle.clone()), params)
             .await
             .expect_err("mismatched main version");
         assert_eq!(error.code, ErrorCode::InvalidParams);
@@ -16150,6 +16221,232 @@ mod tests {
             .expect("workspace close");
     }
 
+    #[tokio::test]
+    async fn owner_outbox_read_pages_fit_negotiated_frames_for_large_blobs_and_queues() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-paged-wire";
+        let opened = service.workspace_open(&RequestContext::unbounded(), json!({
+            "rootDir": scratch.path().to_string_lossy(), "workspaceId": workspace_id, "captureMode": "none",
+        })).await.expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let result = async {
+            service
+                .versions_ensure_main(
+                    &RequestContext::unbounded(),
+                    Some(handle.clone()),
+                    json!({ "workspaceId": workspace_id }),
+                )
+                .await?;
+            let mut id = Value::Null;
+            for index in 0..3 {
+                let mut params = owner_outbox_append_params(workspace_id, &format!("page-{index}"));
+                params["baseUpdateBase64"] =
+                    json!(base64::engine::general_purpose::STANDARD.encode(vec![17; 1_200_000]));
+                params["updateBase64"] = json!(
+                    base64::engine::general_purpose::STANDARD.encode(vec![23 + index; 1_200_000])
+                );
+                params["limits"]["maxPendingBytes"] = json!(10_000_000);
+                id = service
+                    .owner_ydoc_outbox_append(
+                        &RequestContext::unbounded(),
+                        Some(handle.clone()),
+                        params,
+                    )
+                    .await?["outboxId"]
+                    .clone();
+            }
+            let ctx = RequestContext::unbounded().with_max_frame_bytes(1_048_576);
+            let mut cursor = Value::Null;
+            let mut pages = Vec::new();
+            // Fixture-derived ceiling: four 1.2 MB blobs and four headers
+            // need fewer than 32 pages at this negotiated frame size.
+            for _ in 0..32 {
+                let page = service
+                    .owner_ydoc_outbox_read_pending(
+                        &ctx,
+                        Some(handle.clone()),
+                        json!({ "outboxId": id, "cursor": cursor }),
+                        dohc_engine_protocol::limits::MAX_WIRE_INTEGER,
+                    )
+                    .await?;
+                cursor = page
+                    .get("nextCursor")
+                    .cloned()
+                    .ok_or_else(|| wire(ErrorCode::Internal, "missing-page-cursor"))?;
+                pages.push(page);
+                if cursor.is_null() {
+                    return Ok::<_, WireError>(pages);
+                }
+            }
+            Err(wire(ErrorCode::Internal, "page-read-did-not-complete"))
+        }
+        .await;
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        let pages = result.expect("complete paged read");
+        let mut total_wire_bytes = 0;
+        let mut base_pages = 0;
+        let mut update_pages = 0;
+        for page in pages {
+            if page["part"] == "base" {
+                base_pages += 1;
+            }
+            if page["part"] == "update" {
+                update_pages += 1;
+            }
+            let envelope = dohc_engine_protocol::wire::Envelope::Response(Response {
+                id: dohc_engine_protocol::limits::MAX_WIRE_INTEGER,
+                result: page,
+            });
+            let bytes = serde_json::to_vec(&envelope).expect("wire response");
+            assert!(
+                bytes.len() <= 1_048_576,
+                "actual response envelope exceeds negotiated frame"
+            );
+            total_wire_bytes += bytes.len();
+        }
+        assert!(total_wire_bytes > 1_048_576);
+        assert!(base_pages >= 2, "one base must span pages");
+        assert!(update_pages >= 6, "each update must span pages");
+    }
+
+    #[tokio::test]
+    async fn owner_outbox_queued_mutations_honor_embedded_cancellation_and_deadlines() {
+        let scratch = ScratchDir::new().expect("scratch");
+        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
+            .expect("shadow marker");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let workspace_id = "owner-outbox-cancelled-queue";
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": workspace_id,
+                    "captureMode": "none"
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        service
+            .versions_ensure_main(
+                &RequestContext::unbounded(),
+                Some(handle.clone()),
+                json!({ "workspaceId": workspace_id }),
+            )
+            .await
+            .expect("ensure durable main version");
+        let open = service.open(Some(&handle)).expect("open workspace");
+        let held = Arc::clone(&open.session_ops).lock_owned().await;
+        let mut outcomes = Vec::new();
+        for deadline in [false, true] {
+            for method in ["append", "acknowledge", "quarantine"] {
+                let mut ctx = RequestContext::unbounded();
+                if deadline {
+                    ctx.deadline = Some(std::time::Instant::now());
+                }
+                let pending = async {
+                    match method {
+                        "append" => {
+                            service
+                                .owner_ydoc_outbox_append(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    owner_outbox_append_params(workspace_id, "cancelled-append"),
+                                )
+                                .await
+                        }
+                        "acknowledge" => {
+                            service
+                                .owner_ydoc_outbox_acknowledge(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    json!({ "outboxId": "not-enqueued", "receipts": [{
+                                        "deliveryId": "delivery-1", "updateDigest": "0".repeat(64),
+                                        "journalCursor": 1, "acceptingHostEpoch": 1
+                                    }] }),
+                                )
+                                .await
+                        }
+                        _ => {
+                            service
+                                .owner_ydoc_outbox_quarantine(
+                                    &ctx,
+                                    Some(handle.clone()),
+                                    json!({ "outboxId": "not-enqueued", "reason": "test" }),
+                                )
+                                .await
+                        }
+                    }
+                };
+                tokio::pin!(pending);
+                let was_pending = std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(pending.as_mut(), cx).is_pending(),
+                    )
+                })
+                .await;
+                if !deadline {
+                    ctx.cancel.cancel();
+                }
+                let outcome = if was_pending {
+                    Some(tokio::time::timeout(Duration::from_secs(10), pending).await)
+                } else {
+                    None
+                };
+                outcomes.push((method, deadline, outcome));
+            }
+        }
+        let read_ctx = RequestContext::unbounded();
+        read_ctx.cancel.cancel();
+        let cancelled_read = service
+            .owner_ydoc_outbox_read_pending(
+                &read_ctx,
+                Some(handle.clone()),
+                json!({ "outboxId": "not-enqueued" }),
+                1,
+            )
+            .await;
+        drop(held);
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("workspace close");
+        for (method, deadline, outcome) in outcomes {
+            let error = outcome
+                .expect("mutation must first wait behind the held session barrier")
+                .expect("interruption must release the wait while the barrier remains held")
+                .expect_err("queued mutation must not commit");
+            assert_eq!(
+                error.code,
+                if deadline {
+                    ErrorCode::DeadlineExceeded
+                } else {
+                    ErrorCode::Cancelled
+                },
+                "{method}, deadline={deadline}"
+            );
+        }
+        assert_eq!(
+            cancelled_read
+                .expect_err("cancelled read must not start")
+                .code,
+            ErrorCode::Cancelled
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owner_outbox_append_waits_for_the_workspace_session_barrier() {
         // MUTATION: remove the owner outbox session_ops acquisition -> the
@@ -16189,6 +16486,7 @@ mod tests {
         let mut appending = tokio::spawn(async move {
             appending_service
                 .owner_ydoc_outbox_append(
+                    &RequestContext::unbounded(),
                     Some(appending_handle),
                     owner_outbox_append_params("owner-outbox-session-barrier", "serialized-append"),
                 )
@@ -16259,6 +16557,7 @@ mod tests {
         let appending = tokio::spawn(async move {
             appending_service
                 .owner_ydoc_outbox_append(
+                    &RequestContext::unbounded(),
                     Some(appending_handle),
                     owner_outbox_append_params("owner-outbox-close-race", "append-after-close"),
                 )

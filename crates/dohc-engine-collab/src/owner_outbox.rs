@@ -11,6 +11,7 @@ use dohc_engine_storage::{
     TxnOutcome, MAX_IDENTIFIER_BYTES,
 };
 use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -124,6 +125,39 @@ pub struct OwnerOutboxPending {
     pub entries: Vec<OwnerOutboxEntry>,
     pub quarantine_reason: Option<String>,
     pub observed_binding: Option<LiveObjectBinding>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum OwnerOutboxReadPart {
+    Header,
+    Base,
+    EntryHeader,
+    Update,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OwnerOutboxReadCursor {
+    pub snapshot: String,
+    pub part: OwnerOutboxReadPart,
+    pub sequence: i64,
+    pub offset: i64,
+}
+
+#[derive(Debug)]
+pub struct OwnerOutboxReadPage {
+    pub cursor: OwnerOutboxReadCursor,
+    pub total_bytes: i64,
+    pub digest: String,
+    pub bytes: Vec<u8>,
+    pub next_cursor: Option<OwnerOutboxReadCursor>,
+}
+
+#[derive(Debug)]
+pub enum OwnerOutboxPageResult {
+    Page(OwnerOutboxReadPage),
+    ReadChanged,
 }
 
 #[derive(Debug, Clone)]
@@ -431,6 +465,188 @@ pub fn read_pending(
             observed_binding: parent.observed_binding,
         })
     })
+}
+
+/// A page is provisional until the client has verified every complete part.
+/// Each transaction binds its metadata and bounded blob slice to one snapshot;
+/// no transaction or hydrated queue is retained between requests.
+pub fn read_pending_page(
+    store: &EngineStore,
+    workspace_id: &str,
+    outbox_id: &str,
+    cursor: Option<OwnerOutboxReadCursor>,
+    max_bytes: usize,
+) -> Result<OwnerOutboxPageResult, OwnerOutboxError> {
+    validate_identifier(outbox_id, "outbox id must be non-empty and bounded")?;
+    if max_bytes == 0 || max_bytes > dohc_engine_storage::MAX_BLOB_BYTES {
+        return Err(OwnerOutboxError::InvalidInput(
+            "invalid read page byte budget",
+        ));
+    }
+    if let Some(cursor) = &cursor {
+        if cursor.snapshot.len() != 64
+            || !cursor
+                .snapshot
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || cursor.offset < 0
+            || cursor.sequence < 0
+        {
+            return Err(OwnerOutboxError::InvalidInput("invalid read cursor"));
+        }
+    }
+    store.read_with(|conn| {
+        let tx = conn.unchecked_transaction().map_err(read_sql)?;
+        let parent = read_parent(&tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
+        require_workspace(workspace_id, &parent.binding.workspace_id)?;
+        let base_length: i64 = tx.query_row(
+            "SELECT base_byte_length FROM owner_ydoc_outboxes WHERE outbox_id=?1",
+            [outbox_id], |row| row.get(0),
+        ).map_err(read_sql)?;
+        let mut header = serde_json::json!({
+            "outboxId": parent.outbox_id,
+            "binding": parent.binding,
+            "baseUpdateDigest": parent.base_update_digest,
+            "baseByteLength": base_length,
+            "state": parent.state.as_str(),
+            "pendingBytes": parent.pending_bytes,
+            "oldestEntryAtMs": parent.oldest_entry_at_ms,
+            "nextSequence": parent.next_sequence,
+            "quarantineReason": parent.quarantine_reason,
+            "observedBinding": parent.observed_binding,
+        });
+        let snapshot = hex_sha256(&page_json(&header)?);
+        if cursor.as_ref().is_some_and(|cursor| cursor.snapshot != snapshot) {
+            return Ok(OwnerOutboxPageResult::ReadChanged);
+        }
+        let cursor = cursor.unwrap_or(OwnerOutboxReadCursor {
+            snapshot,
+            part: OwnerOutboxReadPart::Header,
+            sequence: 0,
+            offset: 0,
+        });
+        use OwnerOutboxReadPart::{Base, EntryHeader, Header, Update};
+        if matches!(cursor.part, Header | Base) != (cursor.sequence == 0)
+            || cursor.sequence >= parent.next_sequence
+        {
+            return Err(OwnerOutboxError::InvalidInput("invalid read part sequence"));
+        }
+        let next_entry = |after: i64| -> Result<Option<OwnerOutboxReadCursor>, OwnerOutboxError> {
+            tx.query_row(
+                "SELECT sequence FROM owner_ydoc_outbox_entries \
+                 WHERE outbox_id=?1 AND pending=1 AND sequence>?2 AND sequence<?3 \
+                 ORDER BY sequence LIMIT 1",
+                params![outbox_id, after, parent.next_sequence], |row| row.get(0),
+            ).optional().map_err(read_sql).map(|sequence| sequence.map(|sequence| {
+                OwnerOutboxReadCursor { snapshot: cursor.snapshot.clone(), part: EntryHeader, sequence, offset: 0 }
+            }))
+        };
+        let following_part = |part| Some(OwnerOutboxReadCursor {
+            snapshot: cursor.snapshot.clone(), part, sequence: cursor.sequence, offset: 0,
+        });
+        let (total_bytes, digest, bytes, following) = match cursor.part {
+            Header => {
+                let count: i64 = tx.query_row(
+                    "SELECT COUNT(*) FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND pending=1",
+                    [outbox_id], |row| row.get(0),
+                ).map_err(read_sql)?;
+                header["pendingEntryCount"] = count.into();
+                let bytes = page_json(&header)?;
+                let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
+                (total, digest, bytes, following_part(Base))
+            }
+            Base => {
+                if parent.base_blob_digest != parent.base_update_digest {
+                    return Err(OwnerOutboxError::Corrupt);
+                }
+                let bytes = slice_blob(&tx, &parent.base_blob_digest, base_length, cursor.offset, max_bytes)?;
+                (base_length, parent.base_update_digest, bytes, next_entry(0)?)
+            }
+            EntryHeader | Update => {
+                let entry = tx.query_row(
+                    "SELECT append_key,delivery_id,update_digest,update_blob_digest,byte_length,created_at_ms \
+                     FROM owner_ydoc_outbox_entries WHERE outbox_id=?1 AND sequence=?2 AND pending=1",
+                    params![outbox_id, cursor.sequence], |row| Ok((
+                        row.get::<_, String>(0)?, row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?, row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?, row.get::<_, i64>(5)?,
+                    )),
+                ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::InvalidInput("invalid read entry"))?;
+                let (append_key, delivery_id, digest, blob_digest, byte_length, created_at_ms) = entry;
+                if digest != blob_digest || byte_length <= 0 {
+                    return Err(OwnerOutboxError::Corrupt);
+                }
+                if cursor.part == EntryHeader {
+                    let bytes = page_json(&serde_json::json!({
+                        "sequence": cursor.sequence, "appendKey": append_key,
+                        "deliveryId": delivery_id, "updateDigest": digest,
+                        "byteLength": byte_length, "createdAtMs": created_at_ms,
+                    }))?;
+                    let (total, digest, bytes) = slice_header(bytes, cursor.offset, max_bytes)?;
+                    (total, digest, bytes, following_part(Update))
+                } else {
+                    let bytes = slice_blob(&tx, &blob_digest, byte_length, cursor.offset, max_bytes)?;
+                    (byte_length, digest, bytes, next_entry(cursor.sequence)?)
+                }
+            }
+        };
+        let end = cursor.offset + bytes.len() as i64;
+        let next_cursor = if end < total_bytes {
+            Some(OwnerOutboxReadCursor { offset: end, ..cursor.clone() })
+        } else {
+            following
+        };
+        tx.commit().map_err(read_sql)?;
+        Ok(OwnerOutboxPageResult::Page(OwnerOutboxReadPage {
+            cursor, total_bytes, digest, bytes, next_cursor,
+        }))
+    })
+}
+
+fn page_json(value: &serde_json::Value) -> Result<Vec<u8>, OwnerOutboxError> {
+    serde_json::to_vec(value).map_err(|_| OwnerOutboxError::Corrupt)
+}
+
+fn slice_header(
+    bytes: Vec<u8>,
+    offset: i64,
+    max_bytes: usize,
+) -> Result<(i64, String, Vec<u8>), OwnerOutboxError> {
+    let start = usize::try_from(offset)
+        .map_err(|_| OwnerOutboxError::InvalidInput("invalid read offset"))?;
+    if start >= bytes.len() {
+        return Err(OwnerOutboxError::InvalidInput("invalid read offset"));
+    }
+    let end = start.saturating_add(max_bytes).min(bytes.len());
+    Ok((
+        bytes.len() as i64,
+        hex_sha256(&bytes),
+        bytes[start..end].to_vec(),
+    ))
+}
+
+fn slice_blob(
+    conn: &Connection,
+    digest: &str,
+    total: i64,
+    offset: i64,
+    max_bytes: usize,
+) -> Result<Vec<u8>, OwnerOutboxError> {
+    if total <= 0 || total as u64 > dohc_engine_storage::MAX_BLOB_BYTES as u64 {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    if offset < 0 || offset >= total {
+        return Err(OwnerOutboxError::InvalidInput("invalid read offset"));
+    }
+    let length = (total - offset).min(max_bytes as i64);
+    let (recorded, actual, bytes): (i64, i64, Vec<u8>) = conn.query_row(
+        "SELECT byte_length,length(bytes),substr(bytes,?2,?3) FROM binary_blobs WHERE sha256=?1",
+        params![digest, offset + 1, length], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).optional().map_err(read_sql)?.ok_or(OwnerOutboxError::Corrupt)?;
+    if recorded != total || actual != total || bytes.len() as i64 != length {
+        return Err(OwnerOutboxError::Corrupt);
+    }
+    Ok(bytes)
 }
 
 pub fn acknowledge(
@@ -799,6 +1015,158 @@ mod tests {
             journal_cursor: entry.sequence,
             accepting_host_epoch: 1,
         }
+    }
+
+    fn page(
+        store: &EngineStore,
+        id: &str,
+        cursor: Option<OwnerOutboxReadCursor>,
+        budget: usize,
+    ) -> OwnerOutboxReadPage {
+        match read_pending_page(store, "workspace-1", id, cursor, budget).expect("read page") {
+            OwnerOutboxPageResult::Page(page) => page,
+            OwnerOutboxPageResult::ReadChanged => panic!("unchanged snapshot"),
+        }
+    }
+
+    #[test]
+    fn paged_read_slices_individual_blobs_and_preserves_complete_ordered_snapshot() {
+        let (_dir, mut store) = store("owner-paged-read");
+        let mut first = input("first", &vec![23; 263], 1);
+        first.base_update = vec![17; 257];
+        let appended = append(&mut store, "workspace-1", first.clone()).expect("append");
+        first.append_key = "second".to_owned();
+        first.update = vec![31; 269];
+        append(&mut store, "workspace-1", first).expect("second append");
+        let expected =
+            read_pending(&store, "workspace-1", &appended.outbox_id).expect("whole reference");
+        let mut cursor = None;
+        let mut parts: Vec<(OwnerOutboxReadPart, i64, Vec<u8>)> = Vec::new();
+        let mut snapshot = None;
+        loop {
+            let page = page(&store, &appended.outbox_id, cursor, 17);
+            if let Some(snapshot) = &snapshot {
+                assert_eq!(snapshot, &page.cursor.snapshot);
+            }
+            snapshot = Some(page.cursor.snapshot.clone());
+            assert!(!page.bytes.is_empty() && page.bytes.len() <= 17);
+            if page.cursor.offset == 0 {
+                parts.push((page.cursor.part, page.cursor.sequence, Vec::new()));
+            }
+            let (part, sequence, bytes) = parts.last_mut().expect("part");
+            assert_eq!((*part, *sequence), (page.cursor.part, page.cursor.sequence));
+            assert_eq!(bytes.len() as i64, page.cursor.offset);
+            bytes.extend(page.bytes);
+            if bytes.len() as i64 == page.total_bytes {
+                assert_eq!(hex_sha256(bytes), page.digest);
+            }
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(parts.len(), 6);
+        assert_eq!(parts[1].2, expected.base_update);
+        assert_eq!(parts[3].2, expected.entries[0].update);
+        assert_eq!(parts[5].2, expected.entries[1].update);
+        let header: serde_json::Value = serde_json::from_slice(&parts[0].2).expect("header");
+        assert_eq!(header["pendingBytes"], expected.pending_bytes);
+        assert_eq!(header["pendingEntryCount"], 2);
+    }
+
+    #[test]
+    fn changed_append_acknowledgment_or_quarantine_invalidates_a_partial_read() {
+        for mutation in ["append", "acknowledge", "ack-append", "quarantine"] {
+            let (_dir, mut store) = store("owner-page-changed");
+            let appended = append(
+                &mut store,
+                "workspace-1",
+                input("first", b"first update", 1),
+            )
+            .expect("append");
+            let pending =
+                read_pending(&store, "workspace-1", &appended.outbox_id).expect("pending");
+            // Leave the read in the middle of a blob, not merely between rows.
+            let first = page(&store, &appended.outbox_id, None, 4096);
+            let base = page(&store, &appended.outbox_id, first.next_cursor, 1);
+            let cursor = base.next_cursor.expect("base has remaining bytes");
+            assert_eq!(cursor.part, OwnerOutboxReadPart::Base);
+            match mutation {
+                "append" => {
+                    append(
+                        &mut store,
+                        "workspace-1",
+                        input("second", b"second update", 2),
+                    )
+                    .expect("append during read");
+                }
+                "acknowledge" | "ack-append" => {
+                    acknowledge(
+                        &mut store,
+                        "workspace-1",
+                        &appended.outbox_id,
+                        &[receipt(&pending.entries[0])],
+                    )
+                    .expect("ack during read");
+                    if mutation == "ack-append" {
+                        // Restore byte totals and oldest timestamp; only the
+                        // monotonic next_sequence distinguishes this snapshot.
+                        append(
+                            &mut store,
+                            "workspace-1",
+                            input("replacement", b"first update", 1),
+                        )
+                        .expect("replace acknowledged entry");
+                    }
+                }
+                _ => {
+                    quarantine(
+                        &mut store,
+                        "workspace-1",
+                        OwnerOutboxQuarantineInput {
+                            outbox_id: appended.outbox_id.clone(),
+                            reason: "binding changed".to_owned(),
+                            observed_binding: None,
+                        },
+                    )
+                    .expect("quarantine during read");
+                }
+            }
+            assert!(
+                matches!(
+                    read_pending_page(&store, "workspace-1", &appended.outbox_id, Some(cursor), 1),
+                    Ok(OwnerOutboxPageResult::ReadChanged)
+                ),
+                "{mutation}"
+            );
+        }
+    }
+
+    #[test]
+    fn page_refuses_invalid_offsets_and_inconsistent_blob_lengths() {
+        let (_dir, mut store) = store("owner-page-corrupt");
+        let appended =
+            append(&mut store, "workspace-1", input("first", b"update", 1)).expect("append");
+        let first = page(&store, &appended.outbox_id, None, 4096);
+        let mut cursor = first.next_cursor.expect("base cursor");
+        cursor.offset = i64::MAX;
+        assert!(matches!(
+            read_pending_page(&store, "workspace-1", &appended.outbox_id, Some(cursor), 1),
+            Err(OwnerOutboxError::InvalidInput(_))
+        ));
+        let cursor = page(&store, &appended.outbox_id, None, 4096).next_cursor;
+        store
+            .read_with(|conn| {
+                conn.execute(
+                    "UPDATE binary_blobs SET bytes=?1 WHERE sha256=?2",
+                    params![b"short".as_slice(), hex_sha256(b"base update")],
+                )
+            })
+            .expect("damage blob");
+        assert!(matches!(
+            read_pending_page(&store, "workspace-1", &appended.outbox_id, cursor, 1),
+            Err(OwnerOutboxError::Corrupt)
+        ));
     }
 
     #[test]

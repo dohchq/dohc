@@ -58,9 +58,11 @@ pub use live_object_binding::LiveObjectBinding;
 pub use owner_outbox::{
     acknowledge as acknowledge_owner_outbox, append as append_owner_outbox,
     quarantine as quarantine_owner_outbox, read_pending as read_pending_owner_outbox,
-    OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
-    OwnerOutboxAppendResult, OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits,
-    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxState,
+    read_pending_page as read_pending_owner_outbox_page, OwnerDeliveryReceipt,
+    OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput, OwnerOutboxAppendResult,
+    OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits, OwnerOutboxPageResult,
+    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
+    OwnerOutboxReadPart, OwnerOutboxState,
 };
 pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
