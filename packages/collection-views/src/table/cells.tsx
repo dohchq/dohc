@@ -178,13 +178,20 @@ function AddOptionInput({
   );
 }
 
-/**
- * The multi-select editor owns its selection while it is open: each toggle
- * compounds on the previous one, and the props only seed the initial state.
- * Deriving every toggle from the indexed value would erase earlier toggles —
- * the host's re-query is asynchronous, so a delayed or stale indexed prop
- * still names the pre-edit selection.
- */
+type PendingSelection = {
+  value: string[];
+  added: string[];
+  removed: string[];
+};
+
+function sameSelection(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((option, index) => option === right[index]);
+}
+
+// Props can acknowledge an earlier toggle while later toggles are queued.
+// Retire that acknowledged prefix and apply the remaining local changes to
+// the observed selection. Other changed props carry external edits; those
+// become visible too, without erasing pending local additions or removals.
 function MultiSelectEditor({
   options,
   value,
@@ -198,9 +205,38 @@ function MultiSelectEditor({
   close: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
 }) {
-  const [selected, setSelected] = useState(() => asTextArray(value));
+  const [selection, setSelection] = useState(() => ({
+    observed: asTextArray(value),
+    pending: [] as PendingSelection[],
+  }));
+  const observed = asTextArray(value);
+  let current = selection;
+  if (!sameSelection(observed, selection.observed)) {
+    const acknowledged = selection.pending.findLastIndex((change) =>
+      sameSelection(change.value, observed),
+    );
+    current = {
+      observed,
+      pending: selection.pending.slice(acknowledged + 1),
+    };
+    setSelection(current);
+  }
+  const selected = current.pending.reduce(
+    (previous, change) => [
+      ...previous.filter((option) => !change.removed.includes(option)),
+      ...change.added.filter((option) => !previous.includes(option)),
+    ],
+    current.observed,
+  );
   const select = (next: string[]) => {
-    setSelected(next);
+    setSelection({
+      ...current,
+      pending: [...current.pending, {
+        value: next,
+        added: next.filter((option) => !selected.includes(option)),
+        removed: selected.filter((option) => !next.includes(option)),
+      }],
+    });
     emit(next);
   };
   return (

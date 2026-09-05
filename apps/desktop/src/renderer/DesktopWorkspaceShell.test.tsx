@@ -4395,6 +4395,51 @@ describe("workspace switch admission", () => {
   });
 });
 
+describe("collection input during a version switch", () => {
+  it.each(["success", "failure"] as const)(
+    "retains late input after switch %s without crossing versions",
+    async (outcome) => {
+      const user = userEvent.setup();
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      let activeVersionId = "main";
+      bridge.listWorkspaceVersions = vi.fn(async () => ({
+        versions: [
+          { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+          { id: "v2", name: "Draft two", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+        ],
+        activeVersionId,
+      }));
+      const switching = deferred<SwitchWorkspaceVersionResult>();
+      bridge.switchWorkspaceVersion = vi.fn(() => switching.promise);
+      renderShell(bridge);
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const target = (await screen.findAllByTestId("version-item")).find(
+        (item) => item.dataset.versionId === "v2",
+      );
+      await user.click(target!);
+      await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalledOnce());
+      const change = { recordId: "rec-1", recordPath: "tasks/one.md", field: "status", value: "done" };
+      act(() => {
+        expect(enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", change)).toBe(false);
+      });
+      await act(async () => {
+        if (outcome === "success") {
+          activeVersionId = "v2";
+          switching.resolve({ activeVersionId, changedFileCount: 1 });
+        } else {
+          switching.reject(new Error("switch failed"));
+        }
+        await switching.promise.catch(() => undefined);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", outcome === "success");
+        if (outcome === "success") expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
+      });
+      expect(collectionWriteFailures()[0]?.change).toEqual(change);
+    },
+  );
+});
+
 describe("workspace admission over collection writes", () => {
   // Models main's authority the way engineYDocSessionIpc holds it: a record
   // session opens only for the workspace `openWorkspace` last admitted. If

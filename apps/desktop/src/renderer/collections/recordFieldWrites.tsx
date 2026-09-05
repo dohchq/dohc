@@ -1,4 +1,4 @@
-import { useEffect, useRef, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
@@ -51,6 +51,8 @@ export function CollectionRecordFieldWrite({
   change,
   createOption,
   onPrepared,
+  onPreparationStarted,
+  onMutationStarted,
   onSettled,
   onHeldDurably,
   onFailed,
@@ -64,6 +66,8 @@ export function CollectionRecordFieldWrite({
   // The option's schema write landed: the queue clears it from the entry so
   // a later failure's retry does not redo a landed schema write.
   onPrepared: () => void;
+  onPreparationStarted?: (controller: AbortController) => () => void;
+  onMutationStarted?: () => () => void;
   // The engine confirmed the save settled: the change is on disk.
   onSettled: () => void;
   // The settle committed but the file is locked: the engine holds the write
@@ -82,25 +86,42 @@ export function CollectionRecordFieldWrite({
   const sawSaving = useRef(false);
   const prepStarted = useRef(false);
   const alive = useRef(true);
+  const [preparationAbort] = useState(() => new AbortController());
+  const releasePreparation = useRef<(() => void) | undefined>(undefined);
   const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
       alive.current = false;
+      preparationAbort.abort();
+      releasePreparation.current?.();
       if (lockedReport.current !== null) clearTimeout(lockedReport.current);
     },
     [],
   );
 
   useEffect(() => {
-    if (createOption === undefined || prepStarted.current) return;
+    if (createOption === undefined || prepStarted.current || docState.opening) return;
+    if (!docState.available || !docState.doc) {
+      onFailed(null);
+      return;
+    }
+    if (docState.doc.getMap(FRONTMATTER_FIELD).get("id") !== change.recordId) {
+      onFailed(
+        "This file no longer contains the original record. Your change is still here.",
+      );
+      return;
+    }
     prepStarted.current = true;
+    releasePreparation.current = onPreparationStarted?.(preparationAbort);
     void rewriteCollectionSchema({
       workspaceId,
       collectionPath,
       mutate: (schema) => addSelectOption(schema, change.field, createOption),
+      signal: preparationAbort.signal,
+      onMutationStarted,
     }).then((result) => {
       // An unmounted writer's result must not settle a write it no longer
-      // owns: a retry may have re-queued this id under a fresh writer.
+      // owns. A retry belongs to a fresh writer.
       if (!alive.current) return;
       if (result.status === "written") {
         onPrepared();
@@ -118,9 +139,16 @@ export function CollectionRecordFieldWrite({
     workspaceId,
     collectionPath,
     change.field,
+    change.recordId,
+    docState.opening,
+    docState.available,
+    docState.doc,
     createOption,
     onPrepared,
+    onPreparationStarted,
+    onMutationStarted,
     onFailed,
+    preparationAbort,
   ]);
 
   useEffect(() => {
@@ -207,6 +235,7 @@ export type CollectionFieldWrite = {
   workspaceId: string;
   collectionPath: string;
   change: CollectionCellChange;
+  lineage: number;
   // A select option the collection's schema must gain before the cell value
   // writes. Cleared when that schema write lands, so a retry after a later
   // failure replays only what did not land. Undefined for a plain edit.
@@ -220,6 +249,7 @@ export type CollectionFieldWrite = {
 export type CollectionWriteFailure = CollectionFieldWrite & {
   // The state line the failure row shows.
   message: string;
+  superseded?: boolean;
 };
 
 export type CollectionWriteStatus = {
@@ -250,12 +280,51 @@ const statuses = new Map<string, CollectionWriteStatus>();
 // Explorer's runChanges and a version restore can overlap, and editing
 // resumes only when the LAST operation releases.
 const pausedWorkspaces = new Map<string, number>();
+const workspaceLineages = new Map<string, number>();
+const schemaMutations = new Map<symbol, { workspaceId: string }>();
+const schemaPreparations = new Map<number, AbortController>();
 const listeners = new Set<() => void>();
+
+function retainSchemaMutation(workspaceId: string): () => void {
+  const id = Symbol();
+  schemaMutations.set(id, { workspaceId });
+  notify();
+  return () => {
+    schemaMutations.delete(id);
+    notify();
+  };
+}
 
 // What an edit refused during a pause shows; the failure row's Retry is the
 // next step once the operation finishes.
 const PAUSED_REFUSAL_MESSAGE =
   "dohc did not save this change because a file operation was in progress.";
+const STALE_LINEAGE_MESSAGE =
+  "This workspace changed versions or restored earlier work. Copy your unsaved value before discarding it.";
+const SUPERSEDED_MESSAGE =
+  "A newer edit replaced this value. Copy your unsaved value before discarding it.";
+
+function sameField(left: CollectionFieldWrite, right: CollectionFieldWrite): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.change.recordId === right.change.recordId &&
+    left.change.recordPath === right.change.recordPath &&
+    left.change.field === right.change.field;
+}
+
+function collectionWriteLineage(workspaceId: string): number {
+  return workspaceLineages.get(workspaceId) ?? 0;
+}
+
+// Called at the shell's confirmed version/restore boundary, before its
+// operation releases the pause. A failed preflight never advances it.
+export function advanceCollectionWriteLineage(workspaceId: string): void {
+  workspaceLineages.set(workspaceId, collectionWriteLineage(workspaceId) + 1);
+  notify();
+}
+
+export function useCollectionWriteLineage(workspaceId: string): number {
+  return useSyncExternalStore(subscribe, () => collectionWriteLineage(workspaceId));
+}
 
 function keyFor(workspaceId: string, collectionPath: string): string {
   // JSON quotes each part, so two different keys cannot collide.
@@ -294,11 +363,15 @@ export function enqueueCollectionFieldWrite(
   collectionPath: string,
   change: CollectionCellChange,
   createOption?: string,
+  lineage = collectionWriteLineage(workspaceId),
 ): boolean {
   nextWriteId += 1;
   const key = keyFor(workspaceId, collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
-  if (pausedWorkspaces.has(workspaceId)) {
+  if (pausedWorkspaces.has(workspaceId) || lineage !== collectionWriteLineage(workspaceId)) {
+    const message = lineage !== collectionWriteLineage(workspaceId)
+      ? STALE_LINEAGE_MESSAGE
+      : PAUSED_REFUSAL_MESSAGE;
     failures = [
       ...failures,
       {
@@ -306,20 +379,25 @@ export function enqueueCollectionFieldWrite(
         workspaceId,
         collectionPath,
         change,
+        lineage,
         createOption,
-        message: PAUSED_REFUSAL_MESSAGE,
+        message,
       },
     ];
-    statuses.set(key, { ...current, error: PAUSED_REFUSAL_MESSAGE });
+    statuses.set(key, { ...current, error: message });
     trimStatuses();
     notify();
     return false;
   }
   // A new write is a new attempt: clear the stale failure.
   statuses.set(key, { ...current, error: null });
+  const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage };
+  failures = failures.map((failure) =>
+    sameField(failure, write) ? { ...failure, superseded: true } : failure,
+  );
   queue = [
     ...queue,
-    { id: nextWriteId, workspaceId, collectionPath, change, createOption },
+    write,
   ];
   trimStatuses();
   notify();
@@ -357,7 +435,11 @@ function failCollectionFieldWrite(id: number, message: string | null): void {
   if (head?.id !== id) return;
   queue = queue.slice(1);
   const line = message ?? "dohc could not save this change.";
-  failures = [...failures, { ...head, message: line }];
+  failures = [...failures, {
+    ...head,
+    message: line,
+    superseded: queue.some((write) => sameField(write, head)),
+  }];
   const key = keyFor(head.workspaceId, head.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
   statuses.set(key, { ...current, error: line });
@@ -383,6 +465,7 @@ export function retryCollectionFieldWrite(id: number): void {
   // While the workspace's edits are paused the retry button is disabled;
   // this guard covers a programmatic caller. The failure stays retained.
   if (pausedWorkspaces.has(failure.workspaceId)) return;
+  if (failure.superseded || failure.lineage !== collectionWriteLineage(failure.workspaceId)) return;
   failures = failures.filter((entry) => entry.id !== id);
   const key = keyFor(failure.workspaceId, failure.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
@@ -390,10 +473,11 @@ export function retryCollectionFieldWrite(id: number): void {
   queue = [
     ...queue,
     {
-      id: failure.id,
+      id: ++nextWriteId,
       workspaceId: failure.workspaceId,
       collectionPath: failure.collectionPath,
       change: failure.change,
+      lineage: failure.lineage,
       createOption: failure.createOption,
     },
   ];
@@ -418,7 +502,7 @@ export function discardCollectionFieldWrite(id: number): void {
 
 /** True while an accepted cell edit has not reached its record's document. */
 export function hasPendingCollectionFieldWrites(): boolean {
-  return queue.length > 0;
+  return queue.length > 0 || schemaMutations.size > 0;
 }
 
 /** The retained failures — writes that need a retry or an explicit discard. */
@@ -435,7 +519,12 @@ export function useCollectionWriteFailures(): readonly CollectionWriteFailure[] 
 // where each keeps its value and its retry.
 export function abandonPendingCollectionFieldWrites(message: string): void {
   if (queue.length === 0) return;
-  failures = [...failures, ...queue.map((write) => ({ ...write, message }))];
+  for (const write of queue) schemaPreparations.get(write.id)?.abort();
+  failures = [...failures, ...queue.map((write, index) => ({
+    ...write,
+    message,
+    superseded: queue.slice(index + 1).some((later) => sameField(write, later)),
+  }))];
   queue = [];
   notify();
 }
@@ -484,7 +573,8 @@ function settleWrites(
   inScope: (entry: { workspaceId: string }) => boolean,
   options?: { stallMs?: number },
 ): Promise<CollectionWriteSettleReport> {
-  const queuePending = () => queue.some(inScope);
+  const queuePending = () =>
+    queue.some(inScope) || [...schemaMutations.values()].some(inScope);
   const failedCount = () => failures.filter(inScope).length;
   if (!queuePending()) {
     return Promise.resolve({ failed: failedCount(), stalled: false });
@@ -599,6 +689,9 @@ export function resetCollectionFieldWritesForTests(): void {
   failures = [];
   statuses.clear();
   pausedWorkspaces.clear();
+  workspaceLineages.clear();
+  schemaMutations.clear();
+  schemaPreparations.clear();
   nextWriteId = 0;
   notify();
 }
@@ -610,6 +703,15 @@ function CollectionWriteFailureRow({
   failure: CollectionWriteFailure;
 }) {
   const paused = useCollectionWritesPaused(failure.workspaceId);
+  const lineage = useCollectionWriteLineage(failure.workspaceId);
+  const stale = failure.lineage !== lineage;
+  const recoverOnly = stale || failure.superseded;
+  const [copyState, setCopyState] = useState<string | null>(null);
+  const value = failure.change.value;
+  const recoveryText = typeof value === "string"
+    ? value
+    : JSON.stringify(value, (_key, entry: unknown) =>
+        typeof entry === "bigint" ? entry.toString() : entry, 2);
   const file =
     failure.change.recordPath.split("/").at(-1) ?? failure.change.recordPath;
   return (
@@ -620,16 +722,42 @@ function CollectionWriteFailureRow({
       <span className="truncate font-mono text-[11px] text-subtle">
         {failure.change.field} in {file}
       </span>
-      <span className="text-[12px] text-ink">{failure.message}</span>
+      <span className="text-[12px] text-ink">
+        {stale ? STALE_LINEAGE_MESSAGE : failure.superseded ? SUPERSEDED_MESSAGE : failure.message}
+      </span>
+      {recoverOnly ? (
+        <textarea
+          aria-label="Unsaved collection value"
+          readOnly
+          value={recoveryText}
+          className="w-full rounded-md border border-line bg-bg px-2.5 py-1.5 font-mono text-[13px] text-ink"
+        />
+      ) : null}
+      <span className="text-[12px] text-muted">
+        Discard removes the input kept here. You cannot undo this.
+      </span>
       <div className="flex gap-1.5">
         <SecondaryButton
           data-testid="collection-write-retry"
           className="disabled:opacity-50"
-          disabled={paused}
+          disabled={paused || recoverOnly}
           onClick={() => retryCollectionFieldWrite(failure.id)}
         >
           Retry
         </SecondaryButton>
+        {recoverOnly ? (
+          <SecondaryButton
+            data-testid="collection-write-copy"
+            onClick={() => {
+              void Promise.resolve()
+                .then(() => navigator.clipboard.writeText(recoveryText))
+                .then(() => setCopyState("Copied"))
+                .catch(() => setCopyState("Could not copy. Select the value above to copy it."));
+            }}
+          >
+            Copy value
+          </SecondaryButton>
+        ) : null}
         <SecondaryButton
           data-testid="collection-write-discard"
           onClick={() => discardCollectionFieldWrite(failure.id)}
@@ -637,6 +765,7 @@ function CollectionWriteFailureRow({
           Discard unsaved change
         </SecondaryButton>
       </div>
+      {copyState ? <span className="text-[12px] text-muted">{copyState}</span> : null}
     </div>
   );
 }
@@ -658,6 +787,15 @@ export function CollectionFieldWriteHost() {
           change={head.change}
           createOption={head.createOption}
           onPrepared={() => completeCollectionFieldWritePreparation(head.id)}
+          onPreparationStarted={(controller) => {
+            schemaPreparations.set(head.id, controller);
+            return () => {
+              if (schemaPreparations.get(head.id) === controller) {
+                schemaPreparations.delete(head.id);
+              }
+            };
+          }}
+          onMutationStarted={() => retainSchemaMutation(head.workspaceId)}
           onSettled={() => completeCollectionFieldWrite(head.id)}
           onHeldDurably={(message) =>
             holdCollectionFieldWriteDurably(head.id, message)

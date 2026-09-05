@@ -92,7 +92,7 @@ export function VersionMenu(props: {
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
-  onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onError: (message: string) => void;
   // Bumped by the shell when ANOTHER surface switched versions (PR 0N-2's
   // review card switches back to Main) so the selector re-reads the active
@@ -269,7 +269,10 @@ export function VersionMenu(props: {
         ) {
           return;
         }
-        props.onWorkspaceStateChanged(recovered?.activeVersionId);
+        props.onWorkspaceStateChanged(
+          recovered?.activeVersionId,
+          recovered === null || recovered.activeVersionId !== before,
+        );
       } finally {
         releaseOperation?.();
         if (token === operationToken.current) setBusy(null);

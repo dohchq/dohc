@@ -271,6 +271,19 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalled();
   });
 
+  it("does not change collection lineage when Set aside is already on Main", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({
+      versions: [{ id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false }],
+      activeVersionId: "main",
+    });
+    const onWorkspaceStateChanged = vi.fn();
+    const user = userEvent.setup();
+    renderCard(reviewState(), { onWorkspaceStateChanged });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() => expect(onWorkspaceStateChanged).toHaveBeenCalledWith("main", false));
+    expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
+  });
+
   // #579 review r11: the pre-switch flush is the SAME class the version menu
   // fixed in r7, on the second switch surface. When the flush fails the
   // switch never starts and the workspace never leaves its version —

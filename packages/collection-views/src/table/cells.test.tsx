@@ -364,6 +364,69 @@ describe("CellEditor", () => {
     expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
   });
 
+  it("includes an observed remote selection in the next multi-select edit", () => {
+    const emit = vi.fn();
+    const editor = (value: string[]) => (
+      <CellEditor field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+
+    view.rerender(editor(["alpha", "beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+  });
+
+  it("combines observed remote additions with a pending local removal", () => {
+    const emit = vi.fn();
+    const editor = (value: string[]) => (
+      <CellEditor field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha", "beta"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+
+    view.rerender(editor(["alpha", "beta", "gamma"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit).toHaveBeenLastCalledWith(["gamma"]);
+  });
+
+  it("combines observed remote removals with a pending local addition", () => {
+    const emit = vi.fn();
+    const editor = (value: string[]) => (
+      <CellEditor field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha", "beta"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+
+    view.rerender(editor(["beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit).toHaveBeenLastCalledWith(["gamma"]);
+  });
+
+  it("acknowledges earlier toggles without undoing a later toggle of the same option", () => {
+    const emit = vi.fn();
+    const editor = (value: string[]) => (
+      <CellEditor field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha"]);
+
+    view.rerender(editor(["alpha", "beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(false);
+    view.rerender(editor(["alpha"]));
+    view.rerender(editor(["alpha", "beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+  });
+
   it("adds a typed unknown multi-select option to the compounded selection", () => {
     // The add input reads the same live selection as the checkboxes: after a
     // beta toggle, a typed new option extends ["alpha", "beta"], not props.

@@ -24,11 +24,18 @@ export async function rewriteCollectionSchema(options: {
   workspaceId: string;
   collectionPath: string;
   mutate: (schema: CollectionSchema) => CollectionSchema;
+  signal?: AbortSignal;
+  // The caller owns an issued write until its result is known, even if its
+  // component unmounts. Cancellation only stops work before this boundary.
+  onMutationStarted?: () => () => void;
 }): Promise<SchemaWriteResult> {
   const { workspaceId, collectionPath, mutate } = options;
   const relativePath = `${collectionPath}/${COLLECTION_SCHEMA_FILENAME}`;
+  let finishMutation: (() => void) | undefined;
   try {
+    options.signal?.throwIfAborted();
     const read = await bridge().readWorkspaceText({ workspaceId, relativePath });
+    options.signal?.throwIfAborted();
     if (read.truncated) return { status: "error", detail: null };
     const parsed = parseCollectionSchema(read.text);
     if (parsed.status !== "valid") {
@@ -37,10 +44,13 @@ export async function rewriteCollectionSchema(options: {
         detail: `The ${COLLECTION_SCHEMA_FILENAME} file has entries dohc cannot read. Fix the file, then try again.`,
       };
     }
+    const text = serializeCollectionSchema(mutate(parsed.schema));
+    options.signal?.throwIfAborted();
+    finishMutation = options.onMutationStarted?.();
     const result = await bridge().writeWorkspaceText({
       workspaceId,
       relativePath,
-      text: serializeCollectionSchema(mutate(parsed.schema)),
+      text,
       expectedContentHash: read.contentHash,
     });
     return result.status === "written"
@@ -51,5 +61,7 @@ export async function rewriteCollectionSchema(options: {
       status: "error",
       detail: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    finishMutation?.();
   }
 }

@@ -28,6 +28,7 @@ import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
 import {
   enqueueCollectionFieldWrite,
+  useCollectionWriteLineage,
   useCollectionWritesPaused,
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
@@ -220,11 +221,12 @@ export function CollectionPage({
   const loadNextPage = useCallback(() => void store.loadMore(), [store]);
 
   // The global host finishes accepted edits after this page unmounts.
+  const lineage = useCollectionWriteLineage(workspaceId);
   const enqueueCellChange = useCallback(
     (change: CollectionCellChange) => {
-      enqueueCollectionFieldWrite(workspaceId, collectionPath, change);
+      enqueueCollectionFieldWrite(workspaceId, collectionPath, change, undefined, lineage);
     },
-    [workspaceId, collectionPath],
+    [workspaceId, collectionPath, lineage],
   );
   // File and version operations disable new edits until their paths settle.
   const writesPaused = useCollectionWritesPaused(workspaceId);
@@ -298,9 +300,10 @@ export function CollectionPage({
           value: create.value,
         },
         create.option,
+        lineage,
       );
     },
-    [workspaceId, collectionPath],
+    [workspaceId, collectionPath, lineage],
   );
 
   // Relation fields target other collections; the list loads when the

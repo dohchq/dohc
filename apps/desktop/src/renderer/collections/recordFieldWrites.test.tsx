@@ -12,8 +12,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
 import {
+  abandonPendingCollectionFieldWrites,
+  advanceCollectionWriteLineage,
   beginCollectionWriteOperation,
   collectionWriteFailures,
+  discardCollectionFieldWrite,
   CollectionFieldWriteHost,
   enqueueCollectionFieldWrite,
   FILE_LOCKED_REPORT_MS,
@@ -22,6 +25,8 @@ import {
   retryCollectionFieldWrite,
   settleCollectionFieldWrites,
 } from "./recordFieldWrites";
+import { beginCollectionLineageOperation } from "./collectionLineageGate";
+import { serializeCollectionSchema } from "./schemaAuthoring";
 
 const docMock = vi.hoisted(() => ({
   current: null as UseEngineDoc | ((input: unknown) => UseEngineDoc) | null,
@@ -64,7 +69,7 @@ const CHANGE = {
   value: "done",
 };
 
-function enqueue(change = CHANGE) {
+function enqueue(change: Parameters<typeof enqueueCollectionFieldWrite>[2] = CHANGE) {
   let accepted = false;
   act(() => {
     accepted = enqueueCollectionFieldWrite("ws-1", "tasks", change);
@@ -81,6 +86,44 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it("does not replay a failed full-array edit over a newer saved selection", async () => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const earlier = { ...CHANGE, field: "tags", value: ["alpha"] };
+    enqueue(earlier);
+    const failure = collectionWriteFailures()[0]!;
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    enqueue({ ...earlier, value: ["alpha", "beta"] });
+    settleHead(host, doc);
+    act(() => retryCollectionFieldWrite(failure.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha"]);
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", '[\n  "alpha"\n]');
+    expect(screen.getByText("Discard removes the input kept here. You cannot undo this.")).toBeTruthy();
+  });
+
+  it("marks the older failure when the newer same-field input was already queued", () => {
+    docMock.current = engineDocState({ opening: true });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    enqueue({ ...CHANGE, value: "newer" });
+    docMock.current = engineDocState({ available: false });
+    host.rerender(<CollectionFieldWriteHost />);
+    expect(collectionWriteFailures().map((failure) => failure.superseded)).toEqual([true, false]);
+    expect(collectionWriteFailures().map((failure) => failure.change.value)).toEqual(["done", "newer"]);
+  });
+
+  it("does not supersede a failed edit when a different field changes", () => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    enqueue({ ...CHANGE, field: "title", value: "newer" });
+    expect(collectionWriteFailures().every((failure) => !failure.superseded)).toBe(true);
+  });
+
   it("keeps the original value when the session cannot open, and shows it with no page mounted", async () => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
@@ -208,6 +251,50 @@ describe("settleCollectionFieldWrites", () => {
 });
 
 describe("beginCollectionWriteOperation", () => {
+  it("rejects a failure arriving while the initial draft flush is pending", async () => {
+    let finishFlush!: () => void;
+    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const beginning = beginCollectionLineageOperation("ws-1", () => flush);
+    expect(enqueue()).toBe(false);
+    finishFlush();
+    await expect(beginning).rejects.toThrow("A collection change did not save");
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+  });
+
+  it("retains late input for copying instead of retrying into a changed lineage", async () => {
+    const original = new Y.Doc();
+    original.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: original });
+    render(<CollectionFieldWriteHost />);
+    let release!: () => void;
+    await act(async () => { release = await beginCollectionLineageOperation("ws-1"); });
+    // The actual version IPC is now in flight, beyond the preflight check.
+    expect(enqueue()).toBe(false);
+    const nextVersion = new Y.Doc();
+    nextVersion.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc: nextVersion });
+    act(() => { advanceCollectionWriteLineage("ws-1"); release(); });
+    const failure = collectionWriteFailures()[0]!;
+    act(() => retryCollectionFieldWrite(failure.id));
+    expect(nextVersion.getMap("frontmatter").has("status")).toBe(false);
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+    expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    expect(screen.getByLabelText("Unsaved collection value")).toHaveProperty("value", "done");
+    const writeText = vi.fn(async () => undefined);
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    fireEvent.click(screen.getByTestId("collection-write-copy"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("done"));
+    fireEvent.click(screen.getByTestId("collection-write-discard"));
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+
+  it("refuses an old view's callback even after the operation released its pause", () => {
+    advanceCollectionWriteLineage("ws-1");
+    expect(enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, undefined, 0)).toBe(false);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+  });
+
   it("refuses a stale-path edit while paused, retains it, and accepts a retry after release", async () => {
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
@@ -303,5 +390,80 @@ describe("beginCollectionWriteOperation", () => {
     });
     await expect(guard.settled).resolves.toEqual({ failed: 1, stalled: false });
     act(() => guard.release());
+  });
+});
+
+describe("abandoned schema preparation", () => {
+  const read = {
+    text: serializeCollectionSchema({ name: null, description: null, fields: [{ name: "status", type: "select", options: [] }], views: [] }),
+    truncated: false,
+    contentHash: "same-schema-in-both-versions",
+  };
+
+  it("does not prepare an option until the bound document proves the original record identity", () => {
+    const readWorkspaceText = vi.fn(async () => read);
+    const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
+    vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
+    docMock.current = engineDocState({ opening: true });
+    const host = render(<CollectionFieldWriteHost />);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    expect(readWorkspaceText).not.toHaveBeenCalled();
+    const replacement = new Y.Doc();
+    replacement.getMap("frontmatter").set("id", "replacement-record");
+    docMock.current = engineDocState({ available: true, doc: replacement });
+    host.rerender(<CollectionFieldWriteHost />);
+    expect(readWorkspaceText).not.toHaveBeenCalled();
+    expect(writeWorkspaceText).not.toHaveBeenCalled();
+    expect(replacement.getMap("frontmatter").has("status")).toBe(false);
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+    expect(collectionWriteFailures()[0]?.createOption).toBe("done");
+  });
+
+  it("cancels a discarded option edit before its delayed schema read starts a write", async () => {
+    let finishRead!: (value: typeof read) => void;
+    const reading = new Promise<typeof read>((resolve) => { finishRead = resolve; });
+    const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
+    vi.stubGlobal("dohcDesktop", { readWorkspaceText: vi.fn(() => reading), writeWorkspaceText });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    render(<CollectionFieldWriteHost />);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    // Cancel synchronously, without depending on React's unmount cleanup.
+    await act(async () => {
+      abandonPendingCollectionFieldWrites("stalled");
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+      advanceCollectionWriteLineage("ws-1");
+      finishRead(read);
+      await reading;
+    });
+    expect(writeWorkspaceText).not.toHaveBeenCalled();
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+
+  it("keeps an issued schema mutation owned after the user discards its stalled entry", async () => {
+    let finishWrite!: (value: { status: "written" }) => void;
+    const writing = new Promise<{ status: "written" }>((resolve) => { finishWrite = resolve; });
+    const writeWorkspaceText = vi.fn(() => writing);
+    vi.stubGlobal("dohcDesktop", { readWorkspaceText: vi.fn(async () => read), writeWorkspaceText });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    render(<CollectionFieldWriteHost />);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done"); });
+    await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalledOnce());
+    act(() => {
+      abandonPendingCollectionFieldWrites("stalled");
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+    });
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    let admitted = false;
+    const beginning = beginCollectionLineageOperation("ws-1").then((release) => { admitted = true; release(); });
+    await Promise.resolve();
+    expect(admitted).toBe(false);
+    await act(async () => { finishWrite({ status: "written" }); await writing; await beginning; });
+    expect(admitted).toBe(true);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(0);
   });
 });

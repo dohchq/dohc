@@ -677,7 +677,9 @@ describe("collection authoring", () => {
   });
 
   it("retains a rejected option edit after the page unmounts and retries it whole", async () => {
-    docMock.current = engineDocState({ available: false });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
     bridge.writeWorkspaceText.mockImplementationOnce(async () => {
       throw new Error("Write stopped because this window changed workspaces.");
@@ -706,8 +708,6 @@ describe("collection authoring", () => {
 
     // Retry replays the whole edit: the schema write did not land, so the
     // option is recreated first, then the value reaches the record.
-    const doc = new Y.Doc();
-    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     act(() => retryCollectionFieldWrite(failure.id));
     await waitFor(() =>

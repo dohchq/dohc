@@ -1,4 +1,4 @@
-import { beginCollectionWriteOperation } from "./recordFieldWrites";
+import { beginCollectionWriteOperation, collectionWriteFailures } from "./recordFieldWrites";
 
 // A stuck queue must not hold a path or version operation open forever.
 // Matches RecoveryCloseGuard's exit cap: main's settle retries top out well
@@ -34,11 +34,14 @@ export async function beginCollectionLineageOperation(
         "dohc could not finish saving a collection change. Try again.",
       );
     }
-    if (settled.failed > 0) {
+    const failed = collectionWriteFailures().filter(
+      (failure) => failure.workspaceId === workspaceId,
+    ).length;
+    if (failed > 0) {
       throw new Error(
-        settled.failed === 1
+        failed === 1
           ? "A collection change did not save. Retry or discard it, then try again."
-          : `${settled.failed} collection changes did not save. Retry or discard them, then try again.`,
+          : `${failed} collection changes did not save. Retry or discard them, then try again.`,
       );
     }
   } catch (error) {

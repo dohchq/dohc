@@ -91,7 +91,7 @@ export function TryInVersionReviewCard(props: {
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
-  onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onDismissed: () => void;
 }) {
   const { workspaceId, state } = props;
@@ -162,7 +162,8 @@ export function TryInVersionReviewCard(props: {
       // another awaited IPC, and an old-version history answer landing during
       // it would meet a boundary that has not been set.
       landedOn = main.id;
-      props.onWorkspaceStateChanged(landedOn);
+      if (switchIssued) props.onWorkspaceStateChanged(landedOn);
+      else props.onWorkspaceStateChanged(landedOn, false);
       await bridge().dismissTryInVersionReview({ workspaceId });
       if (token !== liveToken.current) return;
       props.onDismissed();

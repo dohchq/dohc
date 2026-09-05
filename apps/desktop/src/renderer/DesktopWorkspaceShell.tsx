@@ -101,9 +101,11 @@ import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
 import {
   abandonPendingCollectionFieldWrites,
+  advanceCollectionWriteLineage,
   remapCollectionFieldWritePaths,
   settleCollectionFieldWrites,
   useCollectionWriteFailures,
+  useCollectionWriteLineage,
 } from "./collections/recordFieldWrites";
 import {
   COLLECTION_WRITE_STALL_MS,
@@ -1841,6 +1843,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
   const workspaceId = props.workspace.workspaceId;
+  const collectionLineage = useCollectionWriteLineage(workspaceId);
   // Version switches, merges, and moment restores are workspace-wide lineage
   // changes: every mounted draft and queued collection write must settle
   // first, and no cell edit may be accepted while the change is in flight.
@@ -3483,7 +3486,10 @@ export function DesktopWorkspaceShell(props: {
   // which is why this is not a list of the shell's own flags.
   const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
-    (activeVersionId?: string) => {
+    (activeVersionId?: string, lineageChanged = true) => {
+      if (lineageChanged) {
+        advanceCollectionWriteLineage(workspaceId);
+      }
       setVersionEpoch((epoch) => epoch + 1);
       // A version switch changes WHICH timeline is true, and the boundary is
       // only worth anything BEFORE the answers it has to judge arrive.
@@ -4050,6 +4056,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {
+      advanceCollectionWriteLineage(workspaceId);
       void refreshFiles().catch((error) =>
         reportShellError("Could not refresh workspace files.", error),
       );
@@ -4057,7 +4064,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Could not refresh history.", error),
       );
     },
-    [refreshFiles, refreshHistory, reportShellError],
+    [refreshFiles, refreshHistory, reportShellError, workspaceId],
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
@@ -6853,7 +6860,7 @@ export function DesktopWorkspaceShell(props: {
               groupCollectionPath ? (
                 <Suspense fallback={<PanelLoading label="collection" />}>
                   <LazyCollectionPage
-                    key={tabPath}
+                    key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
