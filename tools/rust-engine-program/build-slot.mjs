@@ -1,5 +1,4 @@
-// One lane's share of a shared build machine (WINDOWS_DEV.md, "Build
-// economics").
+// One lane's share of a shared build machine.
 //
 // Several agent lanes run cargo on one host. Unbounded, every cargo asks for
 // every logical core — the resource that matters is concurrent rustc
@@ -353,7 +352,7 @@ export async function acquireBuildSlot({
       throw new Error(
         `no build slot freed within ${Math.round(waitMs / 60_000)} minutes: ` +
           `the concurrency budget is ${slots} concurrent cargo lanes ` +
-          `(WINDOWS_DEV.md build economics) and all ${slots} slots at ${root} ` +
+          `and all ${slots} slots at ${root} ` +
           `are held — ${holders(root, slots)}. Wait for a lane to finish and ` +
           `rerun; a dead lane's slot is reclaimed automatically once its ` +
           `heartbeat is 30 minutes stale.`,

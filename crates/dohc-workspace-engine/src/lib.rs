@@ -1,4 +1,4 @@
-//! Shadow-only composition host for the Rust workspace engine.
+//! The workspace engine daemon: composes the engine crates behind the protocol.
 
 #![forbid(unsafe_code)]
 

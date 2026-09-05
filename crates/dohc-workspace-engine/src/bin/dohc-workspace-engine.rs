@@ -1,4 +1,4 @@
-//! DOP1 stdio host for the shadow-only Rust workspace engine.
+//! DOP1 stdio host for the workspace engine daemon.
 
 #![forbid(unsafe_code)]
 

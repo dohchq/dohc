@@ -1,4 +1,4 @@
-//! dohc engine storage — CAL-1 calibration slice.
+//! dohc engine storage: SQLite ownership and transactions.
 //!
 //! Owns exactly one writable `rusqlite` connection per workspace `engine.db`
 //! and the day-one v2 schema. This is the first production-destined Rust of
@@ -25,8 +25,6 @@
 //!   ledger row in one transaction, consulting the named storage fault points
 //!   [`faults::FaultPoint::StorageBeforePersist`] and
 //!   [`faults::FaultPoint::StorageAfterCommitBeforeAck`].
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 

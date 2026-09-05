@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "CAL-1/CAL-2 calibration slice: the workspace actor that owns the storage writer connection on ONE dedicated blocking thread, driven by a tokio command loop with cancellation tokens and deadlines, keyed by canonical engine.db file identity, with an explicit open→ready→draining→closed lifecycle and deterministic Drop. Dormant; not wired into the product."
+description = "Workspace actor runtime for the engine: one actor per engine.db owning the writer connection, keyed by file identity, with cancellation, deadlines, and an explicit lifecycle."
 
 [features]
 # Forwards the storage crash-injection seam so a build that arms faults (the
