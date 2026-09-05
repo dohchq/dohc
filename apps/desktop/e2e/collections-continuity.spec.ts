@@ -55,7 +55,7 @@ views:
     await expect(
       page.getByRole("button", { name: "Open Launch plan" }),
     ).toBeVisible();
-    await page.getByTestId("collection-page").getByRole("checkbox").check();
+    await page.getByTestId("collection-page").getByRole("checkbox").click();
     await page.getByRole("button", { name: "Open Launch plan" }).click();
     await expect
       .poll(() => readFile(join(temp.rootPath, "tasks/plan.md"), "utf8"))
