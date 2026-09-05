@@ -98,13 +98,6 @@ export interface WorkspaceActivityOptions {
     workspace: ActivityWorkspace,
     hooks: WorkspaceCaptureHooks,
   ) => Promise<WorkspaceCaptureDecision> | WorkspaceCaptureDecision;
-  // Dormant R13b shadow observer. No shipping caller supplies it; a later
-  // composition PR may use it to mirror successfully recorded activity into
-  // the Rust adapter without affecting the live watcher/capture pipeline.
-  onRustEngineShadowActivity?: (activity: {
-    workspaceId: string;
-    rootPath: string;
-  }) => void | Promise<void>;
   // Receives the watcher's already-settled path-rich batch. The callback is
   // internal to main and runs before the path-free renderer notification.
   onWatcherBatch?: (
@@ -311,26 +304,6 @@ export function createWorkspaceActivity(
             workspaceId: workspace.workspaceId,
             paths: events.map((event) => event.path),
           });
-          if (options.onRustEngineShadowActivity) {
-            try {
-              void Promise.resolve(
-                options.onRustEngineShadowActivity({
-                  workspaceId: workspace.workspaceId,
-                  rootPath: workspace.rootPath,
-                }),
-              ).catch((error: unknown) => {
-                console.error(
-                  `[desktop] Rust engine shadow activity failed for ${workspace.rootPath}:`,
-                  error,
-                );
-              });
-            } catch (error) {
-              console.error(
-                `[desktop] Rust engine shadow activity failed for ${workspace.rootPath}:`,
-                error,
-              );
-            }
-          }
         },
       });
       // Startup reconciliation claims its capture-chain slot here, in the same

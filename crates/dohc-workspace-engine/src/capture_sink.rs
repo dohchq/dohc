@@ -1,4 +1,4 @@
-//! Dormant files-reconcile adapter for the actor-owned capture primitives.
+//! Files-reconcile adapter over the actor-owned capture primitives.
 
 use dohc_engine_collab::LeaseRegistry;
 use dohc_engine_crypto::{SecretDataKey, create_key_file, load_key_file};
@@ -274,9 +274,8 @@ impl CapturedRoot {
 
 /// Bridges a files-crate reconcile plan to the actor's domain capture writes.
 ///
-/// The adapter is intentionally not wired into workspace open/close yet. Its
-/// caller supplies the active version and capture-time provenance for one
-/// reconcile run; `.dohc/files.toml` is read once at construction, matching
+/// The capture driver constructs one per reconcile run and supplies the
+/// active version and capture-time provenance; `.dohc/files.toml` is read once at construction, matching
 /// the one-policy-snapshot-per-task rule in the TS capture path.
 pub struct StoreCaptureSink {
     actor: ActorHandle,
@@ -614,9 +613,8 @@ impl StoreCaptureSink {
             .ok_or(ESCAPES_ROOT)
     }
 
-    // The blocking actor calls below carry no timeout; this adapter is dormant
-    // and not on any request path. The composition driver (sub-shard C) owns
-    // stall handling when it wires this sink into workspace open/close.
+    // The blocking actor calls below carry no timeout. The capture driver that
+    // owns this sink handles stalls.
     fn ingest_text(
         &self,
         path: &str,

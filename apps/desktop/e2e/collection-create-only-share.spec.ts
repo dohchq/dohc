@@ -6,22 +6,14 @@ import { claimRelayWorkspace, relayJson } from "./helpers/relayPeer";
 import { spawnSyncRelay, type SyncRelayHandle } from "./helpers/syncRelay";
 import { createTempWorkspace } from "./helpers/workspace";
 
-// Lane D conformance: a collection under a share, against the create-only
-// contract in docs/plans/share-links.md ("The create-only collection
-// contract").
+// A collection under a share, against the create-only contract in
+// docs/plans/share-links.md ("The create-only collection contract").
 //
-// The green spec proves the collections Phase 3 gate sequence with today's
-// machinery, relay-direct: collections ride the file share substrate, a
-// cross-device granter edit converges to a link holder, and revocation stops
-// every collection operation over the share.
-//
-// The fixme rows are the create-only cases. They split by blocking reason:
-// - "relay policy" rows need the create-only grant policy, which is
-//   share-links Phase 5 work the relay does not have yet (verified: the
-//   link-create route accepts only `access`, and no collection write surface
-//   exists for a link capability).
-// - "#995" rows need the recipient desktop open-share path, which fails on
-//   main before workspace-shell loads (issue #995).
+// Relay-direct: collections ride the file share substrate, a cross-device
+// granter edit converges to a link holder, and revocation stops every
+// collection operation over the share. The create-only grant cases arrive
+// with the share-links Phase 5 policy; the recipient-desktop case waits on
+// #995.
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
@@ -302,70 +294,3 @@ confidentialTest(
     }
   },
 );
-
-// The create-only grant policy does not exist on the relay yet; it is
-// share-links Phase 5 work against "The create-only collection contract" in
-// docs/plans/share-links.md. These rows are the conformance cases that policy
-// must pass. Their route shapes settle with the policy; the assertions listed
-// in each body are the contract.
-test.describe("create-only collection grant (blocked: relay policy, share-links Phase 5)", () => {
-  test.fixme(
-    "a link holder creates a record twice under one idempotency key and one record results",
-    async () => {
-      // Will assert, against the policy's create surface:
-      // - a create-only grant on the collection path accepts a schema-valid
-      //   record create from an exchanged link capability;
-      // - the response names the server-minted link principal and a
-      //   server-set created timestamp;
-      // - a create body that names principal or timestamp refuses;
-      // - replaying the same idempotency key returns the first recordId and
-      //   the share log contains exactly one created record;
-      // - a same-key retry with a different payload refuses without creating.
-      expect("relay create-only grant policy").toBe("implemented");
-    },
-  );
-
-  test.fixme(
-    "a link holder's update, delete, and schema write refuse byte-identical to missing",
-    async () => {
-      // Will assert, against the policy's write surface:
-      // - update and delete of an existing record under a create-only grant
-      //   return responses byte-identical to the same requests against a
-      //   never-valid capability;
-      // - a write to collection.yaml and a create outside the granted
-      //   collection path refuse the same way;
-      // - the record bytes on the share log are unchanged after all refusals.
-      expect("relay create-only grant policy").toBe("implemented");
-    },
-  );
-
-  test.fixme(
-    "the granter's open view shows the link-created record attributed to the link principal",
-    async () => {
-      // Will assert, with the granter's desktop open on the collection view:
-      // - the record a link holder created appears as a row without a reload;
-      // - the record's history attributes the create to the link principal
-      //   from the create response, not to the granter and not to an agent
-      //   identity.
-      expect("relay create-only grant policy").toBe("implemented");
-    },
-  );
-});
-
-test.describe("collection share on a recipient desktop (blocked: #995)", () => {
-  test.fixme(
-    "a named recipient opens the collection share and reads its records read-only",
-    async () => {
-      // Blocked by #995: the recipient open-share call against the spawned
-      // relay fails before workspace-shell loads. Will assert, once the
-      // share-open path reaches the shell:
-      // - opening `dohc-share:<shareId>:<relayUrl>` as the named recipient
-      //   reaches workspace-shell;
-      // - the received share lists trips/collection.yaml and trips/lisbon.md
-      //   read-only, and private/ledger.md is absent;
-      // - after the granter's device-B edit, refresh shows the booked status
-      //   from RECORD_V2.
-      expect("recipient open-share path (#995)").toBe("fixed");
-    },
-  );
-});

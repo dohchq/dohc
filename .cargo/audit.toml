@@ -1,8 +1,10 @@
 # `time` is present only through ureq's disabled cookie-store feature:
 # dohc-engine-sync-http uses ureq with `default-features = false` and enables
 # only JSON + rustls, and `cargo tree -i time --workspace -e all` is empty.
-# The fixed time release also requires Rust 1.88, above this workspace's 1.85
-# contract. Keep auditing the lockfile while documenting this unreachable
-# advisory until ureq removes or upgrades its optional cookie dependency.
+# The patched release (0.3.47) needs Rust 1.88 and the workspace
+# `rust-version` is 1.85. Taking the fix is one change: raise `rust-version`
+# to 1.88, fix the clippy lints the newer MSRV enables (collapsible_if,
+# manual_is_multiple_of), run `cargo update -p time` under the Rust gate,
+# and delete this ignore.
 [advisories]
 ignore = ["RUSTSEC-2026-0009"]

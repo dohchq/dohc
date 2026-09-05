@@ -1,10 +1,13 @@
-# Engine Phase-B benchmarks
+# Engine benchmarks
 
-This harness measures engine hypotheses C1, C2, and C3 from `DISCOVERY-R2.md`.
-It drives the daemon through the framed workspace-engine client. B2 and B3 use
-the same real relay and two-daemon path as `twoDaemonSync.e2e.test.ts`.
+This harness drives the daemon through the framed workspace-engine client and
+measures three curves: B1, the cost of one appended character as a Y.Doc
+grows; B2, the admission latency of a remote delta behind a queue of
+predecessors; B3, the time for an empty store to catch up through the relay.
+B2 and B3 use the same real relay and two-daemon path as
+`twoDaemonSync.e2e.test.ts`.
 
-The reader is the next agent preparing an orchestrator-scheduled engine run.
+The reader is the next agent preparing a scheduled engine run.
 
 ## Run the full benchmarks
 

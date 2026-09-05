@@ -1,10 +1,7 @@
 #!/usr/bin/env node
-// LOCAL-RUNNER: Rust engine checks (shard R02).
-//
-// Replaces GitHub CI for the Rust workspace per the Gate 0 decision
-// (DECISIONS.md: "GitHub CI SKIPPED ... evidence is local-first"). Runs the
-// Rust policy gate and prints a timestamped evidence line the integrator
-// pastes into the pull request.
+// The Rust gate. CI is dispatch-only, so this runs locally: it runs the Rust
+// policy checks and prints a timestamped evidence line the integrator pastes
+// into the pull request.
 //
 // Requirements: Node >= 22, zero npm dependencies. Windows-first — works from
 // PowerShell and Git Bash (spawns through the platform shell).
@@ -20,7 +17,7 @@
 // row is how the fault-injection tests went unrun for a month. Optional tools
 // may still skip.
 //
-// BUDGET: see the `budget` block below and WINDOWS_DEV.md "Build economics".
+// BUDGET: see the `budget` block below.
 //
 // PROVENANCE: the run reads the tree at every step boundary and stamps the
 // commit into both the summary block and the evidence line. A verdict that
@@ -62,8 +59,8 @@ import { SCRATCH_SENTINEL, inspectScratchRun } from "./scratch-leak-report.mjs";
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
 
-// The machine's build budget (WINDOWS_DEV.md, "Build economics"). On the
-// shared dev box the gate refuses to start under the free-space floor, takes
+// The machine's build budget. On the shared dev box the gate refuses to
+// start under the free-space floor, takes
 // one of the four build slots before any cargo runs, and caps its compiler
 // and test parallelism to its share of the cores. A single-tenant host (CI)
 // has no slot root and runs uncapped. Incremental compilation is off on both:
@@ -83,8 +80,8 @@ if (budget) {
   if (free !== null && free < budget.diskFloorGb) {
     console.error(
       `refusing to run the gate: ${free.toFixed(1)} GB free on the worktree ` +
-        `volume is below the ${budget.diskFloorGb} GB floor (WINDOWS_DEV.md ` +
-        `build economics; a cold workspace build needs ~20 GB). Prune stale ` +
+        `volume is below the ${budget.diskFloorGb} GB floor (a cold workspace ` +
+        `build needs ~20 GB). Prune stale ` +
         `target dirs (C:\\w\\_targets, worktree target/) and rerun, or ` +
         `override the floor with DOHC_GATE_DISK_FLOOR_GB.`,
     );

@@ -408,7 +408,7 @@ describe("YdocLiveAdapter", () => {
     }
   });
 
-  it("pins the dormant R13 resync wire method name", () => {
+  it("pins the resync wire method name", () => {
     expect(YDOC_METHOD.resync).toBe("ydoc.resync");
   });
 

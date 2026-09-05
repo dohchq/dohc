@@ -1,12 +1,12 @@
-//! dohc engine collab — R11a durable Y.Doc layer.
+//! dohc engine collab: the durable Y.Doc layer.
 //!
 //! The Rust-owned durable Y.Doc update cache, snapshots, convergence-neutral
 //! compaction, per-document leases, the base-once replicated lineage, idempotent
 //! and echo-suppressed `ydoc.update` replication apply, and the settle pipeline
 //! (Y.Doc → artifact content with provenance, materialized through R04's job
-//! pipeline). It is the follow-through on the yrs abort criterion the week-one
-//! spike cleared (`SPIKE_REPORT.md`, `DECISIONS.md`), and it enforces all five
-//! binding yrs constraints — see [`ydoc`] for the per-constraint enforcement.
+//! pipeline). It enforces the five binding yrs constraints the yrs spike
+//! established (`crates/yrs-spike/SPIKE_REPORT.md`); see [`ydoc`] for the
+//! per-constraint enforcement.
 //!
 //! # Two regimes (do not conflate)
 //!
@@ -17,8 +17,6 @@
 //!   canonical. `ydoc.update` ops are journaled, the base is emitted exactly
 //!   once (base-once), and the rows are NEVER pruned on close — peers bootstrap
 //!   from that lineage.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 
