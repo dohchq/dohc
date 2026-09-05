@@ -16,7 +16,6 @@ use crate::error::StorageError;
 use crate::faults::{FaultInjector, FaultPoint};
 use crate::limits::{ENGINE_BUILD, ENGINE_SCHEMA_VERSION, ENGINE_STORAGE_PROTOCOL_VERSION};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
-use sha2::{Digest, Sha256};
 
 /// One ordered migration. `sql` is applied verbatim; `checksum` is derived from
 /// it so a silently-edited migration is caught rather than skipped.
@@ -1488,13 +1487,7 @@ pub(crate) const BASELINE_MIGRATIONS: &[Migration] = &[Migration {
 /// Lowercase-hex sha-256 of the migration DDL — the checksum stored in and
 /// re-verified against the ledger.
 pub(crate) fn migration_checksum(sql: &str) -> String {
-    let digest = Sha256::digest(sql.as_bytes());
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
+    crate::blob::hex_sha256(sql.as_bytes())
 }
 
 #[cfg(feature = "fault-injection")]

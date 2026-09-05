@@ -1,7 +1,5 @@
-import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 
 // WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
@@ -67,61 +65,13 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
   ["replication_log", ["op_kind", "payload_json"]],
 ];
 
-// PRESENCE is the read gate. Every migration this engine ships is transactional
-// (crates/dohc-engine-storage/src/migration.rs) — DDL and `engine_migrations`
-// row commit together — so a read-only connection sees a name only after the
-// migration that adds it committed. Every name above present therefore means
-// every read below is valid, whatever ordinal the store has reached.
-//
-// The two sides come from different places: the ledger belongs to the DAEMON
-// binary, the migration list to the SOURCE TREE. This repo's e2e workflow
-// stages a prebuilt `dohc-workspace-engine.exe`, so a store settled at an
-// earlier ordinal than the source is a normal state — and gating reads on the
-// source terminal left every helper here answering 0/[]/false in it, silently
-// and forever.
-//
-// The ledger therefore only classifies an absent name: settled at the source
-// terminal is a defect and throws, short of it may still be migrating and
-// polls. Ordinals apply in strictly increasing order
-// (`validate_migration_order`), so a complete terminal row means every earlier
-// migration committed before it started. An empty ledger settles nothing.
-//
-// The terminal ordinal is READ FROM the source, never pinned here: a stale
-// constant would call a store settled while a newly added migration ran.
-const MIGRATION_SOURCE = fileURLToPath(
-  new URL("../../../../crates/dohc-engine-storage/src/migration.rs", import.meta.url),
-);
-
-let terminalOrdinalCache: number | null = null;
-
-function terminalMigrationOrdinal(): number {
-  if (terminalOrdinalCache !== null) return terminalOrdinalCache;
-  const source = readFileSync(MIGRATION_SOURCE, "utf8");
-  const start = source.indexOf("const BASELINE_MIGRATIONS: &[Migration] = &[");
-  if (start < 0) {
-    throw new Error(`${MIGRATION_SOURCE} has no BASELINE_MIGRATIONS list to read ordinals from.`);
-  }
-  const end = source.indexOf("];", start);
-  if (end < 0) {
-    throw new Error(`${MIGRATION_SOURCE} has an unterminated BASELINE_MIGRATIONS list.`);
-  }
-  const ordinals = [...source.slice(start, end).matchAll(/^\s*ordinal:\s*(\d+),/gm)].map((match) =>
-    Number(match[1]),
-  );
-  // The list must be 0..n-1 in order. Anything else means this reader no longer
-  // understands the migration source, and guessing a terminal from it would put
-  // the gate back to reporting "settled" mid-chain.
-  const contiguous =
-    ordinals.length > 0 && ordinals.every((ordinal, index) => ordinal === index);
-  if (!contiguous) {
-    throw new Error(
-      `${MIGRATION_SOURCE} lists migration ordinals [${ordinals.join(", ")}], which are not ` +
-        "0..n-1 in order, so the e2e schema gate cannot tell when the chain has finished.",
-    );
-  }
-  terminalOrdinalCache = ordinals[ordinals.length - 1]!;
-  return terminalOrdinalCache;
-}
+// Presence is the read gate. The engine ships one transactional migration
+// (`v2-baseline` in crates/dohc-engine-storage/src/migration.rs): its DDL and
+// its `engine_migrations` row commit together, so a read-only connection sees
+// the names above only after the schema is complete. A store whose ledger has
+// that row settled but is missing a name is a defect and throws; a store still
+// short of it may be migrating and polls. An empty ledger settles nothing.
+const BASELINE_MIGRATION_ID = "v2-baseline";
 
 function schemaSettled(db: EngineDb): boolean {
   const ledger = db
@@ -131,9 +81,9 @@ function schemaSettled(db: EngineDb): boolean {
   const row = db
     .prepare(
       `SELECT COUNT(*) AS n FROM engine_migrations
-       WHERE ordinal = ? AND completed_at IS NOT NULL`,
+       WHERE id = ? AND completed_at IS NOT NULL`,
     )
-    .get(terminalMigrationOrdinal()) as { n: number } | undefined;
+    .get(BASELINE_MIGRATION_ID) as { n: number } | undefined;
   return Number(row?.n ?? 0) === 1;
 }
 
@@ -174,9 +124,8 @@ export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | 
     // `toEqual([])` call sites would pass on nothing — the shape this file
     // exists to remove.
     throw new Error(
-      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled at ` +
-        `ordinal ${terminalMigrationOrdinal()}: these e2e readers query a schema the ` +
-        "engine no longer has.",
+      `engine.db has no ${missing.join(", ")}, and its migration ledger has settled ` +
+        `${BASELINE_MIGRATION_ID}: these e2e readers query a schema the engine no longer has.`,
     );
   } catch (error) {
     if (isDbNotOpenable(error, db !== null)) return null;

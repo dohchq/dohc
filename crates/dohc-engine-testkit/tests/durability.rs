@@ -119,7 +119,7 @@ fn crash_after_commit_recovers_exactly_once() {
         Some("committed body")
     );
     assert_eq!(moments(&store), 1);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 1);
+    assert_eq!(store.table_row_count("engine_requests").expect("ledger"), 1);
 
     // Retry the same request id after recovery: exactly-once — replays to the
     // recorded result, no second moment.
@@ -128,7 +128,7 @@ fn crash_after_commit_recovers_exactly_once() {
         .expect("retry");
     assert!(retry.deduped);
     assert_eq!(moments(&store), 1);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 1);
+    assert_eq!(store.table_row_count("engine_requests").expect("ledger"), 1);
 }
 
 // oracle: storage.before-persist — a mid-transaction crash rolls back;
@@ -298,7 +298,10 @@ fn close_reopen_mutate_cycle_stays_writable() {
     let store = open(&db, 99);
     assert_eq!(moments(&store), 3);
     // The ledger holds the one baseline row.
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 1);
+    assert_eq!(
+        store.table_row_count("engine_migrations").expect("ledger"),
+        1
+    );
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

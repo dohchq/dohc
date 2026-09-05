@@ -200,22 +200,6 @@ impl EngineStore {
             .map_err(StorageError::corrupt)
     }
 
-    /// Number of `engine_requests` (idempotency ledger) rows.
-    pub fn request_ledger_len(&self) -> Result<i64, StorageError> {
-        self.scalar_count("SELECT COUNT(*) FROM engine_requests")
-    }
-
-    /// Number of `engine_migrations` (migration ledger) rows.
-    pub fn migration_ledger_len(&self) -> Result<i64, StorageError> {
-        self.scalar_count("SELECT COUNT(*) FROM engine_migrations")
-    }
-
-    fn scalar_count(&self, sql: &str) -> Result<i64, StorageError> {
-        self.conn
-            .query_row(sql, [], |row| row.get(0))
-            .map_err(StorageError::corrupt)
-    }
-
     // ---- R04: blob store -------------------------------------------------
 
     /// Store `bytes` as a content-addressed binary blob (dedup by hash),

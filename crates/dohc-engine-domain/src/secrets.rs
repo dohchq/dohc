@@ -1888,10 +1888,6 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 /// Structural validation runs first; a safe path that is not classified
 /// secret gets the dedicated compatibility error rather than being hidden in
 /// encrypted storage where normal history/search would no longer see it.
-///
-/// No in-place legacy-row rewrite is attempted: pre-R15 cutover destroys the
-/// pre-release Rust/TS secret rows, and ciphertext AAD is path-bound, so a
-/// keyless schema migration could not safely rename an old non-canonical key.
 fn validate_secret_path(path: &str) -> Result<String, DomainError> {
     validate_path(path)?;
     let (classification, normalized) =

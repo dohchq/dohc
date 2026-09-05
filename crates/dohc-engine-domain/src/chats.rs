@@ -4,8 +4,8 @@
 //! receiver-private follows / personal feed / bookmarks, and the durable agent
 //! dispatch ledger — composed ON the storage seam exactly like the versioning
 //! domain: reads via [`EngineStore::read_with`], every compound mutation via
-//! [`EngineStore::write_with`] so the domain write and its replication-journal
-//! entry commit in one `BEGIN IMMEDIATE` transaction. Storage
+//! [`EngineStore::write_with`] so each compound write commits in one
+//! `BEGIN IMMEDIATE` transaction. Storage
 //! owns the connection, open ritual, transaction boundary, and the crash
 //! fault seam; this crate owns what a channel / thread / message / read-cursor /
 //! follow / bookmark / dispatch claim *means* (the TS `linkedChatStore.ts` +

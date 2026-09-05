@@ -1374,8 +1374,8 @@ pub fn write_binary_file_in_tx(
     Ok(())
 }
 
-/// The durable-head triple every verified binary write appends: one moment,
-/// one current snapshot (upsert), one replication-journal record. Shared by
+/// The durable-head pair every verified binary write appends: one moment and
+/// one current snapshot (upsert). Shared by
 /// the mirrored-resolve writer ([`write_binary_file_in_tx`], which follows it
 /// with a materialization job) and the capture-ingest path (which must not
 /// materialize — its bytes came FROM disk). Returns the committed moment
