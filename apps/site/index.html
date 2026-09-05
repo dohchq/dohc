@@ -311,6 +311,47 @@
     </div>
   </section>
 
+  <!-- ============ humans and agents ============ -->
+  <section class="section" id="two-readers" aria-labelledby="two-readers-title">
+    <div class="section-head reveal">
+      <h2 id="two-readers-title">Built for humans and agents.</h2>
+      <p class="section-lede">
+        Your agent sees a folder. Pick any file in it and this is what you
+        see for the same file. There's no import step between the two,
+        because there's no second copy.
+      </p>
+    </div>
+    <div class="readers reveal d1" data-readers>
+      <div class="reader-card">
+        <div class="device-bar"><span class="reader-who is-agent" aria-hidden="true">A</span><span>what your agent sees</span><span class="mono">ls -R launch/</span></div>
+        <div class="reader-tree" role="tablist" aria-label="Files in the launch folder" aria-orientation="vertical">
+          <span class="reader-dir">launch/</span>
+          <button class="reader-file in1" type="button" role="tab" aria-selected="true" data-reader-pick="plan">plan.md</button>
+          <span class="reader-dir in1">tasks/</span>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">collection.yaml</button>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">pricing-page.md</button>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="tasks">payment-sandbox.md</button>
+          <span class="reader-dir in2">… 4 more</span>
+          <button class="reader-file in1" type="button" role="tab" aria-selected="false" data-reader-pick="drawing">flow.excalidraw</button>
+          <span class="reader-dir in1">split/</span>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="app">dohc-app.json</button>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="app">index.html</button>
+          <span class="reader-dir in1">.dohc/</span>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="chat">chats/launch.md</button>
+          <button class="reader-file in2" type="button" role="tab" aria-selected="false" data-reader-pick="history">history</button>
+        </div>
+        <div class="device-foot">Plain files. Anything that can read a folder can read this.</div>
+      </div>
+
+      <div class="reader-card reader-window" role="tabpanel">
+        <div class="device-bar"><span class="reader-who" aria-hidden="true">Y</span><span>what you see</span><span class="mono" data-reader-name>Plan</span></div>
+        <div class="reader-view" data-reader-view></div>
+        <div class="device-foot" data-reader-foot></div>
+      </div>
+    </div>
+    <p class="stage-hint reveal d2">Pick any file in the tree.</p>
+  </section>
+
   <!-- ============ downloads ============ -->
   <section class="section downloads-home" id="downloads" aria-labelledby="downloads-title">
     <div class="downloads-inner">

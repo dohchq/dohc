@@ -1044,5 +1044,90 @@ if (syncDemo) {
   }
 }
 
+// Two readers: the agent's side is a file tree, yours is the window that
+// renders whatever file is picked. Same folder, no second copy.
+const readers = document.querySelector('[data-readers]');
+
+if (readers) {
+  const AGENT_WHO = '<span class="reader-who is-agent" aria-hidden="true">A</span>';
+  const WHO = (letter) => `<span class="reader-who" aria-hidden="true">${letter}</span>`;
+  const FILES = {
+    plan: {
+      name: 'Plan',
+      view: '<h3>Launch plan</h3><p>Beta on the 24th. Three things gate it: the pricing page, the payment sandbox, and the invite flow. Maya owns pricing, Sam owns the sandbox.</p><p class="reader-note">a live document · four people in it today</p>',
+      foot: 'Markdown on disk. A live document while it\'s open, so edits from both of you merge.',
+    },
+    tasks: {
+      name: 'Tasks',
+      view: '<div class="reader-board"><div class="reader-col"><h4>todo <span>2</span></h4><div class="reader-task">Invite flow</div><div class="reader-task">Launch email</div></div><div class="reader-col"><h4>doing <span>3</span></h4><div class="reader-task">Pricing page</div><div class="reader-task">Payment sandbox</div><div class="reader-task">Copy review</div></div><div class="reader-col"><h4>done <span>1</span></h4><div class="reader-task">Beta day</div></div></div><p class="reader-note">a board · also a table, also a calendar</p>',
+      foot: 'A folder with a schema. One markdown file per task; the board, table, and calendar are views of the same files.',
+    },
+    drawing: {
+      name: 'Flow sketch',
+      view: '<div class="reader-drawing"><svg viewBox="0 0 400 170" aria-hidden="true"><rect x="20" y="60" width="110" height="44" rx="6"/><text x="75" y="86" text-anchor="middle">Sign up</text><rect x="250" y="20" width="130" height="44" rx="6"/><text x="315" y="46" text-anchor="middle">Has account</text><rect x="250" y="106" width="130" height="44" rx="6"/><text x="315" y="132" text-anchor="middle">New user</text><path d="M130 82 C 190 82, 190 42, 250 42"/><path d="M130 82 C 190 82, 190 128, 250 128"/></svg></div><p class="reader-note">a drawing · Maya added the branch at 12:41</p>',
+      foot: 'JSON with an id on every shape, so your agent can add a branch or move one without redrawing.',
+    },
+    chat: {
+      name: '#launch',
+      view: `<div class="reader-msg">${WHO('S')}<span><b>Sam</b> sandbox is on track for the 19th, so the 24th is fine by me.</span></div><div class="reader-msg">${WHO('M')}<span><b>Maya</b> <span class="chat-mention">@My Agent</span> can you add the three gates as tasks?</span></div><div class="reader-msg">${AGENT_WHO}<span><b>My Agent</b> done. three tasks in tasks/, due the 21st.</span></div>`,
+      foot: 'Chat is a file in the workspace too. An @ lands in your agent\'s inbox; its reply lands in the room.',
+    },
+    app: {
+      name: 'Split',
+      view: '<div class="reader-app"><div class="reader-app-row"><span>Maya</span><span>owes ¥2,140</span></div><div class="reader-app-row"><span>Sam</span><span class="is-clear">settled</span></div><div class="reader-app-row"><span>you</span><span class="is-clear">paid</span></div></div><p class="reader-note">an app · shared by URL with Maya and Sam</p>',
+      foot: 'Source in the folder. The app reads only the data it lists, and your agent can change the source like any other file.',
+    },
+    history: {
+      name: 'History',
+      view: `<ul class="reader-history"><li>${WHO('M')}<span><b>Maya</b> moved Pricing page to doing</span><small>12:30</small></li><li>${AGENT_WHO}<span><b>My Agent</b> added 3 tasks</span><small>9:06</small></li><li>${WHO('Y')}<span><b>you</b> edited Plan</span><small>9:04</small></li></ul><p class="reader-note">who changed what · any of it can go back</p>`,
+      foot: 'The same list your agent gets from the CLI. Its changes carry its own name.',
+    },
+  };
+
+  const picks = Array.from(readers.querySelectorAll('[data-reader-pick]'));
+  const name = readers.querySelector('[data-reader-name]');
+  const view = readers.querySelector('[data-reader-view]');
+  const foot = readers.querySelector('[data-reader-foot]');
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  let current = 'plan';
+  let swapTimer = 0;
+
+  const render = (key) => {
+    const file = FILES[key];
+    name.textContent = file.name;
+    view.innerHTML = file.view;
+    foot.textContent = file.foot;
+  };
+
+  const show = (key, pick) => {
+    picks.forEach((candidate) => {
+      candidate.setAttribute('aria-selected', String(candidate.dataset.readerPick === key));
+      candidate.tabIndex = candidate === pick ? 0 : -1;
+    });
+    if (key === current) return;
+    current = key;
+    clearTimeout(swapTimer);
+    if (reduced) { render(key); return; }
+    view.classList.add('is-swapping');
+    swapTimer = setTimeout(() => { render(key); view.classList.remove('is-swapping'); }, 160);
+  };
+
+  picks.forEach((pick, index) => {
+    pick.addEventListener('click', () => show(pick.dataset.readerPick, pick));
+    pick.addEventListener('pointerenter', (event) => { if (event.pointerType === 'mouse') show(pick.dataset.readerPick, pick); });
+    pick.addEventListener('keydown', (event) => {
+      const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+      if (!step) return;
+      event.preventDefault();
+      const next = picks[(index + step + picks.length) % picks.length];
+      next.focus();
+      show(next.dataset.readerPick, next);
+    });
+  });
+
+  render(current);
+  show(current, picks[0]);
+}
+
 const year = document.getElementById('year');
 if (year) year.textContent = new Date().getFullYear();
