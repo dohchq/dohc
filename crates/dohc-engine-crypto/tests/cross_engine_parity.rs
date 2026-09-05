@@ -8,14 +8,13 @@
 //! 1. A TS ciphertext decrypts in Rust to the expected plaintext (byte-exact).
 //! 2. The AAD binds workspace+path: a ciphertext sealed for path A does not
 //!    decrypt under path B's AAD — it fails closed.
-//! 3. A TS key-envelope UNWRAPS in Rust to the expected data key.
 //!
 //! The complementary "re-encrypt with the same IV → byte-identical
 //! ciphertext+tag" proof lives as an inline unit test in `src/aead.rs`, because
 //! it needs the deterministic `seal_with_iv` (gated behind `test-util` so
 //! production consumers cannot reuse a nonce).
 
-use dohc_engine_crypto::{CryptoError, SealedSecret, SecretDataKey, envelope, open};
+use dohc_engine_crypto::{CryptoError, SealedSecret, SecretDataKey, open};
 use serde_json::Value;
 
 fn load(fixture: &str) -> Value {
@@ -112,24 +111,4 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
 
     // Sanity: under the correct path it still opens.
     assert!(open(&key, workspace, str_field(a, "path"), &sealed_a).is_ok());
-}
-
-#[test]
-fn ts_key_envelope_unwraps_to_the_expected_data_key() {
-    let fixture = load("ts_key_envelope.json");
-    let passphrase = str_field(&fixture, "passphrase");
-    let workspace = str_field(&fixture, "workspaceId");
-    let envelope_json = str_field(&fixture, "envelopeJson");
-    let expected_key = hex(str_field(&fixture, "dataKeyHex"));
-
-    let key = envelope::unwrap(envelope_json, passphrase, workspace)
-        .unwrap_or_else(|e| panic!("unwrap TS envelope: {}", e.code()));
-    // Round-trip proof without exposing the key elsewhere: re-wrap+unwrap and a
-    // seal/open cycle would also work, but a direct byte compare via a fresh
-    // seal is the tightest. Compare by re-deriving the expected key handle.
-    let expected = SecretDataKey::from_bytes(&expected_key).unwrap();
-    assert_eq!(
-        key, expected,
-        "unwrapped data key must match the TS input key"
-    );
 }

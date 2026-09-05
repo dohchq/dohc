@@ -13128,8 +13128,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
                     | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
                     dohc_engine_crypto::CryptoError::DecryptFailed
                     | dohc_engine_crypto::CryptoError::InvalidKeyLength
-                    | dohc_engine_crypto::CryptoError::KeyFileMalformed
-                    | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+                    | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
                 },
                 _ => ErrorCode::InvalidParams,
             };
@@ -13228,8 +13227,7 @@ fn map_domain_code(error: DomainError) -> ErrorCode {
             | dohc_engine_crypto::CryptoError::InvalidBase64 => ErrorCode::InvalidParams,
             dohc_engine_crypto::CryptoError::DecryptFailed
             | dohc_engine_crypto::CryptoError::InvalidKeyLength
-            | dohc_engine_crypto::CryptoError::KeyFileMalformed
-            | dohc_engine_crypto::CryptoError::EnvelopeUnwrapFailed => ErrorCode::Internal,
+            | dohc_engine_crypto::CryptoError::KeyFileMalformed => ErrorCode::Internal,
         },
         DomainError::PayloadTooLarge { .. } => ErrorCode::PayloadTooLarge,
         DomainError::WorkspaceNotFound
