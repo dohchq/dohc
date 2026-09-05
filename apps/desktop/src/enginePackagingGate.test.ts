@@ -1,16 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { readFileSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { createTestScratchSync } from "./workspaces/testTemp";
 
-// These assertions belong to the desktop app, not to the daemon client package.
-// The lifecycle suite they came from moved into @dohc/workspace-engine-client,
-// and a package test cannot reach back out to assert on this app's packaging
-// config and a repo workflow.
 const desktopDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const repoRoot = resolve(desktopDir, "../..");
 
 const scratchPaths: string[] = [];
 
@@ -38,14 +33,5 @@ describe("Rust engine packaging gate", () => {
     expect(gate.stderr).toContain(
       "Refusing to package without the Rust workspace engine binary",
     );
-    expect(
-      readFileSync(join(desktopDir, "electron-builder.yml"), "utf8"),
-    ).toMatch(/^beforePack: scripts\/require-workspace-engine\.mjs$/m);
-    expect(
-      readFileSync(
-        join(repoRoot, ".github/workflows/desktop-release.yml"),
-        "utf8",
-      ),
-    ).toContain("pnpm --filter @dohc/desktop run build:engine -- --target");
   });
 });

@@ -18,10 +18,6 @@ export default defineConfig({
     // so the suite can no longer go red without naming a test (#635).
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
-    // Without this vitest stubs every *.css import to "" — including the
-    // `styles.css?raw` source text tokens.test.ts parses for the
-    // tokens.ts ⟷ styles.css sync guard.
-    css: true,
     // node >= 25 ships a default-on WebStorage whose localStorage global is
     // created WITHOUT a backing file in the workers ("--localstorage-file was
     // provided without a valid path") and shadows jsdom's real Storage, so

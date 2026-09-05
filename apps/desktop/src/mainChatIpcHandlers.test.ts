@@ -1405,9 +1405,8 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
   });
 });
 
-// The write gate driven through the real handler factories. The source pins
-// in main.chatSecurity.test.ts prove the gate's POSITION; these prove that a
-// refusal stops the store.
+// The write gate driven through the real handler factories: a refusal must
+// stop the store, not only precede it.
 describe("chat scope write gate", () => {
   type ShareAccess = "view" | "comment" | "edit";
   interface ShareChatScope {

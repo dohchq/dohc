@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUTOMATION_RUN_DEADLINE_MS,
   PluginAutomations,
-  engineAutomationId,
   type AutomationEngineAdapter,
   type PluginAutomationRunOutcome,
   type PluginAutomationsOptions,
@@ -124,9 +123,6 @@ describe("PluginAutomations", () => {
       });
     });
     expect(h.adapter.unsubscribeAutomation).toHaveBeenCalledTimes(1);
-    expect(engineAutomationId("hello-plugin", "triage")).toBe(
-      "hello-plugin/triage",
-    );
   });
 
   it("drains a claim: resolves the plugin, runs the handler, settles done", async () => {

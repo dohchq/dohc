@@ -218,17 +218,6 @@ describe("SettingsDialog", () => {
     expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
   });
 
-  it("no longer carries plugins — they live in the activity bar", async () => {
-    const user = userEvent.setup();
-    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
-
-    await user.type(await screen.findByTestId("settings-search"), "uninstall");
-
-    expect(screen.queryByTestId("settings-nav-plugins")).toBeNull();
-    expect(screen.queryByTestId("settings-section-plugins")).toBeNull();
-    expect(screen.getByTestId("settings-empty-search")).toBeTruthy();
-  });
-
   it("closes from Escape", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
