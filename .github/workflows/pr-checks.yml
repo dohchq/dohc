@@ -232,6 +232,9 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Desktop system dependencies
+        run: pnpm exec playwright install-deps chromium
+
       - name: Desktop boot and persistence
         run: xvfb-run -a pnpm qa:smoke
 

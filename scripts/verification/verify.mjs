@@ -1,12 +1,19 @@
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join, matchesGlob, resolve } from "node:path";
 import { prepare, assertPrepared, sourceFingerprint } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
+import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
+function treeState() {
+  return readTreeState(
+    (command) => { try { return git(command.split(" ").slice(1)); } catch { return null; } },
+    () => { try { return existsSync(resolve(repoRoot, git(["rev-parse", "--git-path", "logs/HEAD"]))); } catch { return null; } },
+  );
+}
 export function selectedGates(files, workflow) {
   const yaml = require("js-yaml");
   const document = yaml.load(workflow);
@@ -44,21 +51,29 @@ export async function verify(args) {
   const job = jobIndex < 0 ? null : args[jobIndex + 1];
   if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
+  const baseCommit = base ? git(["rev-parse", "--verify", `${base}^{commit}`]) : null;
   const files = base ? [...new Set([
-    ...git(["diff", "--name-only", `${base}...HEAD`]).split(/\r?\n/),
+    ...git(["diff", "--name-only", `${baseCommit}...HEAD`]).split(/\r?\n/),
     ...(mode === "plan" ? git(["diff", "--name-only", "HEAD"]).split(/\r?\n/).concat(git(["ls-files", "--others", "--exclude-standard"]).split(/\r?\n/)) : []),
   ])].filter(Boolean) : [];
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   const requiredGates = selectedGates(files, workflow);
   if (job && !requiredGates[job]) throw new Error(`The ${job} job is not selected by this diff.`);
   const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
-  if (mode === "plan") { console.log(JSON.stringify({ base, files, gates }, null, 2)); return; }
+  if (mode === "plan") { console.log(JSON.stringify({ base, baseCommit, files, gates }, null, 2)); return; }
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, scope: job ?? "all", root: repoRoot, base, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "", requiredGates, gates, steps: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", root: repoRoot, base, baseCommit, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "", requiredGates, gates, steps: [], treeReadings: [{ step: "start", state: treeState() }], output, verdict: "RUNNING" };
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const startSource = { engine: sourceFingerprint("engine"), desktop: sourceFingerprint("desktop") };
+  function checkTree(name) {
+    report.treeReadings.push({ step: name, state: treeState() });
+    report.provenance = classifyTreeProvenance(report.treeReadings);
+    save();
+    if (report.provenance.status !== "PASS") throw new Error(report.provenance.reason);
+    if (Object.entries(startSource).some(([kind, hash]) => sourceFingerprint(kind) !== hash)) throw new Error("Source changed during verification. The result cannot prove the starting checkout.");
+  }
   let database;
   async function step(name, command, commandArgs, env = process.env) {
     const started = Date.now();
@@ -68,7 +83,7 @@ export async function verify(args) {
     try { result = await run(command, commandArgs, { env, log: row.log }); row.verdict = "PASS"; }
     catch (error) { row.verdict = "FAIL"; throw error; }
     finally { row.seconds = (Date.now() - started) / 1000; save(); }
-    if (git(["rev-parse", "HEAD"]) !== report.commit || Object.entries(startSource).some(([kind, hash]) => sourceFingerprint(kind) !== hash)) throw new Error("Source changed during verification. The result cannot prove the starting checkout.");
+    checkTree(name);
     return result;
   }
   save();
@@ -80,6 +95,7 @@ export async function verify(args) {
     if (mode !== "pr" || gates.js) {
       await prepare({ output });
       report.build = assertPrepared(); save();
+      checkTree("prepare");
     }
     if (mode === "pr" && gates.rust) {
       const pins = require("js-yaml").load(workflow).env;
@@ -87,7 +103,7 @@ export async function verify(args) {
         const result = await step(`cargo-${tool}-version`, "cargo", [tool, "--version"]);
         if (result.stdout.split(/\r?\n/)[0].split(/\s+/)[1] !== pins[variable]) throw new Error(`Install cargo-${tool} ${pins[variable]} to match the workflow.`);
       }
-      await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"]);
+      await step("rust", process.execPath, ["tools/rust-engine-program/run-rust-checks.mjs"], { ...process.env, CARGO_TARGET_DIR: join(repoRoot, "target") });
       await step("rust-verdict", process.execPath, ["tools/rust-engine-program/require-ci-pass-verdict.mjs", join(output, "rust.log")]);
     }
     if (mode === "pr" && gates.js) {
@@ -106,6 +122,7 @@ export async function verify(args) {
       if (mode !== "e2e" && report.desktop.skipped) throw new Error("The mandatory desktop smoke test was skipped.");
       assertPrepared();
     }
+    checkTree("finish");
     report.verdict = "PASS";
   } catch (error) { report.verdict = "FAIL"; report.error = error.message; throw error; }
   finally {
