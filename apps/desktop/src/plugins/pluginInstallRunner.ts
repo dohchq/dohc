@@ -14,7 +14,7 @@ import { delay, errorMessage } from "./pluginShared";
 const MAX_LOG_ENTRIES = 500;
 const PLUGIN_INSTALL_SERVICE_NAME = "dohc.plugin.install";
 // Bounded fallback when terminate() itself reports it never sent the
-// request (CodeRabbit #779 R20) — short because this only fires on that
+// request — short because this only fires on that
 // abnormal path, not the normal exit-gated resolution every other job
 // takes.
 export const TERMINATE_FAILURE_GRACE_MS = 5_000;
@@ -28,8 +28,8 @@ export const INSTALL_TREE_TEARDOWN_CAP_MS = INSTALL_TREE_STOP_GRACE_MS + 2_000;
 
 // CodeRabbit #779 R18 (Critical): this install's cwd is a copy of
 // plugin-authored source, whose pnpm-lock.yaml/.npmrc the plugin author
-// controls. Forwarding this app's full process.env let a plugin-supplied
-// .npmrc interpolate any ambient credential (auth tokens, cloud creds) into
+// controls. Forwarding this app's full process.env let a plugin-supplied.
+// Npmrc interpolate any ambient credential (auth tokens, cloud creds) into
 // a request to a registry the plugin itself points at — npm-family config
 // resolution reads `${VAR}` references straight out of the environment.
 // Only inherit what pnpm and the tools it shells out to (git, tar) actually
@@ -65,8 +65,7 @@ function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
   // all and a plugin-supplied .npmrc chose the registry. Measured against the
   // staged pnpm@11.20.0: with a snapshot .npmrc naming its own registry,
   // npm_config_registry lost and pnpm fetched every dependency from it;
-  // PNPM_CONFIG_REGISTRY wins, because env outranks a project .npmrc
-  // (#779 round 8 D1).
+  // PNPM_CONFIG_REGISTRY wins, because env outranks a project .npmrc.
   env.PNPM_CONFIG_REGISTRY = "https://registry.npmjs.org/";
   env.PNPM_CONFIG_STORE_DIR = pnpmPaths.storeDir;
   env.PNPM_CONFIG_CACHE_DIR = pnpmPaths.cacheDir;
@@ -89,7 +88,7 @@ function buildPluginInstallEnv(pnpmPaths: PluginPnpmPaths): NodeJS.ProcessEnv {
 // readable only from pnpm-workspace.yaml, which --ignore-workspace ignores
 // and the snapshot rejects outright.
 //
-// `pnpm patch` application is NOT gated by --ignore-scripts: patches are
+// `pnpm patch` application is not gated by --ignore-scripts: patches are
 // applied and only the postinstall hooks after them are skipped
 // (building/during-install/src/index.ts:241-250). It is unreachable today
 // because patchedDependencies lives in pnpm-workspace.yaml only
@@ -109,12 +108,11 @@ export const PLUGIN_INSTALL_ARGS = [
   "--node-linker=isolated",
   // pnpm's own defaults, restated where nothing can outrank them: a CLI flag
   // beats every config layer. The pinned pnpm@11.20.0 takes these two
-  // settings from pnpm-workspace.yaml and pnpm 10 took them from a project
-  // .npmrc — both files are plugin-authored, and this install runs before any
+  // settings from pnpm-workspace.yaml and pnpm 10 took them from a project.
+  // Npmrc — both files are plugin-authored, and this install runs before any
   // approval gate. Measured against the staged pnpm: with a malicious
   // pnpm-workspace.yaml, either these flags or --ignore-workspace alone keeps
-  // the tree inside the snapshot, and removing both lets it out
-  // (#779 round 8 D1).
+  // the tree inside the snapshot, and removing both lets it out.
   "--modules-dir=node_modules",
   "--virtual-store-dir=node_modules/.pnpm",
 ] as const;
@@ -138,7 +136,7 @@ export interface PluginInstallProcessHandle {
   /** The install child's own pid, when it has one. Teardown signals its
    * descendants too: pnpm shells out to git and tar, and killing only the
    * pnpm process leaves those writing into the snapshot while the failed
-   * install's artifacts are being removed (#779 round 7 B3). */
+   * install's artifacts are being removed. */
   readonly pid: number | undefined;
   stdout: NodeJS.ReadableStream | null;
   stderr: NodeJS.ReadableStream | null;
@@ -147,7 +145,7 @@ export interface PluginInstallProcessHandle {
   /** True once the termination request was actually sent (Electron's
    * utilityProcess.kill() can return false, e.g. before the child has a
    * PID) — false here means no exit event may ever follow, so the caller
-   * must not wait for one unbounded (CodeRabbit #779 R20). */
+   * must not wait for one unbounded. */
   terminate(): boolean;
 }
 
@@ -236,8 +234,8 @@ function pushLog(
 // A raw stream "data" chunk boundary can land mid-line — pushLog alone
 // would then record each half as its own log entry, and lockfileMismatch's
 // later re-join with "\n" inserts a newline exactly where the token was
-// split, breaking substring matches like "ERR_PNPM_OUTDATED_LOCKFILE"
-// (CodeRabbit #779 R17). This buffers each stream's own partial trailing
+// split, breaking substring matches like "ERR_PNPM_OUTDATED_LOCKFILE".
+// This buffers each stream's own partial trailing
 // line across chunks instead of assuming one chunk is one or more whole
 // lines.
 function createStreamLineBuffer(
@@ -300,7 +298,7 @@ function lockfileMismatch(logs: PluginInstallLogEntry[]): boolean {
  * `forceRound` is that second round. The caller must await it before it
  * reports teardown complete: a SIGTERM-ignoring descendant is still alive and
  * still writing until the SIGKILL lands, and the pipeline discards the
- * staging tree the moment this install returns (#779 round 10 B2).
+ * staging tree the moment this install returns.
  */
 async function signalInstallTree(
   pid: number | undefined,
@@ -413,7 +411,7 @@ async function declaredDependencyCount(snapshotRoot: string): Promise<number> {
  *
  * A redirected install leaves the snapshot with no node_modules, which the
  * lifecycle scan cannot tell apart from a healthy zero-dependency install —
- * so this check, not that one, makes the redirect visible (#779 round 8 D1).
+ * so this check, not that one, makes the redirect visible.
  * A truncated install leaves the same absence, and pnpm writes
  * node_modules/.modules.yaml only once an install completes — so a snapshot
  * that declares dependencies and has no .modules.yaml did not install, no
@@ -519,7 +517,7 @@ async function runInstallJob(
     // modulePath is the file that was actually forked (the pnpm-runner
     // wrapper on the production path, pnpmEntry only on the test-supplied
     // forkProcess path) — name what really failed to start, not always
-    // pnpmEntry (CodeRabbit #779 R19).
+    // pnpmEntry.
     return failure(
       "spawn-failed",
       `pnpm could not start from ${modulePath}: ${errorMessage(error)}`,
@@ -565,7 +563,7 @@ async function runInstallJob(
         if (!sent) {
           // terminate() reports it never sent the request (e.g. the child
           // has no PID yet) — no exit event may ever follow, so this cannot
-          // wait for one unbounded (CodeRabbit #779 R20).
+          // wait for one unbounded.
           pushLog(
             logs,
             "system",

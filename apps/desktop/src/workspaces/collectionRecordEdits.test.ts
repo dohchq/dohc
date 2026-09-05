@@ -103,7 +103,7 @@ describe("setCollectionRecordFields", () => {
     ).resolves.toEqual({ path: "tasks/one.md" });
 
     expect(context.openedPaths).toEqual(["tasks/one.md"]);
-    // ONE journaled update carrying the agent's origin, settled before release.
+    // One journaled update carrying the agent's origin, settled before release.
     expect(log.order).toEqual(["apply", "settle", "close"]);
     expect(log.journaled).toEqual([
       {

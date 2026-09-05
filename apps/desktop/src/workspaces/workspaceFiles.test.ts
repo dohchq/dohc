@@ -40,7 +40,7 @@ beforeEach(async () => {
   root = await createTestScratch("dohc-files-");
 });
 
-// One probe instead of process.platform: whether THIS filesystem treats
+// One probe instead of process.platform: whether this filesystem treats
 // case variants as the same file decides which move semantics apply.
 async function caseInsensitiveFs(): Promise<boolean> {
   const dir = await createTestScratch("dohc-case-");
@@ -312,7 +312,7 @@ describe("listFiles", () => {
     );
   });
 
-  it("returns EMPTY folders so the tree can render them", async () => {
+  it("returns empty folders so the tree can render them", async () => {
     await mkdir(join(root, "empty", "nested"), { recursive: true });
     const result = await listFiles(root);
     expect(result.files).toEqual([]);
@@ -456,7 +456,7 @@ describe("movePath", () => {
     expect(existsSync(join(root, "team"))).toBe(false);
   });
 
-  it("rejects traversal/absolute/reserved on BOTH sides", async () => {
+  it("rejects traversal/absolute/reserved on both sides", async () => {
     await writeFile(join(root, "a.md"), "");
     await expect(movePath(root, "../a.md", "b.md")).rejects.toThrow(/traversal/);
     await expect(movePath(root, "a.md", "../../b.md")).rejects.toThrow(/traversal/);
@@ -491,7 +491,7 @@ describe("movePath", () => {
       const names = await readdir(root);
       expect(names).toContain("README.md");
     } else {
-      // Case-sensitive fs: README.md is a DISTINCT file; creating it first
+      // Case-sensitive fs: README.md is a distinct file; creating it first
       // must refuse the move (realpaths differ — no carve-out).
       await writeFile(join(root, "README.md"), "other");
       await expect(movePath(root, "readme.md", "README.md")).rejects.toThrow(
@@ -608,7 +608,7 @@ describe("deletePath", () => {
     ).toBe("a");
   });
 
-  it("keeps BOTH same-basename files when fallback deletes share a timestamp tick", async () => {
+  it("keeps both same-basename files when fallback deletes share a timestamp tick", async () => {
     // Multi-select delete of a/readme.md + b/readme.md runs back-to-back —
     // the same Date.now() tick — and POSIX rename silently clobbers. The
     // collision-resistant trash name must keep both recoverable.
@@ -628,7 +628,7 @@ describe("deletePath", () => {
   });
 
   it("refuses a symlinked .dohc/trash — fallback never relocates outside the workspace", async () => {
-    // The resolveWorkspaceMetadataDir threat one level deeper: a REAL .dohc
+    // The resolveWorkspaceMetadataDir threat one level deeper: a real.dohc
     // carrying `trash -> <outside>`. mkdir{recursive} no-ops on the existing
     // symlink-to-dir, so only the post-mkdir lstat check can catch it.
     const outside = await createTestScratch("dohc-attacker-");
@@ -645,7 +645,7 @@ describe("deletePath", () => {
 
   it("names the squatter when a FILE sits at .dohc/trash — never a raw errno", async () => {
     // A plain file at .dohc/trash made mkdir{recursive} throw raw
-    // "EEXIST: file already exists, mkdir …" (#544): no constraint, no next
+    // "EEXIST: file already exists, mkdir …": no constraint, no next
     // step, on the very path dohc advertises as the recovery location. The
     // refusal must name .dohc/trash, what squats it, and the way out.
     await mkdir(join(root, ".dohc"), { recursive: true });
@@ -665,7 +665,7 @@ describe("deletePath", () => {
       /reserved/,
     );
     await expect(deletePath(root, ".", rejectingTrash)).rejects.toThrow(/invalid/);
-    // A regular file reached THROUGH a symlinked ancestor still escapes: lstat
+    // A regular file reached through a symlinked ancestor still escapes: lstat
     // follows the ancestor link, realpath of the leaf resolves outside the
     // root, and containment refuses it.
     const outside = await createTestScratch("dohc-outside-");
@@ -731,7 +731,7 @@ describe("collectZipEntries", () => {
 
     const { entries } = await collectZipEntries(root);
     expect(entries.map((entry) => entry.path).sort()).toEqual(["b.md", "notes/a.md"]);
-    // The fd-based bounded read returns the FULL bytes (not a truncated/empty
+    // The fd-based bounded read returns the full bytes (not a truncated/empty
     // buffer) — guards the open→fstat→read loop against an off-by-one.
     const byPath = new Map(
       entries.map((entry) => [entry.path, Buffer.from(entry.data).toString("utf8")]),
@@ -740,7 +740,7 @@ describe("collectZipEntries", () => {
     expect(byPath.get("notes/a.md")).toBe("alpha");
   });
 
-  it("keeps POSIX-distinct .GIT content in ZIP exports", async () => {
+  it("keeps POSIX-distinct .GIT content in zip exports", async () => {
     await mkdir(join(root, ".GIT"), { recursive: true });
     await writeFile(join(root, ".GIT", "file.md"), "owned");
 
@@ -787,13 +787,13 @@ describe("collectZipEntries", () => {
       collectZipEntries(root, "many", {
         includeArchivePath: () => false,
       }),
-      "MUTATION: excluded projection files are buffered before owner replacement",
+      "excluded projection files are buffered before owner replacement",
     ).resolves.toMatchObject({ entries: [] });
     // 30s because this one writes 2001 real files — an I/O budget, not a logic
-    // budget (#372). Scoped to this test: the other 58 in this file measured
+    // budget. Scoped to this test: the other 58 in this file measured
     // under 1s on a loaded box, and a file-wide bump would multiply how long a
     // genuine hang takes to surface. The old 15s bound was measured from
-    // inside: 13.0s on a 24-process load, 2026-08-03 (#568).
+    // inside: 13.0s on a 24-process load, 2026-08-03.
   }, 30_000);
 
   it("exports mounted-share paths (read surface, not a write)", async () => {
@@ -810,7 +810,7 @@ describe("collectZipEntries", () => {
     expect(entries.map((entry) => entry.path)).toEqual(["alex/docs/brief.md"]);
   });
 
-  it("keeps secret-classified files out of archives (codex P2)", async () => {
+  it("keeps secret-classified files out of archives", async () => {
     await writeFile(join(root, "notes.md"), "fine");
     await writeFile(join(root, ".env"), "API_KEY=hunter2");
     await mkdir(join(root, "config"), { recursive: true });
@@ -862,7 +862,7 @@ describe("copyIntoWorkspace", () => {
     expect(await readFile(join(root, "notes (2).md"), "utf8")).toBe("incoming");
   });
 
-  it("fits collision variants within NAME_MAX for near-limit basenames (codex P2)", async () => {
+  it("fits collision variants within NAME_MAX for near-limit basenames", async () => {
     const outside = await createTestScratch("dohc-import-");
     // 251 chars + ".md" = 254 bytes — legal, but stem + " (2)" would exceed
     // NAME_MAX without truncation and abort the batch with ENAMETOOLONG.
@@ -928,10 +928,10 @@ describe("copyIntoWorkspace", () => {
     ).rejects.toThrow(/not a workspace folder/);
   });
 
-  it("refuses a symlinked ANCESTOR in the target folder (reserved-space smuggle, codex P2)", async () => {
+  it("refuses a symlinked ANCESTOR in the target folder", async () => {
     const outside = await createTestScratch("dohc-import-");
     await writeFile(join(outside, "receipt.png"), "png-bytes");
-    // link -> shared-with-me resolves INSIDE the workspace, so realpath
+    // link -> shared-with-me resolves inside the workspace, so realpath
     // containment alone would pass while the copy lands in reserved space.
     await mkdir(join(root, SHARED_WITH_ME_FOLDER, "alex"), { recursive: true });
     await symlink(join(root, SHARED_WITH_ME_FOLDER), join(root, "link"), "dir");
@@ -980,16 +980,16 @@ describe("importDroppedPaths", () => {
       [root],
     );
     // Only the real regular file imports. The directory, the symlink (refused
-    // BEFORE it follows to target.md), and the relative path are all skipped —
+    // before it follows to target.md), and the relative path are all skipped —
     // and the skip count says so instead of the batch silently shrinking.
     expect(outcome).toEqual({ imported: ["doc.md"], skipped: 3 });
     expect(existsSync(join(root, "target.md"))).toBe(false);
   });
 
-  it("refuses a symlink pointing at a secret OUTSIDE the workspace (exfil vector)", async () => {
+  it("refuses a symlink pointing at a secret outside the workspace (exfil vector)", async () => {
     // A compromised renderer forging droppedPaths could plant a symlink to a
     // secret and rely on realpath-then-isFile to copy the SECRET's bytes into
-    // the (possibly cloud-synced) workspace. lstat-ing the ORIGINAL source
+    // the (possibly cloud-synced) workspace. lstat-ing the original source
     // refuses the link before it ever resolves to the target.
     const secrets = await createTestScratch("dohc-secrets-");
     await writeFile(join(secrets, "id_rsa"), "PRIVATE KEY");
@@ -1029,7 +1029,7 @@ describe("importDroppedPaths", () => {
 
   it("still refuses a .dohc source reached through a symlinked ANCESTOR (canonical containment)", async () => {
     // The accepted ancestor-symlink residual (a real leaf under a symlinked dir
-    // imports) must NOT defeat the one location gate we DO enforce: the .dohc
+    // imports) must not defeat the one location gate we DO enforce: the.dohc
     // refusal runs on realpath(source), so an ancestor alias to another
     // workspace's metadata is still canonicalized and refused.
     const otherRoot = await createTestScratch("dohc-other-");
@@ -1064,7 +1064,7 @@ describe("importDroppedPaths", () => {
 // The trash ladder is several renames, and it re-checks the source between
 // them. This is the decision it makes, separated from the I/O because an
 // EACCES on that second look is not arrangeable here -- and it is the case
-// that carried the defect: a check that FAILED was reported as a change.
+// that carried the defect: a check that failed was reported as a change.
 describe("trash ladder stop classification", () => {
   const entry = { ino: 7n, dev: 3n };
 
@@ -1105,10 +1105,10 @@ describe("trash ladder stop classification", () => {
   });
 });
 
-// A copy that fails has to say WHICH thing failed: the name being too long for
+// A copy that fails has to say which thing failed: the name being too long for
 // this filesystem, or the source not being there. Both answer ENOENT on
 // Windows, and a missing source answers ENOENT everywhere -- so reading the
-// second as the first silently SKIPS a source that should abort the batch.
+// second as the first silently skips a source that should abort the batch.
 describe("copy length-refusal classification", () => {
   // What entryCharBudget answers for a Windows folder, and for every other
   // platform, respectively.
@@ -1166,7 +1166,7 @@ describe("copy end-probe classification", () => {
   });
 });
 
-// Arithmetic says an over-budget name COULD be refused for length; it cannot
+// Arithmetic says an over-budget name could be refused for length; it cannot
 // say it WAS. On a long-path-aware host the budget is not the real limit -- a
 // 300-character path works -- so an ENOENT there means something vanished.
 // Predicting from the budget silently counted that as `skipped`, and nobody
@@ -1197,14 +1197,14 @@ describe("import surfaces a vanished source instead of skipping it", () => {
   });
 
   // The narrowest instance of the same defect: the check and the copy
-  // disagreed about what "exists" means. `copyFile` FOLLOWS the source link and
+  // disagreed about what "exists" means. `copyFile` Follows the source link and
   // answered ENOENT for a link whose target is gone; the guard asked `lstat`,
   // which answers about the LINK, said the source was still there, and let the
   // ladder shorten the name until the source counted as skipped.
   //
   // Mutation: ask `lstat` for the source again and this test fails with a bare
   // ENOENT that names a path the user can plainly see. No deep folder is
-  // needed for it: every ENOENT is probed BEFORE the length arithmetic, so the
+  // needed for it: every ENOENT is probed before the length arithmetic, so the
   // over-budget case is the length ladder's own test, not this one.
   it("names a dangling symbolic link instead of skipping it", async () => {
     const base = await mkdtemp(join(tmpdir(), "dohc-dangling-"));
@@ -1216,7 +1216,7 @@ describe("import surfaces a vanished source instead of skipping it", () => {
       // The link itself is right there -- that is why lstat got it wrong.
       expect((await lstat(source)).isSymbolicLink()).toBe(true);
 
-      // The reason and the instruction come BEFORE the name: this renders in a
+      // The reason and the instruction come before the name: this renders in a
       // one-line truncate span, and a basename runs to 255 characters, so
       // leading with it truncates away everything the user needs.
       await expect(copyIntoWorkspace(root, [source])).rejects.toThrow(
@@ -1287,9 +1287,8 @@ describe("import surfaces a vanished source instead of skipping it", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("creates a file under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const path = await createFile(root, "..cache/today.md", "cached text");
-    expect(path).toBe("..cache/today.md");
+    expect(path, "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe("..cache/today.md");
     expect(await readFile(join(root, "..cache", "today.md"), "utf8")).toBe("cached text");
   });
 });

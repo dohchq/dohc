@@ -14,14 +14,14 @@ import {
   type EngineDaemonClient,
 } from "./engineDaemonLifecycle";
 
-// Every cross-machine wait in this file carries this bound (#568). Each
+// Every cross-machine wait in this file carries this bound. Each
 // relaunch runs the startup smoke against a real temporary directory, so a
 // wait's duration is honest fs work plus whatever else the machine is doing.
 // Measured 2026-08-03 on a 24-process load (4 copies of this suite plus 4
 // each of five desktop suites, 3 waves, 12 runs): every wait whose subject
 // arrived completed within 2.5s; 15s is 6x that, and the 20s test deadline
 // still fails a genuine hang as itself. The rolling-window failures that
-// same load produced (6/12 and 3/12 runs) were NOT slow waits — the crash
+// same load produced (6/12 and 3/12 runs) were not slow waits — the crash
 // landed while the replacement's startup smoke was still in flight, so it
 // was spent on the burst budget and the window signal never existed to wait
 // for. Those tests now await the real became-healthy signal below.
@@ -40,7 +40,7 @@ const HEALTHY_RESET_MS = 20;
 // attempt, including the successful ones, and only the healthy-reset timer
 // clears it — so a low maxRestarts makes those tests depend on a real timer
 // firing between crashes, and a loaded run that delays it ends them on the
-// BURST terminal instead of the window terminal under test. None of them needs
+// burst terminal instead of the window terminal under test. None of them needs
 // more than 6 attempts, so a budget this high can never fire and the window
 // stays the only way they can reach terminal. The burst budget has its own
 // tests above.
@@ -50,7 +50,7 @@ class FakeClient implements EngineDaemonClient {
   readonly requests: Request[] = [];
   readonly cancelledRequestIds: number[] = [];
   closed = false;
-  // WHICH kill path ran. The real EngineClient rejects everything in flight
+  // Which kill path ran. The real EngineClient rejects everything in flight
   // with this code, and a caller that retries through a relaunch reads it to
   // tell a replacement from a deliberate shutdown. A fake that only recorded
   // `closed = true` could not tell the two apart at all.
@@ -126,7 +126,7 @@ class SelfExitingClient extends FakeClient {
   ): void {
     if (this.closed) return;
     super.finishClose(cause);
-    // A REAL child's "exit" is an event-loop delivery: node cannot dispatch it
+    // A real child's "exit" is an event-loop delivery: node cannot dispatch it
     // inside the close() call that killed the process. Delivering it
     // synchronously here would let a fake reorder failure reports in a way the
     // real transport never can. A microtask keeps that ordering honest without
@@ -152,7 +152,7 @@ afterEach(() => {
   }
 });
 
-// The first launch's startup smoke runs BEHIND start() now, so a test that
+// The first launch's startup smoke runs behind start() now, so a test that
 // resets `client.requests` after start() must let the smoke finish first or
 // its tail requests bleed into the assertion window. workspace.close is the
 // smoke's last request, and this fake answers synchronously on push — once
@@ -195,9 +195,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("fans daemon events out to lifecycle handlers across restarts", async () => {
-    // MUTATION: dropping the client.onEvent re-subscription in launchOnce (or
-    // the handler fan-out) leaves `seen` empty and this test fails — in daemon
-    // mode capture events are the ONLY history-refresh signal.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const emitters: ((event: Event) => void)[] = [];
     class EventfulClient extends FakeClient {
@@ -231,7 +228,7 @@ describe("Rust engine daemon lifecycle", () => {
       });
       expect(seen).toEqual([1]);
 
-      // The daemon restarts: the SAME lifecycle handler keeps receiving from
+      // The daemon restarts: the same lifecycle handler keeps receiving from
       // the replacement client without re-registering.
       exits[0]?.(1, null);
       await vi.waitFor(() => expect(emitters.length).toBeGreaterThan(1), WAIT);
@@ -248,9 +245,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("fires onLaunch for the first launch and again after a restart", async () => {
-    // MUTATION: dropping the onLaunch call in launchOnce leaves `launches`
-    // at 0 — a capture event that died with a previous daemon's transport
-    // would then never be compensated by a relaunch repaint.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     let launches = 0;
     const lifecycle = new EngineDaemonLifecycle({
@@ -386,11 +380,11 @@ describe("Rust engine daemon lifecycle", () => {
       await lifecycle.start();
       exits[0]?.(1, null);
       // A crash exercises the budget it is aimed at only if it lands on a
-      // HEALTHY generation: one that dies during its own startup smoke is a
+      // healthy generation: one that dies during its own startup smoke is a
       // failed launch attempt instead, and the rolling window and reset
       // timer never see it. The smoke runs against a real temporary
       // directory, so under load it outlasts any fixed sleep — exactly how
-      // this family failed on a busy box (#568). onLaunch fires after
+      // this family failed on a busy box. onLaunch fires after
       // running=true: the real became-healthy signal.
       await vi.waitFor(() => expect(live).toBe(2), WAIT);
       // The budget-reset timer is armed just before onLaunch, so after the
@@ -407,8 +401,6 @@ describe("Rust engine daemon lifecycle", () => {
     // The crash-every-31s daemon: every generation outlives healthyResetMs, so
     // the attempt budget never ends the run and only the rolling window can
     // reach terminal — the one signal the desktop turns into a dialog.
-    // MUTATION: drop the window check in restartAfterExit and this test times
-    // out waiting for a terminal failure that never arrives.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let live = 0;
@@ -434,7 +426,7 @@ describe("Rust engine daemon lifecycle", () => {
     try {
       await lifecycle.start();
       for (let generation = 0; generation < 3; generation += 1) {
-        // Only a HEALTHY generation's crash spends a window slot — see the
+        // Only a healthy generation's crash spends a window slot — see the
         // restart-budget test above for why a sleep cannot stand in for
         // this signal. Then outlive the healthy window: these are the
         // healthy gaps the issue describes, the ones a budget reset by
@@ -461,9 +453,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("forgets restarts older than the rolling window", async () => {
-    // MUTATION: drop the timestamp pruning in restartAfterExit and restarts
-    // spaced four windows apart accumulate, so the third crash ends terminal
-    // and both assertions below fail.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let live = 0;
@@ -505,11 +494,6 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("spends one window slot per crash, not per launch attempt", async () => {
-    // MUTATION: move the recordCrash call inside the attempt loop and the
-    // flaky first attempt of every crash burns a second slot — terminal
-    // arrives at crash 2 with only 2 generations launched, so both counts
-    // below fail. A run that spends one attempt per crash cannot tell the two
-    // accountings apart; this needs a crash that costs more than one attempt.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let launchCount = 0;
@@ -567,8 +551,6 @@ describe("Rust engine daemon lifecycle", () => {
     // performance.now() does not advance while a Linux host sleeps, so a
     // laptop that wakes after the window would find its old crashes still
     // "recent" and terminate on the next one.
-    // MUTATION: drop the wall-clock half of the filter and the retained
-    // entries end this run terminal at the third crash.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let live = 0;
@@ -619,8 +601,6 @@ describe("Rust engine daemon lifecycle", () => {
     // The inverse host fault: an NTP or VM correction moves the wall clock
     // backwards, stranding entries in the future where no wall comparison
     // ever expires them.
-    // MUTATION: drop the monotonic half of the filter and the stranded
-    // entries end this run terminal at the third crash.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const terminalFailures: Error[] = [];
     let live = 0;
@@ -670,8 +650,6 @@ describe("Rust engine daemon lifecycle", () => {
   it("restarts a daemon that is alive but stopped answering engine.ping", async () => {
     // The wedge from the issue: the process never exits, so the restart path —
     // which starts at process exit — is never reached on its own.
-    // MUTATION: remove the wedge detector (or its reportWedge kill) and no
-    // failure is ever reported, no client is closed, and no relaunch happens.
     const clients: SelfExitingClient[] = [];
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -715,7 +693,7 @@ describe("Rust engine daemon lifecycle", () => {
         // window's crash accounting.
         ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
       ]);
-      // The probe must carry no wire deadline. EngineClient arms its OWN timer
+      // The probe must carry no wire deadline. EngineClient arms its own timer
       // for any request that names one and rejects when it fires, so a deadline
       // here would turn a wedged daemon's silence into a rejection the detector
       // reads as life — and none of the above would ever happen against the
@@ -733,18 +711,15 @@ describe("Rust engine daemon lifecycle", () => {
   });
 
   it("ends a wedge loop at PRODUCTION cadence, on a driven clock", async () => {
-    // THE RATIO, not the numbers. Every other wedge test compresses the probe
+    // The ratio, not the numbers. Every other wedge test compresses the probe
     // cadence, and compression changes the one relationship that was broken:
     // a wedge cycle is 3 intervals + 3 expiries = 225s, so the shared crash
     // window (10 exits per 600s) can never hold more than 3 of them, and
     // healthyResetMs (30s) is shorter than the cycle so the burst budget
     // resets every generation too. A daemon that wedged after every launch
-    // therefore restarted forever — #412's own complaint, for wedges.
+    // therefore restarted forever — the own complaint, for wedges.
     //
     // So this test changes NO production constant. It drives a clock instead.
-    // MUTATION: delete the consecutive-wedge budget and leave wedge exits to
-    // the shared 10-in-600s crash contract -> no terminal failure ever
-    // arrives and this fails on an empty list.
     const realSetTimeout = globalThis.setTimeout;
     vi.useFakeTimers();
     let now = 0;
@@ -807,12 +782,12 @@ describe("Rust engine daemon lifecycle", () => {
       expect(clients.every((client) => client.closed)).toBe(true);
       // The cadence check pins the wedge budget's SPEED, which the terminal
       // message alone cannot: a slower probe cadence would produce the same
-      // message, minutes later. It must NOT be an elapsed-driven-time
+      // message, minutes later. It must not be an elapsed-driven-time
       // ceiling: the driven clock advances one step per real event-loop
       // turn, and the relaunch smoke's real I/O consumes turns, so driven
       // milliseconds measure machine load — honest runs measured 650s to
       // 965s of driven time under a 24-process load, overlapping any bound
-      // a tripled interval (830s measured) could fail (#568/#580). Probe
+      // a tripled interval (830s measured) could fail. Probe
       // ARRIVAL SPACING inside one wedged generation is load-invariant:
       // it is pure fake-timer arithmetic, one expiry plus one interval
       // after the previous probe, 45s + 30s = 75s at the production
@@ -839,11 +814,9 @@ describe("Rust engine daemon lifecycle", () => {
   }, 30_000);
 
   it("clears the wedge streak when a generation answers a probe", async () => {
-    // A daemon that wedges, is restarted, ANSWERS, then wedges again is being
+    // A daemon that wedges, is restarted, answers, then wedges again is being
     // recovered — not looping. Only consecutive wedges with nothing answered
     // in between are evidence, so this daemon must keep getting restarted.
-    // MUTATION: drop the consecutiveWedges reset in probeOnce and the second
-    // wedge condemns a daemon that demonstrably answered between the two.
     const clients: SelfExitingClient[] = [];
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -891,8 +864,6 @@ describe("Rust engine daemon lifecycle", () => {
     // `transport-error`, so a plain close tells an editor session the daemon
     // went away on purpose and it stays failed across the restart already
     // under way — AUDIT-KILLREC, reached the second way.
-    // MUTATION: call client.close() in reportWedge instead and the recorded
-    // cause is "closed", which no retry path rebinds through.
     const clients: SelfExitingClient[] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
@@ -925,8 +896,6 @@ describe("Rust engine daemon lifecycle", () => {
     // does not return until the user dismisses the modal. Reporting first
     // would leave the wedged child alive behind that dialog for as long as it
     // stands, while this lifecycle already called the engine gone.
-    // MUTATION: move the kill below reportFailure and the wedged client is
-    // still open when the consumer regains control -> [false].
     const clients: SelfExitingClient[] = [];
     const closedWhenReported: boolean[] = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -967,9 +936,6 @@ describe("Rust engine daemon lifecycle", () => {
     // behind hundreds of megabytes, and the wait on that channel is untimed.
     // No expiry can both survive that and still catch a wedge, so silence is
     // measured as NO TRAFFIC AT ALL rather than as no reply.
-    // MUTATION: drop the inboundActivity check in sendPing and this daemon —
-    // which never answers a probe but never stops sending — is killed as
-    // wedged, restarting a daemon that is draining real work.
     const clients: SelfExitingClient[] = [];
     const failures: Error[] = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -989,7 +955,7 @@ describe("Rust engine daemon lifecycle", () => {
       onFailure: (error) => failures.push(error),
     });
 
-    // Output keeps arriving for OTHER callers throughout, exactly as it would
+    // Output keeps arriving for other callers throughout, exactly as it would
     // while the daemon writes down a queued backlog. No probe is ever answered.
     const traffic = setInterval(() => {
       for (const client of clients) client.inbound += 1;
@@ -1013,13 +979,10 @@ describe("Rust engine daemon lifecycle", () => {
 
   it("counts a reply that lands between probe windows", async () => {
     // Probes do not tile the timeline: the next one starts an interval after
-    // the previous RESOLVED, so with a 20ms expiry and a 30ms interval the
+    // the previous resolved, so with a 20ms expiry and a 30ms interval the
     // windows are [0,20], [50,70], [100,120] — and the gaps belong to nobody.
     // A reply delivered at 30ms, just after its own probe expired, is the
     // likeliest late frame there is. It still proves the daemon is turning.
-    // MUTATION: baseline the activity count inside sendPing per window instead
-    // of carrying it across verdicts, and every one of these replies lands in
-    // a gap, is discarded, and this healthy daemon is killed as wedged.
     const clients: SelfExitingClient[] = [];
     const failures: Error[] = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -1067,8 +1030,6 @@ describe("Rust engine daemon lifecycle", () => {
     // A saturated daemon answers: the request supervisor resolves a queued
     // request's own deadline before it competes for an execution slot, so the
     // probe comes back as a refusal rather than as silence.
-    // MUTATION: count a rejected probe as an expiry, or drop the expiry bound
-    // below the answer latency, and this kills a healthy daemon.
     const clients: FakeClient[] = [];
     const failures: Error[] = [];
     let probes = 0;
@@ -1110,8 +1071,6 @@ describe("Rust engine daemon lifecycle", () => {
   it("does not call a restarting daemon wedged", async () => {
     // A probe can still be in flight when its generation dies. The replacement
     // must not inherit that silence.
-    // MUTATION: drop the liveness re-check after the probe settles and the
-    // stale probe reports a wedge against a daemon that is already gone.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
     const clients: FakeClient[] = [];
     const failures: Error[] = [];
@@ -1537,9 +1496,6 @@ describe("Rust engine daemon lifecycle", () => {
     // The hello/helloAck handshake already proves the daemon is alive and
     // speaking the protocol; the desktop blocks window creation on start(),
     // so the disk-heavy workspace smoke must not gate it.
-    // MUTATION: await the smoke inside the first launch again and start()
-    // cannot resolve while the smoke's workspace.open is still unanswered —
-    // this test times out inside lifecycle.start().
     let openRequest: Request | undefined;
     let releaseOpen!: (response: Response) => void;
     const client = new FakeClient((request) => {
@@ -1595,9 +1551,7 @@ describe("Rust engine daemon lifecycle", () => {
     // — the same error the blocking smoke used to throw out of start(). The
     // kill is a replacement (transport-error, like a wedge kill), and its
     // exit carries the failure into the ordinary restart machinery, whose
-    // relaunch runs the BLOCKING smoke and takes over.
-    // MUTATION: swallow the deferred smoke's rejection, or drop its kill,
-    // and no failure is ever reported and no replacement is launched.
+    // relaunch runs the blocking smoke and takes over.
     const clients: SelfExitingClient[] = [];
     const failures: Array<{ error: Error; terminal: boolean }> = [];
     const lifecycle = new EngineDaemonLifecycle({
@@ -1632,7 +1586,7 @@ describe("Rust engine daemon lifecycle", () => {
         ["smoke integrity check failed", false],
         ["Rust engine daemon exited unexpectedly with signal SIGTERM.", false],
       ]);
-      // Each generation's smoke opened its OWN workspace id: a background
+      // Each generation's smoke opened its own workspace id: a background
       // smoke and a restart's blocking smoke can overlap in one process, and
       // two live opens must never share one.
       const smokeOpenId = (client: FakeClient | undefined) =>
@@ -1680,13 +1634,13 @@ describe("Rust engine daemon lifecycle", () => {
     expect(failures[0]?.terminal).toBe(false);
     // Proves the 20ms request timer drove the failure rather than a hang
     // or a mis-armed slower timer. This bound stays at its original 500ms:
-    // this exact path never failed under load in 12 measured runs (#568),
+    // this exact path never failed under load in 12 measured runs,
     // and evidence borrowed from another path cannot widen a discrimination
     // bound this one never broke — widening it would let a regression that
     // delays the startup timeout to just under the ceiling pass unseen.
     expect(Date.now() - startedAt).toBeLessThan(500);
     // The kill must read as a replacement. The timeout path closes the client
-    // BEFORE the deferred smoke's handler runs, and a real client keeps its
+    // before the deferred smoke's handler runs, and a real client keeps its
     // first cause — a plain close here would classify this kill as deliberate
     // and strand retry-enabled callers across the restart it starts.
     expect(client.closeCause).toBe("transport-error");

@@ -1,32 +1,32 @@
-// Search names a Markdown LINE. The editor addresses doc POSITIONS, and
+// Search names a Markdown LINE. The editor addresses doc positions, and
 // nothing survives the Markdown parse to carry one onto the other, so the
 // mapping is rebuilt here from the same Markdown the line was numbered
 // against: which top-level block holds that line?
 //
 // The answer is APPROXIMATE by construction. Blocks are split on blank lines,
 // with the exceptions that cover how documents are actually written. Every one
-// of them was MEASURED against the real parse in lineBlocks.test.ts, not read
+// of them was measured against the real parse in lineBlocks.test.ts, not read
 // off CommonMark — several of these blocks are this editor's own, and the
 // tokenizer disagrees with the spec in places (see the ordered lists below).
 //
 //  - Some blocks END at their own last line, not at a blank one: a heading
 //    (an ATX line, or the setext underline under a paragraph), a thematic
 //    break, and a fenced code block at its closing fence.
-//  - Some blocks START without a blank line above them, interrupting what is
-//    open: a heading, a fence, a thematic break, and — under a PARAGRAPH or a
+//  - Some blocks start without a blank line above them, interrupting what is
+//    open: a heading, a fence, a thematic break, and — under a paragraph or a
 //    TABLE only — a quote, a list or a table. An ordered list interrupts only
 //    when it counts from 1, because `2.` under a paragraph is that
 //    paragraph's own text. A heading indented into a list item is that item's
 //    heading, not a new block.
 //  - Some blocks RUN THROUGH a blank line, because the next line continues
-//    them: another item of the SAME list, content indented to that item's own
+//    them: another item of the same list, content indented to that item's own
 //    content column, and the next chunk of an indented code block. A list's
-//    identity is its marker, its kind, AND whether its items carry checkboxes
+//    identity is its marker, its kind, and whether its items carry checkboxes
 //    — a checklist is a different node from a bullet list, and inverts this
-//    rule: a blank line SPLITS one. Ordered delimiters share an identity, and
+//    rule: a blank line splits one. Ordered delimiters share an identity, and
 //    ordered items accept any indented continuation. A bullet or task item
 //    still starts a new list.
-//  - A quote absorbs an UNQUOTED line as a lazy continuation until something
+//  - A quote absorbs an unquoted line as a lazy continuation until something
 //    ends that. Inside it: a quoted blank or a quoted fence for any quote, and
 //    for a callout every quoted block start. On the unquoted line itself: a
 //    list marker or raw HTML, where again a callout breaks on any ordered
@@ -71,25 +71,25 @@ type BlockKind =
   | "other";
 
 const HEADING_RE = /^[ \t]{0,3}#{1,6}(?:[ \t]|$)/;
-// A CHECKBOX item. The editor renders these as a taskList, a different node
-// from a bulletList with the OPPOSITE blank-line rule: a blank line SPLITS a
+// A checkbox item. The editor renders these as a taskList, a different node
+// from a bulletList with the opposite blank-line rule: a blank line splits a
 // task list where it joins a bullet one. Bullet markers only — `1. [ ] a` is
 // an ordinary ordered list — and the box needs a space or the line end after
 // it, or `- [ ]a` is just text.
 const TASK_RE = /^[ \t]{0,3}[-+*][ \t]+\[[ xX]\](?:[ \t]|$)/;
-// The captured marker is the list's identity: changing it starts a NEW list.
+// The captured marker is the list's identity: changing it starts a new list.
 const BULLET_RE = /^[ \t]{0,3}([-+*])(?:[ \t]|$)/;
 const ORDERED_RE = /^[ \t]{0,3}\d{1,9}([.)])(?:[ \t]|$)/;
 // A quoted LINE and the prefix stripped off it, mirroring extensions.ts
-// CALLOUT_LINE_RE and stripBlockquotePrefix EXACTLY: spaces before the `>`,
-// never a tab, and exactly one optional SPACE after it. `>\t# T` therefore
+// CALLOUT_LINE_RE and stripBlockquotePrefix exactly: spaces before the `>`,
+// never a tab, and exactly one optional space after it. `>\t# T` therefore
 // keeps its tab, which four columns in makes code rather than a heading.
 const QUOTE_LINE_RE = /^ {0,3}>/;
 const QUOTE_PREFIX_RE = /^ {0,3}> ?/;
-// A blank line, which is what ends most blocks. SPACES only — a tab-only line
+// A blank line, which is what ends most blocks. Spaces only — a tab-only line
 // is not blank here, and neither is a non-breaking space.
 const BLANK_RE = /^ *$/;
-// A COMPLETE callout header, mirroring extensions.ts CALLOUT_HEADER_RE. An
+// A complete callout header, mirroring extensions.ts CALLOUT_HEADER_RE. An
 // unclosed `> [!oops` is an ordinary blockquote, which continues lazily where
 // a callout would not.
 const CALLOUT_RE = /^\[![^\]\n]+\]/;
@@ -100,10 +100,10 @@ const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})(.*)$/;
 // A run of `=` or `-` under a paragraph is that paragraph's setext underline.
 const SETEXT_RE = /^[ \t]{0,3}(?:=+|-+)[ \t]*$/;
 // Where a list item's own content begins, which is the column a continuation
-// line has to reach. It is the ACTIVE item's marker plus the spaces after it,
+// line has to reach. It is the active item's marker plus the spaces after it,
 // so `-    item` wants five columns where `- item` wants two.
 const LIST_MARKER_RE = /^[ \t]{0,3}(?:[-+*]|\d{1,9}[.)])/;
-// Four COLUMNS with nothing open above is an INDENTED code block, which runs
+// Four COLUMNS with nothing open above is an indented code block, which runs
 // through its own blank lines and ends where the indentation stops. Columns,
 // not characters: `   \t` reaches four the same as `    ` does.
 const CODE_COLUMNS = 4;
@@ -111,7 +111,7 @@ const CODE_COLUMNS = 4;
 // Two is a paragraph. `---` under an open paragraph is a setext underline
 // instead, which SETEXT_RE claims first.
 const BREAK_RE = /^[ \t]{0,3}(?:(?:-[ \t]*){3,}|(?:\*[ \t]*){3,}|(?:_[ \t]*){3,})$/;
-// A list can interrupt a paragraph, but an ORDERED one only when it counts
+// A list can interrupt a paragraph, but an ordered one only when it counts
 // from 1: `2.` under a paragraph is that paragraph's own text.
 const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 // `[label]: destination "title"` renders NO node — it is metadata the links
@@ -120,12 +120,12 @@ const INTERRUPTING_ORDERED_RE = /^[ \t]{0,3}1[.)](?:[ \t]|$)/;
 const DEFINITION_LABEL_RE = /^[ \t]{0,3}\[[^\]]+\]:[ \t]*/;
 // A definition's title may sit alone on its own line, indented.
 const DEFINITION_TITLE_RE = /^[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\))[ \t]*$/;
-// What may follow the label: an angle-bracketed destination (which MAY hold
+// What may follow the label: an angle-bracketed destination (which may hold
 // spaces) or a bare one (which may not, and may not open with `<`), then an
 // optional title and nothing else. `[a]: <broken` is a paragraph.
 const DEFINITION_DESTINATION_RE =
   /^(?:<[^<>\n]*>|[^<\s]\S*)(?:[ \t]+(?:"[^"]*"|'[^']*'|\([^)]*\)))?[ \t]*$/;
-// A table's DELIMITER row is what tells its header row apart from an ordinary
+// A table's delimiter row is what tells its header row apart from an ordinary
 // paragraph, so the header is only a header when this follows it. Leading and
 // trailing pipes are both optional; a pipe somewhere is not, or `---` alone
 // would read as a one-column table instead of a break.
@@ -134,7 +134,7 @@ const TABLE_DELIMITER_RE =
 
 /** The cells a table row declares. The outer pipes bound the row rather than
  *  dividing it, and a BACKSLASH-escaped pipe is cell text — `A \| B | C` is
- *  two cells. A pipe inside a code span is NOT protected: the tokenizer
+ *  two cells. A pipe inside a code span is not protected: the tokenizer
  *  divides on it, and the test below holds that. */
 function cellCount(text: string): number {
   const row = text.trim();
@@ -168,7 +168,7 @@ type Fence = { marker: string; length: number };
 
 /** The line index where a standalone `$$…$$` block ends, or null when the
  *  line does not open one. `editor/extensions.ts` anchors the opener at
- *  column 0 and needs the FIRST `$$` after it to end a line — anything else
+ *  column 0 and needs the first `$$` after it to end a line — anything else
  *  is literal text, so an unclosed `$$` is not math and claims nothing. */
 function mathBlockEnd(lines: string[], start: number): number | null {
   if (!(lines[start] ?? "").startsWith("$$")) return null;
@@ -181,11 +181,11 @@ function mathBlockEnd(lines: string[], start: number): number | null {
   return null;
 }
 
-/** The LAST line of a link reference definition starting at `start`, or null
+/** The last line of a link reference definition starting at `start`, or null
  *  when there is none. The destination may sit on the line under the label
  *  and the title under that; the whole run renders no node. A label with
  *  nothing under it, or one whose destination does not parse, is ordinary
- *  text — and hiding a PARAGRAPH would shift every block after it. */
+ *  text — and hiding a paragraph would shift every block after it. */
 function definitionEnd(lines: string[], start: number): number | null {
   const line = lines[start] ?? "";
   if (leadingColumns(line) >= CODE_COLUMNS) return null;
@@ -240,7 +240,7 @@ function continuationIndent(text: string): number {
 
 function blockKind(text: string): BlockKind {
   // First: four columns of indent makes every marker below it literal code.
-  // The patterns count a tab as one CHARACTER, so `\t# H` would read as a
+  // The patterns count a tab as one character, so `\t# H` would read as a
   // heading where the parser reads four columns and calls it code.
   if (leadingColumns(text) >= CODE_COLUMNS) return "code";
   if (HEADING_RE.test(text)) return "heading";
@@ -292,7 +292,7 @@ function closesFence(text: string, fence: Fence): boolean {
 }
 
 /** A top-level block: its index, and the 1-based lines of `body` it spans.
- *  `endLine` is the line before the NEXT block opens, so the gap under a block
+ *  `endLine` is the line before the next block opens, so the gap under a block
  *  is part of its span — the same rule the index has, where a gap line
  *  resolves to the block above it. `startLine` is 0 when no block opened at or
  *  above the line asked about: an empty body, or a line above the first one. */
@@ -302,7 +302,7 @@ type LineBlock = {
   endLine: number;
 };
 
-/** PURE: the top-level block holding 1-based `line` of `body`, with the line
+/** Pure: the top-level block holding 1-based `line` of `body`, with the line
  *  span it covers — which is what lets a caller slice the block's own source
  *  and refine a landing inside it (intraBlock.ts). A line in the gap between
  *  blocks resolves to the block above it; a line past the end resolves to the
@@ -342,7 +342,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       }
       continue;
     }
-    // SPACES only. A tab-only line is not blank to this tokenizer, and
+    // Spaces only. A tab-only line is not blank to this tokenizer, and
     // neither is one holding a non-breaking space — `trim()` would call both
     // blank and split a paragraph the editor keeps whole.
     if (BLANK_RE.test(text)) {
@@ -350,7 +350,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       quoteOpen = false;
       continue;
     }
-    // A setext underline makes the OPEN paragraph a heading and ends it — the
+    // A setext underline makes the open paragraph a heading and ends it — the
     // same one-line shape an ATX heading has, so `Title\n===\nBody` is two
     // nodes. Read before the kinds below, because a lone `-` is also a bullet.
     // Four COLUMNS in it underlines nothing: the paragraph just continues.
@@ -396,7 +396,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       quoteOpen = true;
       continue;
     }
-    // A definition renders nothing, so it starts no block. Under an OPEN
+    // A definition renders nothing, so it starts no block. Under an open
     // paragraph it is not a definition at all, just that paragraph's text.
     const definition = open ? null : definitionEnd(lines, index);
     if (definition !== null) {
@@ -425,7 +425,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       (openKind === "code" && kind === "code");
     // Indented code ends where the indentation stops, blank line or not — the
     // same "ends at its own last line" shape a heading and a fence have. It
-    // cannot START under an open paragraph: there an indented line is that
+    // cannot start under an open paragraph: there an indented line is that
     // paragraph's lazy continuation, not code.
     const leavesCode = openKind === "code" && kind !== "code";
     // A table ROW is not paragraph text, so an indented line under one is a
@@ -439,7 +439,7 @@ export function blockForLine(body: string, line: number): LineBlock {
       kind === "break" ||
       leavesCode ||
       leavesTable ||
-      // A list, a table and display math interrupt a PARAGRAPH (or a table)
+      // A list, a table and display math interrupt a paragraph (or a table)
       // and nothing else — under an open LIST the same lines are that item's.
       (open &&
         (openKind === "other" || openKind === "table") &&
@@ -457,8 +457,8 @@ export function blockForLine(body: string, line: number): LineBlock {
         ((kind === "quote" && openKind !== "ordered") ||
           ((kind === "bullet" || kind === "task" || kind === "ordered") &&
             (kind !== openKind || marker !== openMarker)))) ||
-      // An UNQUOTED line under a lazily-continuing quote. This is not the
-      // quoted-body break set (round 7) and was measured apart from it: here
+      // An unquoted line under a lazily-continuing quote. This is not the
+      // quoted-body break set and was measured apart from it: here
       // the two kinds agree except on an ordered list, where a callout breaks
       // on any number and a plain quote wants one that counts from 1. Display
       // math and indented code are absorbed by both.
@@ -476,7 +476,7 @@ export function blockForLine(body: string, line: number): LineBlock {
     // list item it is that item's own heading, which is what `resumes` says.
     const opens = (kind === "heading" || interrupts || !open) && !resumes;
     if (opens) {
-      // Blocks open in document order, so the first one starting PAST `line`
+      // Blocks open in document order, so the first one starting past `line`
       // settles the answer and leaves nothing worth walking. This block's
       // first line is the line after the holder's last one.
       if (index + 1 > line) {
@@ -492,8 +492,8 @@ export function blockForLine(body: string, line: number): LineBlock {
         kind === "quote" && CALLOUT_RE.test(text.replace(QUOTE_PREFIX_RE, ""));
       quoteFence = null;
     }
-    // The item at the TOP level of this list sets the continuation column, so
-    // a later sibling with a wider marker moves it. A NESTED item does not:
+    // The item at the top level of this list sets the continuation column, so
+    // a later sibling with a wider marker moves it. A nested item does not:
     // it sits inside the open item's content, and the outer item still governs
     // what continues the list.
     if (

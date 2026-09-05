@@ -37,8 +37,8 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// #567: a quit is the one irreversible exit for set-aside drafts, so main
-// asks the renderer BEFORE it proceeds. The interesting cases are what
+// A quit is the one irreversible exit for set-aside drafts, so main
+// asks the renderer before it proceeds. The interesting cases are what
 // happens when the renderer answers late or not at all.
 describe("quit guard", () => {
   it("intercepts the first quit and asks the renderer", () => {
@@ -72,7 +72,7 @@ describe("quit guard", () => {
     expect(quit).not.toHaveBeenCalled();
   });
 
-  // #579 review r11: a renderer that has not answered may be BUSY, not dead.
+  // A renderer that has not answered may be busy, not dead.
   // The ACK window must never force-quit by itself — it asks the user, with
   // the loss named, and "Wait" leaves the drafts alone.
   it("asks the user instead of force-quitting a silent renderer, and waiting keeps the app up", async () => {
@@ -82,11 +82,8 @@ describe("quit guard", () => {
     });
     guard.beforeQuit(quitEvent());
 
-    // MUTATION (busy-renderer force quit): make the timeout approve and
-    // call quit() directly (the r10 shape). A busy renderer's drafts die
-    // with no dialog and no decision.
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(confirmForceQuit).toHaveBeenCalledTimes(1);
+    expect(confirmForceQuit, "busy-renderer force quit: make the timeout approve and call quit() directly (the r10 shape). A busy renderer's drafts die with no dialog and no decision.").toHaveBeenCalledTimes(1);
     expect(quit).not.toHaveBeenCalled();
 
     // The quit stays vetoed afterwards, so a slow renderer can still answer.
@@ -95,7 +92,7 @@ describe("quit guard", () => {
     expect(later.prevented).toBe(true);
   });
 
-  // #579 review r15: an ordinary app.quit() does not deliver this answer. A
+  // An ordinary app.quit() does not deliver this answer. A
   // renderer that wakes before its window closes runs beforeunload knowing
   // nothing of the MAIN-side dialog — no bypass, no approved ids — so it
   // vetoes the exit and opens a second warning while the guard stays
@@ -107,9 +104,7 @@ describe("quit guard", () => {
     });
     guard.beforeQuit(quitEvent());
     await vi.advanceTimersByTimeAsync(1_000);
-    // MUTATION (carry the decision): call options.quit() here instead. The
-    // waking renderer vetoes the unload the user already chose.
-    expect(forceQuit).toHaveBeenCalledTimes(1);
+    expect(forceQuit, "carry the decision: call options.quit() here instead. The waking renderer vetoes the unload the user already chose.").toHaveBeenCalledTimes(1);
     expect(quit).not.toHaveBeenCalled();
     const next = quitEvent();
     expect(guard.beforeQuit(next)).toBe("proceed");
@@ -136,7 +131,7 @@ describe("quit guard", () => {
     expect(forceQuit).not.toHaveBeenCalled();
   });
 
-  // #579 review r19: an update install pre-approves the quit BEFORE the
+  // An update install pre-approves the quit before the
   // renderer can veto its unload. If the user then goes back, the approval
   // must not outlive the quit it was granted for — otherwise the next Cmd+Q
   // proceeds without asking, reaches beforeunload with no pending intent, and
@@ -144,11 +139,9 @@ describe("quit guard", () => {
   it("drops a pre-approval when the quit it was granted for is held", () => {
     const { guard, askRenderer } = makeGuard();
     guard.approve();
-    // MUTATION (hold revokes): leave `approved` set in hold(). The next quit
-    // proceeds unasked and the renderer never gets to name the action.
     guard.hold();
     const next = quitEvent();
-    expect(guard.beforeQuit(next)).toBe("asked");
+    expect(guard.beforeQuit(next), "hold revokes: leave `approved` set in hold(). The next quit proceeds unasked and the renderer never gets to name the action.").toBe("asked");
     expect(next.prevented).toBe(true);
     expect(askRenderer).toHaveBeenCalledTimes(1);
   });
@@ -167,7 +160,7 @@ describe("quit guard", () => {
   });
 });
 
-// #579 review r12: which renderer answers for the quit. Not every window runs
+// Which renderer answers for the quit. Not every window runs
 // the workspace — the PDF export creates a hidden, preload-less one — and
 // asking IT would answer nothing while the user sees the unresponsive dialog
 // over drafts that were fully available.
@@ -184,9 +177,7 @@ describe("workspace window registry", () => {
     registry.track(first);
     registry.track(gone);
     registry.track(second);
-    // MUTATION (allLive): return every tracked window. The force path then
-    // calls destroy() on one that is already destroyed.
-    expect(registry.allLive().map((window) => window.id)).toEqual([
+    expect(registry.allLive().map((window) => window.id), "allLive: return every tracked window. The force path then calls destroy() on one that is already destroyed.").toEqual([
       "first",
       "second",
     ]);
@@ -202,10 +193,7 @@ describe("workspace window registry", () => {
     const pdfExport: FakeWindow = { id: "pdf-export", destroyed: false };
     registry.track(workspace);
 
-    // MUTATION (window targeting): pick the first live window from a list
-    // that includes untracked ones. The quit check reaches a renderer that
-    // cannot answer.
-    expect(registry.live()).toBe(workspace);
+    expect(registry.live(), "window targeting: pick the first live window from a list that includes untracked ones. The quit check reaches a renderer that cannot answer.").toBe(workspace);
     expect(registry.live()).not.toBe(pdfExport);
   });
 
@@ -224,9 +212,9 @@ describe("workspace window registry", () => {
   });
 });
 
-// #579 review r12: the renderer checks its drafts before it asks for an
+// The renderer checks its drafts before it asks for an
 // install, and a reopen can set an edit aside in the gap before main's
-// handler runs. Main asks AGAIN at the moment it would approve the quit.
+// handler runs. Main asks again at the moment it would approve the quit.
 describe("recovery boundary check", () => {
   it("blocks when the renderer reports set-aside drafts at answer time", async () => {
     let asked: number | null = null;
@@ -259,8 +247,8 @@ describe("recovery boundary check", () => {
     await expect(pending).resolves.toBe(false);
   });
 
-  // #579 review r16: the ACK window does not answer for the renderer. A busy
-  // renderer and a dead one look identical from main at ANY deadline, so
+  // The ACK window does not answer for the renderer. A busy
+  // renderer and a dead one look identical from main at any deadline, so
   // silence asks the user instead of refusing the install they asked for.
   it("asks the user when the renderer never answers, and waiting blocks", async () => {
     vi.useFakeTimers();
@@ -271,9 +259,6 @@ describe("recovery boundary check", () => {
       timeoutMs: 1_000,
     });
     const pending = checker.ask();
-    // MUTATION (silent rejection): settle the timeout as blocked without
-    // asking. A merely busy renderer then refuses the install with nothing
-    // shown to the user.
     await vi.advanceTimersByTimeAsync(1_000);
     expect(confirmProceed).toHaveBeenCalledTimes(1);
     await expect(pending).resolves.toBe(true);
@@ -287,14 +272,11 @@ describe("recovery boundary check", () => {
       timeoutMs: 1_000,
     });
     const pending = checker.ask();
-    // MUTATION (ignore the decision): settle as blocked regardless. The user
-    // chose "Install anyway" over a renderer that never answered, and the
-    // install is refused anyway.
     await vi.advanceTimersByTimeAsync(1_000);
     await expect(pending).resolves.toBe(false);
   });
 
-  // #579 review r18: once the dialog is on screen it OWNS the answer. A late
+  // Once the dialog is on screen it owns the answer. A late
   // renderer reply settling behind it either strands the user's click on a
   // request that no longer exists, or lets the install begin while the dialog
   // is still asking whether to proceed.
@@ -317,9 +299,6 @@ describe("recovery boundary check", () => {
     await vi.advanceTimersByTimeAsync(1_000);
 
     // The renderer wakes mid-dialog and says "clear".
-    // MUTATION (dialog ownership): drop the escalated guard from answer().
-    // This settles the request as clear, so the install proceeds while the
-    // user is still looking at a dialog asking whether it should.
     checker.answer(asked!, false);
     await vi.advanceTimersByTimeAsync(0);
 

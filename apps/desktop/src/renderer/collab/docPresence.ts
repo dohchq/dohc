@@ -13,9 +13,9 @@ import {
 } from "./presenceChannel";
 
 // MU-C1 — DOC co-presence: bind a Yjs Awareness to the engine mirror doc and
-// bridge it over the SAME ephemeral relay transport as chat presence, keyed by
+// bridge it over the same ephemeral relay transport as chat presence, keyed by
 // the doc's path/objectId rather than a channel. This is the design's handoff:
-// "the provider exposes the live session.doc; presence binds Yjs AWARENESS to
+// "the provider exposes the live session.doc; presence binds Yjs awareness to
 // it as the ephemeral channel." The Awareness lives on the doc so a future
 // CollaborationCaret can render remote cursors; today we surface the calm
 // "who's editing" set (names + count) for the editor's presence line.
@@ -29,7 +29,7 @@ export interface DocPresenceUser {
 }
 
 // Each publish carries the encoded Yjs awareness update plus the numeric Yjs
-// clientID (`yc`), so the receiver can apply the update AND reconcile removals
+// clientID (`yc`), so the receiver can apply the update and reconcile removals
 // (drop the awareness state of a peer that is no longer in the snapshot).
 interface DocPresenceState {
   user: DocPresenceUser;
@@ -51,7 +51,7 @@ interface DocPresenceOptions {
   topic: string;
   clientId: string;
   user: DocPresenceUser;
-  // Called with the display names of OTHER editors whenever the set changes.
+  // Called with the display names of other editors whenever the set changes.
   onPeers: (names: string[]) => void;
 }
 
@@ -72,8 +72,8 @@ function fromBase64(value: string): Uint8Array {
 }
 
 // y-protocols' applyAwarenessUpdate trusts whatever clientIDs are embedded in
-// the update — it does NOT validate ownership, so a hostile co-editor could
-// craft an update that overwrites ANOTHER peer's awareness entry (or ours).
+// the update — it does not validate ownership, so a hostile co-editor could
+// craft an update that overwrites another peer's awareness entry (or ours).
 // Walk the update's wire format (varUint count, then per entry: varUint
 // clientID, varUint clock, varString state) and return the embedded clientIDs
 // so the caller can reject updates that touch any slot but the claimed one.
@@ -137,7 +137,7 @@ export function bindDocPresence(options: DocPresenceOptions): DocPresenceBinding
       if (peer.clientId === options.clientId) continue;
       const state = peer.state as DocPresenceState | null;
       if (!state || typeof state.yc !== "number" || typeof state.update !== "string") continue;
-      // No remote peer may ever claim OUR Yjs clientID: applying such an
+      // No remote peer may ever claim our Yjs clientID: applying such an
       // update would overwrite (or clock-poison) the local awareness entry.
       if (state.yc === awareness.clientID) continue;
       // First authenticated claimant wins the slot; a different peer relaying

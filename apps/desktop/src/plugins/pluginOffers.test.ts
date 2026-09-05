@@ -251,7 +251,7 @@ describe("listOfferedPlugins", () => {
     ]);
   });
 
-  // Suppression reads the packaged manifest's OWN declared name, not the
+  // Suppression reads the packaged manifest's own declared name, not the
   // directoryName BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES iterates by — the
   // two coincide for every real shipped built-in (pinned above), but the
   // suppression check itself must not silently depend on that coincidence.
@@ -307,7 +307,7 @@ describe("listOfferedPlugins", () => {
   //
   // The same pass also pins packagedBuiltinDisplayName's own invariant (the
   // handler resolves `manifest.displayName ?? manifest.name`, never a bare
-  // displayName): null on that field must mean ONLY "not a built-in", never
+  // displayName): null on that field must mean only "not a built-in", never
   // "a built-in whose packaged manifest has nothing to call itself" — the
   // uninstall dialog reads that field's nullness as exactly that signal.
   it("declares a manifest name matching its own packaged directory, for every built-in driver", async () => {
@@ -412,9 +412,9 @@ describe("addOfferedPlugin", () => {
     await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  // On win32, rename() onto an existing FILE (unlike a directory) SUCCEEDS
+  // On win32, rename() onto an existing FILE (unlike a directory) succeeds
   // and replaces it — verified empirically. publishStaged's own upfront
-  // check has to refuse on ANY existing entry, not only a directory, or an
+  // check has to refuse on any existing entry, not only a directory, or an
   // agent's own stub file sitting at plugins/codex gets silently destroyed.
   // POSIX already refuses this through mkdir()'s EEXIST regardless of what
   // occupies the name, so this pin holds on both platforms.
@@ -443,7 +443,7 @@ describe("addOfferedPlugin", () => {
   });
 
   // Identity is the manifest id, not the directory: a plugin can be
-  // discovered under a DIFFERENT directory between an offer showing and
+  // discovered under a different directory between an offer showing and
   // this call landing (a rename, a second copy racing this one). The
   // caller re-samples existingPluginIds right before this call rather than
   // reusing whatever the offer list saw, so this must refuse the same way
@@ -506,7 +506,7 @@ describe("addOfferedPlugin", () => {
   });
 
   // The fast-path check at the top only catches what's already there before
-  // the copy starts — a concurrent creator landing DURING the copy still has
+  // the copy starts — a concurrent creator landing during the copy still has
   // to be caught by the publish step itself, right where it claims target.
   // POSIX-only: this races the mkdir() claim specifically; the Windows
   // equivalent races the rename() below instead, since only POSIX claims via
@@ -544,7 +544,7 @@ describe("addOfferedPlugin", () => {
   );
 
   // The empirical claim publishStaged's Windows path relies on: rename()
-  // there refuses to land on ANY existing directory, even an empty one —
+  // there refuses to land on any existing directory, even an empty one —
   // that alone is the no-clobber property, with no separate claim step
   // needed the way POSIX needs mkdir()'s atomic fail-on-exist.
   it.runIf(process.platform === "win32")(
@@ -640,9 +640,9 @@ describe("addOfferedPlugin", () => {
     // Forced only around the call under test: this dev host's real
     // filesystem still enforces real Windows rename semantics regardless
     // of what process.platform claims, so a retry that actually needs to
-    // publish runs under this host's TRUE platform below, exercising the
+    // publish runs under this host's true platform below, exercising the
     // already-correct branch for it — this call exists only to route
-    // THIS module's own control flow through the POSIX branch under test.
+    // this module's own control flow through the POSIX branch under test.
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
@@ -683,11 +683,11 @@ describe("addOfferedPlugin", () => {
   });
 
   // Round 11 finding 2: removeOwnedEmptyClaim used to verify only "still an
-  // empty, real directory right now" — true of ANY fresh empty directory
-  // that happens to occupy the same path, not proof it is the one THIS
+  // empty, real directory right now" — true of any fresh empty directory
+  // that happens to occupy the same path, not proof it is the one this
   // call's own mkdir() created. Something else replacing the claim in the
   // window between the mkdir landing and the failure-path cleanup, then
-  // ALSO leaving it empty, used to pass that check and get deleted anyway.
+  // also leaving it empty, used to pass that check and get deleted anyway.
   it("[POSIX] leaves a replaced claim alone instead of deleting it", async () => {
     const fixture = await createFixture();
     const target = join(fixture.workspaceRoot, "plugins", "codex");
@@ -696,7 +696,7 @@ describe("addOfferedPlugin", () => {
       code: "EACCES",
       run: async () => {
         // The claim publishStaged's own mkdir() created is replaced with a
-        // DIFFERENT empty directory at the same path — a different device
+        // different empty directory at the same path — a different device
         // and inode, indistinguishable from the original by an emptiness
         // check alone.
         await rm(target, { recursive: true, force: true });
@@ -738,7 +738,7 @@ describe("addOfferedPlugin", () => {
   // dev/ino can read as 0 on some Windows filesystems and network shares —
   // an unverifiable identity, not proof of anything. Trusting it anyway
   // would make targetIdentity's whole purpose vacuous: a zeroed "captured"
-  // identity would match any OTHER zeroed identity later, the opposite of
+  // identity would match any other zeroed identity later, the opposite of
   // what dev+ino comparison exists to catch. POSIX-only: targetIdentity is
   // only ever read for the mkdir() claim, which only POSIX takes.
   it("refuses to publish when the claim's own identity cannot be verified (zeroed dev/ino)", async () => {
@@ -846,7 +846,7 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(readFile(join(target, "keep.txt"), "utf8")).resolves.toBe("keep");
   });
 
-  // The mechanism this pins: a check on `target` followed by a SEPARATE
+  // The mechanism this pins: a check on `target` followed by a separate
   // delete call stays racy no matter how tight the gap, because Node has
   // no fd-bound recursive delete — plugins/codex itself could be swapped
   // for a junction in between. Binding the delete to a rename closes that:
@@ -891,7 +891,7 @@ describe("removeAddedOfferedPlugin", () => {
   });
 
   // The recheck this rollback runs right before restoring must genuinely
-  // observe the CURRENT state, not the state the top-of-function check saw:
+  // observe the current state, not the state the top-of-function check saw:
   // plugins/ is swapped for a junction here only after that first check
   // already passed, in the exact window the restore's own recheck exists to
   // close. Restoring blindly through it would write the mismatched content
@@ -1070,7 +1070,7 @@ describe("removeAddedOfferedPlugin", () => {
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
-    // Real work landing inside the SAME directory entry — its own identity
+    // Real work landing inside the same directory entry — its own identity
     // is untouched by this, which is exactly what makes it distinct from
     // every other case in this file.
     const target = join(fixture.workspaceRoot, "plugins", "codex");

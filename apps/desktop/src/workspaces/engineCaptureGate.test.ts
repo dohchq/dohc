@@ -19,7 +19,7 @@ import {
 } from "./workspaceSettingsFile";
 
 import { createTestScratch } from "./testTemp";
-// The gate now REQUIRES daemon sessions, matching production, where main.ts
+// The gate now requires daemon sessions, matching production, where main.ts
 // quits the app if the daemon does not start. These tests only assert null vs
 // non-null and never invoke an engine operation, so the sessions throw on any
 // use: if that ever changes, the test says so loudly instead of quietly
@@ -57,8 +57,8 @@ async function writeOptOut(root: string): Promise<void> {
   });
 }
 
-// #483: the capture decision and the notice's cause must come from ONE read.
-// The gate is that read, so it must hand back WHY it recorded nothing.
+// The capture decision and the notice's cause must come from one read.
+// The gate is that read, so it must hand back why it recorded nothing.
 describe("captureForFlaggedWorkspace decision", () => {
   it("returns the unreadable-file reason with the null capture", async () => {
     const root = await createTestScratch("dohc-engine-gate-");
@@ -80,18 +80,18 @@ describe("captureForFlaggedWorkspace decision", () => {
     expect(decision.warning).toContain(
       join(root, ".dohc", WORKSPACE_SETTINGS_FILE),
     );
-    // The retry-path refusal rewrites this exact SUFFIX (#541): a template
+    // The retry-path refusal rewrites this exact suffix: a template
     // that stops ending with it would silently hand retry callers the
     // restart instruction again. Pinned against the real producer.
     expect(decision.warning).toMatch(/ Then restart dohc\.$/);
   });
 
-  // #540: the gate owns the shared-view rule. The decision carries the
+  // The gate owns the shared-view rule. The decision carries the
   // cause, and the settings file — which a shared view does not even
   // materialize — is never read (a read would produce a warning or a
   // capture; the assertions refuse both).
   //
-  // Every level answers the same way (#646 PR3): an edit recipient's writes
+  // Every level answers the same way: an edit recipient's writes
   // reach the engine because the app writes them there itself, so no share
   // view needs a watcher.
   it("gives a shared view a null capture with the share cause, before any read", async () => {
@@ -142,7 +142,7 @@ describe("captureForFlaggedWorkspace decision", () => {
   });
 });
 
-// #541: "not enabled" asserts the user's opt-out. After a failed capture
+// "not enabled" asserts the user's opt-out. After a failed capture
 // build — or an unreadable settings file — that assertion is false, so the
 // refusal must name the established cause instead.
 describe("engineOffRefusal", () => {
@@ -172,7 +172,7 @@ describe("engineOffRefusal", () => {
     expect(refusal).not.toContain("not enabled");
   });
 
-  // Codex P2 on #583 (round 2): the instruction must be the one that works
+  // Codex P2 on #583: the instruction must be the one that works
   // on the caller's path. A retained session keeps the failed decision until
   // restart; a transient dispatch open is rebuilt on the next attempt, so
   // telling that caller to restart the whole app is false. Both messages are
@@ -185,7 +185,7 @@ describe("engineOffRefusal", () => {
     );
   });
 
-  // Codex P2 on #583 (round 6): the noun is the FEATURE the user invoked —
+  // Codex P2 on #583: the noun is the FEATURE the user invoked —
   // the word their surface shows — never an internal implementation noun.
   // Pinned per caller, so swapping or hard-wiring a noun fails.
   it("names each caller's own feature, with its own opt-out grammar", () => {
@@ -217,7 +217,7 @@ describe("engineOffRefusal", () => {
     );
   });
 
-  it("names the unreadable settings file when that read is the cause (#483)", () => {
+  it("names the unreadable settings file when that read is the cause", () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
     const refusal = engineOffRefusal(
@@ -248,7 +248,7 @@ describe("engineOffRefusal", () => {
     );
   });
 
-  // Codex P2 on #583 (round 3): on a retry path the entry is gone, so fixing
+  // Codex P2 on #583: on a retry path the entry is gone, so fixing
   // the named file and trying again rebuilds the capture — the warning's
   // restart instruction is the retained path's, not this one's. The file
   // stays named either way.
@@ -293,7 +293,7 @@ describe("createDispatchRunRelease", () => {
       isRetained: () => retained,
       close: async () => {
         // The open that raced us: it waits for this close, then builds a
-        // fresh RETAINED activity — whose capture decision persists.
+        // fresh retained activity — whose capture decision persists.
         retained = true;
       },
     });
@@ -313,7 +313,7 @@ describe("createDispatchRunRelease", () => {
 });
 
 // Codex P2 on #583: releasing a dispatch's transient open deletes the
-// workspace's activity entry, so a status read AFTER the release sees
+// workspace's activity entry, so a status read after the release sees
 // cause-less defaults — and the refusal falls back to "not enabled", the
 // false cause the refusal exists to remove. The helper owns the order.
 describe("releaseAndRefuseWithoutCapture", () => {
@@ -339,7 +339,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
         settleKeptOpen: async () => undefined,
       }),
     ).rejects.toThrow(
-      // The release CLOSED the entry, so the next attempt rebuilds the
+      // The release closed the entry, so the next attempt rebuilds the
       // capture — no restart needed.
       "dohc could not start Chats for this workspace. Try again.",
     );
@@ -347,9 +347,9 @@ describe("releaseAndRefuseWithoutCapture", () => {
     expect(released).toBe(true);
   });
 
-  // Codex P2 rounds 3–5 on #583: when the release KEEPS an entry, the
+  // Codex P2 rounds 3–5 on #583: when the release keeps an entry, the
   // post-state itself answers. A retention that landed during the close may
-  // have REOPENED the workspace with a WORKING capture — refusing then would
+  // have reopened the workspace with a working capture — refusing then would
   // be the last false message standing.
   it("proceeds when the retention's reopen built a working capture", async () => {
     const reopenedCapture = {};
@@ -365,7 +365,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
     ).resolves.toBeUndefined();
   });
 
-  // Codex P2 on #583 (round 6): the reopener's capture builds AFTER the
+  // Codex P2 on #583: the reopener's capture builds after the
   // release resolves — an immediate read sees a state still forming and
   // refuses a workspace that works moments later. The judgment must settle
   // behind the kept open first.
@@ -374,7 +374,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
     await expect(
       releaseAndRefuseWithoutCapture({
         capture: null,
-        // The reopen finishes building DURING the settle, not before it —
+        // The reopen finishes building during the settle, not before it —
         // and only after a real async hop, so a fire-and-forget call
         // (mutating the await away) cannot satisfy this pin.
         settleKeptOpen: async () => {
@@ -389,9 +389,9 @@ describe("releaseAndRefuseWithoutCapture", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("says restart from the KEPT entry's own cause when its capture is still null", async () => {
+  it("says restart from the kept entry's own cause when its capture is still null", async () => {
     // Our transient entry blamed a build failure; the entry the release kept
-    // (the reopened one) has ITS own cause — an unreadable settings file.
+    // (the reopened one) has its own cause — an unreadable settings file.
     // The refusal must state the live entry's cause, not our stale snapshot.
     let released = false;
     await expect(
@@ -454,7 +454,7 @@ describe("releaseAndRefuseWithoutCapture", () => {
 
 describe("dispatchScanEligible", () => {
   it("an open session keeps scanning after a mid-session opt-out, and stops after reopen", async () => {
-    // The flag applies at the NEXT open (SettingsDialog + captureFor both
+    // The flag applies at the next open (SettingsDialog + captureFor both
     // retain the open-session value). A chat sent after opting out while the
     // workspace is still open must still dispatch, or it stays pending
     // forever; only the reopen — where captureFor reads the flag — opts out.

@@ -104,9 +104,12 @@ async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
     assert_eq!(unread, json!([]));
 
     let attached_close = call(&transport, &cli, 4, "workspace.close").await;
-    // MUTATION: routing attached close through owner teardown makes this fail.
     let flushed = call(&transport, &desktop, 5, "capture.flush").await;
-    assert_eq!(flushed["settled"], json!(true));
+    assert_eq!(
+        flushed["settled"],
+        json!(true),
+        "routing attached close through owner teardown makes this fail."
+    );
     assert_eq!(
         attached_close,
         json!({ "closed": false, "attachmentClosed": true })
@@ -117,8 +120,6 @@ async fn cli_read_attaches_to_full_relay_binding_and_close_preserves_owner() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attach_respects_the_open_handle_cap() {
-    // MUTATION: insert the attachment without the MAX_OPEN_HANDLES check and
-    // this loop mints handles far past the cap instead of refusing.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -150,9 +151,6 @@ async fn read_attach_respects_the_open_handle_cap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn read_attachment_over_a_full_owner_cannot_reach_mutating_methods() {
-    // MUTATION: keep the owner's mode on the attached clone (drop the
-    // `attached.mode = WorkspaceOpenMode::ReadOnly` line) and this write
-    // reaches the desktop's Full binding through a "read" handle.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("shadow marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));

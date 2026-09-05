@@ -27,7 +27,7 @@ const applySlashState: Dispatch<SetStateAction<SlashCommandState>> = (next) => {
 };
 
 // Mirrors MarkdownEditor's dohcDecorations plugin order: the slash-command
-// plugin sees keys BEFORE block exit (menu navigation wins), while block exit
+// plugin sees keys before block exit (menu navigation wins), while block exit
 // sees nested code-block exits before continuation. The whole set runs before
 // StarterKit's keymaps (Mod-Enter beats HardBreak).
 const testChrome = Extension.create({

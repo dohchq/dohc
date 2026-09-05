@@ -13,8 +13,7 @@ import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 // on startup), and the package default is 30s — so a slow launch would be killed by
 // vitest before its own deadline could fire, and even a 20s launch would eat the
 // budget the assertions need. File-level rather than package-level: only some of
-// the test files here spawn a relay child, and the rest keep the tighter default
-// (#372).
+// the test files here spawn a relay child, and the rest keep the tighter default.
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
 
 // Some sandboxes refuse loopback listens with EPERM. Every test below spawns
@@ -149,7 +148,7 @@ async function spawnRunningRelay(
       new Error(`${reason}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not report a port\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
+    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts
     childStdout.on("data", (chunk) => {
       stdout += String(chunk);
       const match = /SYNC_RELAY_LISTENING host=([^\s]+) port=(\d+)/u.exec(stdout);
@@ -306,7 +305,7 @@ function exchangeLink(
   });
 }
 
-// Push as an ARBITRARY authenticated user (WS-MU-C0 forgery tests). The
+// Push as an arbitrary authenticated user (WS-MU-C0 forgery tests). The
 // test-auth seam maps `Bearer test:<userId>` -> actor.userId, so this proves the
 // relay derives the pusher's identity server-side and cannot be told otherwise.
 async function postJsonAs(
@@ -655,7 +654,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     expect(await logLength()).toBe(2);
   });
 
-  // Gate finding: the transport must cap request bodies AT THE STREAM. A
+  // Gate finding: the transport must cap request bodies AT the STREAM. A
   // client streaming an oversized body is cut off mid-upload (413 and/or a
   // destroyed socket) instead of being fully buffered, and the server stays
   // healthy afterwards.
@@ -698,7 +697,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       writeMore();
     });
 
-    // The stream was cut off BEFORE the client could deliver the full body
+    // The stream was cut off before the client could deliver the full body
     // (pre-fix, the server buffered all 48MB and only then rejected).
     expect(outcome.sentAll).toBe(false);
     if (outcome.status !== null) expect(outcome.status).toBe(413);
@@ -707,7 +706,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     const health = await fetch(`${baseUrl}/health`);
     expect(health.status).toBe(200);
     // High bytes on purpose. main.ts hand-rolls the node:http<->fetch adapter
-    // BECAUSE the standard one mishandles raw-byte blob traffic, and the only
+    // because the standard one mishandles raw-byte blob traffic, and the only
     // thing that can catch a regression there is reading a blob back over real
     // HTTP and comparing bytes. `Buffer.from("...")` cannot: every byte of an
     // ASCII string survives a text round trip, so a utf8-decoding adapter would
@@ -717,7 +716,7 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     const put = await putBytes(baseUrl, `/sync/${WORKSPACE_ID}/blobs/${digest}`, smallBytes);
     expect(put.status).toBe(200);
 
-    // Byte-for-byte on the way OUT, which nothing else in this package checks:
+    // Byte-for-byte on the way out, which nothing else in this package checks:
     // every other blob GET goes through createSyncRelayHandler in-process and so
     // never touches main.ts's adapter at all.
     const fetched = await fetch(`${baseUrl}/sync/${WORKSPACE_ID}/blobs/${digest}`, {
@@ -924,7 +923,7 @@ async function spawnRelayExpectExit(
     let stderr = "";
     const timeout = setTimeout(() => {
       reject(new Error(`sync relay did not exit\nstdout:\n${stdout}\nstderr:\n${stderr}`));
-    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts (#372)
+    }, 45_000); // tsx startup under load, not a hang — see presence.integration.test.ts
     child.stdout.on("data", (chunk) => {
       stdout += String(chunk);
       if (/SYNC_RELAY_LISTENING/u.test(stdout)) {

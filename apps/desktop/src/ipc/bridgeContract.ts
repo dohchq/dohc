@@ -157,11 +157,11 @@ const WORKSPACE_EDITOR_TEXT = z.string().superRefine((text, ctx) => {
 // units and UTF-8 never spends less than one byte per code unit, so this
 // character bound admits every body the engine could hold.
 //
-// Matching the STORAGE contract does not promise that every stored body
+// Matching the storage contract does not promise that every stored body
 // arrives. The daemon caps one wire string at 8 MiB (`WireLimits`,
 // `crates/dohc-engine-protocol/src/limits.rs`), so a larger body reaches the
 // renderer only by blob hydration. `versionedText.read`, the moment timeline,
-// compare rows, and conflict listing all hydrate withheld bodies (#537) — see
+// compare rows, and conflict listing all hydrate withheld bodies — see
 // VERSION_TEXT.
 //
 // One REQUEST field shares the schema — the combined conflict resolution at
@@ -205,7 +205,7 @@ const MODE_ENUM = z.enum(WORKSPACE_MODES);
 export const PickWorkspaceRootResult = PATH_STRING.nullable();
 export type PickWorkspaceRootResult = z.infer<typeof PickWorkspaceRootResult>;
 
-// The level a recipient holds on a path/version share (#646), from the same
+// The level a recipient holds on a path/version share, from the same
 // one place the relay and the engine read it. All three levels read the same
 // files today; PR2 opens comment and edit to chat, PR3 opens edit to writes.
 // The chat-channel grant's own binary access is a different field.
@@ -247,19 +247,19 @@ export const WorkspaceSummary = z.object({
   rootPath: PATH_STRING,
   kind: KIND_ENUM,
   mode: MODE_ENUM,
-  // Present only on a shared VIEW received through a relay share grant
-  // (PR 18): the workspace is read-only, refreshed from the share, and
+  // Present only on a shared VIEW received through a relay share grant:
+  // the workspace is read-only, refreshed from the share, and
   // carries who shared it for honest copy. `ended` marks a revoked share.
   shareView: z
     .object({
-      // Absent ONLY on a `damaged` marker whose stored record had no readable
+      // Absent only on a `damaged` marker whose stored record had no readable
       // id. Never invented: a placeholder id is a lie the rest of the app
-      // could act on. A marker WITHOUT one is damaged by definition — every
+      // could act on. A marker without one is damaged by definition — every
       // live-share action (refresh, dismiss) is addressed by share id, so a
       // marker that cannot name itself cannot be presented as a live share.
       shareId: z.string().min(1).max(200).optional(),
       granterEmail: z.string().min(3).max(320).nullable(),
-      // The pinned level (#646). Absent ONLY when `damaged` says the stored
+      // The pinned level. Absent only when `damaged` says the stored
       // grant could not be read. The banner states the level; it never
       // decides anything with it.
       access: SHARE_ACCESS.optional(),
@@ -280,18 +280,18 @@ export const WorkspaceSummary = z.object({
   shareMounts: z
     .array(
       z.object({
-        // Both REQUIRED, damaged or not: they are what the Remove action is
+        // Both required, damaged or not: they are what the Remove action is
         // addressed by (`shareId`) and what names the folder on disk
         // (`label`). A row that cannot supply them cannot be acted on, so it
         // is the one shape that is dropped instead of kept.
         shareId: z.string().min(1).max(200),
         label: z.string().min(1).max(64),
         granterEmail: z.string().min(3).max(320).nullable(),
-        // The pinned level (#646), so a mount the relay no longer lists can
-        // still say what it grants. Absent ONLY when `damaged` says the
+        // The pinned level, so a mount the relay no longer lists can
+        // still say what it grants. Absent only when `damaged` says the
         // stored grant could not be read.
         access: SHARE_ACCESS.optional(),
-        // The stored grant is unreadable. The row is KEPT so the mount stays
+        // The stored grant is unreadable. The row is kept so the mount stays
         // removable: its folder is on disk, and dropping the row would strand
         // it with no way back through the UI. It shows no level, refreshes
         // nothing, and says what happened.
@@ -354,7 +354,7 @@ export type WorkspaceFileEntry = z.infer<typeof WorkspaceFileEntry>;
 
 export const ListWorkspaceFilesResult = z.object({
   files: z.array(WorkspaceFileEntry),
-  // Additive (Phase E3 explorer): directories ride along so EMPTY folders
+  // Directories ride along so empty folders
   // appear in the tree. Optional so older fixtures/consumers keep parsing;
   // the main-side walk always provides it.
   folders: z.array(PATH_STRING).optional(),
@@ -365,7 +365,7 @@ export const ListWorkspaceFilesResult = z.object({
 });
 export type ListWorkspaceFilesResult = z.infer<typeof ListWorkspaceFilesResult>;
 
-// ---- Collections (Phase 2 views) ----
+// ---- Collections ----
 //
 // list/get/query delegate to the engine's collection index through the
 // workspace-engine client. Results are the engine's contract shapes from
@@ -607,7 +607,7 @@ export type CreateWorkspaceFolderPayload = z.infer<
   typeof CreateWorkspaceFolderPayload
 >;
 
-// rename === move: ONE engine — F2, inline rename, and drag-drop all call it.
+// rename === move: one engine — F2, inline rename, and drag-drop all call it.
 export const MoveWorkspacePathPayload = z.object({
   workspaceId: WORKSPACE_ID,
   fromPath: PATH_STRING,
@@ -649,7 +649,7 @@ export type ExportWorkspaceZipResult = z.infer<typeof ExportWorkspaceZipResult>;
 
 // Document export ("Copy as Markdown" ships purely through the renderer's own
 // clipboard call — no IPC needed). Markdown/HTML/PDF export all land through
-// this ONE channel. For `kind: "markdown"` the content is the document's raw
+// this one channel. For `kind: "markdown"` the content is the document's raw
 // markdown (frontmatter included), written verbatim to a .md file — the
 // text-first export. For HTML/PDF the renderer builds the same self-contained
 // HTML (title + rendered body + inline styles, no external assets); main
@@ -684,9 +684,9 @@ export const ExportDocumentFileResult = z.object({
 });
 export type ExportDocumentFileResult = z.infer<typeof ExportDocumentFileResult>;
 
-// Explorer context menu: the renderer names WHAT was right-clicked, main
+// Explorer context menu: the renderer names what was right-clicked, main
 // builds the native Menu from main-owned labels over the closed
-// EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the SAME invoke
+// EXPLORER_MENU_COMMANDS tuple (channels.ts) and resolves the same invoke
 // with the chosen id (null = dismissed). No event channel needed.
 export const ShowExplorerMenuPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -720,7 +720,7 @@ export type ShowWorkbenchMenuResult = z.infer<typeof ShowWorkbenchMenuResult>;
 
 export const ImportWorkspaceFilesPayload = z.object({
   workspaceId: WORKSPACE_ID,
-  // OS drag-in (Phase E3): absolute source paths resolved by the PRELOAD
+  // OS drag-in: absolute source paths resolved by the PRELOAD
   // (webUtils.getPathForFile) from a drop event. TRUST DELTA vs the dialog
   // flow: these are renderer-supplied — main re-validates every one through
   // the picker-grade import path (importDroppedPaths: regular files only,
@@ -822,10 +822,10 @@ export type WriteWorkspaceAssetPayload = z.infer<
 >;
 
 // The `/image` slash command's file picker. A renderer <input type="file">
-// CANNOT be opened at a chosen starting directory (browser security), so the
+// cannot be opened at a chosen starting directory (browser security), so the
 // picker is a MAIN-process dialog that opens at the workspace ROOT — where a
 // user's images actually live. Main reads the chosen files itself (it already
-// has fs access), so the whole pick is ONE round trip: the renderer gets the
+// has fs access), so the whole pick is one round trip: the renderer gets the
 // bytes it needs for the existing write+insert path, never learns an absolute
 // path, and needs no second read IPC.
 export const PickImageFilesPayload = z.object({
@@ -833,9 +833,9 @@ export const PickImageFilesPayload = z.object({
 });
 export type PickImageFilesPayload = z.infer<typeof PickImageFilesPayload>;
 
-// One picked image: its ORIGINAL basename (never a path — the renderer only
+// One picked image: its original basename (never a path — the renderer only
 // slugifies it into an asset filename), the media type main resolved from the
-// extension, and the bytes under the SAME 20MB bound the asset write enforces.
+// extension, and the bytes under the same 20MB bound the asset write enforces.
 // Oversize picks are dropped in main exactly as paste drops them in the
 // renderer, so this array only ever carries files that are writable.
 const PICKED_IMAGE_NAME = z
@@ -957,7 +957,7 @@ export const ReadWorkspaceGraphPayload = z.object({
 export type ReadWorkspaceGraphPayload = z.infer<typeof ReadWorkspaceGraphPayload>;
 
 export const WorkspaceGraphResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  // Partial-freshness marker; see ListChatFileMentionsResult.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   nodes: z.array(WorkspaceGraphNode).max(2000),
   edges: z.array(WorkspaceGraphEdge).max(10000),
@@ -968,9 +968,9 @@ export const WorkspaceGraphResult = z.object({
 });
 export type WorkspaceGraphResult = z.infer<typeof WorkspaceGraphResult>;
 
-// Backlinks ("Linked mentions"): the OPEN document's inbound links, derived
+// Backlinks ("Linked mentions"): the open document's inbound links, derived
 // read-only in main from the same source graph. `path` is the open file; the
-// result lists every OTHER file that links to it with a highlighted snippet per
+// result lists every other file that links to it with a highlighted snippet per
 // mention. Bounds mirror workspaceGraph's MAX_BACKLINK_* caps (kept as literals
 // here so this shared contract never imports the main-only fs module).
 export const GetBacklinksPayload = z.object({
@@ -1124,7 +1124,7 @@ const SYNC_STATUS_BASE_FIELDS = {
   ]),
   pendingChangeCount: z.number().int().nonnegative(),
   lastSyncedAtMs: z.number().nullable(),
-  // Additive (Phase E2 status bar): HOW MANY files conflict, not just that
+  // How many files conflict, not just that
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
@@ -1133,34 +1133,34 @@ const SYNC_STATUS_BASE_FIELDS = {
   // recorder no longer exists. Drives the persistent "History is off"
   // notice. Optional so older producers/fixtures keep parsing.
   historyRecordingOff: z.boolean().optional(),
-  // Additive (#483): why main's open-time settings read could not trust the
+  // Why main's open-time settings read could not trust the
   // file, when it could not. The notice states this cause instead of blaming
   // the Settings toggle. Bounded like the settings warning it carries: the
   // sentence names a full path. Optional so older producers/fixtures keep
   // parsing.
   settingsWarning: z.string().min(1).max(4600).optional(),
-  // #505: true when the recorder could not be BUILT at workspace open — a
+  // True when the recorder could not be built at workspace open — a
   // failure, not a decision. `historyRecordingOff` is true as well (nothing
   // records either way), so the notice must read this first: the opt-out copy
   // names Settings, which nobody touched here.
   //
-  // REQUIRED where its neighbours above are optional, and deliberately so. An
+  // Required where its neighbours above are optional, and deliberately so. An
   // omitted boolean reads as false, and false here does not mean "unknown" —
   // it asserts the user chose this, which is the false cause #505 is about. A
   // producer that cannot say which cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
-  // #540: true when this workspace is a shared view — fed by the share's
+  // True when this workspace is a shared view — fed by the share's
   // pull, never a recorder of its own. A capability, not an opt-out and not
   // a failure, so the notice must not blame the Settings toggle.
   //
-  // REQUIRED for the same reason as its neighbour: an omitted boolean reads
+  // Required for the same reason as its neighbour: an omitted boolean reads
   // as false, and false asserts "not a shared view", which routes the notice
   // to the opt-out's copy — a cause nobody chose.
   historyShareView: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.
   syncFailing: z.boolean().optional(),
-  // Additive: a shared view can have canonical file state that has not yet
+  // A shared view can have canonical file state that has not yet
   // reached its local folder. The producer bounds each path sample while the
   // counts report the full repair debt.
   shareProjection: z
@@ -1176,12 +1176,12 @@ const SYNC_STATUS_BASE_FIELDS = {
       }),
     ])
     .optional(),
-  // #882: increments whenever main retires this workspace's live
+  // Increments whenever main retires this workspace's live
   // editor sessions. Every renderer re-reads status after an activity ping,
   // so the generation makes every mounted editor release its retired session.
   // Required because workspaceActivity includes it in every status.
   liveSessionsGeneration: z.number().int().nonnegative(),
-  // Additive: files that are safe locally but cannot fit in the relay's
+  // Files that are safe locally but cannot fit in the relay's
   // encoded payload limit. The notice center keeps this visible until a
   // later successful sync no longer reports the path.
   sharingDeclined: z
@@ -1272,7 +1272,7 @@ export const EngineMomentRecord = z.object({
   // Workspace-global recording order: the pagination cursor and a monotonic
   // refresh key. Real moments always have a nonnegative order.
   momentOrder: z.number().int().nonnegative(),
-  // Secret-backed file moment (PR 08): metadata-only by construction — the
+  // Secret-backed file moment: metadata-only by construction — the
   // row renders with a lock and its diff page shows "Contents are protected".
   protected: z.boolean().optional(),
   contentKind: z.enum(["text", "binary"]).optional(),
@@ -1334,7 +1334,7 @@ export const EngineMomentDetailRecord = EngineMomentRecord.omit({
 }).extend({
   // null before-text = the moment created the file OR the before side is
   // binary (then beforeBinary is set); delete moments carry the removed
-  // content as beforeText and null afterText. PROTECTED moments are
+  // content as beforeText and null afterText. Protected moments are
   // metadata-only: both sides are always null and the page renders
   // "Contents are protected" / "Binary contents" instead of a diff.
   beforeText: MOMENT_TEXT.nullable(),
@@ -1359,7 +1359,7 @@ export type RestoreEngineMomentFilePayload = z.infer<
 export const RestoreEngineMomentFileResult = z.object({
   restored: z.enum(["text", "deleted"]),
   // The forward moment the restore recorded; undoing = restoring to before
-  // THIS moment through the same channel.
+  // this moment through the same channel.
   restoredMomentId: MOMENT_ID,
   path: PATH_STRING,
 });
@@ -1461,7 +1461,7 @@ export const ChatFileMentionRecord = z.object({
 export type ChatFileMentionRecord = z.infer<typeof ChatFileMentionRecord>;
 
 export const ListChatFileMentionsResult = z.object({
-  // #718: these responses are built from the local store after ONE bounded
+  // These responses are built from the local store after one bounded
   // shared-channel sync pass. This is how many joined rows that pass did not
   // leave fresh — the ones its window never reached, plus the ones it reached
   // and could not sync (offline, relay hiccup). A pass that died outright, or
@@ -1738,7 +1738,7 @@ const CHAT_EMOJI = z
   .max(32)
   .regex(EMOJI_GRAPHEME_PATTERN, "must be a single emoji grapheme");
 
-// One ACTIVE reaction as the renderer paints it. The UI groups these by
+// One active reaction as the renderer paints it. The UI groups these by
 // (messageId, emoji) into pills; `authorId` lets it mark the viewer's own.
 export const ChatReactionRecord = z.object({
   reactionId: z.string().min(1).max(200),
@@ -1797,7 +1797,7 @@ export const ChannelThreadRecord = ChatThreadRecord.extend({
 });
 export type ChannelThreadRecord = z.infer<typeof ChannelThreadRecord>;
 
-// A file-linked Chat as the Chats view lists it: the CURRENT path when the
+// A file-linked Chat as the Chats view lists it: the current path when the
 // engine can resolve the stable object id, else the captured hint.
 export const FileChatThreadRecord = ChatThreadRecord.extend({
   path: PATH_STRING.nullable(),
@@ -1810,7 +1810,7 @@ export const ListChatChannelsPayload = z.object({
 export type ListChatChannelsPayload = z.infer<typeof ListChatChannelsPayload>;
 
 export const ListChatChannelsResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  // Partial-freshness marker; see ListChatFileMentionsResult.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   channels: z.array(ChatChannelRecord),
   // The "Files" grouping: file-linked Chats listed read-only beside the
@@ -1888,7 +1888,7 @@ export const ListPersonalChatFeedPayload = z.object({
 });
 export type ListPersonalChatFeedPayload = z.infer<typeof ListPersonalChatFeedPayload>;
 export const ListPersonalChatFeedResult = z.object({
-  // Partial-freshness marker; see ListChatFileMentionsResult (#718).
+  // Partial-freshness marker; see ListChatFileMentionsResult.
   sharedChannelRowsUncovered: z.number().int().positive().optional(),
   items: z.array(ChatFeedItemRecord).max(50),
   nextCursor: z.string().max(1000).optional(),
@@ -1983,7 +1983,7 @@ export const SetChatReactionPayload = z.object({
   threadId: CHAT_THREAD_ID,
   messageId: z.string().min(1).max(200),
   emoji: CHAT_EMOJI,
-  // add or remove YOUR reaction. The store is a set-membership CRDT: this is
+  // add or remove your reaction. The store is a set-membership CRDT: this is
   // the observed cell state, resolved by LWW-per-cell.
   state: z.enum(["added", "removed"]),
 });
@@ -2037,7 +2037,7 @@ export const SyncDmsPayload = z.object({
   workspaceId: WORKSPACE_ID,
   // The DM the caller is reading, when it is reading one. The shared-channel
   // pass is bounded, so a poll that names its open conversation keeps that one
-  // fresh instead of waiting for the rotation to reach it (#718).
+  // fresh instead of waiting for the rotation to reach it.
   openChannelId: CHAT_CHANNEL_ID.optional(),
 });
 export type SyncDmsPayload = z.infer<typeof SyncDmsPayload>;
@@ -2067,8 +2067,8 @@ export type DeclineDmPayload = z.infer<typeof DeclineDmPayload>;
 export const RequestDmAgainPayload = z.object({ shareId: SHARE_ID });
 export type RequestDmAgainPayload = z.infer<typeof RequestDmAgainPayload>;
 
-// A participant's reverse path for where an accepted DM lives (#742): ends
-// the SAME JoinedSharedChannel row leaveSharedChannel ends, keyed by DM
+// A participant's reverse path for where an accepted DM lives: ends
+// the same JoinedSharedChannel row leaveSharedChannel ends, keyed by DM
 // shareId. The owner side has no shareId (DmRecord.shareId is null for the
 // owner) and never calls this.
 export const LeaveDmPayload = z.object({
@@ -2094,11 +2094,11 @@ export const StartDmResult = z.object({
 export type StartDmResult = z.infer<typeof StartDmResult>;
 
 // Ephemeral presence (MU-C1 / MU-C5). The renderer's presence transport is
-// IPC-PROXIED so the relay bearer token NEVER reaches the renderer: main holds
+// IPC-PROXIED so the relay bearer token never reaches the renderer: main holds
 // cachedCredentials.token and makes the actual relay presence request. These
 // payloads carry only the scope, an opaque display state, and the long-poll
 // bookkeeping. The scope is authorized in MAIN (the caller's own workspace, or
-// a share they hold a grant for) BEFORE the relay — which re-authorizes from
+// a share they hold a grant for) before the relay — which re-authorizes from
 // the bearer independently.
 export const PresenceScopeInput = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("workspace"), workspaceId: WORKSPACE_ID }),
@@ -2119,15 +2119,15 @@ const PRESENCE_POLL_ID = z.string().min(1).max(128);
 
 // Cap the opaque presence state at the IPC boundary, mirroring the relay's
 // MAX_PRESENCE_STATE_BYTES (services/sync-relay). Presence carries small display
-// data ({ displayName, typing }); bounding it HERE stops a renderer from forcing
+// data ({ displayName, typing }); bounding it here stops a renderer from forcing
 // main to JSON.stringify an attacker-sized (or cyclic / non-JSON) payload before
 // the relay's own cap applies.
 export const PRESENCE_STATE_MAX_BYTES = 8 * 1024;
 const PRESENCE_STATE_MAX_DEPTH = 32;
 
-// A CHEAP, short-circuiting size guard: it walks the already-deserialized value
+// A cheap, short-circuiting size guard: it walks the already-deserialized value
 // accumulating an UPPER BOUND on the serialized UTF-8 byte size and bails the
-// moment it exceeds the cap — so an oversized payload is rejected WITHOUT a full
+// moment it exceeds the cap — so an oversized payload is rejected without a full
 // JSON.stringify. Returns false for cycles, over-depth nesting, and non-JSON
 // values (bigint), which the relay would reject or main would throw on anyway.
 // Printable ASCII minus `"` and `\` — characters JSON serializes verbatim.
@@ -2265,7 +2265,7 @@ const WORKSPACE_VERSION_NAME_MAX = 80;
 // hydrates each differing path by `readTextFile` -> `readTextBlob`, so a
 // compare side at the engine's contract does arrive.
 //
-// Conflict listing keeps up too (#537): a row past 8 MiB minus envelope
+// Conflict listing keeps up too: a row past 8 MiB minus envelope
 // headroom is degraded to withheld metadata rather than refused
 // (`conflicts_list`, crates/dohc-workspace-engine/src/lib.rs), and
 // `listTextConflicts` hydrates each withheld side through
@@ -2275,11 +2275,11 @@ const WORKSPACE_VERSION_NAME_MAX = 80;
 // The bound stays the engine's storage contract rather than any transport
 // ceiling: a second hand-copied constant is the drift #517 was filed about.
 // The one place the client mirrors the frame cap is `engineTextLimits.ts`,
-// where `CONFLICT_ROW_HARD_CAP_BYTES` is DERIVED from the frame constant the
+// where `CONFLICT_ROW_HARD_CAP_BYTES` is derived from the frame constant the
 // drift guard already covers.
 //
 // The combined resolution (`keep-combined` below) is the one REQUEST use, and
-// its contract is NOT this one: the engine bounds a combined resolution by the
+// its contract is not this one: the engine bounds a combined resolution by the
 // control frame that carries the whole request, measured in JSON-ENCODED bytes
 // (`crates/dohc-workspace-engine/src/lib.rs`, `resolve_request_encoded_bytes`).
 // Encoded, so escaping counts: a newline-heavy body is twice its raw size on
@@ -2335,7 +2335,7 @@ export const WorkspaceVersionFileChange = z.object({
   currentText: VERSION_TEXT.optional(),
   // The compared version's side; absent when the file only exists in Main.
   incomingText: VERSION_TEXT.optional(),
-  // Secret-backed file (PR 08): the compare view renders "Protected file
+  // Secret-backed file: the compare view renders "Protected file
   // changed" — both text sides are always absent when this is set.
   protected: z.boolean().optional(),
   // Binary files are byte-versioned but comparison is metadata-only.
@@ -2354,7 +2354,7 @@ export type CompareWorkspaceVersionsPayload = z.infer<
   typeof CompareWorkspaceVersionsPayload
 >;
 
-// Page-shaped (#562): the rows carry full text sides, so the message is
+// Page-shaped: the rows carry full text sides, so the message is
 // bounded by main's page budget (`COMPARE_PAGE_TEXT_BYTE_BUDGET`,
 // workspace-core versionCompare.ts) and the rest rides the continuation.
 export const CompareWorkspaceVersionsResult = z.object({
@@ -2402,16 +2402,16 @@ export type MergeWorkspaceVersionPayload = z.infer<typeof MergeWorkspaceVersionP
 
 const CONFLICT_ID = z.string().min(1).max(200);
 
-// Every conflict-carrying result is page-shaped (#562): the daemon pages
+// Every conflict-carrying result is page-shaped: the daemon pages
 // `conflicts.list` under a byte budget, and these results pass one such page
 // through. Non-null nextAfterConflictId: more open conflicts exist past this
 // page — pass it back as afterConflictId to fetch them.
 export const MergeWorkspaceVersionResult = z.object({
   mergedFileCount: z.number().int().min(0),
   unchangedFileCount: z.number().int().min(0),
-  // How many files THIS merge left in conflict. The rows below are the first
-  // page of ALL open conflicts (a sync conflict can be among them), so the
-  // STAGE decision reads this count — unrelated open conflicts must not turn
+  // How many files this merge left in conflict. The rows below are the first
+  // page of all open conflicts (a sync conflict can be among them), so the
+  // stage decision reads this count — unrelated open conflicts must not turn
   // a clean merge into a conflicted one. The count sentence over the cards
   // reads the loaded rows instead: it describes what the user is looking at.
   conflictCount: z.number().int().min(0),
@@ -2688,7 +2688,7 @@ export type SitePreviewMode = z.infer<typeof SitePreviewMode>;
 export const SitePackagePayload = z.object({
   workspaceId: WORKSPACE_ID,
   path: PATH_STRING,
-  // The mode the CALLER is actually previewing right now (a stored per-tab
+  // The mode the caller is actually previewing right now (a stored per-tab
   // choice, or the renderer's own automatic pick) — share-what-you-
   // previewed needs this to select the same artifact the preview serves,
   // not just whatever dohc.json happens to pin. Omitted (or null) falls
@@ -2909,7 +2909,7 @@ export type StopPluginPanelPayload = z.infer<typeof StopPluginPanelPayload>;
 const StopPluginPanelResult = z.void();
 type StopPluginPanelResult = z.infer<typeof StopPluginPanelResult>;
 
-// Wrapper-plugin web apps (PR3): the guest is a main-process WebContentsView,
+// Wrapper-plugin web apps: the guest is a main-process WebContentsView,
 // so the renderer never receives the guest URL — the pairing credential in
 // its fragment stays between the plugin process and main. The renderer gets
 // the title and the credential-free origin, and reports placeholder bounds.
@@ -3020,10 +3020,10 @@ export function parsePluginWebAppFailedEventForIpc(
   return parsed.success ? parsed.data : null;
 }
 
-// Workspace plugin management (PR2). Main owns one pipeline for the active
+// Workspace plugin management. Main owns one pipeline for the active
 // workspace. Every action returns a discriminated result, so expected plugin
 // failures cross as bounded data instead of opaque Electron exceptions.
-// Reuses PLUGIN_ID above (PR1b/#777's panel schemas) rather than a second
+// Reuses PLUGIN_ID above (PR1b/the panel schemas) rather than a second
 // plugin-id validator for the same field.
 const PLUGIN_SOURCE_HASH = z.string().regex(/^[0-9a-f]{64}$/);
 const PLUGIN_DIAGNOSTIC = z.string().min(1).max(10_000);
@@ -3128,7 +3128,7 @@ export const PluginActionPayload = z.object({
 
 // The directory a discovered (never-installed) row's own id can never
 // safely stand in for: that id is only ever a broken manifest's directory-
-// derived fallback, a plain string that can coincide with some OTHER,
+// derived fallback, a plain string that can coincide with some other,
 // unrelated plugin's real, valid manifest id. Preflight resolves the exact
 // directory the caller named, never trusting pluginId alone to disambiguate
 // which plugin that id actually means.
@@ -3169,7 +3169,7 @@ const PluginSettingsValues = z.record(
 
 // directoryName, not pluginId alone, is what settles which row's answers a
 // call reads or writes: an id is only ever a broken manifest's directory-
-// derived fallback, which can coincide with some OTHER, unrelated plugin's
+// derived fallback, which can coincide with some other, unrelated plugin's
 // real id.
 export const GetPluginSettingsPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
@@ -3296,7 +3296,7 @@ export type PluginSizesResult = z.infer<typeof PluginSizesResult>;
 
 // directoryName is what settles which row's bytes a call reports: an id is
 // only ever a broken manifest's directory-derived fallback, which can
-// coincide with some OTHER, unrelated plugin's real id.
+// coincide with some other, unrelated plugin's real id.
 export const PluginSizesPayload = PluginActionPayload.extend({
   directoryName: z.string().min(1).max(255),
 }).strict();
@@ -3387,7 +3387,7 @@ export function activityPathsAffectWorkspaceListing(
   return paths.some((path) => !hasEngineIgnoredSegment(path, platform));
 }
 
-// Unlike plugin events, an activity ping must never be DROPPED on a schema
+// Unlike plugin events, an activity ping must never be dropped on a schema
 // failure: under-notifying is the staleness bug the channel exists to
 // prevent. A malformed payload degrades to the global, payload-free ping.
 export function parseWorkspaceActivityEventForIpc(
@@ -3829,8 +3829,8 @@ const RelayShareGrantedRowBase = z.object({
   // The workspace coordinate. This device need not have that workspace in
   // its local registry.
   workspaceId: z.string().min(1).max(256),
-  // null for a PENDING email invite (an addressed email that has no dohc
-  // account yet); the recipientEmail carries who it was shared with (PR 18).
+  // null for a pending email invite (an addressed email that has no dohc
+  // account yet); the recipientEmail carries who it was shared with.
   recipientUserId: z.string().min(1).max(256).nullable(),
   recipientEmail: EMAIL_STRING.nullable(),
   grantId: z.string().min(1).max(200),
@@ -3900,7 +3900,7 @@ export const CreateRelaySharePayload = z.object({
   recipientEmail: EMAIL_STRING,
   paths: z.array(PATH_STRING).min(1).max(100).optional(),
   versionId: z.string().min(1).max(128).optional(),
-  // Required (#646). There is no default at either boundary: the relay
+  // Required. There is no default at either boundary: the relay
   // refuses a create that names no level, and so does this one. A caller that
   // sends nothing has not chosen `view`, it has failed to say what the share
   // grants.
@@ -4509,8 +4509,8 @@ export const RelayShareGrantRevokeResponse = RevokeRelayShareGrantResult.extend(
   ok: z.literal(true),
 }).strict();
 
-// ---- Share changes (#646 PR3a) ----
-// An edit-level recipient edits its own share view and SENDS the result. The
+// ---- Share changes ----
+// An edit-level recipient edits its own share view and sends the result. The
 // granter reads the changes and accepts or declines them; nothing lands in
 // the granter's files without that act. The user-facing noun is `changes`
 // throughout; `proposal` is code and storage only.
@@ -4575,7 +4575,7 @@ export const ShareProposalRow = z.object({
   // to state rather than a name to invent.
   proposedByEmail: EMAIL_STRING.nullable(),
   createdAtMs: z.number().int().nonnegative(),
-  // HOW MANY files, not which ones. A timer polls this listing and renders a
+  // How many files, not which ones. A timer polls this listing and renders a
   // sender and a count; carrying the rows made every tick cost the relay a
   // base resolution per file of every open proposal, to build rows no surface
   // read. `readShareProposalChanges` states the rows, for the one proposal a
@@ -4589,7 +4589,7 @@ export const ListShareProposalsResult = z.object({
 });
 export type ListShareProposalsResult = z.infer<typeof ListShareProposalsResult>;
 
-// ONE read for the whole review, and it carries NO content.
+// One read for the whole review, and it carries NO content.
 //
 // It used to carry both sides' text for every file, which made opening a
 // review cost one relay blob fetch and one local file read per file, all
@@ -4616,11 +4616,11 @@ export type ReadShareProposalChangesResult = z.infer<
   typeof ReadShareProposalChangesResult
 >;
 
-// ONE file's two sides, fetched when the granter opens that file.
+// One file's two sides, fetched when the granter opens that file.
 export const ReadShareProposalFileContentPayload = z.object({
   workspaceId: WORKSPACE_ID,
   proposalId: SHARE_PROPOSAL_ID,
-  // WHICH file, by its position in the submit. The renderer never names a
+  // Which file, by its position in the submit. The renderer never names a
   // path: a path from the renderer is a path this process would then read, and
   // the granter's own files are what it would read them from.
   opIndex: z.number().int().nonnegative().max(MAX_SHARE_PROPOSAL_OPS - 1),
@@ -4664,7 +4664,7 @@ export const SubmitShareChangesPayload = z.object({
 });
 export type SubmitShareChangesPayload = z.infer<typeof SubmitShareChangesPayload>;
 
-// What a successful submit did. The new proposal's id is NOT among these
+// What a successful submit did. The new proposal's id is not among these
 // facts: the surface re-reads its own sent changes right after, and an id that
 // arrived by two routes would be two answers to one question.
 const SubmitShareChangesSuccessResult = z.object({
@@ -4673,8 +4673,8 @@ const SubmitShareChangesSuccessResult = z.object({
   // Local changes the submit's capture pass journaled or repaired. Repairs can
   // change the projection, so the renderer uses this count to repaint files.
   capturedLocalChanges: z.number().int().nonnegative(),
-  // Files this submit did NOT offer because they are not part of this share.
-  // The count does not distinguish a file that LEFT the shared paths from one
+  // Files this submit did not offer because they are not part of this share.
+  // The count does not distinguish a file that left the shared paths from one
   // that was never in them — both are the same fact to the person who pressed
   // send. Silently dropping them is the failure this states: some of their
   // work is not sent, and nothing says so.
@@ -4759,7 +4759,7 @@ export type WithdrawShareChangesResult = z.infer<
 // ---- Shared channels (MU-C4) ----
 // A chat-channel grant: a whole channel (threads + messages + reactions)
 // shared to another relay account, read-write by default, read-only as the
-// broadcast opt-in. Granted rows manage who a channel is shared WITH;
+// broadcast opt-in. Granted rows manage who a channel is shared with;
 // received rows are invitations addressed to this account; joined rows are
 // the ones pulled into a local workspace's chat store.
 
@@ -4785,9 +4785,9 @@ export type ShareChatChannelResult = z.infer<typeof ShareChatChannelResult>;
 // dohc did not write and must parse in one go, and readRelayChatShareLanes
 // applies it before this schema sees them: a relay-controlled body over the
 // cap would otherwise fail the parse below, reject the IPC call, and clear
-// every cached row on the sharing surface (#608).
+// every cached row on the sharing surface.
 //
-// It does NOT gate joining. #640 deleted that use: the joined lane is now
+// It does not gate joining. #640 deleted that use: the joined lane is now
 // answered per channel the caller names, so its response size no longer
 // depends on how many channels the account has ever joined, and nothing about
 // the read needs a join to be refused. See scopeJoinedChannels.
@@ -4821,14 +4821,14 @@ export type JoinedSharedChannelRow = z.infer<typeof JoinedSharedChannelRow>;
 
 // The joined lane, answered one channel at a time.
 //
-// A caller names the channels it is SHOWING and gets one answer per name:
+// A caller names the channels it is showing and gets one answer per name:
 // the registry row that gates that channel, or null when this workspace holds
 // none. So the response is bounded by the caller's view, not by how many
 // channels the account has ever joined — which is what lets tombstones be
 // kept for as long as the write gate needs them, with no reaping and no
-// compaction (#640).
+// compaction.
 //
-// A wire id the caller did NOT name is absent, and absent means UNKNOWN.
+// A wire id the caller did not name is absent, and absent means UNKNOWN.
 // Unknown locks the channel, exactly as an unresolved listing does: the
 // renderer must never read a channel it has no gate row for as one it owns.
 export const JoinedChannelAnswer = z.object({
@@ -4855,7 +4855,7 @@ export type ListChatChannelSharesPayload = z.infer<typeof ListChatChannelSharesP
 // The relay side carries which of three different facts it learned, because
 // each one means something different for cached rows:
 //  - "answered": the relay's rows, authoritative (empty means no shares).
-//  - "unreachable": the relay did not answer. NOT an empty listing — the
+//  - "unreachable": the relay did not answer. Not an empty listing — the
 //    caller keeps what it already knows.
 //  - "signed-out": there is no valid session (signed out, expired, switched
 //    account). Account-scoped rows do not exist for this caller, so cached
@@ -4870,12 +4870,12 @@ export const ListChatChannelSharesResult = z.object({
   // NO row cap, and it must not gain one. These are dohc's own registry rows
   // and they are the authority for channelIsLocked: a read that refuses them
   // rejects the whole IPC call, the renderer reads an unknown listing, and
-  // every channel goes read-only (#617). Nothing needs a cap here now — the
+  // every channel goes read-only. Nothing needs a cap here now — the
   // caller's view bounds the size.
   joined: z.array(JoinedChannelAnswer),
   // The account the relay lanes are scoped to (server + stable user id), or
   // null when no session exists. Cached relay rows are preservable only
-  // within the SAME session: an unreachable answer under a different account
+  // within the same session: an unreachable answer under a different account
   // must never preserve another account's rows.
   sessionKey: z.string().nullable(),
   relay: z.discriminatedUnion("state", [
@@ -4885,13 +4885,13 @@ export const ListChatChannelSharesResult = z.object({
       received: z.array(ChatChannelShareReceivedRow).max(MAX_CHAT_CHANNEL_SHARE_ROWS),
     }),
     z.object({ state: z.literal("unreachable") }),
-    // Over the per-lane cap. NOT "unreachable": that word means dohc could not
+    // Over the per-lane cap. Not "unreachable": that word means dohc could not
     // read the answer, and a retry is the right next step for it. This answer
     // arrived and will arrive again identically, so a surface that shows it as
     // an outage offers a Try again that can never work and never says what is
-    // wrong — the #618 defect, reintroduced for the one condition dohc's own
+    // wrong — the defect, reintroduced for the one condition dohc's own
     // cap creates. It carries what it observed and the configured limit so the
-    // surface can name the constraint. Like "unreachable" it is NOT
+    // surface can name the constraint. Like "unreachable" it is not
     // authoritative: cached rows stand.
     z.object({
       state: z.literal("over-limit"),
@@ -4913,7 +4913,7 @@ export type ListChatChannelSharesResult = z.infer<typeof ListChatChannelSharesRe
 
 // The joined rows alone, read from the local registry. listChatChannelShares
 // answers the same rows, but it asks the relay for the grant side first, so a
-// caller that only needs to know what THIS machine joined would wait on the
+// caller that only needs to know what this machine joined would wait on the
 // network for an answer the network does not hold.
 export const ListJoinedSharedChannelsPayload = z.object({
   workspaceId: WORKSPACE_ID,
@@ -5063,7 +5063,7 @@ export const RefreshSharedViewResult = z.discriminatedUnion("ok", [
 export type RefreshSharedViewResult = z.infer<typeof RefreshSharedViewResult>;
 
 // ---- Share mounts ----
-// The receive side of a relay share materialized INSIDE a host workspace as
+// The receive side of a relay share materialized inside a host workspace as
 // shared-with-me/<label>/ — ordinary read-only files (agent-readable through
 // normal tools) that live-follow the share. Mounting/refreshing/unmounting
 // are host-workspace operations; every path and label is re-validated in
@@ -5111,16 +5111,16 @@ export type UnmountSharePayload = z.infer<typeof UnmountSharePayload>;
 
 export const UnmountShareResult = z.object({
   workspace: WorkspaceSummary,
-  // The registry record was removed but its folder was LEFT on disk, because
+  // The registry record was removed but its folder was left on disk, because
   // the record's label is not one this app would ever materialize through.
   // Removing a folder named by an unusable label is exactly what the label
   // validator exists to prevent, so the record is cleaned up and the folder
-  // is reported instead of touched (#646).
+  // is reported instead of touched.
   folderLeft: z.literal(true).optional(),
 });
 export type UnmountShareResult = z.infer<typeof UnmountShareResult>;
 
-// Local agent integration (Phase 11). An agent run is a LOCAL concept: a small
+// Local agent integration. An agent run is a LOCAL concept: a small
 // record persisted to .dohc/agent-runs.json. Enabling a run (optionally) spawns
 // the managed MCP stdio child for the workspace and sets the watcher's
 // active-run slot, so the run's writes are attributed to the agent.
@@ -5356,7 +5356,7 @@ export const WriteClipboardTextPayload = z.object({
 }).strict();
 export type WriteClipboardTextPayload = z.infer<typeof WriteClipboardTextPayload>;
 
-// Native window chrome (Phase E1). The renderer mirrors its theme flip to
+// Native window chrome. The renderer mirrors its theme flip to
 // main so the OS titleBarOverlay (Windows/Linux) re-tints with the app; main
 // feature-detects overlay support and no-ops where it doesn't exist.
 export const SetTitlebarThemePayload = z.object({
@@ -5376,7 +5376,7 @@ export type StepWindowZoomPayload = z.infer<typeof StepWindowZoomPayload>;
 
 // Application-menu commands. One closed set (channels.ts owns the tuple; the
 // sandboxed preload validates against it as a plain value): the menu sends
-// these names and the shell routes them through the SAME command registry the
+// these names and the shell routes them through the same command registry the
 // palette uses — menu items never grow their own action definitions.
 export const MenuCommand = z.enum(MENU_COMMANDS);
 export type MenuCommand = z.infer<typeof MenuCommand>;
@@ -5597,7 +5597,7 @@ export const SetWorkspaceUiStatePayload = z.object({
 });
 export type SetWorkspaceUiStatePayload = z.infer<typeof SetWorkspaceUiStatePayload>;
 
-// Workspace content search (Phase E5.0). The renderer mints a bounded
+// Workspace content search. The renderer mints a bounded
 // searchId per search; main spawns ripgrep rooted at the real workspace root
 // and STREAMS batches back over the desktop:search-results event channel
 // (closed shape, validated before send and again in the dependency-free
@@ -5701,7 +5701,7 @@ export const OpenEngineYDocSessionResult = z.object({
   artifactAssets: z.array(ARTIFACT_ASSET_DESCRIPTOR).optional(),
   lineageGeneration: z.number().int().positive().optional(),
   // The path is not in the version the workspace is on — a version switch
-  // removed it while this open was queued behind that switch (#534).
+  // removed it while this open was queued behind that switch.
   // This reason must not downgrade to the writable plain editor, because that
   // editor would autosave the path back into the version as a phantom file.
   notInVersion: z.boolean().optional(),
@@ -5710,8 +5710,8 @@ export const OpenEngineYDocSessionResult = z.object({
   documentUnavailable: z.boolean().optional(),
   // The open did not land, and a session for this document may still be the
   // engine's. It is raised by an open that hit its retry deadline while the
-  // engine was unreachable (#564), an open whose refusal could not release its
-  // own session, and a session main holds whose close failed (#657). Like
+  // engine was unreachable, an open whose refusal could not release its
+  // own session, and a session main holds whose close failed. Like
   // notInVersion, it must not downgrade to the writable plain editor: a plain
   // autosave beside a session the engine still binds takes the disk path #533
   // closed. The caller stays read-only, states the reason, and offers a retry —
@@ -5736,7 +5736,7 @@ export const ReadEngineYDocArtifactAssetPayload = z.object({
   sessionId: ENGINE_YDOC_SESSION_ID,
   // The full descriptor, not just the id: after a lineage replacement one id
   // can name both the winner's asset and a retired lineage's. The descriptor
-  // SELECTS among the descriptors main has pinned for this session — main
+  // selects among the descriptors main has pinned for this session — main
   // hydrates from its own pinned copy, never from these fields.
   descriptor: ARTIFACT_ASSET_DESCRIPTOR,
 });
@@ -5762,12 +5762,12 @@ export const ApplyEngineYDocUpdatePayload = z.object({
   update: ENGINE_YDOC_UPDATE,
   lineageGeneration: z.number().int().positive(),
   // Monotonic per-session local-edit counter. Main echoes the seq a settle
-  // STARTED at back on the save-state channel so the renderer never shows
+  // started at back on the save-state channel so the renderer never shows
   // "Saved" for a settle that predates the user's latest keystroke.
   //
-  // DEFAULTED, never required: this handler is a hardened boundary whose
+  // Defaulted, never required: this handler is a hardened boundary whose
   // contract is an inert no-op for an unknown/foreign/read-only session — it
-  // must never throw. A required field would reject at the schema, BEFORE the
+  // must never throw. A required field would reject at the schema, before the
   // session lookup, converting that silent refusal into an exception.
   seq: z.number().int().nonnegative().default(0),
 });
@@ -5839,7 +5839,7 @@ export type EngineYDocRemoteUpdateEventSchema = z.infer<
   typeof EngineYDocRemoteUpdateEventSchema
 >;
 
-// Test-only snapshot of the main-process mark/measure recorder (Phase 16):
+// Test-only snapshot of the main-process mark/measure recorder:
 // named marks as wall-clock epochs, measures as durations between marks.
 export const DesktopMarksResult = z.object({
   marks: z.record(z.string(), z.number()),
@@ -5937,7 +5937,7 @@ export interface DohcDesktopBridge {
   archiveChatBookmark(
     payload: ArchiveChatBookmarkPayload,
   ): Promise<ArchiveChatBookmarkResult>;
-  // Collections (Phase 2 views): the engine's collection index, read-only.
+  // Collections: the engine's collection index, read-only.
   // Writes ride the live document's frontmatter map, not a bridge method.
   listCollections(payload: ListCollectionsPayload): Promise<ListCollectionsResult>;
   getCollection(payload: GetCollectionPayload): Promise<GetCollectionResult>;
@@ -6026,7 +6026,7 @@ export interface DohcDesktopBridge {
   cloudJoinWorkspace(
     payload: CloudJoinWorkspacePayload,
   ): Promise<CloudJoinWorkspaceResult>;
-  // Relay shares (PR 18): grant side.
+  // Relay shares: grant side.
   createRelayShare(payload: CreateRelaySharePayload): Promise<CreateRelayShareResult>;
   listRelayShares(): Promise<ListRelaySharesResult>;
   getRelayReceivedShare(
@@ -6093,7 +6093,7 @@ export interface DohcDesktopBridge {
   ): Promise<ListJoinedSharedChannelsResult>;
   joinSharedChannel(payload: JoinSharedChannelPayload): Promise<JoinSharedChannelResult>;
   leaveSharedChannel(payload: LeaveSharedChannelPayload): Promise<void>;
-  // Relay shares (PR 18): receive side — read-only shared views.
+  // Relay shares: receive side — read-only shared views.
   openSharedView(payload: OpenSharedViewPayload): Promise<OpenSharedViewResult>;
   refreshSharedView(payload: RefreshSharedViewPayload): Promise<RefreshSharedViewResult>;
   dismissShareSkips(payload: DismissShareSkipsPayload): Promise<void>;
@@ -6106,7 +6106,7 @@ export interface DohcDesktopBridge {
   dismissAutomationFailure(
     payload: DismissAutomationFailurePayload,
   ): Promise<void>;
-  // Share changes (#646 PR3a): the granter reviews and settles.
+  // Share changes: the granter reviews and settles.
   listShareProposals(
     payload: ListShareProposalsPayload,
   ): Promise<ListShareProposalsResult>;
@@ -6119,7 +6119,7 @@ export interface DohcDesktopBridge {
   settleShareProposal(
     payload: SettleShareProposalPayload,
   ): Promise<SettleShareProposalResult>;
-  // Share changes (#646 PR3a): the recipient sends, tracks, and takes back.
+  // Share changes: the recipient sends, tracks, and takes back.
   submitShareChanges(
     payload: SubmitShareChangesPayload,
   ): Promise<SubmitShareChangesResult>;
@@ -6309,7 +6309,7 @@ export interface DohcDesktopBridge {
   // account switch, or a relay proving the session dead). Account-scoped
   // renderer caches — the relay-backed share rows — refresh on this signal;
   // the generic activity ping deliberately reaches only cheap local
-  // refreshes. The event carries the NEW session's key (null when signed
+  // refreshes. The event carries the new session's key (null when signed
   // out) so a same-account token rotation invalidates nothing. Returns an
   // unsubscribe function.
   // The phase completes the two-moment transition contract: "changing" is
@@ -6338,12 +6338,12 @@ export interface DohcDesktopBridge {
   getUpdateState(): Promise<UpdateStateEvent>;
   checkForUpdates(): Promise<UpdateCheckResult>;
   installUpdate(): Promise<UpdateActionResult>;
-  // Quit interception (#567): main asks before a quit proceeds so set-aside
-  // drafts can warn FIRST — electron-updater's quitAndInstall is one-shot,
+  // Quit interception: main asks before a quit proceeds so set-aside
+  // drafts can warn first — electron-updater's quitAndInstall is one-shot,
   // so the decision must come before any destructive call. The renderer
   // either holds the quit (its dialog owns the decision) or resumes it.
   onQuitRequested(listener: () => void): () => void;
-  // Main re-checks recovery drafts at the quit boundary (#579 review, r12):
+  // Main re-checks recovery drafts at the quit boundary:
   // the renderer answers whether any unresolved set-aside edit would be lost.
   onRecoveryCheckRequested(listener: (requestId: number) => void): () => void;
   answerRecoveryCheck(payload: {
@@ -6352,7 +6352,7 @@ export interface DohcDesktopBridge {
   }): Promise<void>;
   holdQuit(): Promise<void>;
   resumeQuit(): Promise<void>;
-  // Workspace content search (Phase E5.0). Answers accepted after the rg child
+  // Workspace content search. Answers accepted after the rg child
   // spawns, or returns a typed updating refusal while initial capture runs;
   // results stream separately through onSearchResults. A new search cancels
   // the previous one in main.
@@ -6402,7 +6402,7 @@ export interface DohcDesktopBridge {
   onEngineYDocLineageReplacement(
     listener: (event: EngineYDocLineageReplacementEvent) => void,
   ): () => void;
-  // The document's REAL save state, pushed on every settle outcome. The editor
+  // The document's real save state, pushed on every settle outcome. The editor
   // must never claim "Saved" from anything else: a settle can fail (and used to
   // fail silently) while the renderer's own timer said the doc was safe.
   onEngineYDocSaveState(

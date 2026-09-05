@@ -6,7 +6,7 @@ import {
   type TryVersionSnapshotLike,
 } from "./tryInVersion";
 
-// PR 0N-2 "Try it in a version": one gesture composes EXISTING operations —
+// PR 0N-2 "Try it in a version": one gesture composes existing operations —
 // create a fork named after the task, which activates it (0M-4
 // create-and-switch), then start a dohc-tracked agent run. On run end the
 // session turns into a review state carrying the changed-file count vs Main.
@@ -226,7 +226,7 @@ describe("createTryInVersionSessions", () => {
   });
 
   it("still reaches review when the run ended before the session was recorded", async () => {
-    // startSession can finalize a failed run BEFORE tryInVersion.start returns
+    // startSession can finalize a failed run before tryInVersion.start returns
     // its runId — the end signal must not be lost in that gap.
     const gate: { release: (() => void) | null } = { release: null };
     const sessions = manager({

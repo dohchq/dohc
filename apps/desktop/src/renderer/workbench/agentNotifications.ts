@@ -1,7 +1,7 @@
 // Agent -> user notifications (Agent Notifications & Mentions). A background
-// agent run that FINISHES, NEEDS INPUT, ASKS the user, or ERRORS should reach
+// agent run that finishes, needs input, asks the user, or errors should reach
 // the user through the NoticeCenter even when they are looking at something
-// else. This module is the PURE model behind that surface: it turns a stream
+// else. This module is the pure model behind that surface: it turns a stream
 // of agent-session snapshots into a calm, coalesced notification list.
 //
 // Anti-noise is the whole point:
@@ -53,8 +53,8 @@ export interface AgentActivityInput {
   // Title of the permission the run is blocked on (drives "needs input" copy).
   pendingPermissionTitle?: string;
   // Stable id of the permission the run is blocked on. Discriminates the
-  // needs-input notice per WAIT so a dismissed permission-A does not suppress a
-  // later permission-B on the SAME run (each wait can re-raise once).
+  // needs-input notice per wait so a dismissed permission-A does not suppress a
+  // later permission-B on the same run (each wait can re-raise once).
   pendingPermissionId?: string;
   // First line of the agent's latest message, used for specific "finished" /
   // "asked" copy ("Your agent finished reorganizing /notes").
@@ -141,7 +141,7 @@ function agentNotificationId(
 }
 
 // The dismissal/coalescing key for a desired notice. needs-input is
-// discriminated by the pending permission id so a NEW wait on the same run
+// discriminated by the pending permission id so a new wait on the same run
 // gets a fresh id (and can re-raise after an earlier wait was dismissed).
 function notificationIdFor(
   input: AgentActivityInput,
@@ -246,9 +246,9 @@ interface ReduceOptions {
 }
 
 // Folds one activity snapshot into the running notification list.
-//   • Notices for OTHER runs/workspaces are preserved untouched (a run that
+//   • Notices for other runs/workspaces are preserved untouched (a run that
 //     finished off-screen keeps its notice while a new run starts).
-//   • For THIS run, a transition to a new kind supersedes the old kind's
+//   • For this run, a transition to a new kind supersedes the old kind's
 //     notice; a resume (desired = null) clears it.
 //   • An already-present desired notice is left as-is (stable id + timestamp)
 //     so repeated polls of the same state never re-stamp or duplicate it.
@@ -258,7 +258,7 @@ export function reduceAgentNotifications(
   opts: ReduceOptions,
 ): AgentNotification[] {
   const runId = input.runId;
-  // Reference-stable no-op: a poll that changes nothing MUST return the same
+  // Reference-stable no-op: a poll that changes nothing must return the same
   // array so useAgentNotifications' setState bails out and React skips the
   // re-render. The hook polls every ~1.5s for the app's life; allocating a
   // fresh array each idle tick would re-render the whole notifications subtree
@@ -266,7 +266,7 @@ export function reduceAgentNotifications(
   if (!runId) return prev as AgentNotification[];
   const kind = desiredKind(input);
   const desiredId = kind !== null ? notificationIdFor(input, kind, runId) : null;
-  // Would the filter actually drop anything for THIS run? (a superseded kind,
+  // Would the filter actually drop anything for this run? (a superseded kind,
   // an earlier needs-input for a different permission, or a resume clearing a
   // notice). If not, keep `prev` itself rather than a fresh, equal copy.
   const needsFilter = prev.some((notice) => {
@@ -276,8 +276,8 @@ export function reduceAgentNotifications(
   const kept: AgentNotification[] = needsFilter
     ? prev.filter((notice) => {
         if (notice.workspaceId !== input.workspaceId || notice.runId !== runId) return true;
-        // For THIS run, keep only the exact desired notice; any other kind — or
-        // an earlier needs-input for a DIFFERENT permission — is superseded.
+        // For this run, keep only the exact desired notice; any other kind — or
+        // an earlier needs-input for a different permission — is superseded.
         return desiredId !== null && notice.id === desiredId;
       })
     : (prev as AgentNotification[]);

@@ -263,11 +263,11 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalled();
   });
 
-  // #579 review r11: the pre-switch flush is the SAME class the version menu
+  // The pre-switch flush is the same class the version menu
   // fixed in r7, on the second switch surface. When the flush fails the
   // switch never starts and the workspace never leaves its version —
   // announcing a change would reopen the open document and set its
-  // still-editable draft aside for nothing (#567).
+  // still-editable draft aside for nothing.
   it("announces nothing when the pre-switch flush fails before the switch starts", async () => {
     const onWorkspaceStateChanged = vi.fn();
     const user = userEvent.setup();
@@ -279,17 +279,14 @@ describe("TryInVersionReviewCard", () => {
     });
     await user.click(screen.getByTestId("try-review-set-aside"));
 
-    // MUTATION (switchIssued in backToMain): announce unconditionally from
-    // the catch. The bookkeeping reopen then sets the draft aside on the
-    // version the user never left.
     await waitFor(() =>
-      expect(screen.getByTestId("try-review-error")).toBeTruthy(),
+      expect(screen.getByTestId("try-review-error"), "switchIssued in backToMain: announce unconditionally from the catch. The bookkeeping reopen then sets the draft aside on the version the user never left.").toBeTruthy(),
     );
     expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
     expect(onWorkspaceStateChanged).not.toHaveBeenCalled();
   });
 
-  // ...but a failure AFTER the switch IPC started must still announce: main
+  // ...but a failure after the switch IPC started must still announce: main
   // settles and closes live Y.Doc sessions on its way, so the reopen is what
   // re-binds them.
   it("still announces when the switch itself fails mid-way", async () => {
@@ -308,10 +305,10 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalledWith(undefined);
   });
 
-  // #579 review r15: the announcement already happened at line 161, before
+  // The announcement already happened at line 161, before
   // the dismissal IPC. A dismissal that fails afterwards does not un-know
   // where the workspace landed, and announcing twice bumps the version epoch
-  // a SECOND time — that same-version reopen sets aside a draft the user
+  // a second time — that same-version reopen sets aside a draft the user
   // typed while the dismissal hung, for a failure that has nothing to do with
   // the version.
   it("announces the landing once when only the dismissal fails", async () => {
@@ -326,9 +323,7 @@ describe("TryInVersionReviewCard", () => {
       expect(screen.getByTestId("try-review-error")).toBeTruthy(),
     );
 
-    // MUTATION (double bump): drop the `landedOn !== undefined` return. The
-    // catch announces the same landing again and reopens Main twice.
-    expect(onWorkspaceStateChanged).toHaveBeenCalledTimes(1);
+    expect(onWorkspaceStateChanged, "double bump: drop the `landedOn !== undefined` return. The catch announces the same landing again and reopens Main twice.").toHaveBeenCalledTimes(1);
     expect(onWorkspaceStateChanged).toHaveBeenCalledWith("main");
   });
 
@@ -425,7 +420,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       ),
     );
 
-    // The 0N-2 review card switches back to Main OUTSIDE this menu; the shell
+    // The 0N-2 review card switches back to Main outside this menu; the shell
     // bumps versionEpoch -> refreshKey. Without the re-read the selector kept
     // showing the stale try-version name.
     bridgeMock.listWorkspaceVersions.mockResolvedValue({

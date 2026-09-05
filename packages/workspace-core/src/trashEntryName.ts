@@ -7,15 +7,15 @@
 // and APFS -- produced a rename target past the per-component limit. The
 // calling agent received "ENOENT: no such file or directory, rename ..." about
 // a file that was right there, and would reasonably read that as a delete that
-// never happened (#613). The desktop had a fix and kept it to itself.
+// never happened. The desktop had a fix and kept it to itself.
 //
 // Then this module predicted the filesystem's answer twice, and was wrong both
 // times. First it assumed the per-component limit was the only one, which is
 // false on Windows without long paths. Then it assumed the composed-path limit
-// ALWAYS binds, which is false wherever long paths are enabled -- and that
+// always binds, which is false wherever long paths are enabled -- and that
 // took deletion away from deep workspaces that had been working.
 //
-// So it stopped predicting. The rule offers CANDIDATES, longest first, and the
+// So it stopped predicting. The rule offers candidates, longest first, and the
 // caller renames its way down them: the real name is attempted before anything
 // is thrown away, and a shorter one is used only when the platform actually
 // refused the longer one. A name that fits is never shortened for a limit that
@@ -25,17 +25,17 @@
 // The entropy stays with the caller: this module takes the prefix already
 // built, so it needs no crypto import and stays usable from any environment.
 
-// The per-component limit, 255 everywhere dohc ships -- but NOT in the same
+// The per-component limit, 255 everywhere dohc ships -- but not in the same
 // unit. NTFS counts UTF-16 code units; ext4 and APFS count UTF-8 bytes. A
 // 70-character CJK basename is 70 units and 210 bytes, so a byte rule on NTFS
 // truncates a name the filesystem would have taken whole.
 export const NAME_MAX_UNITS = 255;
 
 // Win32 MAX_PATH: 260 including the terminating NUL, so 259 usable characters
-// for the WHOLE path, counted in UTF-16 units. It applies only when the
+// for the whole path, counted in UTF-16 units. It applies only when the
 // process is not long-path aware or
 // HKLM\SYSTEM\CurrentControlSet\Control\FileSystem\LongPathsEnabled is 0 --
-// which is why it is a FALLBACK here and never a precondition.
+// which is why it is a fallback here and never a precondition.
 export const WINDOWS_MAX_PATH_CHARS = 259;
 
 // TextEncoder/TextDecoder rather than Buffer, so this module carries no Node
@@ -44,7 +44,7 @@ export const WINDOWS_MAX_PATH_CHARS = 259;
 // and 4-byte sequences, not assumed.
 //
 // ignoreBOM is the one place they disagree, and its name is inverted: it means
-// "ignore the BOM-NESS of U+FEFF", so `true` KEEPS the character. The default
+// "ignore the BOM-NESS of U+FEFF", so `true` Keeps the character. The default
 // eats a leading U+FEFF, which for filename bytes is data loss -- a name that
 // legitimately starts with U+FEFF would come back a character short, silently,
 // with no error to notice.
@@ -63,7 +63,7 @@ function measure(value: string, unit: NameUnit): number {
   return unit === "utf16" ? value.length : utf8Encoder.encode(value).length;
 }
 
-// Where to cut a UTF-16 string so the cut does not SPLIT a surrogate pair.
+// Where to cut a UTF-16 string so the cut does not split a surrogate pair.
 //
 // Not "does it end in a high surrogate" -- that confuses a pair this cut broke
 // with a lone surrogate the name already carried, and drops the second. A cut
@@ -165,13 +165,13 @@ export function trashEntryPlan(
 // "report.md" + attempt 2 -> "report (2).md", for a copy that must not
 // overwrite. Dotfiles (".env") and extensionless names suffix at the end.
 //
-// The SAME ladder as a trash entry, and for the same reason: the stem is fitted
+// The same ladder as a trash entry, and for the same reason: the stem is fitted
 // to the per-component limit in the platform's unit, and a second, shorter
 // candidate also fits the composed-path limit where one applies. Measuring the
 // component in UTF-16 units is right for NTFS and leaves a multibyte name
-// LONGER than the old byte rule did, so without this rung a colliding CJK name
+// longer than the old byte rule did, so without this rung a colliding CJK name
 // in a deep folder composes past MAX_PATH -- and `copyFile` answers ENOENT,
-// which is #613's original symptom arriving through the collision path.
+// which is the original symptom arriving through the collision path.
 export function collisionVariantPlan(
   name: string,
   attempt: number,

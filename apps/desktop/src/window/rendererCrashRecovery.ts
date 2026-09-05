@@ -6,7 +6,7 @@
 // doesn't spin reload-crash-reload forever.
 
 // The one exit reason that is not a crash: an intentional teardown
-// (clean-exit) must not trigger a reload. "killed" is deliberately NOT
+// (clean-exit) must not trigger a reload. "killed" is deliberately not
 // excluded — Electron reports it for a renderer terminated externally (an OS
 // task-killer, forcefullyCrashRenderer on some platforms), which leaves the
 // window exactly as blank as a crash and must reload too. App-quit teardown

@@ -110,7 +110,7 @@ export function publicUpdateState(
       state.status === "up-to-date" ||
       state.status === "offline" ||
       state.status === "error");
-  // A STAGED restart is still offerable (#579 review, r17). `restartStaged`
+  // A staged restart is still offerable. `restartStaged`
   // latches once quitAndInstall runs and never clears, so gating on it stranded
   // the update for the rest of the run whenever the restart was interrupted —
   // a late recovery warning whose "Go back" then had nothing to go back to.
@@ -139,7 +139,7 @@ export async function startAutoUpdates(options: {
   onState?: (state: UpdateState, publicState: PublicUpdateState) => void;
   // Completes a restart that was already staged. quitAndInstall starts its
   // own quit on the first call and has none left to start on a second, so
-  // main makes it (#579 review, r18).
+  // main makes it.
   quitForStagedRestart?: () => void;
   importUpdater?: () => Promise<UpdaterModuleLike>;
 }): Promise<AutoUpdateController | null> {
@@ -261,10 +261,9 @@ export async function startAutoUpdates(options: {
   };
 
   // quitAndInstall is ONE-SHOT in electron-updater: a second call returns
-  // without quitting. Every recovery decision therefore happens BEFORE this
+  // without quitting. Every recovery decision therefore happens before this
   // runs (the renderer checks its set-aside drafts first, and main
-  // pre-approves the quit) — there is deliberately no resume path here
-  // (#579 review, r10).
+  // pre-approves the quit) — there is deliberately no resume path here.
   const installUpdate = async (): Promise<UpdateActionResult> => {
     if (stopped || state.status !== "ready") {
       return { accepted: false, state: publicState() };
@@ -272,7 +271,7 @@ export async function startAutoUpdates(options: {
     if (restartStaged) {
       // The latch is spent, but the restart is not lost: electron-updater
       // installs it on the next quit. What remains is exactly that quit, and
-      // it is MAIN's to make (#579 review, r18). The renderer must not have
+      // it is MAIN's to make. The renderer must not have
       // to know — it held this fact in a module variable, which a reload
       // reset while this latch stayed set, stranding the update for the rest
       // of the run.

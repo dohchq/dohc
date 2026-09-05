@@ -25,7 +25,7 @@ let exportInFlight = false;
 // Renders `html` to a PDF buffer in a hidden, sandboxed, preload-less
 // BrowserWindow — the content is document markdown (a user's or an agent's
 // own text), never trusted with Node or IPC access. The window (and its
-// backing temp file) is ALWAYS cleaned up, even if load/print throws.
+// backing temp file) is always cleaned up, even if load/print throws.
 export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   if (exportInFlight) {
     throw new Error("An export is already in progress.");

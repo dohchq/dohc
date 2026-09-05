@@ -1,9 +1,9 @@
 // Warm paper + graphite palette (brand bible / packages/brand, supersedes the
 // zinc D-E5 draft): near-monochrome warm neutrals, green-graphite accent,
-// color ONLY where semantics demand it (success/warning/danger, selection).
+// color only where semantics demand it (success/warning/danger, selection).
 //
-// DUPLICATION GUARD — single source of truth pattern: styles.css carries the
-// SAME values as a static stylesheet so first paint never waits on JS, and
+// Duplication guard — single source of truth pattern: styles.css carries the
+// same values as a static stylesheet so first paint never waits on JS, and
 // surfaces CSS cannot reach (window backgroundColor, titleBarOverlay) read
 // them from here. tokens.test.ts parses styles.css and asserts every value
 // below matches byte-for-byte; that sync test IS the guard — edit both files
@@ -35,7 +35,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     line: "#e4e1d8",
     ink: "#1c1b18",
     muted: "#55524a",
-    // Decorative text must clear 3.0:1 on EVERY surface it sits on —
+    // Decorative text must clear 3.0:1 on every surface it sits on —
     // panel-2 (sidebar/status bar), not just bg — in both modes (see the
     // contrast test).
     subtle: "#7f7b6e",
@@ -44,7 +44,7 @@ export const palette: Record<"light" | "dark", ThemeTokens> = {
     agent: "#5c6250",
     // Find-match highlight (search panel <mark>, pressed search toggles):
     // the editor's selection-blue family, tuned so the OPAQUE mark clears
-    // 3:1 against panel/panel-2 AND the selected-row bg (line), with bold
+    // 3:1 against panel/panel-2 and the selected-row bg (line), with bold
     // ink text on it at AA (4.38:1) — see the contrast test below. The
     // graphite accent stays the only structural accent; this token means
     // exactly one thing: "your match".

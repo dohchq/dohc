@@ -38,17 +38,17 @@ pub struct CaptureError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IngestOutcome {
     /// The observed content was captured. The sink reports the size and
-    /// lowercase-hex sha256 of the bytes it ACTUALLY persisted — the manifest
+    /// lowercase-hex sha256 of the bytes it actually persisted — the manifest
     /// must record those, not the plan's scan-time observation: a re-reading
     /// sink can capture newer bytes than the scan hashed (rapid writes
     /// coalescing, or a change landing before the watcher was live), and a
     /// manifest recording the stale scan hash would silently skip the
     /// re-ingest if the file later reverted to those exact bytes.
     Captured { size: u64, sha256: String },
-    /// The path is durably NOT engine-owned (policy-untracked, no longer
+    /// The path is durably not engine-owned (policy-untracked, no longer
     /// engine-ownable content, or an unsafe name). The op is acknowledged —
     /// the disposition is settled, not retryable — but the manifest must
-    /// FORGET the path rather than record it as captured, so a later
+    /// forget the path rather than record it as captured, so a later
     /// ownership change (policy widened, content became ownable) re-ingests
     /// on the next scan instead of reading as already-captured.
     NotOwned,
@@ -107,7 +107,7 @@ pub struct CaptureApplyResult {
     /// ingests and completed retires).
     pub applied_paths: Vec<String>,
     /// The actual content identity of each applied ingest, in plan order.
-    /// The manifest records THESE, never the plan's scan-time hash.
+    /// The manifest records these, never the plan's scan-time hash.
     pub captured: Vec<CapturedIngest>,
     /// Ingest paths the sink settled as [`IngestOutcome::NotOwned`]. They are
     /// acknowledged, but the controller manifest drops them instead of

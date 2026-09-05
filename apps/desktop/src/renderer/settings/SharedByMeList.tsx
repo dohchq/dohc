@@ -8,7 +8,7 @@ import { bridge } from "../bridge";
 import { ProposalReviewDialog } from "../workbench/ProposalReviewDialog";
 import { ShareAccessBadge } from "./ShareAccessBadge";
 
-// "Shared by me" (PR 18): the management list for relay share grants. Lives
+// "Shared by me": the management list for relay share grants. Lives
 // in Settings → Cloud. Calm inventory: what's shared, with whom, and one
 // honest way to end it.
 //
@@ -22,7 +22,7 @@ type LoadState =
   | {
       status: "ready";
       shares: RelayShareGrantedRow[];
-      // Open submissions for THIS workspace, oldest first per share. Shares
+      // Open submissions for this workspace, oldest first per share. Shares
       // granted from another workspace list with no count: the read is
       // workspace-scoped, and a missing count states less than a wrong one.
       openChanges: Map<string, { count: number; oldest: ShareProposalRow }>;
@@ -71,7 +71,7 @@ export function SharedByMeList(props: { workspaceId: string }) {
       ]);
       if (token !== loadToken.current) return;
       // What the row shows: how many are waiting, and which one the Review
-      // button opens — the OLDEST, because that is the one waiting longest.
+      // button opens — the oldest, because that is the one waiting longest.
       const openChanges = new Map<string, { count: number; oldest: ShareProposalRow }>();
       for (const proposal of proposals.proposals) {
         const seen = openChanges.get(proposal.shareId);

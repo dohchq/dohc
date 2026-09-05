@@ -68,7 +68,7 @@ describe("syncCode", () => {
     ).toThrow();
 
     // The authz comparison refuses secret-bearing or non-relay components on
-    // EITHER side — never "matches" through them.
+    // either side — never "matches" through them.
     expect(relayUrlsMatch("https://user:pass@relay.test", "https://relay.test")).toBe(false);
     expect(relayUrlsMatch("https://relay.test", "https://relay.test?token=x")).toBe(false);
     expect(relayUrlsMatch("https://relay.test#f", "https://relay.test#f")).toBe(false);

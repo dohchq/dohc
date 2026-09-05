@@ -61,7 +61,7 @@ describe("ui-state file store", () => {
     ).toEqual([]);
     // 15s: 40 real atomic writes (write + fsync + rename each) is an I/O budget, not
     // a logic budget — same profile as collectZipEntries, and it timed out at 5000ms
-    // under contention (#372). Scoped to this test; the rest of the file is fast.
+    // under contention. Scoped to this test; the rest of the file is fast.
   }, 15_000);
 
   it("retries a transient Windows rename failure and completes the write", async () => {
@@ -87,7 +87,7 @@ describe("ui-state file store", () => {
     expect(await readUiStateFile(root)).toBeNull();
   });
 
-  it("an oversized on-disk file reads as null — stat-capped BEFORE read+parse", async () => {
+  it("an oversized on-disk file reads as null — stat-capped before read+parse", async () => {
     const root = await createTestScratch("dohc-ui-state-");
     await writeUiStateFile(root, STATE);
     // Valid JSON, hostile size: a workspace can carry any bytes it likes —
@@ -130,10 +130,10 @@ describe("ui-state file store", () => {
   });
 });
 
-// THE invariant this file exists for: ui-state writes land under .dohc, which
+// The invariant this file exists for: ui-state writes land under.dohc, which
 // the watcher ignores at any depth — persisting workbench chrome state must
-// NEVER produce a history record (feedback loop, timeline noise, sync upload).
-// Retirement Phase C: the engine capture is the only recorder, so the
+// never produce a history record (feedback loop, timeline noise, sync upload).
+// The engine capture is the only recorder, so the
 // assertion is against what the watcher enqueues into it.
 describe("ui-state writes never reach history", () => {
   it("the watcher enqueues the user file but nothing for ui-state.json", async () => {

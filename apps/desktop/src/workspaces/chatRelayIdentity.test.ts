@@ -257,10 +257,10 @@ describe("assertSyncEnrollmentCredentials", () => {
   });
 });
 
-// #646 PR2 — a share view's chat identity. A share view is not an enrolled
+// A share view's chat identity. A share view is not an enrolled
 // workspace: it has no `remote` and no owner id to write as, so the account
 // that holds the grant is the one it writes under.
-describe("share view chat identity (#646 PR2)", () => {
+describe("share view chat identity", () => {
   const credentials = {
     serverUrl: "https://cloud.dohc.test",
     relayUrl: "https://relay.dohc.test",
@@ -279,7 +279,7 @@ describe("share view chat identity (#646 PR2)", () => {
   });
 
   it("resolves nothing when signed out or signed into another relay", () => {
-    // Both answers must be undefined, and the CALLER must refuse rather than
+    // Both answers must be undefined, and the caller must refuse rather than
     // write: a chat op with no author never replicates, so a comment written
     // here would look sent and never leave the machine.
     expect(
@@ -296,7 +296,7 @@ describe("share view chat identity (#646 PR2)", () => {
         { relayUrl: "https://relay.dohc.test" },
         { ...credentials, relayUrl: "https://other-relay.dohc.test" },
       ),
-      "MUTATION: writing under a session from another relay claims an identity that relay never issued",
+      "writing under a session from another relay claims an identity that relay never issued",
     ).toBeUndefined();
   });
 

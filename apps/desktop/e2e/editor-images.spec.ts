@@ -120,9 +120,9 @@ test("in-editor image: a subfolder doc renders an UPWARD-relative image from the
   }
 });
 
-test("in-editor image: a link escaping the workspace root does NOT render", async () => {
+test("in-editor image: a link escaping the workspace root does not render", async () => {
   // `../../outside.png` from notes/ climbs above the workspace root. The
-  // resolver refuses to mint a dohc-file:// URL for it AND refuses to hand the
+  // resolver refuses to mint a dohc-file:// URL for it and refuses to hand the
   // raw path to the browser (which would resolve it against the renderer's own
   // page, outside the workspace entirely): the <img> ends up with NO src, so
   // nothing is ever requested — even though a real, decodable file exists at the
@@ -131,7 +131,7 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    // A real, decodable PNG planted OUTSIDE the workspace root (temp.baseDir is
+    // A real, decodable PNG planted outside the workspace root (temp.baseDir is
     // the parent of temp.rootPath) at the exact path the escape link targets.
     await writeFile(join(temp.baseDir, "outside.png"), PNG_BYTES);
     await writeWorkspaceFiles(temp, [
@@ -158,7 +158,7 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
     // ...and it was never rewritten to the privileged scheme on the way there.
     await expect(img).not.toHaveAttribute("src", /^dohc-file:\/\//);
 
-    // Now prove it never decodes. `naturalWidth` is 0 BEFORE a load is even
+    // Now prove it never decodes. `naturalWidth` is 0 before a load is even
     // attempted, so polling for the first 0 would pass trivially: give the
     // browser a real window to attempt (and finish) a load, then assert the
     // settled state once. An <img> with no src reports complete=true with
@@ -181,7 +181,7 @@ test("in-editor image: a link escaping the workspace root does NOT render", asyn
 
 // ── dragging an image FILE into a document ─────────────────────────────────
 
-// Writes a real PNG to a temp dir OUTSIDE the workspace — the OS location a
+// Writes a real PNG to a temp dir outside the workspace — the OS location a
 // user actually drags from — and returns its absolute path.
 async function pngOutsideWorkspace(): Promise<string> {
   const dir = await createTestScratch("dohc-drag-");
@@ -190,7 +190,7 @@ async function pngOutsideWorkspace(): Promise<string> {
   return path;
 }
 
-// A REAL file drag, driven through Chromium's own drag machinery via CDP
+// A real file drag, driven through Chromium's own drag machinery via CDP
 // (Input.dispatchDragEvent carries actual OS file paths). This exercises the
 // full path a user's drag takes — hit-testing included — which a synthetic
 // `dispatchEvent("drop")` would bypass entirely.
@@ -219,7 +219,7 @@ test("dragging an image file onto the editor embeds it into the configured attac
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   try {
-    // global-folder: bytes land in ONE folder at the workspace root, and the
+    // global-folder: bytes land in one folder at the workspace root, and the
     // nested doc's src has to climb to it — so this proves the drop path runs
     // the attachment-location logic rather than hardcoding `assets/`.
     await seedWorkspaceSettings(temp, {
@@ -241,7 +241,7 @@ test("dragging an image file onto the editor embeds it into the configured attac
     // The image renders — the whole write → dohc-file:// serve → decode path.
     await expectEditorImagePainted(page);
 
-    // ...and the bytes landed in the CONFIGURED folder at the workspace root,
+    // ...and the bytes landed in the configured folder at the workspace root,
     // under the slug+hash asset name, not next to the document.
     await expect
       .poll(async () => await readdir(join(temp.rootPath, "attachments")).catch(() => []))
@@ -262,7 +262,7 @@ test("dragging an image file onto the editor embeds it into the configured attac
 });
 
 test("dragging an image onto the page top-matter (outside ProseMirror) still embeds it", async () => {
-  // The regression this guards: file-drop embedding used to live ONLY in
+  // The regression this guards: file-drop embedding used to live only in
   // ProseMirror's handleDrop, which never runs for drops outside view.dom.
   // The document pane is bigger than view.dom — the title/icon/properties
   // top-matter sits in the same scroller — so dropping an image up there was
@@ -330,7 +330,7 @@ test("/image opens the native picker and embeds the chosen file", async () => {
     await expect(page.locator(".dohc-slash-menu__item").first()).toBeVisible();
     await page.keyboard.press("Enter");
 
-    // The picked bytes travel the SAME write+insert path paste/drop use, so the
+    // The picked bytes travel the same write+insert path paste/drop use, so the
     // default per-document setting puts them in the doc's own assets folder.
     await expectEditorImagePainted(page);
     await expect

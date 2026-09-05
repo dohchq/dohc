@@ -85,10 +85,10 @@ describe("requireE2eEngine", () => {
   });
 
   it("stages the root build over an existing staged copy, regardless of mtime", () => {
-    // The root build is authoritative and engineBinary.ts resolves it FIRST, so
+    // The root build is authoritative and engineBinary.ts resolves it first, so
     // leaving a different file staged would have Electron launch one daemon
     // while the seed helper used another. A previous run's override can be
-    // NEWER than a fresh build, so mtime is the wrong test — the supported way
+    // newer than a fresh build, so mtime is the wrong test — the supported way
     // to pin a custom artifact is the override, asserted below.
     const root = createTestScratchSync("dohc-e2e-engine-guard-");
     const cargoTargetDir = join(root, "cargo");
@@ -99,7 +99,7 @@ describe("requireE2eEngine", () => {
     const built = join(cargoTargetDir, "dohc-workspace-engine");
     writeFileSync(staged, "leftover");
     writeFileSync(built, "root-build");
-    // Staged deliberately NEWER, which the previous revision would have kept.
+    // Staged deliberately newer, which the previous revision would have kept.
     utimesSync(staged, 1_900_000_000, 1_900_000_000);
     utimesSync(built, 1_700_000_000, 1_700_000_000);
 
@@ -133,7 +133,7 @@ describe("requireE2eEngine", () => {
     writeFileSync(built, "root-build");
     writeFileSync(override, "override-build");
     utimesSync(staged, 1_700_000_000, 1_700_000_000);
-    // Deliberately the NEWEST, so a naive mtime rule would pick it over the
+    // Deliberately the newest, so a naive mtime rule would pick it over the
     // override.
     utimesSync(built, 1_900_000_000, 1_900_000_000);
     utimesSync(override, 1_800_000_000, 1_800_000_000);

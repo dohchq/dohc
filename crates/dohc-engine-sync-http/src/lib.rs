@@ -1194,7 +1194,7 @@ impl<'a> From<&'a ShareReplicationEnvelope> for WireShareLogInput<'a> {
 #[serde(rename_all = "camelCase")]
 struct WireShareProposalSubmitRequest<'a> {
     submit_id: &'a str,
-    /// Serialized straight from the contract type: the relay's field names ARE
+    /// Serialized straight from the contract type: the relay's field names are
     /// its camelCase names, so a mirror here would only be a copy that drifts.
     ops: &'a [ShareProposalChange],
 }
@@ -1307,7 +1307,7 @@ mod tests {
         status: u16,
     }
 
-    /// The relay reads a proposed change's base pair as a STATED fact — both
+    /// The relay reads a proposed change's base pair as a stated fact — both
     /// halves or neither (`filterProposedChangeForShare`). An absent field and
     /// a null field must therefore not look the same on the wire, so every
     /// optional field is serialized rather than skipped.
@@ -1336,7 +1336,7 @@ mod tests {
             assert_eq!(
                 record.get(field),
                 Some(&serde_json::Value::Null),
-                "MUTATION: {field} must be sent as an explicit null, never skipped",
+                "{field} must be sent as an explicit null, never skipped",
             );
         }
         assert_eq!(
@@ -1349,7 +1349,7 @@ mod tests {
                 .and_then(serde_json::Value::as_i64),
             Some(7),
         );
-        // The EXACT field set. `ShareProposalChange` derives `Serialize`, so a
+        // The exact field set. `ShareProposalChange` derives `Serialize`, so a
         // field added to the struct reaches the granter's relay without anyone
         // deciding it should. This is what makes that a test failure instead.
         assert_eq!(
@@ -1364,7 +1364,7 @@ mod tests {
                 "afterByteLength",
                 "recordedAtMs",
             ]),
-            "MUTATION: a new field on ShareProposalChange must not silently join the wire",
+            "a new field on ShareProposalChange must not silently join the wire",
         );
     }
 
@@ -1410,8 +1410,6 @@ mod tests {
 
     #[test]
     fn response_budget_covers_a_full_maximal_relay_page() {
-        // MUTATION: restoring the old 11 MiB budget fails this against the
-        // relay's 500 × 256 KiB legal page.
         let required = MAX_PULL_OPS
             * (MAX_PAYLOAD_JSON_BYTES + MAX_LOG_ROW_RESPONSE_OVERHEAD_BYTES)
             + MAX_LOG_PAGE_RESPONSE_OVERHEAD_BYTES;
@@ -1423,9 +1421,10 @@ mod tests {
 
     #[test]
     fn plaintext_bearer_transport_requires_the_debug_loopback_opt_in() {
-        // MUTATION: accepting `http://` in the normal constructor makes the
-        // first two assertions expose a bearer token over plaintext.
-        assert!(HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err());
+        assert!(
+            HttpRelayTransport::new("http://127.0.0.1:1", "token").is_err(),
+            "accepting `http://` in the normal constructor makes the first two assertions expose a bearer token over plaintext."
+        );
         assert!(HttpRelayTransport::new("http://localhost:1", "token").is_err());
         assert!(HttpRelayTransport::new("http://example.com", "token").is_err());
         assert!(HttpRelayTransport::new("https://example.com", "token").is_ok());
@@ -1469,12 +1468,12 @@ mod tests {
             HttpRelayTransport::new("https://relay.example", "token").expect("https transport");
         assert!(
             transport.agent.config().https_only(),
-            "MUTATION: disabling https_only permits an HTTPS base to downgrade on redirect"
+            "disabling https_only permits an https base to downgrade on redirect"
         );
         assert_eq!(
             transport.agent.config().max_redirects(),
             0,
-            "MUTATION: restoring ureq's redirect default reaches unvalidated destinations"
+            "restoring ureq's redirect default reaches unvalidated destinations"
         );
     }
 
@@ -1530,7 +1529,7 @@ mod tests {
         assert_eq!(
             error,
             RelayError::BadRequest,
-            "MUTATION: restoring redirects follows the HTTPS-to-HTTP downgrade"
+            "restoring redirects follows the HTTPS-to-HTTP downgrade"
         );
         thread.join().expect("TLS server thread");
     }

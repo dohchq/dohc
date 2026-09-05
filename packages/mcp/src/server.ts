@@ -89,8 +89,8 @@ function text(value: unknown) {
 export function createDohcMcpServer(ctx: ToolContext): McpServer {
   const server = new McpServer({ name: "dohc", version: "0.1.0" });
 
-  // A share view's write surface is its access level (#646). The write tools
-  // come in two tiers, and a tier the level does not grant is NEVER registered
+  // A share view's write surface is its access level. The write tools
+  // come in two tiers, and a tier the level does not grant is never registered
   // — an agent pointed at a share view is offered only what it may use. Read
   // tools always register below.
   //

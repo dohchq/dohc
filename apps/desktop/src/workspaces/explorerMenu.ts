@@ -9,7 +9,7 @@ import { shareViewTakesLocalWrites, type ShareViewWriteScope } from "./shareWrit
 // 9,000-line closure can only be pinned by reading the source, and a source
 // pin proves position, never behaviour.
 //
-// The menu MIRRORS the write gates behind it. It must offer exactly what those
+// The menu mirrors the write gates behind it. It must offer exactly what those
 // handlers accept, because an item that is refused when clicked is the surface
 // lying about what it can do.
 
@@ -42,7 +42,7 @@ const separator: ExplorerMenuEntry = { kind: "separator" };
 
 export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry[] {
   const isSharedView = scope.shareView !== null;
-  // The four routed operations — create, rename, delete, import (#802) —
+  // The four routed operations — create, rename, delete, import —
   // offered exactly where their handlers accept them: everywhere in an
   // ordinary workspace, and in a share view only at the level
   // `shareViewTakesLocalWrites` names. One rule, asked once, by the menu and
@@ -94,7 +94,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   }
 
   return [
-    // Sharing onward is refused in a share view HERE, not only wherever
+    // Sharing onward is refused in a share view here, not only wherever
     // `canShare` is computed: someone else's files are not this account's to
     // grant, and a defense a comment claims but no code performs is not one.
     ...(scope.canShare && !isSharedView ? [item("Share…", "share"), separator] : []),

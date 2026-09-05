@@ -9,7 +9,7 @@ import { LinkedChatsPanel } from "./LinkedChats";
 // CodeRabbit major (WS-D gate): a chat opened from a search result is
 // consumed ONCE. The Shell clears its searchChatThread state through
 // onInitialThreadConsumed, so toggling History <-> Chats (which fully
-// unmounts/remounts this panel and resets its consumed ref) must NOT trap
+// unmounts/remounts this panel and resets its consumed ref) must not trap
 // the user back inside the stale thread.
 
 const searchThread: ChatThreadRecord = {
@@ -576,7 +576,7 @@ describe("LinkedChatsPanel read cursor", () => {
   });
 });
 
-// #646 PR2: chat follows a file share. A `view` recipient reads the chat and
+// Chat follows a file share. A `view` recipient reads the chat and
 // adds nothing to it; `comment` and `edit` write. Main refuses a `view` write
 // with these exact words (SharedFileReadOnlyError), so the panel states them
 // instead of offering a control that can only fail.
@@ -627,7 +627,7 @@ describe("LinkedChatsPanel share level", () => {
     expect(screen.queryByTestId("linked-chat-readonly-note")).toBeNull();
   });
 
-  // A shared view ALWAYS states the answer, so an absent prop can only mean
+  // A shared view always states the answer, so an absent prop can only mean
   // a workspace this machine owns. The shell is what guarantees that, and it
   // is why this prop carries the decision rather than the level: a damaged
   // grant has no level to read, and reading one would answer "writable".
@@ -637,33 +637,33 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(
       screen.queryByTestId("linked-chat-composer"),
-      "MUTATION: a share whose grant cannot be read must not offer a composer",
+      "a share whose grant cannot be read must not offer a composer",
     ).toBeNull();
     expect(screen.getByTestId("linked-chat-readonly-note").textContent).toBe(
       "Chats are read-only in this shared view.",
     );
   });
 
-  // The seam the e2e missed. `LinkedChats` loads messages and reactions in ONE
+  // The seam the e2e missed. `LinkedChats` loads messages and reactions in one
   // Promise.all, so a handler left on the capture gate rejects the whole
   // thread open — the panel shows "Could not load this chat" and PR2's
   // headline capability is unreachable, at every level, through the only
   // surface a person uses. Driving IPC directly never sees it.
-  it("opens a thread by loading messages AND reactions together", async () => {
+  it("opens a thread by loading messages and reactions together", async () => {
     render(panel({ shareReadOnly: false, initialThread: searchThread }));
 
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(bridgeMock.listChatMessages).toHaveBeenCalled();
     expect(
       bridgeMock.listChatReactions,
-      "MUTATION: a reactions handler that refuses a share view refuses the whole thread open",
+      "a reactions handler that refuses a share view refuses the whole thread open",
     ).toHaveBeenCalled();
     expect(screen.queryByText(/Could not load this chat/i)).toBeNull();
     expect(screen.getByTestId("linked-chat-composer")).toBeTruthy();
   });
 
   it("reports the thread as unloadable when either half of that load refuses", async () => {
-    // The failure this file must be able to SEE: whichever half refuses, the
+    // The failure this file must be able to see: whichever half refuses, the
     // reader gets the same dead panel, so a test that stubs both to resolve
     // proves nothing about either.
     bridgeMock.listChatReactions.mockRejectedValueOnce(
@@ -678,8 +678,8 @@ describe("LinkedChatsPanel share level", () => {
     );
   });
 
-  // A reaction is a WRITE, so a share that refuses writes offers no PICKER.
-  // The reactions already on a message are part of the CONVERSATION, though,
+  // A reaction is a write, so a share that refuses writes offers no PICKER.
+  // The reactions already on a message are part of the conversation, though,
   // and a reader who can see the messages must see who reacted to them —
   // dropping the whole prop hid other people's reactions along with the
   // affordance to add one.
@@ -717,11 +717,11 @@ describe("LinkedChatsPanel share level", () => {
     await waitFor(() => expect(screen.getByTestId("linked-chat-thread")).toBeTruthy());
     expect(
       screen.getAllByTestId("linked-chat-reaction-pill").length,
-      "MUTATION: dropping reactionControls hides other people's reactions too",
+      "dropping reactionControls hides other people's reactions too",
     ).toBeGreaterThan(0);
     expect(
       screen.queryByTestId("linked-chat-add-reaction"),
-      "MUTATION: a share that refuses writes must not offer the picker",
+      "a share that refuses writes must not offer the picker",
     ).toBeNull();
   });
 

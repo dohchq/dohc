@@ -54,7 +54,7 @@ function calloutPos(editor: Editor): number {
   return found;
 }
 
-/** Change ONLY the callout title, as a remote/agent edit would. */
+/** Change only the callout title, as a remote/agent edit would. */
 function externallySetTitle(editor: Editor, title: string): void {
   const pos = calloutPos(editor);
   const node = editor.state.doc.nodeAt(pos);
@@ -116,7 +116,7 @@ describe("callout header title staleness", () => {
     // ...while a remote/agent edit renames the callout.
     externallySetTitle(editor, "Remote wins");
 
-    // Blurring must NOT write the stale focused input back over the remote title.
+    // Blurring must not write the stale focused input back over the remote title.
     input.blur();
 
     expect(liveTitle(editor)).toBe("Remote wins");
@@ -135,9 +135,9 @@ describe("callout header title staleness", () => {
 
   it("keeps the focused title input across content inserted before the callout", () => {
     // A collaborator/agent inserting text before a callout shifts its document
-    // position. The widget key must key off callout ORDINAL (not absolute pos),
+    // position. The widget key must key off callout ordinal (not absolute pos),
     // or the decoration remints — dropping the focused input and its
-    // uncommitted title WITHOUT a blur (the commit never fires).
+    // uncommitted title without a blur (the commit never fires).
     const editor = makeEditor("intro\n\n> [!note] Title\n> body");
     const input = titleInput(editor);
     input.focus();
@@ -168,7 +168,7 @@ describe("callout header title staleness", () => {
     expect(liveTitle(editor)).toBe("First commit");
 
     // Re-acquire the (possibly reminted) input, type an uncommitted edit, then
-    // Escape: it must restore the CURRENT title ("First commit"), not "Original".
+    // Escape: it must restore the current title ("First commit"), not "Original".
     input = titleInput(editor);
     input.focus();
     input.value = "Scratch edit";
@@ -308,7 +308,7 @@ describe("callout header selection", () => {
   }
 
   it("clicking the header background selects the whole callout", () => {
-    // This is the only mouse path to select a FOLDED callout (its body is
+    // This is the only mouse path to select a folded callout (its body is
     // hidden), which in turn is what makes it deletable via Backspace.
     const editor = makeEditor("> [!note]- Folded\n> hidden body");
 

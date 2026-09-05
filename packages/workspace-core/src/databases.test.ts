@@ -35,7 +35,7 @@ describe("classifyDatabaseFile", () => {
 
   it("exposes the single-source helpers the watcher collapse uses", () => {
     // .sqlite3 once diverged between this module and the watcher's local copy
-    // of the regex — these helpers ARE the watcher's rules now.
+    // of the regex — these helpers are the watcher's rules now.
     expect(isDatabaseFile("notes/log.sqlite3")).toBe(true);
     expect(isDatabaseFile("notes/log.sqlite3-wal")).toBe(false);
     expect(sidecarBasePath("notes/log.sqlite3-wal")).toBe("notes/log.sqlite3");

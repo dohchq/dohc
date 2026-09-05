@@ -635,7 +635,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   // The renderer answers ui.theme for a panel before it reaches main, so
-  // BOTH paths refuse here — and say why rather than "unsupported method".
+  // both paths refuse here — and say why rather than "unsupported method".
   it("refuses ui.theme by name on either request path", async () => {
     const root = await createTestScratch("dohc-plugin-sdk-host-");
     const paths: PluginSdkHostContext[] = [
@@ -675,8 +675,6 @@ describe("invokePluginSdkHost", () => {
       });
     });
 
-    // MUTATION (serve this from the plugin-process path too): a plugin with
-    // no renderer would ask for a tab nothing can open.
     it("refuses the request path with no renderer behind it", async () => {
       const root = await createTestScratch("dohc-plugin-sdk-host-");
       await expect(
@@ -691,9 +689,6 @@ describe("invokePluginSdkHost", () => {
       ).rejects.toThrow(/ui.openWebApp is unavailable for this request path/);
     });
 
-    // MUTATION (read the declared web apps from the request instead of the
-    // registration): a panel could open a web app its manifest never declared
-    // — approval covers the manifest, so this is the line approval sits on.
     it("refuses a web app this plugin's manifest never declared", async () => {
       await expect(
         invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
@@ -720,9 +715,6 @@ describe("invokePluginSdkHost", () => {
       ).rejects.toThrow(/instanceKey must be a non-empty string/);
     });
 
-    // MUTATION (drop the length bound): the key rides in a tab path that
-    // restore rejects past 4096 characters, so an unbounded key would open a
-    // tab that never comes back.
     it("names the limit when an instance key is too long", async () => {
       await expect(
         invokePluginSdkHost(await panelWithWebApps(), "ui.openWebApp", {
@@ -732,9 +724,6 @@ describe("invokePluginSdkHost", () => {
       ).rejects.toThrow(/513 characters, past the limit of 512 characters/);
     });
 
-    // MUTATION (check only for NUL, or lean on the SDK's own check): the SDK
-    // check is the caller's copy and a caller can skip it, so this side is
-    // what keeps a control character out of a tab path and a tab label.
     it.each([
       ["a NUL byte", "sites/a\u0000b"],
       ["a newline", "sites/a\nb"],
@@ -907,7 +896,7 @@ describe("invokePluginSdkHost", () => {
     await expect(request).rejects.toThrow("Plugin panel is no longer active.");
   });
 
-  it("reports childProcesses honestly, and rejects every method, when invokeChildProcess is absent (#779 round 3 finding 7 / R24)", async () => {
+  it("reports childProcesses honestly, and rejects every method, when invokeChildProcess is absent", async () => {
     // Panel-driven SDK calls never supply invokeChildProcess — only a
     // plugin's own routeSdkRequest path may broker child processes on its
     // behalf.

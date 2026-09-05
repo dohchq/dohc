@@ -649,7 +649,7 @@ describe("PluginDetailsPage", () => {
   // confirmation from a stale "never installed" claim used to scope to id
   // alone. Two rows can share an id (a broken manifest's directory-derived
   // fallback colliding with some other, unrelated plugin's real id), and
-  // an UNRELATED row's own install completing must never close a
+  // an unrelated row's own install completing must never close a
   // completely different row's dialog for a transition that never
   // happened to it.
   it("keeps an open Remove dialog open when an unrelated, id-colliding row installs", async () => {
@@ -703,7 +703,7 @@ describe("PluginDetailsPage", () => {
   });
 
   // A directoryName matching a built-in says nothing about what a copy's
-  // OWN manifest currently claims — it can be hand-edited, or too broken to
+  // own manifest currently claims — it can be hand-edited, or too broken to
   // read at all. The dialog must name the packaged plugin Add actually
   // restores, never whatever title this specific copy happens to carry.
   it("names the packaged plugin, not this copy's own display name, for a built-in directory", async () => {
@@ -716,7 +716,7 @@ describe("PluginDetailsPage", () => {
       displayName: "Someone's Fork",
     });
     bridgeMock.listPlugins.mockResolvedValue({ ok: true, plugins: [renamedCopy] });
-    // The preflight names the PACKAGED manifest's own displayName — never
+    // The preflight names the packaged manifest's own displayName — never
     // this copy's "Someone's Fork" — proving the dialog reads it from
     // there, not from confirmation.plugin.
     bridgeMock.pluginUninstallPreflight.mockResolvedValue({
@@ -795,7 +795,7 @@ describe("PluginDetailsPage", () => {
     expect(bridgeMock.uninstallPlugin).not.toHaveBeenCalled();
   });
 
-  // The interleaving the test above cannot reach: the install lands WHILE
+  // The interleaving the test above cannot reach: the install lands while
   // the preflight request for Remove is still in flight, before
   // confirmation exists for the event-driven clear (the test above) to act
   // on. The preflight response must not install a dialog built from a
@@ -848,8 +848,8 @@ describe("PluginDetailsPage", () => {
   // Round 18 finding 2: the same in-flight check above scoped to id alone —
   // two rows can share an id (a broken manifest's directory-derived
   // fallback colliding with some other, unrelated plugin's real id), and an
-  // UNRELATED, id-colliding row's own install completing must never refuse
-  // to open THIS row's Remove confirmation for a transition that never
+  // unrelated, id-colliding row's own install completing must never refuse
+  // to open this row's Remove confirmation for a transition that never
   // happened to it.
   it("still opens the Remove confirmation when an unrelated, id-colliding row installs while preflight is in flight", async () => {
     const removingRow = plugin("codex", {
@@ -905,9 +905,6 @@ describe("PluginDetailsPage", () => {
     expect(screen.getByTestId("plugin-uninstall-dialog")).toBeTruthy();
   });
 
-  // MUTATION (offer Open for a per-instance app too): this page has no
-  // instance to name, so the open would be refused — and a user would be
-  // handed a button that never works. The plugin's own panel opens these.
   it("offers no Open for a web app that opens one tab per instance", async () => {
     const installed = plugin("t3-code", {
       webApps: [{ id: "preview", title: "Preview", instanced: true }],
@@ -994,11 +991,8 @@ describe("PluginDetailsPage", () => {
       <PluginDetailsPage workspaceId="ws-new" pluginId="t3-code" directoryName="t3-code" />,
     );
 
-    // MUTATION (leave openingWebApp alone across the switch): the stale
-    // request never clears it — its own cleanup is skipped by the epoch
-    // guard — and every Open control in this workspace stays disabled.
     const open = await screen.findByTestId("plugin-open-web-app");
-    await waitFor(() => expect(open.hasAttribute("disabled")).toBe(false));
+    await waitFor(() => expect(open.hasAttribute("disabled"), "leave openingWebApp alone across the switch: the stale request never clears it — its own cleanup is skipped by the epoch guard — and every Open control in this workspace stays disabled.").toBe(false));
     await act(async () => {
       fireEvent.click(open);
       await Promise.resolve();
@@ -1106,7 +1100,7 @@ describe("PluginDetailsPage", () => {
     );
   });
 
-  it("offers a retry action for a plugin whose fresh install failed (CodeRabbit #779 R30)", async () => {
+  it("offers a retry action for a plugin whose fresh install failed", async () => {
     const stuck = plugin("stuck-plugin", {
       status: "disabled-pending-repair",
       disabledReason: "repair",
@@ -1167,7 +1161,7 @@ describe("PluginDetailsPage", () => {
     });
   });
 
-  it("keeps offering a build retry after a crash-loop respawn hides status \"failed\" (round-8 finding 3)", async () => {
+  it("keeps offering a build retry after a crash-loop respawn hides status \"failed\"", async () => {
     const respawned = plugin("respawned-plugin", {
       status: "ready",
       runtimeStatus: "ready",
@@ -1192,7 +1186,7 @@ describe("PluginDetailsPage", () => {
     });
   });
 
-  it("offers Retry build, not Enable, for a crash-loop-disabled plugin with a failed replacement owed (round-10 finding 1)", async () => {
+  it("offers Retry build, not Enable, for a crash-loop-disabled plugin with a failed replacement owed", async () => {
     const disabled = plugin("disabled-plugin", {
       status: "disabled",
       disabledReason: "crash-loop",
@@ -1245,7 +1239,7 @@ describe("PluginDetailsPage", () => {
     expect(screen.queryByTestId("plugin-rebuild")).toBeNull();
   });
 
-  it("offers only uninstall for an installed plugin whose manifest broke (#779 round 8 D2)", async () => {
+  it("offers only uninstall for an installed plugin whose manifest broke", async () => {
     const broken = plugin("broken-plugin", {
       valid: false,
       status: "invalid",
@@ -1591,7 +1585,7 @@ describe("PluginDetailsPage", () => {
         workspaceId === "ws-old" ? oldList.promise : newList.promise,
     );
 
-    // The open tab is the SAME (pluginId, directoryName) throughout — a
+    // The open tab is the same (pluginId, directoryName) throughout — a
     // workspace switch changes which workspace answers for it, never the
     // row identity the tab itself was opened for.
     const view = renderPage("t3-code", "ws-old");
@@ -1744,9 +1738,6 @@ describe("PluginDetailsPage", () => {
     });
 
     it("reports a read failure instead of claiming there is no README", async () => {
-      // MUTATION (catch every rejection as "absent"): a permission failure
-      // reads as a plugin that simply documents nothing, and the user is
-      // told a comfortable lie about their own workspace.
       bridgeMock.listPlugins.mockResolvedValue({
         ok: true,
         plugins: [plugin("t3-code")],
@@ -1768,12 +1759,6 @@ describe("PluginDetailsPage", () => {
     });
 
     it("never lets a slow read repaint over the folder the plugin now has", async () => {
-      // MUTATION (drop the async-response guard in useReadme): the rename's own
-      // README paints first, then the read for the folder the plugin no
-      // longer has lands on top of it and the page shows the wrong file.
-      // A workspace switch cannot prove this — it unmounts the README —
-      // so the race is exercised where it really lives: one live page whose
-      // plugin changed folder underneath it.
       bridgeMock.listPlugins.mockResolvedValue({
         ok: true,
         plugins: [plugin("t3-code", { directoryName: "old-folder" })],

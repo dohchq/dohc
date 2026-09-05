@@ -3,16 +3,16 @@
 //! into it (mirrors the TS driver's `globalLiveYDocReservations`). The store's
 //! single owned connection already enforces one writer per `engine.db`; the
 //! lease adds the finer-grained per-lineage exclusion the co-editing lifecycle
-//! needs, and releases DETERMINISTICALLY on `Drop` (never stranded "live" on a
+//! needs, and releases deterministically on `Drop` (never stranded "live" on a
 //! panic or an early return during a failed open).
 //!
 //! **Scope: PROCESS-LOCAL, per-registry.** Exclusion holds only within one
 //! [`LeaseRegistry`] in one process — two independent registries (or two
 //! processes) can each grant a lease for the same [`DocKey`], exactly like the
 //! TS `globalLiveYDocReservations` (a per-process module-global set). CROSS-
-//! PROCESS exclusion is NOT this type's job: it rides the store's single owned
+//! PROCESS exclusion is not this type's job: it rides the store's single owned
 //! writer connection (one writer per `engine.db`) plus the durable base-once
-//! re-check in `claim_base`. Pass ONE registry per process to the code that
+//! re-check in `claim_base`. Pass one registry per process to the code that
 //! opens sessions.
 //!
 //! If the internal mutex is ever poisoned (a thread panicked while holding it),
@@ -35,11 +35,11 @@ use crate::DocKey;
 #[derive(Clone, Default)]
 pub struct LeaseRegistry {
     /// Root-path scope prefixed onto the workspace component of every key.
-    /// One process-wide registry serves EVERY open root (multi-service
+    /// One process-wide registry serves every open root (multi-service
     /// exclusion on the same root), but two roots can carry the same
-    /// workspace id AND the same derived object id (two clones of one
+    /// workspace id and the same derived object id (two clones of one
     /// workspace) — unscoped keys would refuse the second root's open as
-    /// ydoc-session-busy against a lease in a DIFFERENT engine DB. The
+    /// ydoc-session-busy against a lease in a different engine DB. The
     /// default instance has an empty scope; per-root users hold a
     /// [`Self::scoped`] view sharing the same held-set.
     scope: String,
@@ -52,7 +52,7 @@ impl LeaseRegistry {
         LeaseRegistry::default()
     }
 
-    /// A view over the SAME shared held-set whose keys carry the workspace
+    /// A view over the same shared held-set whose keys carry the workspace
     /// root, so identical (workspace, object) pairs under different roots
     /// cannot exclude each other.
     pub fn scoped(&self, root: &std::path::Path) -> LeaseRegistry {

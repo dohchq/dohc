@@ -16,8 +16,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Editor, Extension, getSchema, type JSONContent } from "@tiptap/core";
 import { StarterKit } from "@tiptap/starter-kit";
 import { Markdown } from "@tiptap/markdown";
-// Bare TaskItem is imported here ONLY as the contrast case for the schema-
-// fidelity pin below (#711) — every registered test-local editor schema in
+// Bare TaskItem is imported here only as the contrast case for the schema-
+// fidelity pin below — every registered test-local editor schema in
 // this file uses DohcTaskItem.
 import { TaskItem, TaskList } from "@tiptap/extension-list";
 import { TableKit } from "@tiptap/extension-table";
@@ -122,7 +122,7 @@ afterEach(() => {
 // once-per-process latch (`warnedAboutTextSelection` in prosemirror-state's
 // checkTextSelection) — it logs at most once for the life of this test
 // process. These pins are only honest while this describe block is the
-// FIRST one in this file to construct a collab editor: if some earlier suite
+// first one in this file to construct a collab editor: if some earlier suite
 // already tripped the latch, `console.warn` assertions below would pass
 // vacuously (the warning simply never fires again) whether or not the fix
 // still works. Keep this describe first in the file.
@@ -169,7 +169,7 @@ describe("MarkdownEditor collaboration selection", () => {
   // node with zero children: schema.nodeFromJSON builds it without
   // validating (tiptap only validates when enableContentCheck is set), so
   // the editor mounts with no paragraph at all — no placeholder, empty DOM —
-  // and still logs the #705 warning, since nothing in that document resolves
+  // and still logs the warning, since nothing in that document resolves
   // to inline content either. Both shapes are first-class in product: a
   // brand-new note (empty body) and a properties-only page (frontmatter,
   // no body) both bind through this exact path.
@@ -247,7 +247,7 @@ describe("MarkdownEditor collaboration selection", () => {
   // at all — is the exact shape "undoes and redoes a local edit in
   // collaboration mode" below binds before typing into it. It hits the same
   // empty-body path as the two pins above; called out on its own because an
-  // unguarded seed logs the RELATED `(doc)` warning variant here specifically
+  // unguarded seed logs the related `(doc)` warning variant here specifically
   // (confirmed 0/5 clean on the unguarded seed, 5/5 clean once guarded).
   it("binds a bare new Y.Doc() without losing the placeholder paragraph or warning", async () => {
     const selectionWarning =
@@ -283,7 +283,7 @@ describe("MarkdownEditor collaboration selection", () => {
     }
   });
 
-  // The selection seed must be recomputed on every editor REBUILD, not just
+  // The selection seed must be recomputed on every editor rebuild, not just
   // when collab.ydoc's own identity changes. useEditor rebuilds (destroys
   // and reconstructs the tiptap Editor) whenever `extensions` changes
   // identity — which happens when awareness is added, removed, or swapped,
@@ -291,7 +291,7 @@ describe("MarkdownEditor collaboration selection", () => {
   // A seed memoized on [collab?.ydoc] alone would survive that rebuild
   // holding the doc's shape from MOUNT time — reseeding the fresh editor
   // with a stale (here: paragraph-first) path even though the doc's real
-  // leading node is now a taskList, recreating #705's invalid selection.
+  // leading node is now a taskList, recreating the invalid selection.
   it("recomputes the selection seed on a rebuild, not the mount-time doc shape", async () => {
     const selectionWarning =
       /TextSelection endpoint not pointing into a node with inline content/;
@@ -317,7 +317,7 @@ describe("MarkdownEditor collaboration selection", () => {
         ),
       );
 
-      // Rewrite the SAME Y.Doc's body to a taskList-first shape — an
+      // Rewrite the same Y.Doc's body to a taskList-first shape — an
       // external actor replacing content, not typed through the bound
       // editor (which would apply incrementally and never exercise a fresh
       // mount's seed path at all). The fragment is cleared first:
@@ -383,12 +383,12 @@ describe("MarkdownEditor collaboration selection", () => {
   });
 });
 
-// #711: the bare-TaskItem swap isn't registration-only — a bare TaskItem's
+// The bare-TaskItem swap isn't registration-only — a bare TaskItem's
 // `paragraph+` content model rejects the nested list a real task item can
-// hold. Driven through the REAL Y.Doc round trip (the same
+// hold. Driven through the real Y.Doc round trip (the same
 // prosemirrorJSONToYXmlFragment / yXmlFragmentToProseMirrorRootNode pair
 // production uses), a document that nests a list under a task item survives
-// with DohcTaskItem and is dropped ENTIRELY (the whole doc reduces to
+// with DohcTaskItem and is dropped entirely (the whole doc reduces to
 // `{ type: "doc" }`, content undefined) with bare TaskItem — the earlier
 // fakes weren't just modeling a narrower schema, they'd have silently eaten
 // this exact document if a test had ever driven one through them.
@@ -786,9 +786,9 @@ describe("MarkdownEditor empty list item focus", () => {
 });
 
 // The live editor registers its own extension list, and the collaboration
-// binding converts the Y.Doc through THAT schema. A `paragraph+` task item
+// binding converts the Y.Doc through that schema. A `paragraph+` task item
 // makes the indented list schema-invalid, so binding drops the whole task list
-// and the document opens empty (#700).
+// and the document opens empty.
 describe("MarkdownEditor nested checklists", () => {
   it("binds an indented list under a checkbox from the Y.Doc", async () => {
     const markdown = ["- [ ] parent", "  - child one", "  - child two"].join("\n");
@@ -1201,8 +1201,8 @@ describe("MarkdownEditor remote carets", () => {
 // FenceWideningCodeBlock, StarterKit's default codeBlock hardcoded a
 // three-backtick fence regardless of content, so a code block whose own
 // content held a ``` line closed its fence early and truncated on
-// re-import (#704).
-describe("MarkdownEditor markdown export: code fence widening (#704)", () => {
+// re-import.
+describe("MarkdownEditor markdown export: code fence widening", () => {
   it("reports Replace all while the find input owns focus", async () => {
     Object.defineProperty(Element.prototype, "scrollIntoView", {
       configurable: true,
@@ -1637,7 +1637,7 @@ describe("MarkdownEditor read-only links", () => {
 // `dirtyTrackingReady` ref, which made "did the app hear the edit?" a question
 // about timing: an edit that arrived before the frame was applied to
 // ProseMirror's document and never reported, so the editor showed the text
-// while the app said "Saved" and scheduled no save at all (#797).
+// while the app said "Saved" and scheduled no save at all.
 //
 // Holding the frame open is what makes that window permanent instead of a
 // 16ms race. These tests fail deterministically if the gate returns, and they
@@ -1684,7 +1684,7 @@ describe("MarkdownEditor dirty tracking", () => {
 
   // The rebuild case, and the more dangerous one: the user is already in the
   // document when the engine session ends and the view falls back to the local
-  // editor. `collab` drops, the extensions change, and tiptap builds a NEW
+  // editor. `collab` drops, the extensions change, and tiptap builds a new
   // editor underneath a user who never stopped typing.
   it("reports an edit that lands after the editor is rebuilt mid-session", async () => {
     holdAnimationFrames();

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// #516: the two surfaces that draw a unified diff — the history diff page and
+// The two surfaces that draw a unified diff — the history diff page and
 // the versions compare page — both ran the diff on every render, unmemoized,
 // and both built one object per line of the whole body before the 800-line
 // display bound applied. These pin both halves of the fix on both surfaces.
@@ -79,7 +79,7 @@ describe("history diff page", () => {
     expect(computeTextDiffSpy).toHaveBeenCalledTimes(1);
 
     // A render that does not change the moment must not diff it again. This
-    // used to run the diff TWICE per render: once for the counts, once for
+    // used to run the diff twice per render: once for the counts, once for
     // the lines.
     view.rerender(
       <EngineMomentDiffPage
@@ -106,7 +106,7 @@ describe("history diff page", () => {
     // lines to render the same 801.
     expect(body.children).toHaveLength(801);
     expect(body.textContent).toContain("more diff lines hidden");
-    // The counts still describe the WHOLE change.
+    // The counts still describe the whole change.
     expect(screen.getByTestId("engine-diff-counts").textContent).toBe(
       "+250000 -250000",
     );

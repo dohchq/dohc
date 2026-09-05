@@ -401,7 +401,7 @@ describe("CloudLogin", () => {
     expect(screen.getByTestId("cloud-sync-passphrase")).toBeTruthy();
   });
 
-  it("shows the copyable sync code for a synced workspace (0P-C join handle)", async () => {
+  it("shows the copyable sync code for a synced workspace", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
       email: "ice@dohc.dev",

@@ -44,7 +44,7 @@ describe("process-backed agent drivers", () => {
       command: "C:\\Windows\\System32\\cmd.exe",
       // One outer-quoted /s /c command line, passed verbatim so Node cannot
       // re-quote it — cmd.exe strips the outer quotes and runs the shim with
-      // its argv intact even when the shim path contains spaces. EVERY token
+      // its argv intact even when the shim path contains spaces. Every token
       // is quoted so cmd metacharacters (& | < > ^) inside arguments are
       // inert instead of being parsed as command separators.
       args: [

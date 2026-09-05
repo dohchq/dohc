@@ -42,7 +42,7 @@ describe("reserved paths", () => {
     expect(isReservedPath("notes/today.md")).toBe(false);
   });
 
-  it("reserves a nested .dohc at ANY depth, not just the first segment", () => {
+  it("reserves a nested .dohc at any depth, not just the first segment", () => {
     expect(isReservedPath("notes/.dohc/x")).toBe(true);
     expect(isReservedPath("a/b/.DOHC/x")).toBe(true);
     const result = validateUserWritePath("notes/.dohc/secret");
@@ -168,7 +168,7 @@ describe("path traversal", () => {
 
 describe("Check A — reserved-path (security core, every surface, every platform)", () => {
   // 8.3 short-name aliases of `.dohc`: on Windows these resolve to the reserved
-  // dir, so they must be refused on reads AND writes on EVERY platform (the
+  // dir, so they must be refused on reads and writes on every platform (the
   // guard can't depend on running where the alias expands).
   const dohcAliases = [
     "DOHC~1",
@@ -195,7 +195,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
     }
   });
 
-  it("rejects `shared-with-me` 8.3 aliases on WRITE but allows them on READ", () => {
+  it("rejects `shared-with-me` 8.3 aliases on write but allows them on read", () => {
     for (const candidate of ["SHARED~1/alex/brief.md", "share~10/x.md", "SHARED~2"]) {
       // Write reservation (like shared-with-me itself).
       expect(validateUserWritePath(candidate)).toEqual({ ok: false, reason: "reserved" });
@@ -208,7 +208,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
     }
   });
 
-  it("does NOT treat non-reserved tilde names as reserved (only the alias stems)", () => {
+  it("does not treat non-reserved tilde names as reserved (only the alias stems)", () => {
     for (const candidate of [
       "report~1.pdf",
       "draft~2.md",
@@ -225,7 +225,7 @@ describe("Check A — reserved-path (security core, every surface, every platfor
 });
 
 describe("Check B — materialize hazard (disk-write only, win32-gated)", () => {
-  // Host-legal off Windows, unsafe to WRITE onto a Windows disk, and NOT
+  // Host-legal off Windows, unsafe to write onto a Windows disk, and not
   // reserved aliases: ADS/drive colons, device names, generic 8.3 shapes.
   const hazards = [
     "notes.md:hidden",
@@ -269,14 +269,14 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
     }
   });
 
-  it("allows the SAME names on a non-Windows materialize (host-legal there)", () => {
+  it("allows the same names on a non-Windows materialize (host-legal there)", () => {
     for (const candidate of hazards) {
       expect(validateUserMaterializePath(candidate, { platform: "linux" }).ok).toBe(true);
       expect(validateUserMaterializePath(candidate, { platform: "darwin" }).ok).toBe(true);
     }
   });
 
-  it("allows the SAME names on the default write path (classify/capture) and non-win32 reads", () => {
+  it("allows the same names on the default write path (classify/capture) and non-win32 reads", () => {
     for (const candidate of hazards) {
       // Check A only — never applies the materialize hazard.
       expect(validateUserWritePath(candidate).ok).toBe(true);
@@ -296,7 +296,7 @@ describe("Check B — materialize hazard (disk-write only, win32-gated)", () => 
       });
       expect(validateUserReadPath(candidate, { platform: "linux" }).ok).toBe(true);
     }
-    // Non-colon hazards (device names, 8.3 shapes) still READ fine on Windows —
+    // Non-colon hazards (device names, 8.3 shapes) still read fine on Windows —
     // an existing file with that name must stay readable/capturable.
     for (const candidate of ["nul.md", "report~1.pdf", "CONIN$", "LONGDI~1/notes.md"]) {
       expect(validateUserReadPath(candidate, { platform: "win32" }).ok).toBe(true);

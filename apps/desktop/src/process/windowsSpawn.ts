@@ -1,6 +1,6 @@
 // Windows child-process spawning support, shared by agent transports and the
-// site runner. On Windows, package-manager and npm-installed CLI commands are
-// .cmd/.bat shims that cannot be spawned directly; they must run behind a
+// site runner. On Windows, package-manager and npm-installed CLI commands are.
+// Cmd/.bat shims that cannot be spawned directly; they must run behind a
 // cmd.exe wrapper whose command line follows cmd's (not POSIX's) quoting
 // rules, and killing that wrapper does not kill the real process it started.
 // Everything here is a no-op on other platforms.
@@ -8,7 +8,7 @@ import { execFile, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
 
-// Quote a token for a cmd.exe /s /c command line. EVERY token is quoted:
+// Quote a token for a cmd.exe /s /c command line. Every token is quoted:
 // cmd.exe does not interpret its metacharacters (& | < > ^ and parentheses)
 // inside double quotes, so quoting only whitespace-bearing tokens would let a
 // metacharacter-bearing argument be parsed as a second command that no
@@ -86,7 +86,7 @@ export function resolveSpawnCommand(
   const extension = win32.extname(resolved).toLowerCase();
   if (extension === ".cmd" || extension === ".bat") {
     // cmd.exe /s strips the first and last quote of the string after /c, so
-    // the whole command line rides in ONE outer-quoted argument with every
+    // the whole command line rides in one outer-quoted argument with every
     // token quoted individually. windowsVerbatimArguments stops Node from
     // re-quoting that argument, which would corrupt cmd.exe's parsing (and,
     // for a spaced shim path like "C:\Program Files\nodejs\npm.cmd", swallow
@@ -128,10 +128,10 @@ export function killProcessTreeWin32(
   });
 }
 
-// taskkill /PID <wrapper> /T walks the LIVE process tree from a still-running
+// taskkill /PID <wrapper> /T walks the live process tree from a still-running
 // wrapper pid — it has nothing to walk once that wrapper has already exited,
 // the same gap posixSpawn.ts's module comment describes for "-pid" process
-// groups. siteRunner's stopChild needs a snapshot taken WHILE the wrapper was
+// groups. siteRunner's stopChild needs a snapshot taken while the wrapper was
 // still alive, captured periodically the same way posixSpawn.ts's shared
 // processDescendants lets a backgrounded descendant stay reachable after its
 // own wrapper exits and gets reparented away in the process table.

@@ -24,7 +24,7 @@ export interface OwnedWorkspaceSearchSource {
 }
 
 /**
- * The engine's collection index reads for THIS workspace. Main derives them
+ * The engine's collection index reads for this workspace. Main derives them
  * from the workspace's engine adapter; the port passes them through with the
  * same scope its file reads have — the whole owned workspace — so a caller
  * holding this port reads collections exactly where it reads files.

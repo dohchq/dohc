@@ -174,17 +174,13 @@ fn head_content_kind(store: &EngineStore, version_id: &str, path: &str) -> Strin
 
 /// Bytes that agree need no decision.
 ///
-/// MUTATION: compare binary sides by their (always empty) text view instead of
-/// their content address -> this keeps passing, while its differing-bytes
-/// sibling below reports `unchanged` and the merge silently drops the source's
-/// bytes.
 #[test]
 fn equal_bytes_merge_uncontested() {
     let (_scratch, mut store) = open();
     let bytes = b"\x89PNG\x00\x01";
     write_binary(&mut store, "main", "logo.png", bytes, "obj-logo", "m-1");
     fork(&mut store);
-    // The source rewrites the SAME bytes, so the two heads still agree.
+    // The source rewrites the same bytes, so the two heads still agree.
     write_binary(&mut store, "feat", "logo.png", bytes, "obj-feat-1", "f-1");
     let before = moment_count(&store);
 
@@ -213,9 +209,6 @@ fn equal_bytes_merge_uncontested() {
 /// Differing bytes open a conflict carrying both sides, and each side resolves
 /// to its own bytes.
 ///
-/// MUTATION: drop the binary branch from the merge decision tree -> the merge
-/// fast-forwards through the TEXT write seam, which reads a binary head as an
-/// empty path, and this expects a conflict it never gets.
 #[test]
 fn differing_bytes_open_a_conflict_resolvable_by_side() {
     let (_scratch, mut store) = open();
@@ -302,7 +295,7 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     assert_eq!(moment_count(&store), before);
     assert_eq!(binary_head_sha(&store, "main", "logo.png"), main_sha);
 
-    // A second conflict over the same pair resolves the OTHER way, so both
+    // A second conflict over the same pair resolves the other way, so both
     // choices cannot be wired to the same side.
     let reopened = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version(
@@ -332,7 +325,7 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
 }
 
 /// The folder must follow the resolution: applying the incoming binary side
-/// into the ACTIVE version commits its disk write, keyed on the resolve
+/// into the active version commits its disk write, keyed on the resolve
 /// moment's id and guarded by the head it replaces.
 #[test]
 fn applying_a_binary_side_into_the_active_version_enqueues_its_materialization() {
@@ -386,12 +379,10 @@ fn applying_a_binary_side_into_the_active_version_enqueues_its_materialization()
     assert_eq!(job.preimage, Preimage::Present(main_sha));
 }
 
-/// A NEW binary file, present only in the source: base and current are both
+/// A new binary file, present only in the source: base and current are both
 /// absent, so nothing on the target can be lost and the merge fast-forwards
 /// instead of asking the user to adjudicate a disagreement that does not exist.
 ///
-/// MUTATION: fire the fast-forward without checking that current equals base ->
-/// `differing_bytes_open_a_conflict_resolvable_by_side` FAILS.
 #[test]
 fn a_new_source_only_binary_file_fast_forwards() {
     let (_scratch, mut store) = open();
@@ -411,7 +402,7 @@ fn a_new_source_only_binary_file_fast_forwards() {
         MergeTextFileResult::BinaryWrite { write, comparison } => {
             assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
             assert!(write.head.binary);
-            // The head reports its BINARY address and length, never the empty
+            // The head reports its binary address and length, never the empty
             // text view a binary snapshot reads as.
             assert_eq!(write.head.snapshot.blob_sha256, feat_sha);
             assert_eq!(write.head.byte_length, feat_bytes.len() as i64);
@@ -442,7 +433,7 @@ fn a_new_source_only_binary_file_fast_forwards() {
     );
 }
 
-/// The same fast-forward over a head the target has NOT touched since the fork:
+/// The same fast-forward over a head the target has not touched since the fork:
 /// current equals base by content ADDRESS, so only the source moved.
 #[test]
 fn a_source_only_binary_replacement_fast_forwards_over_the_unchanged_head() {
@@ -475,7 +466,7 @@ fn a_source_only_binary_replacement_fast_forwards_over_the_unchanged_head() {
         MergeTextFileResult::BinaryWrite { write, .. } => {
             assert_eq!(write.head.snapshot.blob_sha256, feat_sha);
             // The path keeps its object identity; the merge id binds only a
-            // NEW target path.
+            // new target path.
             assert_eq!(write.object.object_id, "obj-logo");
         }
         other => panic!("expected a binary fast-forward, got {other:?}"),
@@ -532,13 +523,11 @@ fn a_source_only_binary_change_fast_forwards_over_an_unchanged_text_head() {
     );
 }
 
-/// An EMPTY text head over a binary base is not a binary fast-forward either. A
+/// An empty text head over a binary base is not a binary fast-forward either. A
 /// binary side's text view is empty, so equality read from the text view would
 /// let the emptied head stand in for its binary ancestor and the incoming bytes
 /// would land on an edit that never shared an ancestor with them.
 ///
-/// MUTATION: compare the fast-forward's sides by their text view instead of
-/// their content address -> this fast-forwards instead of conflicting.
 #[test]
 fn an_empty_text_head_over_a_binary_base_is_not_a_binary_fast_forward() {
     let (_scratch, mut store) = open();
@@ -628,16 +617,13 @@ fn a_replayed_binary_fast_forward_reports_the_head_it_wrote() {
     );
 }
 
-/// The OTHER direction of a source-only change: the target holds bytes it has
+/// The other direction of a source-only change: the target holds bytes it has
 /// not touched since the fork, and the source replaced them with TEXT. Only the
 /// source moved, so the comparison reads `IncomingChanged` — but the merge
-/// still goes to the user: the binary fast-forward writes BYTES, and the TEXT
-/// fast-forward does not hand its seam a binary current (#491). Resolving does
+/// still goes to the user: the binary fast-forward writes bytes, and the TEXT
+/// fast-forward does not hand its seam a binary current. Resolving does
 /// — one click later, `ApplyIncoming` writes the incoming text over the bytes.
 ///
-/// MUTATION: drop the `incoming.binary` gate from the fast-forward -> the merge
-/// hands a TEXT blob address to the binary write seam and dies with
-/// `binary file write references a missing binary blob`.
 #[test]
 fn text_replacing_an_untouched_binary_head_opens_a_conflict() {
     let (_scratch, mut store) = open();
@@ -712,17 +698,14 @@ fn comparison_reports_a_binary_head_with_its_address_and_size() {
     assert_eq!(comparison.status, ComparisonStatus::IncomingChanged);
 }
 
-/// The source REMOVED a binary asset the target still holds. Applying the
-/// incoming side must remove it from the target's head AND from the folder.
+/// The source removed a binary asset the target still holds. Applying the
+/// incoming side must remove it from the target's head and from the folder.
 ///
 /// A binary head's removal carries its own preimage and job id; the text
 /// enqueue seam hashes the deleted snapshot's TEXT, which for a binary head is
 /// the empty string, so it would queue a disk write guarded by the wrong
 /// preimage against the wrong content.
 ///
-/// MUTATION: enqueue the delete through the text seam instead of the binary
-/// one -> the binary delete job is missing and the preimage is the empty
-/// string's hash.
 #[test]
 fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
     let (_scratch, mut store) = open();
@@ -819,7 +802,7 @@ fn a_binary_base_under_two_text_sides_opens_a_conflict() {
         "m-1",
     );
     fork(&mut store);
-    // Both sides replace the bytes with DIFFERENT text.
+    // Both sides replace the bytes with different text.
     write_text(&mut store, "main", "notes.md", "main text\n", "m-2");
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 
@@ -839,14 +822,12 @@ fn a_binary_base_under_two_text_sides_opens_a_conflict() {
     }
 }
 
-/// The same shape with an EMPTY current text file. A binary head's text VIEW is
+/// The same shape with an empty current text file. A binary head's text VIEW is
 /// also empty, so a three-way merge fed the base's view would read
 /// `local == base` and fast-forward the incoming text over a head that never
 /// shared an ancestor with it. The base's kind has to gate the line merge, not
 /// only its text.
 ///
-/// MUTATION: gate the line merge on the live sides alone and pass the base's
-/// text view to `merge_markdown` -> this merges instead of conflicting.
 #[test]
 fn an_empty_text_head_over_a_binary_base_is_not_a_fast_forward() {
     let (_scratch, mut store) = open();
@@ -861,7 +842,7 @@ fn an_empty_text_head_over_a_binary_base_is_not_a_fast_forward() {
     );
     fork(&mut store);
     // Main empties the file; the fork writes real text. The empty head and the
-    // binary base share an empty text view and NOTHING else.
+    // binary base share an empty text view and nothing else.
     write_text(&mut store, "main", "notes.md", "", "m-2");
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 

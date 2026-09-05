@@ -133,7 +133,7 @@ describe("resolveWorkspaceImageSrc", () => {
   });
 
   it("blocks a src that escapes the workspace root (never returns the raw path)", () => {
-    // notes/plan.md + ../../outside.png climbs above the root. Returning the RAW
+    // notes/plan.md +../../outside.png climbs above the root. Returning the raw
     // path would not contain anything: the renderer page has its own base URL
     // (file:// when packaged), so the browser would resolve the escape against
     // the APP directory and decode whatever it found. Blocked → no src at all.

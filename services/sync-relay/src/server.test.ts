@@ -836,8 +836,6 @@ describe("sync relay handler", () => {
       await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
     );
     expect(fetched.ops).toEqual([]);
-    // MUTATION: Number.isFinite, Math.trunc, or rounding admits the fractional
-    // row and makes the Rust i64 decoder permanently stall behind it.
   });
 
   it("refuses a legacy relay database with a fractional timestamp at cutover", async () => {
@@ -872,8 +870,6 @@ describe("sync relay handler", () => {
     expect(() => openSyncRelayStorage(dbPath)).toThrow(
       "sync relay log contains a timestamp outside the integer wire contract",
     );
-    // MUTATION: casting/truncating during cutover silently changes the signed
-    // wire value; omitting the scan re-exposes the poison row to Rust pulls.
   });
 
   it("persists the legacy timestamp validation marker after the first scan", async () => {
@@ -901,7 +897,6 @@ describe("sync relay handler", () => {
     db.close();
     expect(Number(marker?.completed_at_ms)).toBeGreaterThan(0);
     expect(() => openSyncRelayStorage(dbPath).close()).not.toThrow();
-    // MUTATION: omitting the durable marker makes every reopen rescan the full log.
   });
 
   it("replaces the pre-launch combined share table without carrying rows forward", async () => {
@@ -964,7 +959,7 @@ describe("sync relay handler", () => {
     expect(Number(grantTable?.count)).toBe(1);
   });
 
-  // Gate finding: a missing blob in an OWNED workspace must be
+  // Gate finding: a missing blob in an owned workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The
   // isolation invariant is untouched: non-owners still get the fixed
@@ -1039,7 +1034,7 @@ describe("sync relay handler", () => {
     expect(create.status).toBe(200);
     expect(await json(create)).toMatchObject({ ok: true, sha256: sha256(first) });
 
-    // Concurrent-enroll race: a second unconditional PUT with DIFFERENT
+    // Concurrent-enroll race: a second unconditional PUT with different
     // content loses — exactly one winner, nothing clobbered.
     const racingCreate = await h(putKeys(second));
     expect(racingCreate.status).toBe(409);
@@ -1274,8 +1269,8 @@ describe("sync relay handler", () => {
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 
-  // WS-G2-C1 GC-ROOT: a blob referenced by a LIVE ydoc.update log op is a root
-  // and MUST NOT be collected out from under the rich-doc head — even with a
+  // WS-G2-C1 GC-ROOT: a blob referenced by a live ydoc.update log op is a root
+  // and must not be collected out from under the rich-doc head — even with a
   // zero grace window (so aging cannot save it) and even though a sibling
   // orphan blob IS reclaimed in the same sweep. This is the relay side of the
   // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
@@ -1355,19 +1350,19 @@ describe("sync relay handler", () => {
     const content = Buffer.from("blob-in-flight");
     const contentSha = sha256(content);
 
-    // Phase 1: the blob is uploaded.
+    // The blob is uploaded.
     expect(
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content })))
         .status,
     ).toBe(200);
 
-    // GC runs in the gap BEFORE the log append. The blob is younger than the
-    // grace window, so it is NOT reclaimed.
+    // GC runs in the gap before the log append. The blob is younger than the
+    // grace window, so it is not reclaimed.
     const gc = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
     expect(gc).toEqual({ ok: true, removed: 0, removedSha256s: [] });
     expect((await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status).toBe(200);
 
-    // Phase 2: the referencing log op is appended against durable content.
+    // The referencing log op is appended against durable content.
     expect(
       (
         await h(
@@ -1390,7 +1385,7 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // Once the blob has aged past the grace window AND is referenced by the log,
+    // Once the blob has aged past the grace window and is referenced by the log,
     // it stays (referenced). An unreferenced aged blob is still collectible.
     clock.now += 10 * 60 * 1000 + 1;
     const gcLater = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
@@ -1400,7 +1395,7 @@ describe("sync relay handler", () => {
 
   // 0P sync-hardening GATE FIX (durable log referencing a missing blob). The
   // grace window keeps a fresh blob alive across the PUT->POST gap, but it does
-  // NOT cover an old blob that ages past the grace, nor a blob GC'd after a
+  // not cover an old blob that ages past the grace, nor a blob GC'd after a
   // failed /log that a retry re-references. The append validates every
   // referenced blob IN-TRANSACTION and rejects the whole batch (retryable
   // 422 blob_missing) rather than pinning the log to content the relay lost.
@@ -1822,7 +1817,7 @@ describe("sync relay handler", () => {
       (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
     ).toEqual([]);
 
-    // Two-phase happy path: re-upload the blob, then the SAME append lands
+    // Two-phase happy path: re-upload the blob, then the same append lands
     // cleanly against durable content.
     expect(
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content }))).status,
@@ -3043,7 +3038,7 @@ describe("MU-C0 verified chat authorship", () => {
     });
   }
 
-  it("rejects a batch mixing one valid and one forged op ATOMICALLY (nothing admitted)", async () => {
+  it("rejects a batch mixing one valid and one forged op atomically (nothing admitted)", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -3056,7 +3051,7 @@ describe("MU-C0 verified chat authorship", () => {
     );
     expect(mixed.status).toBe(403);
     expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
-    // Atomic: the valid op in the same batch was NOT admitted either.
+    // Atomic: the valid op in the same batch was not admitted either.
     expect(await logOps(h)).toEqual([]);
   });
 
@@ -3065,7 +3060,7 @@ describe("MU-C0 verified chat authorship", () => {
     const h = handler(storage);
     await createWorkspace(h);
     // A non-chat op that happens to carry an authorId belonging to someone else
-    // is NOT a chat op, so the authorship gate ignores it.
+    // is not a chat op, so the authorship gate ignores it.
     const opaque = await h(
       request(
         "a",
@@ -3127,9 +3122,9 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(4);
   });
 
-  it("REJECTS an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
+  it("Rejects an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
     // A future authored chat op (here a made-up chat.thread.update) that carries
-    // an author-shaped field we have NOT taught the policy to verify must be
+    // an author-shaped field we have not taught the policy to verify must be
     // refused, not admitted unverified. Shipping a new authored chat op without
     // extending CHAT_OP_POLICY fails closed.
     const storage = await testStorage();
@@ -3157,7 +3152,7 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toEqual([]);
   });
 
-  it("REJECTS a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
+  it("Rejects a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);

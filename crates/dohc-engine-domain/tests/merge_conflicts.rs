@@ -25,7 +25,6 @@ const NO_FAULTS: NoFaults = NoFaults;
 
 #[test]
 fn compare_files_never_hydrates_full_text_body() {
-    // MUTATION: add a text or sha payload field to the paged entry -> this exhaustive destructure fails to compile.
     let entry = VersionFileChangeEntry {
         path: "large.md".to_owned(),
         status: VersionFileChangeStatus::Modified,
@@ -160,8 +159,6 @@ fn merge_input(path: &str, moment: &str, conflict: &str, object: &str) -> MergeT
 
 #[test]
 fn empty_main_fork_compares_and_merges_its_first_file_with_an_absent_base() {
-    // MUTATION: restore the fork_base_snapshots row-count gate -> both the
-    // comparison and merge fail with fork-base-not-found.
     let (_scratch, mut store) = open();
     let mut versions = VersionedTextStore::new(&mut store);
     fork(&mut versions);
@@ -467,8 +464,6 @@ fn merge_decision_tree_writes_deletes_merges_and_opens_conflict() {
 
 #[test]
 fn merge_materialization_is_gated_to_the_active_target_version_across_reopen() {
-    // MUTATION: enqueue merge jobs unconditionally -> the inactive assertion
-    // fails and startup replay overwrites the active working-tree bytes.
     let (scratch, mut store) = open();
     {
         let mut versions = VersionedTextStore::new(&mut store);
@@ -1417,9 +1412,9 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
     );
 }
 
-/// M2 (BINHEAD) + WS-G1: the three-way text merge must NEVER clobber a binary
+/// M2 (BINHEAD) + WS-G1: the three-way text merge must never clobber a binary
 /// head. A fork forked before `a.md` existed (base absent) adds TEXT at `a.md`,
-/// while the target grows a BINARY head at `a.md`. The pre-fix merge read the
+/// while the target grows a binary head at `a.md`. The pre-fix merge read the
 /// binary head as absent (its `JOIN blobs` is binary-blind), saw
 /// current == base == absent, fast-forwarded, and overwrote the binary head
 /// with text. It must open a conflict instead, and the binary head must survive
@@ -1427,9 +1422,9 @@ fn merge_job_crash_then_external_edit_is_preserved_on_recovery() {
 #[test]
 fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     let (_scratch, mut store) = open();
-    // Seed an UNRELATED file on main so the fork carries a non-empty durable
+    // Seed an unrelated file on main so the fork carries a non-empty durable
     // fork base (else the merge short-circuits with `fork-base-not-found` before
-    // reaching the binary-head gate). `a.md` itself does NOT exist yet, so its
+    // reaching the binary-head gate). `a.md` itself does not exist yet, so its
     // fork base is genuinely absent.
     VersionedTextStore::new(&mut store)
         .write_text(
@@ -1441,7 +1436,7 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
     fork(&mut vt);
     drop(vt);
 
-    // Target (main) grows a BINARY head at a.md AFTER the fork.
+    // Target (main) grows a binary head at a.md after the fork.
     let bin_bytes = b"\x00binary head\xff";
     let bin_sha = hex_sha256(bin_bytes);
     store
@@ -1476,7 +1471,7 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
         )
         .expect("fork text at a.md");
 
-    // The comparison reports the binary head as PRESENT, not as an empty path.
+    // The comparison reports the binary head as present, not as an empty path.
     let comparison = VersionedTextStore::new(&mut store)
         .compare_text_file_versions(&CompareTextFileVersions {
             workspace_id: WS.to_owned(),
@@ -1514,7 +1509,7 @@ fn merge_opens_a_conflict_instead_of_clobbering_a_binary_head_at_the_target() {
         other => panic!("expected a binary conflict, got {other:?}"),
     }
 
-    // The binary head SURVIVES on main, unchanged.
+    // The binary head survives on main, unchanged.
     let (kind, blob, bin): (String, Option<String>, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -1580,15 +1575,15 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
         Preimage::Present(text_blob_sha256("incoming")),
     );
 
-    // MUTATION: reconstruct by re-running the live comparison before consulting
-    // the recorded comparison -> the replayed comparison reports main's LATER
-    // binary head instead of the text head the first merge acknowledged.
     let replay = VersionedTextStore::new(&mut store)
         .merge_text_file_from_version(&input, &NO_FAULTS)
         .expect("exact retry returns the recorded merge");
     match replay {
         MergeTextFileResult::Write { comparison, write } => {
-            assert_eq!(comparison, first_comparison);
+            assert_eq!(
+                comparison, first_comparison,
+                "reconstruct by re-running the live comparison before consulting the recorded comparison -> the replayed comparison reports main's later binary head instead of the text head the first merge acknowledged."
+            );
             assert_eq!(write.moment.moment_id, first_moment_id);
             assert!(write.deduped);
         }
@@ -1608,12 +1603,12 @@ fn exact_merge_retry_reconstructs_recorded_outcome_before_binary_head_comparison
     assert_eq!(live_binary_sha, binary_sha);
 }
 
-/// S2 (BINHEAD): the exact-head gate must not defer FOREVER on a legacy binary
+/// S2 (BINHEAD): the exact-head gate must not defer forever on a legacy binary
 /// side that carries no head identity. A recorded side built via
 /// `ConflictFileState::binary()` (or a v9-era row) has NULL object/latest-moment,
 /// so requiring `Some(..) == None` would always mismatch and strand the resolve
 /// as StaleHead. When the recorded side has NO identity, fall back to path+sha;
-/// a recorded side that DOES carry identity keeps the strict no-clobber check.
+/// a recorded side that does carry identity keeps the strict no-clobber check.
 #[test]
 fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
     let live =
@@ -1626,15 +1621,15 @@ fn exact_head_gate_falls_back_for_legacy_null_identity_binary_sides() {
         "a legacy NULL-identity side matching path+sha must resolve, not defer forever"
     );
 
-    // Legacy side whose bytes differ must still NOT match.
+    // Legacy side whose bytes differ must still not match.
     let legacy_other = ConflictFileState::binary("a.md", "sha-other");
     assert!(
         !live_state_matches_conflict_current(&live, &legacy_other),
         "path+sha fallback must still reject a byte mismatch"
     );
 
-    // A recorded side that DOES carry identity keeps the strict check: same
-    // bytes but a recreated head (different object/moment) must NOT match.
+    // A recorded side that does carry identity keeps the strict check: same
+    // bytes but a recreated head (different object/moment) must not match.
     let strict_same =
         ConflictFileState::binary_head("a.md", "sha-bytes", 9, "obj-live", "moment-live", 10);
     assert!(

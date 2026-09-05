@@ -1,4 +1,4 @@
-//! Search: the index+query round-trip over REAL file snapshots and
+//! Search: the index+query round-trip over real file snapshots and
 //! chat messages (built through the versioning + chat domains, never hand-poked
 //! FTS rows), policy-filtered visibility, the fail-closed FILE policy (scoped so
 //! chat search survives a broken file policy), read-your-writes with no torn
@@ -140,7 +140,7 @@ fn send(store: &mut EngineStore, thread_id: &str, message_id: &str, body: &str, 
         .expect("send");
 }
 
-/// Build the index for the main version inside ONE transaction (atomic rebuild).
+/// Build the index for the main version inside one transaction (atomic rebuild).
 fn ensure_index(store: &mut EngineStore, root: &Path, now: i64) {
     let outcome = store
         .write_with(&NO_FAULTS, |tx| {
@@ -162,8 +162,6 @@ fn run_search(
 
 #[test]
 fn short_query_falls_back_to_a_bounded_linear_scan() {
-    // MUTATION: convert query_search_index's short-query sentinel to an empty
-    // candidate batch and both seeded two-character hits disappear.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -266,9 +264,6 @@ fn rebuild_extracts_drawing_text_without_indexing_scene_data() {
 
 #[test]
 fn short_query_scan_caps_every_row_examined_even_without_matches() {
-    // MUTATION: restore the SQL instr(lower(text), ...) filter or remove the raw
-    // row cap and this no-match page scans all three rows and reports no
-    // continuation.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -334,8 +329,6 @@ fn short_query_scan_caps_every_row_examined_even_without_matches() {
 
 #[test]
 fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
-    // MUTATION: remove the workspace/version predicates from the SQL and the
-    // foreign row consumes this one-row scan before the target is reached.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -419,8 +412,6 @@ fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
 
 #[test]
 fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget() {
-    // MUTATION: restore the page-start Bounds error and this query fails instead
-    // of serving the sole viable candidate by itself.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -461,8 +452,6 @@ fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget()
 
 #[test]
 fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
-    // MUTATION: apply the file source-byte accounting only to TooShort queries
-    // and all three matching bodies are owned by this regular FTS page.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -546,8 +535,7 @@ fn short_query_fallback_preserves_unicode_case_matching() {
 fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
     // A wire page can cut an actor result after the first candidate and mint an
     // inclusive line cursor even though that candidate has no later matching
-    // line. MUTATION: truncate the inclusive candidate probe to `limit` and the
-    // exhausted anchor consumes the only slot, hiding the second file.
+    // line.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -597,8 +585,6 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
 
 #[test]
 fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
-    // MUTATION: remove CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET accounting and one
-    // actor turn owns every 64 KiB body in this thread.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -680,8 +666,6 @@ fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
 
 #[test]
 fn oversized_legacy_chat_rows_are_skipped_without_failing_later_hits() {
-    // MUTATION: return Bounds for an oversized hydrated chat row and the first
-    // legacy thread prevents the later healthy thread from being searched.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -733,8 +717,7 @@ fn oversized_legacy_chat_rows_are_skipped_without_failing_later_hits() {
 #[test]
 fn chat_projection_lines_follow_canonical_replication_order() {
     // A replicated message can receive a later local message_order while
-    // carrying an earlier source timestamp. MUTATION: order projection context
-    // by message_order and the replicated hit moves from line 11 to line 15.
+    // carrying an earlier source timestamp.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
     let db = scratch.engine_db_path().expect("db");
@@ -1006,7 +989,7 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
     write_file(&mut store, "obj-ok", "notes/plan.md", "file needle", 10);
     start_thread(&mut store, "chan-1", "th-1", "chat needle here", 20);
 
-    // A malformed files.toml → FILE search fails CLOSED (no file results), but
+    // A malformed files.toml → FILE search fails closed (no file results), but
     // chat search is independent and stays available.
     std::fs::create_dir_all(root.join(".dohc")).expect("mkdir");
     std::fs::write(
@@ -1069,8 +1052,8 @@ fn read_your_writes_same_txn_no_torn_index() {
     let db = scratch.engine_db_path().expect("db");
     let mut store = open(&db, 1);
 
-    // Seed three files, then in ONE transaction rebuild the index AND upsert a
-    // fourth file, and immediately query WITHIN the same transaction: the query
+    // Seed three files, then in one transaction rebuild the index and upsert a
+    // fourth file, and immediately query within the same transaction: the query
     // must observe the whole committed generation (all four), never a partial.
     write_file(&mut store, "obj-a", "a.md", "alpha needle", 10);
     write_file(&mut store, "obj-b", "b.md", "beta needle", 11);
@@ -1126,7 +1109,7 @@ fn crash_mid_index_reopen_repairs() {
         write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
         start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
 
-        // Arm a crash BEFORE the index transaction persists: the whole rebuild
+        // Arm a crash before the index transaction persists: the whole rebuild
         // (FTS rows + index_state) rolls back.
         let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
         let outcome = store
@@ -1192,7 +1175,7 @@ fn bounds_query_length_and_limit() {
     // A pathologically long query is bounded (no results, no FTS blow-up).
     let long = "n".repeat(50_000);
     assert!(run_search(&store, &root, &long).is_empty());
-    // At the primitive: an over-long query FAILS CLOSED (Some(empty)), never the
+    // At the primitive: an over-long query fails closed (Some(empty)), never the
     // `None` fallback sentinel — so an adapter cannot turn it into a linear scan.
     let overlong = store
         .read_with(|conn| query_search_index(conn, &root, WS, V, &long, 100))
@@ -1271,7 +1254,7 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
 
 /// The P1 regression: `search_workspace`/`ensure` can run on an autocommit
 /// (`read_with`) connection. A crash MID-rebuild — after the chat FTS wipe,
-/// before the rebuild inserts — must NOT leave a torn/empty generation. The
+/// before the rebuild inserts — must not leave a torn/empty generation. The
 /// savepoint inside `ensure_search_index_for_version` is what guarantees this on
 /// a connection with no enclosing transaction.
 #[test]
@@ -1381,7 +1364,7 @@ fn orphan_thread_does_not_disable_all_search() {
         })
         .expect("orphan");
 
-    // The rebuild must SKIP the orphan thread's header, not hard-error the whole
+    // The rebuild must skip the orphan thread's header, not hard-error the whole
     // search surface: file search still works.
     let results = run_search(&store, &root, "needle");
     assert!(
@@ -1459,7 +1442,7 @@ fn degraded_policy_does_not_reindex_chat_per_query() {
     ensure_index(&mut store, &root, 30); // degraded: chat built, state row degraded=1
 
     // FTS rowid is monotonic on insert, so a re-wipe+rebuild would advance
-    // MAX(rowid). Capture it, run several searches, and assert it is UNCHANGED —
+    // MAX(rowid). Capture it, run several searches, and assert it is unchanged —
     // proving the stable degraded window does not re-index chat per query.
     let max_rowid = |store: &EngineStore| -> i64 {
         store
@@ -1520,7 +1503,7 @@ fn multiple_chat_threads_all_return() {
 /// Finding C (search correctness): when a binary write overwrites an
 /// already-indexed TEXT file, the file FTS row is frozen (the lazy index never
 /// rebuilds, and the rebuild-time binary exclusion never cleans an already-built
-/// index). The query reader must therefore drop a candidate whose LIVE head is
+/// index). The query reader must therefore drop a candidate whose live head is
 /// now binary — otherwise the binary file stays searchable by its stale former
 /// text.
 #[test]
@@ -1545,7 +1528,7 @@ fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
         "text file must be searchable before the binary overwrite"
     );
 
-    // Overwrite the SAME path/object with a BINARY head (no index rebuild).
+    // Overwrite the same path/object with a binary head (no index rebuild).
     let bytes = b"\x00binary now\xff".as_slice();
     let sha = hex_sha256(bytes);
     store

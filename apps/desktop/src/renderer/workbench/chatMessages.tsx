@@ -25,7 +25,7 @@ import { extractChatFileReferenceTokens } from "./chatFileMentions";
 import type { ChatFileReferenceToken } from "./chatFileMentions";
 
 // Shared Chats rendering (PR 13, WS-E): the file-rail LinkedChats panel and
-// the workspace Chats view render messages and composers through these SAME
+// the workspace Chats view render messages and composers through these same
 // pieces so authorship display and send affordances can never drift. Test
 // ids are prefixed per surface ("linked-chat-*" vs "chats-*") because both
 // panels can be mounted at once.
@@ -45,14 +45,14 @@ export function ipcErrorMessage(error: unknown, fallback: string): string {
   return message.trim().length > 0 ? message.trim() : fallback;
 }
 
-// Reaction toggle (WS-MU-C2), shared by BOTH chat surfaces (the file-rail
+// Reaction toggle (WS-MU-C2), shared by both chat surfaces (the file-rail
 // LinkedChats panel and the Chats view) so their optimistic behavior can never
 // drift. Optimistically flips the viewer's own reaction on the target cell,
 // then reconciles to the canonical server list. Two guarantees the naive
 // version lacked:
 //   1. ROLLBACK — a failed setChatReaction reverts the optimistic cell, so the
 //      UI never keeps a reaction the server rejected.
-//   2. PER-CELL ORDERING — overlapping toggles on the SAME (message, emoji) can
+//   2. PER-CELL ORDERING — overlapping toggles on the same (message, emoji) can
 //      resolve out of order; a per-cell sequence guard drops every response but
 //      the latest toggle's, so two rapid clicks converge to the correct final
 //      state instead of racing to whichever server round-trip lands last.
@@ -83,7 +83,7 @@ export function runReactionToggle(
   const seq = (ctx.reactionSeq.current.get(cellKey) ?? 0) + 1;
   ctx.reactionSeq.current.set(cellKey, seq);
 
-  // Apply the viewer's OWN presence on this one cell, leaving every other
+  // Apply the viewer's own presence on this one cell, leaving every other
   // reaction (and every other reactor) untouched.
   const setCell = (current: ChatReactionRecord[], present: boolean): ChatReactionRecord[] => {
     const without = current.filter(
@@ -112,8 +112,8 @@ export function runReactionToggle(
   const present = input.nextState === "added";
   ctx.setReactions((current) => setCell(current, present));
 
-  // A response may touch UI state only if the thread is still live AND this is
-  // still the latest toggle for THIS cell (a newer toggle supersedes it).
+  // A response may touch UI state only if the thread is still live and this is
+  // still the latest toggle for this cell (a newer toggle supersedes it).
   const isCurrent = (): boolean =>
     token === ctx.liveToken.current && ctx.reactionSeq.current.get(cellKey) === seq;
 
@@ -347,7 +347,7 @@ export function MentionText(props: {
 const DEFAULT_REACTION_EMOJIS = ["👍", "❤️", "🎉", "🙌", "😄", "👀", "✅", "🚀"] as const;
 
 export interface ChatReactionControls {
-  // Every ACTIVE reaction in the open thread (all messages).
+  // Every active reaction in the open thread (all messages).
   reactions: ChatReactionRecord[];
   // The viewer's own reactor id, so pills can highlight "yours" and toggle.
   viewerAuthorId: string;
@@ -483,7 +483,7 @@ export function MessageReactions(props: {
         </button>
       ) : null}
       {pickerOpen && !props.controls.readOnly ? (
-        // A lightweight quick-pick, NOT an APG menu: role="group" with plain
+        // A lightweight quick-pick, not an APG menu: role="group" with plain
         // toggle <button>s (each Tab-stoppable, aria-pressed reflecting the
         // viewer's state). We deliberately don't claim role="menu"/menuitem*,
         // which would promise arrow-key roving semantics we don't implement.

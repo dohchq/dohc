@@ -159,7 +159,7 @@ fn backup_disk_full_fails_closed_and_never_touches_source() {
     let mut store = EngineStore::open(&scratch.db_path(), 1).expect("open");
     write_doc(&mut store, "r1", "doc-a", "important", 10);
 
-    // A probe reporting almost no space forces disk-full BEFORE any copy.
+    // A probe reporting almost no space forces disk-full before any copy.
     let err = create_verified_backup(
         &store,
         &recovery,
@@ -620,7 +620,7 @@ fn job_and_canonical_state_commit_atomically() {
         let faults = OneShot {
             armed: AtomicBool::new(true),
         };
-        // One transaction: upsert a document AND enqueue its materialization
+        // One transaction: upsert a document and enqueue its materialization
         // job. A crash before commit must roll back BOTH.
         let outcome = store
             .write_with(&faults, |tx| {
@@ -650,10 +650,10 @@ fn job_and_canonical_state_commit_atomically() {
 }
 
 // ---------------------------------------------------------------------------
-// transient contention (#658)
+// transient contention
 // ---------------------------------------------------------------------------
 
-/// REAL contention, not an injected variant: a second connection holds the
+/// Real contention, not an injected variant: a second connection holds the
 /// write lock and the store's own transaction is refused.
 ///
 /// `StorageError::FileLocked` had NO producer anywhere in the engine. Its
@@ -663,19 +663,17 @@ fn job_and_canonical_state_commit_atomically() {
 /// `StorageError::persist` and reached callers as terminal `persist-failed`.
 ///
 /// This test is the reachability proof, so it uses no fault injection and
-/// builds no error by hand: it makes SQLite say BUSY and reads what the store
+/// builds no error by hand: it makes SQLite say busy and reads what the store
 /// returns. The wait is the store's own `ENGINE_SQLITE_BUSY_TIMEOUT_MS`
 /// budget, which is what "the retry budget was exhausted" means.
 ///
-/// MUTATION: drop the `is_busy` check from `StorageError::persist` -> this
-/// reports `persist-failed`, the answer that made the busy store terminal.
 #[test]
 fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
     let scratch = Scratch::new("busy-contention");
     let path = scratch.db_path();
     let mut store = EngineStore::open(&path, 1_000).expect("open the engine store");
 
-    // A SECOND connection takes the write lock and keeps it.
+    // A second connection takes the write lock and keeps it.
     let blocker = Connection::open(&path).expect("open a second connection");
     blocker
         .execute_batch("BEGIN IMMEDIATE")
@@ -691,10 +689,10 @@ fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
 
     assert!(
         matches!(refused, StorageError::FileLocked),
-        "MUTATION: real SQLITE_BUSY is not the transient lock, it is {refused:?}"
+        "real SQLITE_BUSY is not the transient lock, it is {refused:?}"
     );
     assert_eq!(refused.code(), "file-locked");
-    // The store is INTACT, which is the half that makes it retryable: the
+    // The store is intact, which is the half that makes it retryable: the
     // same write succeeds once the blocker lets go.
     blocker
         .execute_batch("ROLLBACK")
@@ -711,8 +709,6 @@ fn a_genuinely_busy_database_is_reported_as_the_transient_lock() {
 /// ordinary SQL failure must keep its terminal answer — otherwise every
 /// persist failure would advertise a retry that cannot help.
 ///
-/// MUTATION: return `true` unconditionally from `is_busy` -> this reports
-/// `file-locked` for a plain syntax error.
 #[test]
 fn an_ordinary_sql_failure_is_still_terminal() {
     let scratch = Scratch::new("busy-narrowness");

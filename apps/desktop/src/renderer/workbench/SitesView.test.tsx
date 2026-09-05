@@ -66,9 +66,9 @@ describe("SitesView", () => {
 
   it("reloads detected sites when the settled files revision bumps, including a content-only edit", async () => {
     // filesSettledRevision bumps on every settled workspace file listing,
-    // including a content-only edit to an EXISTING file (e.g. dohc.json) —
+    // including a content-only edit to an existing file (e.g. dohc.json) —
     // not just an add/remove. A structural path/kind/icon hash would
-    // produce the SAME value for that case and never rerun this effect.
+    // produce the same value for that case and never rerun this effect.
     const view = render(
       <SitesView
         workspaceId="ws-sites"

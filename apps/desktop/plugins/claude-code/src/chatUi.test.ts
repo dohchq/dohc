@@ -27,7 +27,7 @@ class FakeEventSource extends EventTarget {
  *
  * Every call starts from a clean sessionStorage and a fresh fragment token,
  * simulating a genuine first load -- unless `reload` is set, which leaves
- * both alone: sessionStorage keeps whatever a prior call in the SAME test
+ * both alone: sessionStorage keeps whatever a prior call in the same test
  * already stored, and the fragment stays whatever chat.js's own
  * history.replaceState last left it as (empty, after a real first load).
  * That is exactly what a real page reload looks like: the same origin's

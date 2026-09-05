@@ -3,8 +3,7 @@
 //! Every message is a constant string — it never embeds plaintext, key
 //! material, IVs, tags, or ciphertext. The `code()` accessor returns the exact
 //! kebab-case strings the TS engine surfaces (`decrypt-failed`, `key-corrupt`,
-//! `unwrap-failed`) so the ported store keeps error-code parity
-//! (`LANGUAGE_SEMANTICS_MATRIX.md` §14.1).
+//! `unwrap-failed`) so the ported store keeps error-code parity.
 
 use thiserror::Error;
 

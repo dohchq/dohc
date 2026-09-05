@@ -108,7 +108,7 @@ pub(crate) fn verify_live_clone_binding(
 /// The reset-freshness proof: the live db's own `engine_ownership` identity
 /// must equal the one recorded when `initialize_fresh_store` created it. A
 /// stale same-clone copy (the moved-aside store or the backup restored over
-/// `engine.db`) shares the shadow token but NOT this identity.
+/// `engine.db`) shares the shadow token but not this identity.
 pub(crate) fn verify_live_reset_identity(
     db: &Path,
     expected_uuid: &str,

@@ -104,7 +104,7 @@ describe("plugin panel SDK authority", () => {
     expect(all.signal.aborted).toBe(true);
   });
 
-  it("aborts an in-flight brokered call at revocation, and lets the panel re-grant against a new runtime after (#779 round 18 finding 3)", () => {
+  it("aborts an in-flight brokered call at revocation, and lets the panel re-grant against a new runtime after", () => {
     const registry = createPluginPanelSdkAuthorityRegistry();
     registry.register(owned);
     // A brokered request already authorized against the old runtime — its

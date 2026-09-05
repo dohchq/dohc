@@ -12,7 +12,7 @@ import {
 // Slash-menu flicker regression (engine editor). Two failure modes are pinned:
 //
 // 1. Remount churn — if typing a query ever closes+reopens the menu (state
-//    passing through CLOSED, plugin re-registration, editor recreation), the
+//    passing through closed, plugin re-registration, editor recreation), the
 //    element remounts and the dohc-pop-in entrance animation replays on every
 //    keystroke: visible flicker. The MutationObserver + animationstart
 //    counters must stay at exactly one mount / one entrance.

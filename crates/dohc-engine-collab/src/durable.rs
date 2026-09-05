@@ -7,12 +7,12 @@
 //!
 //! ## Two regimes (never conflated — plan correction)
 //!
-//! [`Regime::LocalOnly`] keeps the log as a PRUNABLE fast-resume cache. The
+//! [`Regime::LocalOnly`] keeps the log as a prunable fast-resume cache. The
 //! workspace file is the durable artifact, and a closed session prunes every
 //! CRDT row to the bare marker. [`Regime::Replicated`] makes the CRDT lineage
 //! durable canonical:
 //! the base is emitted exactly once, local edits journal `ydoc.update` ops
-//! (surfaced via [`AppendOutcome::emit_outbound`]), and close NEVER prunes — a
+//! (surfaced via [`AppendOutcome::emit_outbound`]), and close never prunes — a
 //! peer bootstraps from the persisted lineage.
 
 use dohc_engine_domain::ChangeAttribution;
@@ -267,7 +267,7 @@ pub struct SettleOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CloseOutcome {
     /// Replicated (or persist-closed-state) close: the lineage was compacted and
-    /// KEPT durable.
+    /// kept durable.
     Compacted(CompactOutcome),
     /// Local-only close: the CRDT rows were pruned to the bare marker.
     Pruned {
@@ -306,8 +306,8 @@ pub fn load_persisted(
     store: &EngineStore,
     key: &DocKey,
 ) -> Result<Option<PersistedDoc>, CollabError> {
-    // Read the marker, the latest snapshot, and the update tail from ONE
-    // consistent SQLite read snapshot (a single DEFERRED read transaction), so a
+    // Read the marker, the latest snapshot, and the update tail from one
+    // consistent SQLite read snapshot (a single deferred read transaction), so a
     // concurrent compaction cannot delete the tail between reading the old
     // snapshot and reading the updates and make reconstruction silently omit
     // committed edits. (Single-writer-per-store already precludes an in-process
@@ -348,7 +348,7 @@ pub fn load_persisted(
                 reason: format!("update blob {sha} missing at seq {seq}"),
             })?;
         // A journaled update that fails to apply is corruption, not a silent
-        // skip — we NEVER assume state-unchanged after a failed apply
+        // skip — we never assume state-unchanged after a failed apply
         // (constraint 5); we surface it.
         doc.apply(&bytes)?;
         up_to = seq;
@@ -408,7 +408,7 @@ pub fn ensure_marker(
     })
 }
 
-/// Rewrite a BARE local marker's content kind to the caller's explicit
+/// Rewrite a bare local marker's content kind to the caller's explicit
 /// request. A marker with durable doc state (or a claimed base) never changes
 /// kind — the lineage owns it. A pruned, state-free local marker is only a
 /// remembered default, and keeping it authoritative would permanently
@@ -445,7 +445,7 @@ pub fn rewrite_bare_marker_content_kind(
 }
 
 /// Append a locally-produced update to the durable log (advancing the head).
-/// Validates the bytes BEFORE any blob put / journal (constraint 5: never
+/// Validates the bytes before any blob put / journal (constraint 5: never
 /// journal bytes that fail validation); content-addresses them; and dedups on
 /// the blob sha so a crash-retry is exactly-once. Self-bounds the log: a
 /// genuinely-new append triggers compaction once the pending count reaches the
@@ -560,9 +560,9 @@ pub fn record_local_update_creating_marker(
 }
 
 /// The full first-seed form: optionally ensures the `file_objects` parent row
-/// and enforces the empty-lineage seed guard — all in ONE transaction with the
+/// and enforces the empty-lineage seed guard — all in one transaction with the
 /// append, so a crash cannot strand a bare parent row and a timed-out-commit
-/// RETRY of the same seed bytes DEDUPES (the blob check precedes the guard)
+/// retry of the same seed bytes dedupes (the blob check precedes the guard)
 /// instead of refusing seed-onto-existing-lineage.
 #[allow(clippy::too_many_arguments)]
 pub fn record_local_update_creating_marker_guarded<F>(
@@ -615,7 +615,7 @@ where
 /// blob sha does not hash the bytes a second time.
 ///
 /// `seed_source_sha256` is the captured head whose content this update
-/// imports, recorded on the marker with the append (#815). Pass it only for a
+/// imports, recorded on the marker with the append. Pass it only for a
 /// client-declared seed; any other first update (a crash-replayed prior
 /// state, for example) must leave it `None` so settle and close never treat
 /// the file as already holding the doc.
@@ -686,7 +686,7 @@ fn record_local_update_creating_marker_guarded_inner<F>(
 where
     F: FnOnce(&Transaction<'_>, &mut AppendOutcome, &str) -> Result<(), CollabError>,
 {
-    // Hashed ONCE per append: the idempotency key, the seed-retry dedupe
+    // Hashed once per append: the idempotency key, the seed-retry dedupe
     // probe, the blob row, and the caller's post-append hook all reuse this
     // digest instead of re-walking the update bytes.
     let update_sha = crate::hex_sha256(update);
@@ -774,7 +774,7 @@ where
             None
         };
         if guarded_marker.is_some_and(|marker| marker.head_update_seq > 0) {
-            // A retry of the SAME first update after a timed-out commit must
+            // A retry of the same first update after a timed-out commit must
             // dedupe, not refuse: check the blob before the guard.
             if let Some(existing) = blob_seq_in_log(tx, key, &update_sha, update)? {
                 return Ok(AppendOutcome {
@@ -850,11 +850,11 @@ where
             )?;
             if !outcome.deduped {
                 pending_after_append = Some(outcome.seq - marker.head_snapshot_seq);
-                // The seed's provenance commits WITH the seed append: the
+                // The seed's provenance commits with the seed append: the
                 // marker now records which captured head this lineage's
-                // first update imported (#815). A dedup replays the original
+                // first update imported. A dedup replays the original
                 // append whose commit already recorded it. Only the
-                // lineage's FIRST update can be a seed — any other stamp
+                // lineage's first update can be a seed — any other stamp
                 // request is dropped, so a misuse degrades to a redundant
                 // settle write, never a false claim that the file already
                 // holds the doc.
@@ -874,8 +874,8 @@ where
                 post_append(tx, &mut outcome, &update_sha)?;
             }
             if let (Some(request_id), Some(hash)) = (request_id, request_hash.as_deref()) {
-                // NEGATIVE namespace (-seq): rollback cleanup deletes ledger
-                // rows by POSITIVE moment_order, so a stored -seq can never
+                // Negative namespace (-seq): rollback cleanup deletes ledger
+                // rows by positive moment_order, so a stored -seq can never
                 // be swept out from under a retry.
                 tx.execute(
                     "INSERT INTO engine_requests \
@@ -1046,7 +1046,7 @@ fn append_local_update(
     if let Some(actor_origin_id) = actor_origin_id {
         crate::validate_actor_origin_id(actor_origin_id)?;
     }
-    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
+    // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
             seq: existing,
@@ -1102,7 +1102,7 @@ fn append_local_update_cached(
     if let Some(actor_origin_id) = actor_origin_id {
         crate::validate_actor_origin_id(actor_origin_id)?;
     }
-    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order. A
+    // Dedup before the gate — `blob_seq_in_log`'s doc explains the order. A
     // dedupe changes no durable state, so it never touches the cache.
     if let Some(existing) = blob_seq_in_log(conn, key, sha, update)? {
         return Ok(AppendOutcome {
@@ -1240,7 +1240,7 @@ pub(crate) fn index_applied_frontmatter(
     // synced update needs the lineage reconstruction. The seq-0 base is the
     // author's exact base only for an update authored directly against it;
     // for a later update the replay can fabricate `-> absent` entries, which
-    // the resolved-away branch in the indexer refuses to journal (#1001).
+    // the resolved-away branch in the indexer refuses to journal.
     let (authored_before, authored_after) = if history_source.is_none() {
         (before.clone(), after.clone())
     } else {
@@ -1290,8 +1290,8 @@ fn lineage_base_doc(conn: &Connection, key: &DocKey) -> Result<Ydoc, CollabError
 
 /// After a genuinely-new append, fold the log if it has grown past the default
 /// threshold (self-bounding). A dedup or a crash does nothing. Compaction is
-/// convergence-neutral for BOTH regimes (it keeps a full-state snapshot; only a
-/// local-only CLOSE prunes to nothing), so this is safe to run mid-session
+/// convergence-neutral for both regimes (it keeps a full-state snapshot; only a
+/// local-only close prunes to nothing), so this is safe to run mid-session
 /// regardless of regime.
 pub(crate) fn self_bound_log(
     store: &mut EngineStore,
@@ -1549,7 +1549,7 @@ fn claim_base_with_coordinate_in_tx(
         // Upsert the marker first (FK parent for the snapshot), stamping the
         // replicated regime + content kind. In the INDIVIDUAL-FIRST flow the
         // marker already exists as `local-only` (created by `ensure_marker`), so
-        // claiming a base must PROMOTE it to `replicated` — a `DO NOTHING` here
+        // claiming a base must promote it to `replicated` — a `DO NOTHING` here
         // would leave `regime = 'local-only'`, and the next `close_session`
         // would take the prune branch and DELETE the just-claimed base
         // (destroying the shared lineage). Promote-on-claim keeps "open when
@@ -1577,8 +1577,8 @@ fn claim_base_with_coordinate_in_tx(
         .map_err(map_sql)?;
 
         // Atomic re-check: a base already claimed ⇒ resume the winner, emit no
-        // second base — but ONLY when the incoming base IS the stored base.
-        // Silently resuming (and acking) a DIFFERENT base would drop a
+        // second base — but only when the incoming base IS the stored base.
+        // Silently resuming (and acking) a different base would drop a
         // divergent lineage while the relay cursor advances past it, leaving
         // that peer's later updates missing an unrecoverable dependency.
         let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
@@ -2260,7 +2260,7 @@ fn validate_successor_base(
 
 /// Read a doc's marker inside the caller's transaction.
 ///
-/// Origination reads the marker under the SAME transaction as the append it
+/// Origination reads the marker under the same transaction as the append it
 /// rides and the claim it may commit, so the three cannot disagree.
 pub fn read_marker_in_tx(
     tx: &Transaction<'_>,
@@ -2283,7 +2283,7 @@ pub fn read_marker_from_connection(
 
 /// Reconstruct the persisted doc inside the caller's transaction (marker
 /// required). The conflict-resolution fold reads, rewrites, and appends under
-/// ONE transaction so the folded update extends exactly the lineage it read.
+/// one transaction so the folded update extends exactly the lineage it read.
 pub fn load_doc_in_tx(tx: &Transaction<'_>, key: &DocKey) -> Result<Ydoc, CollabError> {
     load_doc_from_connection(tx, key)
 }
@@ -2345,7 +2345,7 @@ pub fn record_update_for_lineage_in_tx(
     append_local_update(tx, key, &marker, update, &sha, None, None, now_ms)
 }
 
-/// Encode the base bytes (and their state vector) that ORIGINATE `key`'s
+/// Encode the base bytes (and their state vector) that originate `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
 ///
@@ -2374,12 +2374,12 @@ pub fn encode_origination_base_in_tx(
 
 /// Settle: project the reconstructed Y.Doc to artifact content (with provenance),
 /// content-address the projection in `binary_blobs`, and enqueue a durable
-/// materialization job (R04's pipeline) in the SAME transaction.
+/// materialization job (R04's pipeline) in the same transaction.
 ///
-/// **Clock-independent exactly-once.** The generation is a DURABLE, monotone
-/// per-doc `settle_seq` (never the wall clock): a re-settle of UNCHANGED content
+/// **Clock-independent exactly-once.** The generation is a durable, monotone
+/// per-doc `settle_seq` (never the wall clock): a re-settle of unchanged content
 /// reuses the current generation (idempotent no-op even if the clock advanced —
-/// a crash-retry dedups); a settle of CHANGED content bumps the generation (so a
+/// a crash-retry dedups); a settle of changed content bumps the generation (so a
 /// content revert re-materializes, and a newer settle supersedes an older
 /// on-disk generation for the path). The job id is deterministic in `(key,
 /// content sha, generation)` and dedup-guarded, so a crash after commit but
@@ -2459,8 +2459,8 @@ pub fn settle(
                 target_path: target_path.to_string(),
                 content_sha256: content_sha.clone(),
                 // The preimage the materializer revalidates before replacing: the
-                // FIRST settle expects the target absent; a later settle expects
-                // the PREVIOUS settle's content still on disk (else an external
+                // first settle expects the target absent; a later settle expects
+                // the previous settle's content still on disk (else an external
                 // editor wrote it — preserve-both). `Absent` on every settle would
                 // wrongly conflict-flag every edited doc after the first write.
                 preimage: match &last_sha {
@@ -2497,7 +2497,7 @@ pub fn settle(
 }
 
 /// Close a session: regime-dependent. Replicated (or persist-closed-state)
-/// compacts and KEEPS the lineage durable; local-only prunes every CRDT row to
+/// compacts and keeps the lineage durable; local-only prunes every CRDT row to
 /// the bare marker (the workspace file is the artifact). A caller that uses a
 /// store-backed projector supplies its digest; scenes refuse the generic
 /// projection because their portable files resolve from versioned storage.
@@ -2512,7 +2512,7 @@ pub fn close_session(
     let marker = read_marker(store, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime == Regime::Replicated || persist_closed_state {
         // Force a compaction (threshold 0) so the lineage is a single snapshot +
-        // no trailing updates, and NEVER prune it.
+        // no trailing updates, and never prune it.
         return Ok(match maybe_compact(store, key, 0, faults, now_ms)? {
             TxnOutcome::Committed(outcome) => {
                 TxnOutcome::Committed(CloseOutcome::Compacted(outcome))
@@ -2520,7 +2520,7 @@ pub fn close_session(
             TxnOutcome::Crashed { committed } => TxnOutcome::Crashed { committed },
         });
     }
-    // Local-only prune would DISCARD the CRDT cache. Refuse unless the artifact
+    // Local-only prune would discard the CRDT cache. Refuse unless the artifact
     // already holds the head's bytes (the workspace file is the artifact: it
     // must exist before the cache is thrown away). A doc with no edits
     // (`head_update_seq == 0`) has nothing to lose and prunes freely.
@@ -2541,13 +2541,13 @@ pub fn close_session(
                 )
             }
         };
-        // TWO ways the artifact can already hold these bytes, and both count.
+        // Two ways the artifact can already hold these bytes, and both count.
         // A settle records itself in `last_settled_sha`. A CAPTURE of the file
         // moves the HEAD to them and touches no marker column — it reads the
         // disk, so a matching captured head IS the proof this guard asks for.
         // Reading the marker alone refuses a document whose own projection is
-        // already the head, and capture -> discharge -> open never converges
-        // (#665). The sync-side `ydoc_apply::project_and_write_in_tx` uses a
+        // already the head, and capture -> discharge -> open never converges.
+        // The sync-side `ydoc_apply::project_and_write_in_tx` uses a
         // narrower head/projection match to dedupe a converged envelope; it
         // does not gate this prune.
         let covered = store.read_with(|conn| -> Result<bool, CollabError> {
@@ -2556,7 +2556,7 @@ pub fn close_session(
             {
                 return Ok(true);
             }
-            // THIRD proof (#815): a seed-only lineage whose recorded source
+            // Third proof: a seed-only lineage whose recorded source
             // is still the captured head. The projection sha cannot match —
             // projecting normalizes — but everything the doc contains was
             // imported from bytes the captured head (and the version store's
@@ -2568,7 +2568,7 @@ pub fn close_session(
         if !covered {
             return Err(CollabError::UnsettledClose);
         }
-        // The settle may have COMMITTED while its materialization failed
+        // The settle may have committed while its materialization failed
         // transiently: last_settled_sha matches the projection but the job
         // that would land it on disk is still pending. Pruning now would
         // discard the CRDT with the artifact never replaced — refuse until
@@ -2619,7 +2619,7 @@ pub fn close_session(
                 rusqlite::params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(map_sql)?;
-        // `last_settled_sha` clears WITH the cache: it described the pruned
+        // `last_settled_sha` clears with the cache: it described the pruned
         // lineage. The next open reseeds from the file, and its settle
         // expectation must be the OPEN-TIME head — a retained sha from the
         // pruned lineage would turn the first settle after an intervening
@@ -2650,9 +2650,9 @@ pub(crate) fn validate_update_bytes(update: &[u8]) -> Result<(), CollabError> {
             max: MAX_YDOC_UPDATE_BYTES,
         });
     }
-    // Constraint 5: reject truncated/malformed bytes BEFORE journaling.
+    // Constraint 5: reject truncated/malformed bytes before journaling.
     // `Ydoc::validate_update` runs the abort-safe pre-validator
-    // (`replay_parity::prevalidate_update_bytes`) FIRST — before any call that
+    // (`replay_parity::prevalidate_update_bytes`) first — before any call that
     // can reach yrs 0.27.3's uncatchable `Update::decode_v1` hard-abort on
     // malformed input (`catch_unwind` cannot intercept it; see
     // `replay_parity::safe_read_string`'s doc comment) — so this single call
@@ -2777,10 +2777,10 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
 
 /// The sha of the content the last settle materialized (or `None` if never
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
-/// Full durable admission check for a remote update WITHOUT applying it:
+/// Full durable admission check for a remote update without applying it:
 /// byte validation (empty/5 MiB cap/abort-safe prevalidation) plus the
 /// replay-parity gate against the lineage's current base. The sync defer
-/// path runs this BEFORE acking a coordinate it can only replay later —
+/// path runs this before acking a coordinate it can only replay later —
 /// an update the drain would refuse must never be acked.
 pub fn validate_remote_update_for(
     store: &EngineStore,
@@ -2792,7 +2792,7 @@ pub fn validate_remote_update_for(
 
 /// [`validate_remote_update_for`] with already-acked-but-deferred
 /// predecessor updates replayed onto the gate doc first — a later deferred
-/// update may only become invalid AFTER its queued predecessors apply, and
+/// update may only become invalid after its queued predecessors apply, and
 /// acking it against the bare durable head would strand the drain.
 pub fn validate_remote_update_with_pending(
     store: &EngineStore,
@@ -2852,7 +2852,7 @@ pub fn read_last_settled_sha(
 }
 
 /// The captured head sha a SEED-ONLY lineage imported, or `None` when the
-/// lineage is anything else (#815).
+/// lineage is anything else.
 ///
 /// `Some(sha)` proves, from durable state alone, that the doc's entire
 /// history is one client-declared seed update importing the captured head
@@ -2956,9 +2956,9 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
     .ok_or(CollabError::NoMarker)
 }
 
-/// The object's head sha, but ONLY when a capture put it there.
+/// The object's head sha, but only when a capture put it there.
 ///
-/// The DIRECTION decides, not the bytes. A capture is disk -> engine: it reads
+/// The direction decides, not the bytes. A capture is disk -> engine: it reads
 /// the file, mints no materialization job, and its head therefore IS what the
 /// file holds. A head the engine wrote is engine -> disk, and its job is the
 /// only thing that says whether the file ever received it — a job that
@@ -2967,9 +2967,9 @@ fn last_settled_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, C
 /// Answering "covered" from such a head would prune the CRDT over a file that
 /// disagrees with it.
 ///
-/// Matched on the recorded DIRECTION itself
+/// Matched on the recorded direction itself
 /// (`dohc_engine_domain::store::CAPTURE_ORIGIN`), not on a job-row absence.
-/// #723: a `NOT EXISTS(materialization_jobs …)` heuristic reads a leftover
+/// A `NOT EXISTS(materialization_jobs …)` heuristic reads a leftover
 /// TERMINAL job row for the same content+path (from an earlier, unrelated
 /// engine settle) as "not captured" — a reversion to previously-engine-written
 /// bytes then refuses a valid discharge. `claim_foreign_head`'s dedupe writes
@@ -2990,7 +2990,7 @@ fn captured_head_sha(conn: &Connection, key: &DocKey) -> Result<Option<String>, 
             key.object_id,
             dohc_engine_domain::store::CAPTURE_ORIGIN,
         ],
-        // NULL for a BINARY head (schema v10), which a path whose bytes stop
+        // NULL for a binary head (schema v10), which a path whose bytes stop
         // round-tripping as UTF-8 becomes. It covers nothing, and reading it
         // as a plain String would raise InvalidColumnType instead —
         // `.optional()` absorbs only QueryReturnedNoRows.
@@ -3014,7 +3014,7 @@ pub(crate) fn head_of(
 }
 
 /// The content-addressed dedup probe: the earliest un-folded log row already
-/// holding exactly these bytes. Both admission paths run it BEFORE the
+/// holding exactly these bytes. Both admission paths run it before the
 /// replay-parity gate: an in-log sha means the gate already admitted these
 /// bytes against the base they extended, and re-applying them is a CRDT no-op —
 /// re-gating against today's newer base could only spuriously refuse. Folded

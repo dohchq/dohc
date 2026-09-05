@@ -189,7 +189,7 @@ export interface CellEditorProps {
   close: () => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
-   * options do not have yet. The host must add `option` to the schema FIRST
+   * options do not have yet. The host must add `option` to the schema first
    * and only then write `nextValue` to the cell; this package never writes.
    * Absent means editors only pick existing options.
    */
@@ -406,7 +406,7 @@ export function FieldCell({
     reason,
     <button
       type="button"
-      // min-h keeps an EMPTY cell clickable: with no text the button's
+      // min-h keeps an empty cell clickable: with no text the button's
       // content box collapses to zero height and the cell cannot be edited
       // by mouse at all.
       className="block min-h-5 w-full truncate text-left text-[13px]"

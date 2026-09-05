@@ -2284,7 +2284,7 @@ impl ChangeAttribution {
 /// Values stay as the stored JSON text; the event layer decides parsing and
 /// size bounds. Serialized device-locally onto a parked update's deferred
 /// coordinate so a drain retry can surface facts an earlier failed drain
-/// already committed (#1004) — never a wire shape.
+/// already committed — never a wire shape.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionFieldChangeFact {
     pub field_name: String,
@@ -2459,12 +2459,12 @@ pub fn index_collection_frontmatter_apply_in_tx(
         let applied = after_object.and_then(|values| values.get(field_name));
         let authored_previous = authored_before.and_then(|values| values.get(field_name));
         let authored_next = authored_after.and_then(|values| values.get(field_name));
-        // A delta update carries the author's FULL delete set, so replaying it
+        // A delta update carries the author's full delete set, so replaying it
         // on the lineage base deletes items earlier updates already replaced
         // and reads as a removal the author never made. Inserts come only
-        // from the author, so an authored change with a PRESENT next value is
+        // from the author, so an authored change with a present next value is
         // genuine; an authored `-> absent` cannot be told apart from that
-        // replay artifact and is never journaled (#1001).
+        // replay artifact and is never journaled.
         if optional_collection_values_equal(previous, applied)
             && !optional_collection_values_equal(authored_previous, authored_next)
             && authored_next.is_some()
@@ -2495,7 +2495,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
     // Parsed provenance can change a field's validation without changing its
     // coerced value: `estimate: .nan` and `estimate: ".nan"` both index as
     // the string ".nan" but flag for different reasons, so a caller that
-    // supplied provenance always reindexes (#987).
+    // supplied provenance always reindexes.
     if applied_frontmatter_unchanged && authored_frontmatter_unchanged && after_provenance.is_none()
     {
         return Ok(None);
@@ -2510,7 +2510,7 @@ pub fn index_collection_frontmatter_apply_in_tx(
         after,
         // A caller that parsed the after state from Markdown knows which
         // fields held a non-finite number before coercion; without it, keep
-        // the stored reasons (#987).
+        // the stored reasons.
         match after_provenance {
             Some(provenance) => FieldProvenance::Parsed {
                 non_finite_fields: &provenance.non_finite_fields,
@@ -4658,7 +4658,7 @@ fn group_collection_records(
 /// Cost: the collation parses both JSON operands on every comparison, about
 /// n log(page) parses per query, where the old in-memory sort parsed each
 /// value once. That trades CPU for memory bounded by the page instead of
-/// the collection (#991); a 100k-record sort on string-heavy fields is the
+/// the collection; a 100k-record sort on string-heavy fields is the
 /// case to benchmark before relying on it.
 fn register_collection_query_sql(conn: &Connection) -> Result<(), crate::DomainError> {
     conn.create_collation("DOHC_COLLECTION_JSON", |left, right| {
@@ -4668,7 +4668,7 @@ fn register_collection_query_sql(conn: &Connection) -> Result<(), crate::DomainE
         ) {
             (Ok(left), Ok(right)) => compare_json(&left, &right),
             // value_json is CHECK json_valid; an unparsable operand still
-            // needs a TOTAL order, so fall back to byte order.
+            // needs a total order, so fall back to byte order.
             _ => left.cmp(right),
         }
     })

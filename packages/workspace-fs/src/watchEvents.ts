@@ -1,7 +1,7 @@
-// Phase 5: the raw filesystem watch layer for a local-first workspace.
+// The raw filesystem watch layer for a local-first workspace.
 //
 // Two concerns live here, kept separate so the noisy parts stay testable:
-//   1. PURE rules that decide which paths are workspace noise vs. real user
+//   1. Pure rules that decide which paths are workspace noise vs. real user
 //      files, and how SQLite's multi-file write protocol collapses back to a
 //      single logical database change.
 //   2. A thin chokidar wrapper that debounces raw events into a quiet-window
@@ -38,11 +38,11 @@ const EDITOR_NOISE = [
   /^\.DS_Store$/i, // macOS Finder metadata
 ];
 
-// TRUE when the watcher should drop this relative path before it ever becomes
+// True when the watcher should drop this relative path before it ever becomes
 // a user file op. Shares hasIgnoredSegment with the file-tree walker so the
-// watcher never records history for paths the tree hides (.dohc at any depth,
-// .git, node_modules), plus editor scratch files. NOTE: SQLite sidecars
-// (.db-wal/-journal/-shm) are NOT ignored here — a SQLite write often touches
+// watcher never records history for paths the tree hides (.dohc at any depth,.
+// Git, node_modules), plus editor scratch files. NOTE: SQLite sidecars
+// (.db-wal/-journal/-shm) are not ignored here — a SQLite write often touches
 // only the WAL while the base .db is untouched until checkpoint, so ignoring
 // sidecars would make the change INVISIBLE. Instead the pipeline lets sidecar
 // events through and folds them into one base-db update via
@@ -81,8 +81,8 @@ export function collapseSqliteSidecars(events: WatcherEvent[]): WatcherEvent[] {
   const baseDbIndex = new Map<string, number>();
 
   // Default to "update" — a sidecar event (incl. a WAL checkpoint that reads
-  // as a sidecar delete) means the database CHANGED, not that it was deleted.
-  // Only the base db's OWN delete event means the database was deleted, so a
+  // as a sidecar delete) means the database changed, not that it was deleted.
+  // Only the base db's own delete event means the database was deleted, so a
   // delete of the base path takes precedence over any sidecar churn.
   const foldBaseDb = (dbPath: string, baseOwnOperation?: WatcherEvent["operation"]): void => {
     const existing = baseDbIndex.get(dbPath);
@@ -134,7 +134,7 @@ export type WorkspaceEventsWatcher = {
   // Idempotent; flushes pending changes so a save right before quit records.
   stop: () => void;
   // Resolves when chokidar's initial scan completes — writes made after this
-  // point are guaranteed to be observed. (Writes landing DURING the initial
+  // point are guaranteed to be observed. (Writes landing during the initial
   // scan can be folded into it and dropped; callers that trigger writes, like
   // the desktop's openWorkspace, await this first. Changes made while the app
   // was closed are reconciled by sync's manifest diff, not the watcher.)
@@ -150,8 +150,8 @@ export function watchWorkspaceEvents(
 ): WorkspaceEventsWatcher {
   if (signal?.aborted) return { stop: () => undefined, ready: Promise.resolve() };
 
-  // cwd makes chokidar hand back EVENT paths relative to rootDir, but the
-  // `ignored` predicate is called with ABSOLUTE paths during the initial scan
+  // cwd makes chokidar hand back event paths relative to rootDir, but the
+  // `ignored` predicate is called with absolute paths during the initial scan
   // — relativize first or .dohc/** (incl. our own history writes) leaks
   // through and the watcher records its own output in a feedback loop.
   const watcher = watch(".", {

@@ -7,17 +7,17 @@ import {
   outsideWorkspaceRefusal,
 } from "@dohc/workspace-core";
 
-// THE resolver for a workspace's internal metadata directory (<root>/.dohc).
+// The resolver for a workspace's internal metadata directory (<root>/.dohc).
 // Every main-process writer of internal metadata (ui-state.json,
 // agent-runs.json) must resolve the directory through here — never join
 // "<root>/.dohc" by hand. The trap this closes: a malicious attached
 // workspace can carry `.dohc -> /some/user-writable/outside-dir` (a symlink
 // with a valid manifest copied inside), and a naive join-then-write would
-// follow it and land files OUTSIDE the workspace boundary. The contract:
+// follow it and land files outside the workspace boundary. The contract:
 //
 //   - the workspace root is realpath'd first (so containment compares
 //     resolved paths, not symlinked aliases),
-//   - <root>/.dohc must be a REAL directory — lstat, so a symlink is seen AS
+//   - <root>/.dohc must be a real directory — lstat, so a symlink is seen AS
 //     a symlink and refused, even one pointing at a real directory,
 //   - a missing .dohc is created (first write on a fresh workspace),
 //   - and the resolved dir must still live inside the resolved root.

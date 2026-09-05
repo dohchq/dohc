@@ -779,7 +779,7 @@ fn crash_mid_send_strands_no_empty_thread() {
             .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
             .expect("gen");
     }
-    // Arm a crash BEFORE persist during the atomic thread+message write.
+    // Arm a crash before persist during the atomic thread+message write.
     {
         let mut store = open(&db, 2);
         let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
@@ -1745,10 +1745,6 @@ fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
     let page = LinkedChatStore::new(&mut store)
         .list_personal_feed(WS, "owner", Some(10), None)
         .expect("feed");
-    // MUTATION: hydrating the page's attachments in one query without
-    // distributing per occurrence -> the opening/parent shared by several
-    // items goes empty for all but one of them, a bare message collects a
-    // neighbor's attachments, or a dangling attachment resurfaces.
     fn objects(message: &dohc_engine_domain::ChatMessage) -> Vec<&str> {
         message
             .attachments
@@ -2088,7 +2084,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
         );
     }
 
-    // Whitespace-only commands are VALID (the oracle's `normalizeCommand`
+    // Whitespace-only commands are valid (the oracle's `normalizeCommand`
     // preserves them verbatim; an omitted command is the empty string) —
     // only NUL and the metadata length cap refuse.
     for invalid_command in ["bad\0command".to_owned(), "x".repeat(16_385)] {
@@ -2155,7 +2151,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
         );
     }
 
-    // A second claim while run-1 is RUNNING returns None (single-writer).
+    // A second claim while run-1 is running returns None (single-writer).
     let second = chats
         .claim_next_pending(WS, "run-2", "agent", None, 23, &NO_FAULTS)
         .expect("second");
@@ -2265,7 +2261,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("same running claim");
     assert_eq!(retry, a);
 
-    // Before completion, B is NOT claimable (single-writer guard).
+    // Before completion, B is not claimable (single-writer guard).
     assert!(
         chats
             .claim_next_pending(WS, "run-B", "agent", None, 25, &NO_FAULTS)
@@ -2283,7 +2279,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .expect("some B");
     assert_eq!(b.dispatch.trigger_message_id, "mB");
 
-    // A DIFFERENT workspace can neither complete nor fail this run — the
+    // A different workspace can neither complete nor fail this run — the
     // lookup is workspace-scoped at the SQL, not just at the RPC layer.
     assert!(
         chats
@@ -2303,7 +2299,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
         .complete_dispatch(WS, "run-A", 0, 28, &NO_FAULTS)
         .expect("idempotent complete");
 
-    // A's run record is ended with its ORIGINAL exit code timestamp (26), not
+    // A's run record is ended with its original exit code timestamp (26), not
     // the idempotent no-op's (28).
     let ended: Option<i64> = store
         .read_with(|conn| {
@@ -2391,7 +2387,7 @@ fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
             .ensure_general_channel(WS, "gen-1", 10, &NO_FAULTS)
             .expect("gen");
     }
-    // Arm a crash AFTER commit, before ack — the write IS durable but surfaces
+    // Arm a crash after commit, before ack — the write IS durable but surfaces
     // as an error to the caller (who does not learn it succeeded).
     {
         let mut store = open(&db, 2);
@@ -2405,8 +2401,8 @@ fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
         assert_eq!(err.code(), "persist-failed");
         assert!(faults.fired());
     }
-    // Retry with the SAME ids + request_id: replays the recorded result exactly
-    // once (does NOT hit the message PK and fail a write that succeeded).
+    // Retry with the same ids + request_id: replays the recorded result exactly
+    // once (does not hit the message PK and fail a write that succeeded).
     let mut store = open(&db, 3);
     let mut chats = LinkedChatStore::new(&mut store);
     let mut input = start_thread("gen-1", "t1", "m0", "hello", ChatActorKind::Human, 20);
@@ -2416,7 +2412,7 @@ fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
         .expect("replay");
     assert_eq!(thread.thread_id, "t1");
     assert_eq!(message.message_id, "m0");
-    // A same-key retry with a DIFFERENT payload is a reuse mismatch.
+    // A same-key retry with a different payload is a reuse mismatch.
     let mut reused = start_thread("gen-1", "t1", "m0", "DIFFERENT", ChatActorKind::Human, 20);
     reused.request_id = Some("req-1".to_owned());
     assert_eq!(
@@ -2445,7 +2441,7 @@ fn author_kind_check_constraint_rejects_bogus_wire_value() {
     let db = scratch.engine_db_path().expect("db");
     let store = open(&db, 1);
     // A wrong-case / bogus author_kind (as a future R10 replication-apply might
-    // receive over the wire) is rejected AT WRITE by the CHECK, not stored to
+    // receive over the wire) is rejected AT write by the CHECK, not stored to
     // trip later on read.
     let result = store.read_with(|conn| {
         conn.execute(
@@ -2688,7 +2684,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
             &NO_FAULTS,
         )
         .expect("start");
-    // owner follows nothing → m0 is NOT visible; marking it seen fails closed.
+    // owner follows nothing → m0 is not visible; marking it seen fails closed.
     let head = encode_feed_cursor(&FeedCursorValue {
         created_at_ms: 100,
         message_id: "m0".to_owned(),
@@ -2867,7 +2863,7 @@ fn feed_cursor_encode_matches_ts_and_ts_cursor_decodes() {
 #[test]
 fn claim_refuses_a_run_id_already_used_anywhere() {
     // Run ids are globally unique by schema (idx_agent_run_records_run_id).
-    // A caller-supplied id that already exists — an ENDED run in this
+    // A caller-supplied id that already exists — an ended run in this
     // workspace, or any run in another — must refuse cleanly. Mutation
     // check: drop the run_id_taken probe in `claim_next_pending` — both
     // claims below then hit the UNIQUE violation mid-transaction and

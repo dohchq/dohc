@@ -15,9 +15,9 @@ import {
 
 // AUDIT-SILENTSAVE. Three dogfood computer-use journeys, driving the real app,
 // each watched a document read "Saved" in the editor while its .md on disk sat
-// at ZERO BYTES — silent, total loss of what the user wrote. The trigger was
+// at zero bytes — silent, total loss of what the user wrote. The trigger was
 // size: past the engine's 48 KiB in-band response cap the settle refused
-// pre-commit on EVERY debounced attempt (journey 1's load-test.md held 131,442
+// pre-commit on every debounced attempt (journey 1's load-test.md held 131,442
 // typed/pasted bytes and the file never received one), and the refusal reached
 // nothing at all — no log, no UI, while a renderer-side timer kept flipping the
 // indicator to "Saved".
@@ -26,7 +26,7 @@ import {
 // the real app, a real engine, a real file on disk.
 
 const CHUNK = "The quick brown fox jumps over the lazy dog, repeatedly. ";
-// ~140 KiB: past BOTH the 48 KiB in-band response cap and the 128 KiB capture
+// ~140 KiB: past both the 48 KiB in-band response cap and the 128 KiB capture
 // text cap, matching the 131,442 bytes journey 1 actually pasted. Under 128 KiB
 // this spec would miss the capture layer retiring the engine record entirely.
 const CHUNKS = 2_500;
@@ -51,7 +51,7 @@ async function openEngineDoc(
 
 test("a document past the in-band cap reaches disk, and the editor never claims Saved before it does", async () => {
   // This spec does more than any other here: launch, type ~140 KiB, wait out
-  // the settle, then RESTART the app and wait for the reconcile. Measured on a
+  // the settle, then restart the app and wait for the reconcile. Measured on a
   // saturated machine (14 busy threads, the state this repo's parallel agents
   // actually leave it in), healthy passes ran 25.4s–58.7s — up against the
   // config's 60s default, which then timed out 2 runs in 8 with nothing wrong.
@@ -94,7 +94,7 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
 
     await expect(editor).toContainText(TAIL_SENTINEL, { timeout: 15_000 });
     // The edit registered: the indicator left "Saved" for the typing. From
-    // here on, the next "Saved" is a claim about THIS content.
+    // here on, the next "Saved" is a claim about this content.
     await expect(saveState).toHaveAttribute("data-state", "saving", {
       timeout: 15_000,
     });

@@ -804,7 +804,7 @@ describe("Codex chat web app", () => {
       text: secondText,
     });
     // A known event right after the truncated text: any stale delta the
-    // truncation missed would replay BEFORE this one, so asserting this is
+    // truncation missed would replay before this one, so asserting this is
     // the very next replay event is a deterministic proof that nothing
     // else landed -- no timeout needed, and no risk of a slow-but-real
     // event racing past an arbitrary wait.
@@ -966,7 +966,7 @@ describe("Codex chat web app", () => {
 
   it("replays no message for a reservation the driver hasn't accepted yet, but carries it in order once it has", async () => {
     // A reconnect landing in the exact window between the reservation and
-    // the driver's accept would have no live fetch on THAT connection to
+    // the driver's accept would have no live fetch on that connection to
     // ever mark the send failed -- it must see no message for it, not an
     // unconfirmed message rendered as if it were sent.
     const entered = deferred();
@@ -1231,7 +1231,7 @@ describe("Codex chat web app", () => {
     expect(await post(url, "message", { text: "Second turn" }, token)).toMatchObject({
       status: 202,
     });
-    // The SAME session, not a fresh one: no second startSession call.
+    // The same session, not a fresh one: no second startSession call.
     expect(fake.startInputs).toHaveLength(1);
     expect(fake.sessions[0]?.promptCalls).toEqual(["First session", "Second turn"]);
   });
@@ -1282,7 +1282,7 @@ describe("Codex chat web app", () => {
       status: "cancelled",
     });
 
-    // The SAME session, not a fresh one.
+    // The same session, not a fresh one.
     const nextResponse = await post(url, "message", { text: "Second" }, token);
     expect(nextResponse.status).toBe(202);
     expect(fake.startInputs).toHaveLength(1);
@@ -2111,7 +2111,7 @@ describe("Codex chat web app", () => {
       expect(freshResponse.status).toBe(202);
       // A second, real driver.startSession() attempt -- not just a status
       // code that happened to be 202 for some other reason. (startInputs
-      // itself isn't checked here: the fake only pushes to it AFTER its own
+      // itself isn't checked here: the fake only pushes to it after its own
       // gate resolves, and the abandoned first attempt's gate is still held
       // open below.)
       expect(starts).toBe(2);

@@ -40,13 +40,13 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
     let paths = Paths::new(validated.root.clone());
 
     // The recovery dir is proven valid — outside the clone root, creatable,
-    // canonical — BEFORE any state is persisted, on every invocation. A
+    // canonical — before any state is persisted, on every invocation. A
     // violation is a caller/configuration error: refuse with `Err` (retryable
     // with a correct dir) rather than poisoning the persisted state.
     ensure_outside_root(&paths.root, config.recovery_dir)?;
     let recovery_dir = canonical_recovery_dir(config.recovery_dir)?;
 
-    // The fence resolves marker files THROUGH `.dohc`/`engine`, so an aliased
+    // The fence resolves marker files through `.dohc`/`engine`, so an aliased
     // component would let the lock file below be created outside the clone.
     // Refuse before anything under the root is written.
     ensure_real_engine_dir(&paths)?;
@@ -92,7 +92,7 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
             RehearsalState::Settled => {
                 // Precondition (refusal, not terminal): the live db itself
                 // must prove it is the clone the fence validated. Backup
-                // CREATION failures below (torn staging/manifest included)
+                // creation failures below (torn staging/manifest included)
                 // stay terminal by design — the shadow clone is disposable
                 // and re-runs fresh; finer-grained resume is a `--cutover`
                 // follow-up.
@@ -154,7 +154,7 @@ pub fn run_rehearsal(config: RehearsalConfig<'_>) -> Result<RehearsalOutcome, Re
             }
             RehearsalState::Initialized => {
                 // Precondition (refusal): the fresh live store must still
-                // exist, prove its clone binding, AND carry the recorded
+                // exist, prove its clone binding, and carry the recorded
                 // reset identity — the user-file inventory below skips
                 // `.dohc`, and a stale same-clone copy shares the token.
                 verify_reset_preconditions(&paths, &validated, &record)?;
@@ -259,7 +259,7 @@ fn capture_proofs(paths: &Paths, recovery_dir: &Path) -> Result<(), RehearsalErr
     verify_protected_snapshots(paths, recovery_dir)
 }
 
-/// `.dohc` and `.dohc/engine` must be REAL directories: a symlinked component
+/// `.dohc` and `.dohc/engine` must be real directories: a symlinked component
 /// would redirect every marker lookup — and the lock/state writes below —
 /// into a directory outside the clone root.
 fn ensure_real_engine_dir(paths: &Paths) -> Result<(), RehearsalError> {
@@ -401,16 +401,16 @@ fn initialize_fresh_store(
         });
     }
     // Alias-safe: every existing triplet path (db AND WAL/SHM sidecars) must
-    // be a REAL regular file before the read-write open can follow a
+    // be a real regular file before the read-write open can follow a
     // symlink/junction and bind or migrate a database — or replay an aliased
     // sidecar — outside the clone. Absent is fine: a fresh store is made.
     for name in DB_TRIPLET {
         super::require_real_file(&paths.engine.join(name), "initialize-live-db-alias-refused")?;
     }
     let mut store = EngineStore::open(&paths.db, now_ms)?;
-    // A fresh store is bound here; an EXISTING store is acceptable only when
+    // A fresh store is bound here; an existing store is acceptable only when
     // already bound to this clone (the crash window between a completed
-    // initialize and its marker). A crash between store CREATION and the
+    // initialize and its marker). A crash between store creation and the
     // bind leaves an unbound store that stays a terminal refusal —
     // disposable-clone recovery, not a `--cutover`-grade resume.
     if !store.bind_shadow_clone_token(shadow_token)? {
@@ -424,7 +424,7 @@ fn initialize_fresh_store(
             code: "initialize-ownership-missing",
         });
     }
-    // The freshness proof: the backed-up ORIGINAL identity may not reappear
+    // The freshness proof: the backed-up original identity may not reappear
     // as the live store — a stale same-clone copy (old store or backup
     // restored over engine.db) shares the shadow token but not a new uuid.
     if engine_uuid == original_engine_uuid {

@@ -15,7 +15,7 @@ import { realpath, stat } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
 // Phase E5.0 content-search engine: spawns the bundled ripgrep
-// (@vscode/ripgrep — the exact engine VS Code uses) rooted at the REAL
+// (@vscode/ripgrep — the exact engine VS Code uses) rooted at the real
 // workspace root, parses its --json event stream line-by-line, and forwards
 // bounded result batches to a callback. No shell is ever involved: the query
 // travels as one argv element after `--`, so it can never read as a flag or
@@ -23,7 +23,7 @@ import { createInterface } from "node:readline";
 //
 // WSL/process safety: every child this module spawns is tracked by handle.
 // A new search, an explicit cancel, the renderer going away, and app quit
-// each kill the SPECIFIC tracked child — never a pattern kill.
+// each kill the specific tracked child — never a pattern kill.
 
 // Bounds. The two the tests/renderer share are exported; the rest are pinned
 // through buildRipgrepArgs' visible argv in the unit tests.
@@ -51,7 +51,7 @@ export interface WorkspaceSearchRequest {
 // - a glob already targeting the projection is used as-is;
 // - a basename-style glob (no "/") floats to any depth, so it intersects
 //   mounts — scope it: "*.md" -> "shared-with-me/**/*.md";
-// - any other path-style glob is ANCHORED at the workspace root and cannot
+// - any other path-style glob is anchored at the workspace root and cannot
 //   match under shared-with-me/ — the intersection is empty, so the pass
 //   is skipped (null).
 export function mountScopedIncludeGlob(
@@ -69,7 +69,7 @@ export function mountScopedIncludeGlob(
   }
   if (!glob.includes("/")) return `shared-with-me/**/${glob}`;
   // A leading "**/" floats like a basename glob (gitignore semantics: not
-  // root-anchored), so "**/*.md" DOES match mounted files — scope it under
+  // root-anchored), so "**/*.md" Does match mounted files — scope it under
   // the projection instead of skipping the pass.
   if (glob.startsWith("**/")) return `shared-with-me/${glob}`;
   return null;
@@ -78,13 +78,13 @@ export function mountScopedIncludeGlob(
 export interface SearchResultEntry {
   // Workspace-relative, forward-slashed, validateUserReadPath-clean.
   path: string;
-  // 1-based line and column (column in CHARACTERS into the full line).
+  // 1-based line and column (column in characters into the full line).
   line: number;
   column: number;
   // The matched line, trimmed of its newline and bounded to
   // SEARCH_MAX_PREVIEW_CHARS — windowed around the match when the line is
   // longer, with matchStart/matchEnd re-based into the window. The renderer
-  // highlights with these offsets and NEVER re-executes the pattern.
+  // highlights with these offsets and never re-executes the pattern.
   preview: string;
   matchStart: number;
   matchEnd: number;
@@ -102,14 +102,14 @@ export interface SearchBatch {
 // rg's own gitignore handling; `**/` so a nested .git/.dohc prunes too), the
 // file-size and per-file caps, and the `--` terminator so the user's query is
 // always a pattern, never a flag. --no-ignore + --hidden make search results
-// agree with the explorer tree, which lists dotfiles and ignores ONLY the
+// agree with the explorer tree, which lists dotfiles and ignores only the
 // reserved segments.
 //
 // GLOB ORDER IS LOAD-BEARING: rg glob precedence is last-match-wins, so the
-// built-in exclusions are appended AFTER the user's include/exclude globs.
+// built-in exclusions are appended after the user's include/exclude globs.
 // With them first, includeGlob '**/.git/**' (or even a benign '*') would
 // re-include reserved-segment content — .git/config routinely carries
-// credential tokens in HTTPS remote URLs. toSearchEntries re-checks every
+// credential tokens in https remote URLs. toSearchEntries re-checks every
 // emitted path against hasIgnoredSegment as the engine-level backstop.
 export function buildRipgrepArgs(request: WorkspaceSearchRequest): string[] {
   const args = [
@@ -128,10 +128,10 @@ export function buildRipgrepArgs(request: WorkspaceSearchRequest): string[] {
   if (!request.regex) args.push("--fixed-strings");
   if (request.includeGlob) args.push("-g", request.includeGlob);
   if (request.excludeGlob) args.push("-g", `!${request.excludeGlob}`);
-  // Built-in exclusions LAST (after every user glob): last-match-wins keeps
+  // Built-in exclusions last (after every user glob): last-match-wins keeps
   // them authoritative no matter what the user typed.
   args.push("-g", "!**/.dohc/**", "-g", "!**/.git/**", "-g", "!**/node_modules/**");
-  // Secret floor (PR 08): `.env`-style paths never surface search snippets —
+  // Secret floor: `.env`-style paths never surface search snippets —
   // the same classifyEngineFilePath floor the engine enforces, expressed as
   // rg globs (case-insensitive to match the floor's lowercase rule) plus the
   // toSearchEntries backstop below. Over-exclusion is the safe direction.
@@ -171,15 +171,15 @@ export function parseRipgrepLine(line: string): RgMatchData | null {
   return typed.data as RgMatchData;
 }
 
-// rg reports submatch offsets in BYTES into the line; previews are sliced in
+// rg reports submatch offsets in bytes into the line; previews are sliced in
 // CHARACTERS. Convert via the UTF-8 byte prefix (multi-byte text stays honest
-// instead of off-by-N). The line's buffer is computed ONCE by the caller —
+// instead of off-by-N). The line's buffer is computed once by the caller —
 // a long line can carry hundreds of submatches, and re-encoding it per
 // submatch was a measurable main-process hot spot on prose fixtures.
 function byteToCharOffset(line: string, bytes: Buffer, byteOffset: number): number {
   if (byteOffset <= 0) return 0;
   if (byteOffset >= bytes.length) return line.length;
-  // All-ASCII fast path: byte offsets ARE char offsets.
+  // All-ASCII fast path: byte offsets are char offsets.
   if (bytes.length === line.length) return byteOffset;
   return bytes.subarray(0, byteOffset).toString("utf8").length;
 }
@@ -187,7 +187,7 @@ function byteToCharOffset(line: string, bytes: Buffer, byteOffset: number): numb
 // Converts one rg match event into bounded result entries (one per submatch).
 // Every path must pass validateUserReadPath — rg runs rooted at the real
 // workspace root and emits relative paths, but the validator is the same
-// containment rule every other IPC surface enforces, applied BEFORE the path
+// containment rule every other IPC surface enforces, applied before the path
 // crosses toward the renderer. Pure; unit tests cover the windowing math.
 export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   const rawPath = data.path?.text;
@@ -206,7 +206,7 @@ export function toSearchEntries(data: RgMatchData): SearchResultEntry[] {
   // rejects these today, and this stays near rg parsing because include globs
   // can out-vote CLI exclusions (last-match-wins).
   if (hasIgnoredSegment(validated.normalized)) return [];
-  // Secret-floor backstop (PR 08): even if a user include glob out-votes the
+  // Secret-floor backstop: even if a user include glob out-votes the
   // CLI exclusions, a secret-classified path never crosses to the renderer.
   // Read-aware: a mounted shared-with-me/<label>/.env classifies secret too.
   if (classifyEngineFilePathForRead(validated.normalized).kind === "secret") return [];
@@ -314,8 +314,8 @@ export function startRipgrepSearch(options: {
     if (entries.length === 0 || (allowPath && !allowPath(entries[0].path))) {
       return;
     }
-    // Flush INSIDE the loop: one rg match event carries one entry per
-    // SUBMATCH, and a long prose line against a short query can carry
+    // Flush inside the loop: one rg match event carries one entry per
+    // submatch, and a long prose line against a short query can carry
     // hundreds — a batch must never exceed the contract's per-event entry
     // cap, no matter how many entries one line yields.
     for (const entry of entries) {
@@ -325,7 +325,7 @@ export function startRipgrepSearch(options: {
       if (pending.length >= SEARCH_BATCH_MAX_ENTRIES) flush(false);
     }
     if (total >= SEARCH_MAX_TOTAL_MATCHES) {
-      // Hard stream cap: stop the scan by killing OUR tracked child.
+      // Hard stream cap: stop the scan by killing our tracked child.
       limitHit = true;
       child.kill();
     }
@@ -380,7 +380,7 @@ async function terminateSearch(search: {
   await settlesWithin(search.settled, SEARCH_TERMINATION_FINAL_MS);
 }
 
-// Tracks at most ONE active search per owner (an owner is a renderer
+// Tracks at most one active search per owner (an owner is a renderer
 // webContents). Starting a new search for an owner kills its previous child
 // by handle; cancel/dispose do the same. Electron-free so the lifecycle is
 // unit-testable; main.ts adapts webContents ids and quit hooks onto it.

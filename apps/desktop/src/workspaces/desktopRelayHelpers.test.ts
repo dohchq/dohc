@@ -127,9 +127,9 @@ describe("desktop relay helpers", () => {
     });
   });
 
-  // The fetched selector BECOMES the grant every later pull is enforced
+  // The fetched selector becomes the grant every later pull is enforced
   // against, so an unreadable one is refused instead of softened. Every
-  // permissive reading lands on the WIDEST grant — empty paths with no
+  // permissive reading lands on the widest grant — empty paths with no
   // version is "the whole tracked workspace" to the engine — so a relay that
   // merely omits or corrupts the field would disarm the containment.
   it("refuses a share whose selector it cannot read, instead of widening the grant", async () => {
@@ -137,7 +137,7 @@ describe("desktop relay helpers", () => {
       { shareId: "share-a" }, // selector missing entirely
       { shareId: "share-a", selector: null },
       { shareId: "share-a", selector: "docs" },
-      // Each row below carries a VALID access, so it is refused for the
+      // Each row below carries a valid access, so it is refused for the
       // reason it names and not for a missing level.
       { shareId: "share-a", selector: { versionId: "v1" }, access: "view" }, // no paths array
       {
@@ -162,7 +162,7 @@ describe("desktop relay helpers", () => {
         selector: { paths: [], versionId: null },
         access: "view",
       },
-      // The level dimension (#646). An otherwise perfect selector whose level
+      // The level dimension. An otherwise perfect selector whose level
       // is missing or unreadable is refused too: the level is pinned with the
       // grant, and reading an unreadable one as "view" would invent a grant
       // the relay never stated.
@@ -212,12 +212,12 @@ describe("desktop relay helpers", () => {
           ),
           shareId: "share-a",
         }),
-        `MUTATION: a permissive fallback records ${JSON.stringify(body.selector)} as a whole-workspace grant`,
+        `a permissive fallback records ${JSON.stringify(body.selector)} as a whole-workspace grant`,
       ).rejects.toBeInstanceOf(ShareSelectorInvalidError);
     }
   });
 
-  // A chat-channel grant has no file selector at all. That is a KNOWN kind,
+  // A chat-channel grant has no file selector at all. That is a known kind,
   // not an unreadable response, so it resolves to null and the file surfaces
   // refuse it with their own guidance.
   it("reports a chat-channel grant as having no file selector", async () => {

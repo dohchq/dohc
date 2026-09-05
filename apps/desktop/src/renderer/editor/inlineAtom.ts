@@ -1,9 +1,9 @@
 // Inline-atom parser — the single source of truth for the v0 grammar.
 //
 // Contract: docs/strategy/inline-atom-format-v0.md (FROZEN v0).
-// This module is intentionally pure and dependency-free so the SAME
+// This module is intentionally pure and dependency-free so the same
 // parser is used by both the editor (decoration plugin) and the LLM
-// eval harness — never a second, drifting implementation. It NEVER
+// eval harness — never a second, drifting implementation. It never
 // throws: anything that does not match is simply not an atom.
 
 export type InlineAtomValueType = 'number' | 'boolean' | 'date' | 'string'
@@ -27,19 +27,19 @@ const NUMBER = /^-?\d+(\.\d+)?$/
 const DATE = /^\d{4}-\d{2}-\d{2}$/
 
 // ASCII punctuation (incl. braces) — used to recognise an escaped
-// punctuation char in PROSE so it never opens an atom.
+// punctuation char in prose so it never opens an atom.
 const ASCII_PUNCT = /[!-/:-@[-`{-~]/
-// Round-trip-escapable set: ASCII punctuation EXCLUDING `{` and `}`.
+// Round-trip-escapable set: ASCII punctuation excluding `{` and `}`.
 // A markdown serializer (mdast-util-to-markdown, which markdown serializer
 // uses) escapes `_ * \` [ ] …` to avoid accidental emphasis/links — so
 // a saved `{billable_this_week}` comes back as `{billable\_this\_week}`.
 // Inside an atom body we unescape these so the atom survives the
-// round-trip. Braces are NOT in this set: serializers don't escape
+// round-trip. Braces are not in this set: serializers don't escape
 // them, and an escaped brace inside a body is handled by the contract
 // rule (only `\}` is a literal `}` in a string; `\{` ⇒ not an atom).
 const ESCAPABLE = /[!-/:-@[-`|~]/
 /** True if text[i] is a backslash escaping an ASCII-punct at i+1.
- *  Exported so the eval scorer's brace-scan uses the SAME prose-escape
+ *  Exported so the eval scorer's brace-scan uses the same prose-escape
  *  rule (no parser/scorer drift). */
 function isEscaped(text: string, i: number): boolean {
   return (
@@ -156,7 +156,7 @@ function parseInner(
   const rawValue = body.slice(colon + 1).trim()
   if (!IDENT.test(key) || rawValue.length === 0) return null
 
-  // Contract: a value is exactly ONE scalar — never an array/object.
+  // Contract: a value is exactly one scalar — never an array/object.
   // An unquoted value that looks like a list/array (`[a,b]`) is
   // structure → not an atom (block views handle structure).
   if (rawValue[0] === '[') return null

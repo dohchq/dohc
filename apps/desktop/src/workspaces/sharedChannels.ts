@@ -9,17 +9,17 @@ import type { JoinedChannelAnswer } from "../ipc/bridgeContract";
 import type { JoinedSharedChannel } from "./registryStore";
 
 // MU-C4 shared channels — the desktop's refresh pass over a bounded window of
-// the shared channels a workspace has JOINED: push the member's locally-authored
+// the shared channels a workspace has joined: push the member's locally-authored
 // channel ops through the share's member-append route, then pull everyone else's.
 // Best-effort by design: one failing share never blocks the others (or the
-// workspace's own sync pass), and a revoked share is reported as ENDED so the
+// workspace's own sync pass), and a revoked share is reported as ended so the
 // caller can mark it in the registry — the local copy stays readable, it just
 // stops updating (PR-18's honest end-of-share).
 
-// Per-key async serializer (CodeRabbit Stability): shared-channel sync fires
-// from the relay cadence, several fire-and-forget IPC sends, AND an awaited
+// Per-key async serializer: shared-channel sync fires
+// from the relay cadence, several fire-and-forget IPC sends, and an awaited
 // listChatChannels — all for the same workspace. Overlapping passes race the
-// per-share cursor/peer updates in engine.db. Calls for the same key QUEUE
+// per-share cursor/peer updates in engine.db. Calls for the same key queue
 // (never coalesce: a send journaled after a pass started still gets its own
 // pass), different keys stay concurrent, and a rejected run never wedges the
 // queue.
@@ -28,7 +28,7 @@ export function createKeyedSerializer(): <T>(key: string, run: () => Promise<T>)
   return (key, run) => {
     const tail = tails.get(key) ?? Promise.resolve();
     const result = tail.then(run);
-    // The stored tail always settles resolved so a rejection (surfaced to THIS
+    // The stored tail always settles resolved so a rejection (surfaced to this
     // caller via `result`) cannot poison later runs.
     const settled = result.then(
       () => undefined,
@@ -42,8 +42,8 @@ export function createKeyedSerializer(): <T>(key: string, run: () => Promise<T>)
   };
 }
 
-// Bounds every relay request in a shared-channel pass (CodeRabbit Stability):
-// listChatChannels AWAITS the pass, so a hung relay socket must abort after
+// Bounds every relay request in a shared-channel pass:
+// listChatChannels awaits the pass, so a hung relay socket must abort after
 // the timeout instead of blocking the Chats surface indefinitely. Errors ride
 // the pass's normal transient-failure path (logged, retried next pass).
 export function relayFetchWithTimeout(
@@ -54,7 +54,7 @@ export function relayFetchWithTimeout(
     baseFetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
 }
 
-// The joined lane, answered for the channels a caller is SHOWING (#640).
+// The joined lane, answered for the channels a caller is SHOWING.
 //
 // The registry array holds one row per channel this workspace ever joined,
 // including a tombstone per channel it has left. Returning all of it made the
@@ -100,20 +100,20 @@ export function scopeJoinedChannels(
 }
 
 // Registry merge for the join flow (CodeRabbit Data Integrity): a re-join of
-// the SAME channel under a NEW share id (revoked + re-granted) must replace
+// the same channel under a new share id (revoked + re-granted) must replace
 // the stale row, not sit beside it — matching on shareId alone left the
 // channel listed and synced twice.
 //
 // It refuses nothing. The join gate this used to carry existed to bound the
-// joined-lane response, and the scoped read bounds that now (#640). A desktop
+// joined-lane response, and the scoped read bounds that now. A desktop
 // that refused a join could not stop the relay granting one either — it could
 // only make the user's own channel unreachable, which is how the same cap
 // produced three permanent-refusal defects in one review cycle.
 //
 // The replacement happens IN PLACE. A re-granted channel is the same channel,
 // and the sync rotation reads its position from this array — appending it would
-// move it to the end, which strands every row the rotation had not reached yet
-// (#718). Only a channel this workspace has never joined is appended.
+// move it to the end, which strands every row the rotation had not reached yet.
+// Only a channel this workspace has never joined is appended.
 export function mergeJoinedChannel(
   existing: readonly JoinedSharedChannel[],
   joined: JoinedSharedChannel,
@@ -150,15 +150,15 @@ export function endJoinedChannel(
 }
 
 // MU-C4 write gate (CodeRabbit security; product invariant "agent writes must
-// respect sharing boundaries"): a READ-ONLY or ENDED shared-channel grant must
-// reject chat writes BEFORE any durable local mutation. The renderer disabling
+// respect sharing boundaries"): a READ-ONLY or ended shared-channel grant must
+// reject chat writes before any durable local mutation. The renderer disabling
 // its composers is honesty, not authorization — main is the boundary; without
 // this gate a crafted IPC call would mint durable local messages/reactions
-// that sync forever refuses to deliver. An ENDED grant (revoked / owner gone)
+// that sync forever refuses to deliver. An ended grant (revoked / owner gone)
 // is a read-only local copy: it already stopped syncing, so a post-revocation
 // write would only ever live locally, violating "ended means read-only".
 // Resolution is by the channel's WIRE identity (thread → channel → wire)
-// against the joined registry rows. Targets that resolve OUTSIDE any
+// against the joined registry rows. Targets that resolve outside any
 // read-only/ended grant — plain local channels, file-linked threads, unknown
 // ids — pass through; the store's own write path owns those errors.
 interface SharedChannelTargetInput {
@@ -214,7 +214,7 @@ export async function assertSharedChannelWritable(
   }
 }
 
-// How many live joined rows one pass covers (#718). listChatChannels awaits the
+// How many live joined rows one pass covers. listChatChannels awaits the
 // pass, and the pass is sequential whatever it does: EngineRelayClient chains
 // every relay RPC for a workspace (engineRelayClient.ts:591, 1020-1037), so
 // running the rows concurrently could not overlap a round trip.
@@ -223,7 +223,7 @@ export async function assertSharedChannelWritable(
 // 15 s fetch timeout and a 30 s daemon deadline — and a row costs one pull, or a
 // push plus a paged pull at 500 ops a page (sync-relay/src/server.ts:87,
 // dohc-engine-sync/src/model.rs:7). Rows were the only unbounded multiplier.
-// Sixteen caps a pass near 32 requests: what the pass already spends on ONE
+// Sixteen caps a pass near 32 requests: what the pass already spends on one
 // channel carrying an 8,000-op backlog. A pass that a write triggered adds that
 // one share on top, so the true ceiling is 17 rows.
 export const SHARED_CHANNEL_SYNC_PASS_ROWS = 16;
@@ -265,7 +265,7 @@ export interface SyncJoinedSharedChannelsResult {
   changed: boolean;
   // Live rows the rotation did not reach this pass.
   uncovered: number;
-  // Rows the pass DID reach and could not refresh (offline, relay hiccup).
+  // Rows the pass did reach and could not refresh (offline, relay hiccup).
   // They stay in the rotation — a failure must not stall the window — but they
   // are not fresh, so a caller reporting freshness must count them too.
   failedRows: number;
@@ -289,7 +289,7 @@ export async function syncJoinedSharedChannels(input: {
   passRows: number;
   resumeAfterChannelWireId?: string;
   // The CHANNEL whose write triggered this pass. Always covered, and covered in
-  // ADDITION to the rotation's rows. A channel, not a grant: the pass may wait
+  // addition to the rotation's rows. A channel, not a grant: the pass may wait
   // in a queue, and a revoke plus re-grant replaces the share id while it does.
   priorityChannelWireId?: string;
   // Required factory-selected operations prevent a rooted sync pass from
@@ -340,7 +340,7 @@ export async function syncJoinedSharedChannels(input: {
             (registryPosition.get(channel.channelWireId) ?? -1) > cursorPosition,
         );
   const startIndex = afterCursor < 0 ? 0 : afterCursor;
-  // The rotation always gets the whole window. A write's own share is EXTRA
+  // The rotation always gets the whole window. A write's own share is extra
   // work — it has to go out now, and charging it a rotation slot would make the
   // coverage promise depend on write traffic: repeated writes to one channel
   // would starve the tail of the registry forever. So a pass costs at most
@@ -359,7 +359,7 @@ export async function syncJoinedSharedChannels(input: {
   }
   const covered = priority ? [priority, ...rotation] : rotation;
   const uncovered = live.length - covered.length;
-  // The cursor follows the ROTATION only. A priority row is covered out of
+  // The cursor follows the rotation only. A priority row is covered out of
   // order, so letting it move the cursor would skip whatever it jumped over.
   const resumeAfterChannelWireId =
     rotation.at(-1)?.channelWireId ?? input.resumeAfterChannelWireId ?? null;

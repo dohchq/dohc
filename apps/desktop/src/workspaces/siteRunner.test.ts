@@ -9,7 +9,7 @@ import {
 } from "../ipc/bridgeContract";
 
 // Every test here spawns real node children, honest work a busy machine
-// stretches (#568). Measured 2026-08-03 on a 24-process load (12 runs):
+// stretches. Measured 2026-08-03 on a 24-process load (12 runs):
 // individual tests passed at up to 2.3s against vitest's 5s default test
 // deadline, and the dev-server cancel completed in up to 3.3s against its
 // old 2s promptness ceiling — limits inside the loaded-healthy range. The
@@ -459,7 +459,7 @@ describe("package manager helpers", () => {
   });
 
   it("validates every statement a package script's shell body actually runs, not just its first token", () => {
-    // `export HOST=0.0.0.0; vite` runs as TWO statements under npm/pnpm's
+    // `export HOST=0.0.0.0; vite` runs as two statements under npm/pnpm's
     // own shell — the export must still be caught even though it isn't the
     // package script's first (and only recognized) command.
     expect(() =>
@@ -484,12 +484,12 @@ describe("package manager helpers", () => {
   });
 
   it("validates every statement of a compound body hidden inside a nested shell wrapper", () => {
-    // The compound structure lives INSIDE sh's own quoted body here, not at
+    // The compound structure lives inside sh's own quoted body here, not at
     // the package script's top level — a distinct code path
     // (assertLoopbackOnlyDevServerCommandAtDepth's nested-shell handling)
     // from the plain package-script-body case above. An unrelated leading
     // statement ("true", not "export") hides the rebind behind an
-    // ordinary "&&" — nothing about the assignment ITSELF (no glued-on
+    // ordinary "&&" — nothing about the assignment itself (no glued-on
     // operator character, no "export" keyword) helps catch it; only
     // actually splitting the nested body into its own statements does.
     expect(() =>
@@ -535,7 +535,7 @@ describe("package manager helpers", () => {
       assertLoopbackOnlyDevServerCommand("next", ["-H", "mysite.local"]),
     ).toThrow(/loopback/);
     // A bare "--host" (no value at all — the last token, or immediately
-    // followed by another flag) is UNVERIFIABLE, not a known bind to "all
+    // followed by another flag) is unverifiable, not a known bind to "all
     // interfaces" — that claim asserted something this scanner never
     // actually observed. The message must name the flag instead.
     expect(() =>
@@ -573,7 +573,7 @@ describe("package manager helpers", () => {
   });
 
   it("recognizes a host-bind flag case-insensitively, inline and as a separate token alike", () => {
-    // The inline form (--host=X) was ALREADY case-insensitive; the
+    // The inline form (--host=X) was already case-insensitive; the
     // separate-token form (--host X) matched a plain, case-sensitive Set —
     // "--HOST 0.0.0.0" silently passed neither form's check. A real CLI
     // parser is typically case-sensitive itself (so "--HOST" likely does
@@ -633,7 +633,7 @@ describe("package manager helpers", () => {
       expect(() =>
         assertLoopbackOnlyDevServerCommand(command, ["-rx", "HOST=0.0.0.0", "vite"]),
       ).toThrow(/loopback/);
-      // A PLAIN declare/typeset/local (no -x) creates a shell-local
+      // A plain declare/typeset/local (no -x) creates a shell-local
       // variable a child process never sees — vite itself never inherits
       // this HOST, so it must not be refused.
       expect(() =>
@@ -644,10 +644,10 @@ describe("package manager helpers", () => {
 
   it("scans every operand export/declare/typeset/local takes, not just the first", () => {
     // Bash's own `help export` documents `export [-fn] [name[=value] ...]`
-    // — an ARBITRARY number of operands, never a separate command to run
+    // — an arbitrary number of operands, never a separate command to run
     // at all (the same is true of declare/typeset/local). "KEEP" here is
     // a bare operand (exports an already-set variable, nothing new to
-    // check) — stopping the scan there instead of continuing PAST it
+    // check) — stopping the scan there instead of continuing past it
     // would miss the HOST assignment that follows.
     expect(() =>
       assertLoopbackOnlyDevServerCommand("export", ["KEEP", "HOST=0.0.0.0", "vite"]),
@@ -656,16 +656,16 @@ describe("package manager helpers", () => {
     expect(() =>
       assertLoopbackOnlyDevServerCommand("export", ["NODE_ENV=production", "HOST=0.0.0.0"]),
     ).toThrow(/loopback/);
-    // A NON-exported declare/typeset/local's SECOND operand must not be
+    // A NON-exported declare/typeset/local's second operand must not be
     // wrongly treated as a real (unconditional) host assignment either —
-    // stopping the declare-specific handling after only the FIRST
+    // stopping the declare-specific handling after only the first
     // operand let the outer loop's own bare-assignment branch re-examine
     // the second one fresh, with no memory that it was never exported.
     for (const command of ["declare", "typeset", "local"]) {
       expect(() =>
         assertLoopbackOnlyDevServerCommand(command, ["FOO=1", "HOST=0.0.0.0"]),
       ).not.toThrow();
-      // The exported form must still catch a LATER operand too.
+      // The exported form must still catch a later operand too.
       expect(() =>
         assertLoopbackOnlyDevServerCommand(command, ["-x", "FOO=1", "HOST=0.0.0.0"]),
       ).toThrow(/loopback/);
@@ -673,7 +673,7 @@ describe("package manager helpers", () => {
   });
 
   it("rejects a HOST/HOSTNAME assignment passed through the env wrapper", () => {
-    // GNU env's documented form: env [NAME=VALUE]... [COMMAND [ARG]...] —
+    // GNU env's documented form: env [NAME=VALUE]... [COMMAND [arg]...] —
     // env itself is not an assignment, so the direct-assignment scan alone
     // (which reads command+args as one leading run) never reaches "HOST="
     // here without recognizing "env" as a wrapper first.
@@ -693,7 +693,7 @@ describe("package manager helpers", () => {
 
   it("rejects a HOST assignment behind env's own leading OPTIONs, and refuses an unrecognized one", () => {
     // GNU env's documented form is `env [OPTION]... [NAME=VALUE]...
-    // [COMMAND [ARG]...]` — its OPTIONs (-i, -u NAME, ...) can precede the
+    // [COMMAND [arg]...]` — its OPTIONs (-i, -u NAME,...) can precede the
     // assignments, and the scan must recognize and skip them to still reach
     // a HOST= that follows.
     expect(() =>
@@ -718,8 +718,8 @@ describe("package manager helpers", () => {
   it("validates a shell env wraps, not just env's own leading assignments", () => {
     // `env sh -c "HOST=0.0.0.0 vite"` looks like a completely unrecognized
     // command to nestedShellCommand (which only ever switches on the
-    // command it's GIVEN — "env" — never on what env goes on to run), and
-    // assertDirectHostBinds only ever checks env's OWN leading options/
+    // command it's given — "env" — never on what env goes on to run), and
+    // assertDirectHostBinds only ever checks env's own leading options/
     // assignments, never the wrapped command's. Without recursing into
     // what env actually runs, the shell body's own HOST rebind is
     // completely unchecked.
@@ -748,7 +748,7 @@ describe("package manager helpers", () => {
 
   it("validates cross-env's leading assignments the same way env's are validated", () => {
     // cross-env's documented form (`cross-env [NAME=VALUE]... COMMAND
-    // [ARG]...`) is the identical leading-assignments-then-command shape
+    // [arg]...`) is the identical leading-assignments-then-command shape
     // env(1) has — it was never in nestedShellCommand's or
     // assertDirectHostBinds's env-only checks, so a HOST rebind through it
     // passed validation entirely.
@@ -767,7 +767,7 @@ describe("package manager helpers", () => {
   });
 
   it("refuses passthrough wrappers outright — commands this scanner cannot statically re-parse", () => {
-    // nice/stdbuf/timeout/sudo/doas each have their OWN prefix-attached,
+    // nice/stdbuf/timeout/sudo/doas each have their own prefix-attached,
     // value-carrying option grammar; nohup/setsid take next to none, but
     // are refused for the same reason — none of them share env's single,
     // already-implemented option grammar, and reimplementing each
@@ -806,7 +806,7 @@ describe("package manager helpers", () => {
   });
 
   it("refuses env -S/--split-string instead of silently skipping its embedded assignment", () => {
-    // GNU env's -S/--split-string re-splits ITS OWN payload into further
+    // GNU env's -S/--split-string re-splits its own payload into further
     // OPTIONs, NAME=VALUE assignments, and the command, using env's own
     // splitting rules (not shell quoting) — `env -S 'HOST=0.0.0.0 vite'`
     // hides a real HOST assignment from a scanner that treats -S as an
@@ -824,7 +824,7 @@ describe("package manager helpers", () => {
 
   it("accepts env's -- end-of-options marker and keeps scanning the assignment after it", () => {
     // GNU env's synopsis is `env [OPTION]... [-] [NAME=VALUE]...
-    // [COMMAND [ARG]...]` — "--" is the standard end-of-options marker
+    // [COMMAND [arg]...]` — "--" is the standard end-of-options marker
     // (distinct from a bare "-", which resets the environment); a safe
     // `env -- HOST=127.0.0.1 vite` must not be rejected as an unrecognized
     // option, or a legitimate dev command is refused outright.
@@ -885,7 +885,7 @@ describe("startSiteDevServer", () => {
           "-c",
           // The trailing sleep keeps the wrapper alive long enough (with a
           // 20ms poll interval, comfortably many ticks) for the descendant
-          // poll to capture the backgrounded pid at least once BEFORE the
+          // poll to capture the backgrounded pid at least once before the
           // wrapper exits on its own — the exact condition this pin proves,
           // not an arbitrary wait for stop() to happen to run late enough.
           "sleep 500 & child=$!; echo CHILD:$child; echo 'Local: http://127.0.0.1:43212'; sleep 0.3",
@@ -919,9 +919,9 @@ describe("startSiteDevServer", () => {
     async () => {
       await mkdir(join(root, "site"), { recursive: true });
       // The poll interval is set far longer than this whole test takes, so
-      // the descendant can ONLY be captured by an immediate/near-immediate
+      // the descendant can only be captured by an immediate/near-immediate
       // snapshot, never by the interval's own first tick. A brief real
-      // delay (well under the OLD 5s default, comfortably over one `ps`
+      // delay (well under the old 5s default, comfortably over one `ps`
       // round-trip) keeps this realistic — the descendant tree walk itself
       // takes real wall-clock time (spawning `ps`, reading /proc), so a
       // wrapper that exits in literally zero time is an unfixable race
@@ -963,8 +963,8 @@ describe("startSiteDevServer", () => {
     async () => {
       await mkdir(join(root, "site"), { recursive: true });
 
-      // A REAL, independent throwaway process this test controls
-      // directly — simulates "a descendant only the SLOW capture will
+      // A real, independent throwaway process this test controls
+      // directly — simulates "a descendant only the slow capture will
       // ever reveal."
       const descendant = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], {
         stdio: "ignore",
@@ -980,8 +980,8 @@ describe("startSiteDevServer", () => {
       let callCount = 0;
       const descendantsReader = async (): Promise<number[]> => {
         callCount += 1;
-        // The FIRST call — the immediate, post-spawn snapshot — is the
-        // SLOW one: it won't resolve until the test explicitly releases
+        // The first call — the immediate, post-spawn snapshot — is the
+        // slow one: it won't resolve until the test explicitly releases
         // it, well after later, faster calls have already come and
         // gone. Every call after it resolves immediately with nothing,
         // the "later capture that finishes first" half of the race.
@@ -1002,15 +1002,15 @@ describe("startSiteDevServer", () => {
 
         // Wait for the wrapper to exit on its own — the "already
         // exited" path stopChild's own guard short-circuits on, exactly
-        // the one this fix targets. By now several FAST interval ticks
+        // the one this fix targets. By now several fast interval ticks
         // (calls #2+) have already fired and resolved empty while call
         // #1 is still pending.
         await new Promise<void>((resolve) => handle.onExit(resolve));
         expect(callCount).toBeGreaterThan(1);
 
         const stopped = handle.stop();
-        // Release the slow capture's result only AFTER stop() has
-        // begun — proving stopChild actually WAITS for it instead of
+        // Release the slow capture's result only after stop() has
+        // begun — proving stopChild actually waits for it instead of
         // deciding the set is empty from an already-resolved, more-
         // recently-started call.
         slowResolve([descendantPid!]);
@@ -1212,8 +1212,8 @@ describe("startSiteDevServer", () => {
     const controller = new AbortController();
     const startedAt = Date.now();
     // The ceiling proves the abort drove the rejection, not the ready
-    // timeout. Honest cancels measured up to 3.3s on a 24-process load
-    // (#568), so the old 5000/2000 band held no room for both margins:
+    // timeout. Honest cancels measured up to 3.3s on a 24-process load,
+    // so the old 5000/2000 band held no room for both margins:
     // 30_000/10_000 keeps 3x above the measured cancel and 3x below the
     // ready timeout.
     const starting = startSiteDevServer({
@@ -1380,7 +1380,7 @@ describe("buildSite", () => {
     await mkdir(join(root, "site"), { recursive: true });
     const controller = new AbortController();
     const startedAt = Date.now();
-    // Same band as the dev-server cancel above (#568): the ceiling proves
+    // Same band as the dev-server cancel above: the ceiling proves
     // the abort ended the build, not the build timeout, with 3x margin to
     // the measured loaded cancel on one side and to the timeout on the
     // other.
@@ -1423,10 +1423,9 @@ describe("buildSite", () => {
     await mkdir(join(root, "site", "custom"), { recursive: true });
     await writeFile(join(root, "site", "custom", "index.html"), "<h1>Custom</h1>");
     expect(await detectBuildOutput(join(root, "site"), "custom")).toBe(join(root, "site", "custom"));
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     await mkdir(join(root, "site", "..cache"), { recursive: true });
     await writeFile(join(root, "site", "..cache", "index.html"), "<h1>Cache-built</h1>");
-    expect(await detectBuildOutput(join(root, "site"), "..cache")).toBe(
+    expect(await detectBuildOutput(join(root, "site"), "..cache"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(
       join(root, "site", "..cache"),
     );
     await mkdir(join(root, "outside"), { recursive: true });
@@ -1465,10 +1464,10 @@ describe("buildSite", () => {
 
   it("does not report a build output whose index.html symlinks outside the output directory", async () => {
     // Readable, stat()-follows-symlinks-so-isFile()-passes, and it's still
-    // inside the SITE overall — every earlier check in detectBuildOutput
+    // inside the site overall — every earlier check in detectBuildOutput
     // passes. But the static preview server's own per-request containment
-    // check (staticDirectoryPreview.ts) resolves the SAME entry's real
-    // path and requires it stay inside the OUTPUT directory specifically,
+    // check (staticDirectoryPreview.ts) resolves the same entry's real
+    // path and requires it stay inside the output directory specifically,
     // not just the site — buildSite would otherwise report ok: true for
     // an artifact the preview then serves as a 403/blank page.
     await mkdir(join(root, "site", "dist"), { recursive: true });

@@ -6,7 +6,7 @@
 //!
 //! - `size` and `sha256` are **engine-independent** ground truth — any correct
 //!   implementation computes the same bytes, so agreement confirms this crate
-//!   computes them correctly, but it is NOT itself a cross-engine parity check.
+//!   computes them correctly, but it is not itself a cross-engine parity check.
 //!   The accelerator and its TS client are gone (the Rust daemon owns capture),
 //!   so these fixtures are now a pinned independent oracle rather than one half
 //!   of a two-engine comparison.
@@ -298,7 +298,7 @@ fn golden_is_sensitive_to_the_content_hash() {
     let scanner = Scanner::new(ScanBounds::default()).expect("scanner");
     let listing = scan_completed(&scanner, ws.path());
 
-    // Manifest matches a.md exactly, but records b.md's OLD hash.
+    // Manifest matches a.md exactly, but records b.md's old hash.
     let prior = ScanManifest::from_entries([
         (
             "a.md".to_owned(),

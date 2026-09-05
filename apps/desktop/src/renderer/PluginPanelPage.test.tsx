@@ -447,10 +447,8 @@ describe("PluginPanelPage", () => {
       webAppId: "preview",
       instanceKey: "sites/marketing",
     });
-    // MUTATION (take the plugin id from the panel's own message): a panel
-    // could open another plugin's web app. It comes from the mounted panel.
     await vi.waitFor(() =>
-      expect(onOpenWebApp).toHaveBeenCalledWith(
+      expect(onOpenWebApp, "take the plugin id from the panel's own message: a panel could open another plugin's web app. It comes from the mounted panel.").toHaveBeenCalledWith(
         "hello-plugin",
         "preview",
         "sites/marketing",

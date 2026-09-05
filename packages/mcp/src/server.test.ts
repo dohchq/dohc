@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { createDohcMcpServer, parseArgs } from "./server";
 import type { ToolContext } from "./tools";
 
-// The two write tiers a share level decides between (#646). A document write
+// The two write tiers a share level decides between. A document write
 // changes the granter's files; a chat write posts to a thread.
 const DOCUMENT_WRITE_TOOLS = [
   "dohc_write_file",
@@ -85,7 +85,7 @@ describe("share-level tool profiles", () => {
     for (const tool of [...DOCUMENT_WRITE_TOOLS, ...CHAT_WRITE_TOOLS]) {
       expect(
         names,
-        `${tool}: MUTATION: offering a write tool a shared view always refuses`,
+        `${tool}: offering a write tool a shared view always refuses`,
       ).not.toContain(tool);
     }
     for (const tool of READ_TOOLS) {
@@ -93,7 +93,7 @@ describe("share-level tool profiles", () => {
     }
   });
 
-  it("offers an edit profile exactly the comment profile's tools (PR3 opens document writes)", async () => {
+  it("offers an edit profile exactly the comment profile's tools", async () => {
     const { names: comment } = await connectedToolNames({ ...base, shareAccess: "comment" });
     const { names: edit } = await connectedToolNames({ ...base, shareAccess: "edit" });
     expect([...edit].sort()).toEqual([...comment].sort());

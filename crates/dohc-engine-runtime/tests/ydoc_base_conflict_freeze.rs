@@ -1,4 +1,4 @@
-//! The base-divergence conflict is LOAD-BEARING (#546 review round 2).
+//! The base-divergence conflict is LOAD-BEARING.
 //!
 //! Opening the conflict is not enough. Two paths could still cancel the
 //! user's review: a routine open+settle of the document would materialize
@@ -6,9 +6,9 @@
 //! kept the current text never reached the durable Y.Doc, so the next
 //! inbound delta silently reversed it. The invariant under test:
 //!
-//! - an OPEN sync conflict on a Y.Doc object freezes the settle
+//! - an open sync conflict on a Y.Doc object freezes the settle
 //!   (`ydoc-conflict-open`), and
-//! - RESOLUTION folds the chosen text into the lineage in the same
+//! - Resolution folds the chosen text into the lineage in the same
 //!   transaction that closes the row, so later deltas merge with the choice.
 
 use dohc_engine_collab::{ContentKind, DocKey};
@@ -112,9 +112,6 @@ fn head_text(db: &std::path::Path) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_base_conflict_freezes_the_settle() {
-    // MUTATION: drop the open-conflict check in `ydoc_settle_on_store` — the
-    // settle succeeds and the head assertion below fails with the sender's
-    // projection.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (key, winner_base, _winner_doc, _conflict_id) = {
@@ -339,13 +336,11 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_pending_resolution_job_replays_before_the_next_settle() {
-    // Codex #596 P1: a resolution write enqueues `resolve-mat_<moment>`, and
+    // A resolution write enqueues `resolve-mat_<moment>`, and
     // the fold marks the choice settled in the same transaction. If that job
     // has not landed yet, the next settle's pending-job recovery must replay
     // it — probing only `ydoc-mat_<moment>` leaves the disk pre-resolution
-    // while every marker reports the choice as settled. MUTATION: revert the
-    // recovery probe to the single ydoc-mat prefix — the disk assertion
-    // fails with the pre-resolution bytes.
+    // while every marker reports the choice as settled.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
@@ -430,11 +425,10 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_base_conflict_freezes_the_open_too() {
-    // Codex #596 round 4: refusing only the settle left the OPEN serving the
+    // Refusing only the settle left the open serving the
     // claimed sender lineage - the editor displayed and accepted edits
     // against the unreviewed side while the head froze. The gate covers
-    // open and settle symmetrically. MUTATION: drop the open-conflict check
-    // in `ydoc_open_state_on_store` - the open succeeds and this fails.
+    // open and settle symmetrically.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     {
@@ -478,8 +472,6 @@ async fn an_oversized_resolution_hits_the_successor_projection_limit_before_effe
     // constraint, limit, and observed usage instead of collapsing to
     // state-corrupt.
     //
-    // MUTATION: return the old bare `InvalidText { reason: "text exceeds the
-    // size cap" }` from `validate_text` - the PayloadTooLarge match fails.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (_key, _winner_base, _winner_doc, conflict_id) = {
@@ -535,11 +527,9 @@ async fn an_oversized_resolution_hits_the_successor_projection_limit_before_effe
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_resolution_fold_self_bounds_the_update_log() {
-    // Codex #596 round 4: folds append full-document rewrites but never
-    // compacted, so repeated conflicts grow ydoc_updates without bound. The
-    // resolve now runs the append path's best-effort compaction. MUTATION:
-    // drop the post-resolve `maybe_compact` call - the pending-update count
-    // stays above the threshold and this fails.
+    // Folds append full-document rewrites, so repeated conflicts would grow
+    // ydoc_updates without bound. The resolve runs the append path's
+    // best-effort compaction.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (_key, winner_doc, conflict_id) = {
@@ -637,13 +627,11 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
 async fn a_resolution_refuses_while_a_session_holds_the_document() {
     // The freeze from the other side. The open/settle guards stop a session
     // ACQUIRING a document under review; this is a conflict resolving while
-    // an editor is ALREADY holding one. The fold commits a full-document
+    // an editor is already holding one. The fold commits a full-document
     // rewrite to the durable Y.Doc while the client keeps editing the copy
     // it has, so its next update merges from pre-resolution state — losing
     // the live edits or reversing the reviewed choice.
     //
-    // MUTATION: drop the lease probe in `conflict_resolve_on_store` — the
-    // resolve succeeds under the live lease and this refusal fails.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
@@ -838,8 +826,6 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
     // absent, accepted it, and projected the retained lineage back into a
     // snapshot. The user's approved deletion was silently reversed.
     //
-    // MUTATION: drop the `retire_ydoc_lineage_in_tx` call from the delete
-    // arm — the lineage rows survive and the assertions below fail.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
@@ -847,7 +833,7 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
         seed_divergent_base(&mut store)
     };
 
-    // The incoming side is ABSENT: applying it is a deletion. This is the
+    // The incoming side is absent: applying it is a deletion. This is the
     // row shape a delete-side conflict carries.
     {
         let mut store = EngineStore::open(&db, 2).expect("reopen");
@@ -1247,13 +1233,11 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
 async fn an_idempotent_retry_survives_a_live_session() {
     // The live-lease guard must not outrank the idempotency contract. A
     // resolution commits, its response is lost, the user opens the resolved
-    // document, and the client retries the SAME request_id. The request
+    // document, and the client retries the same request_id. The request
     // ledger replays the recorded result and rewrites nothing — so refusing
     // that retry for a live lease would turn a lost response into a
     // different answer.
     //
-    // MUTATION: drop `AND status='open'` from the guard's conflict lookup —
-    // the retry below fails with ydoc-session-live.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {

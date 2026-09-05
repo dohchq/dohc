@@ -7,8 +7,7 @@
 //! reference accelerator (NDJSON thread-per-request) — studied for its
 //! documented behavior, not depended on.
 //!
-//! The calibration point is **cancellation + bounds** (`plan §Workspace actor
-//! model`, `PORTING.md` §12/§14):
+//! The calibration point is **cancellation + bounds**:
 //!
 //! - **Cooperative cancellation between bounded units.** Every scan checks the
 //!   [`CancellationToken`] between directory entries and between hash batches,

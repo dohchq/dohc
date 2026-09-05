@@ -238,7 +238,7 @@ describe("discoverSites", () => {
 
     // Without the fix, the generic "first conventional directory name in
     // the path" scan finds "dist" and promotes "portal/public" — an
-    // ordinary subdirectory, not a site of its own — into a SECOND,
+    // ordinary subdirectory, not a site of its own — into a second,
     // spurious candidate.
     expect(sites.map((site) => site.root)).toEqual(["portal"]);
     expect(sites[0]).toMatchObject({

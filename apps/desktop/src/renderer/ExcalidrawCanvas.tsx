@@ -89,7 +89,7 @@ export default function ExcalidrawCanvas(props: ExcalidrawCanvasProps) {
   const [readyApi, setReadyApi] = useState<ExcalidrawImperativeAPI | null>(null);
   const [presenceBound, setPresenceBound] = useState(false);
   // Per-canvas, not module-global: two panes of one document share one
-  // Y.Doc, and each pane must treat only ITS OWN transactions as local — the
+  // Y.Doc, and each pane must treat only its own transactions as local — the
   // other pane's edits are remote to this one and must render here.
   const localOrigin = useRef<symbol>(Symbol("dohc.localExcalidrawChange"));
   const hydratedFileIds = useRef<Set<string>>(new Set());

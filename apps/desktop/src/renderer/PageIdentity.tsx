@@ -29,7 +29,7 @@ const EMOJI_CHOICES = [
 
 // Page identity above the document body: a large serif title and an emoji
 // icon, both stored as reserved `title` / `icon` frontmatter keys. This is a
-// sibling React surface — NOT part of the ProseMirror doc — so it never
+// sibling React surface — not part of the ProseMirror doc — so it never
 // touches the editor schema. It reuses the same read/write plumbing as
 // PropertiesPanel: a plain markdown body with YAML frontmatter (local mode,
 // via applyFrontmatter through onChange) OR the frontmatter Y.Map (collab /
@@ -85,7 +85,7 @@ export function PageIdentity(props: PageIdentityProps) {
   const icon =
     typeof meta.icon === "string" ? meta.icon : displayFrontmatterValue(meta.icon);
 
-  // Reserved-key writes go through the SAME pathway PropertiesPanel uses so
+  // Reserved-key writes go through the same pathway PropertiesPanel uses so
   // there is no second save cycle: a Y.Map transaction for collab, or a
   // frontmatter rewrite handed back through onChange for local markdown.
   function writeField(key: "title" | "icon", value: string | undefined) {

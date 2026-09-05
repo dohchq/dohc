@@ -66,7 +66,7 @@ const SECRET_KEY_UNAVAILABLE: CaptureError = CaptureError {
 const MAX_ADDED_TEXT_PREPARE_WORKERS: usize = 8;
 
 /// Per-run moment provenance, mirroring the TS capture metadata: a reconcile
-/// pass stamps ONE summary + correlation id across every moment it records
+/// pass stamps one summary + correlation id across every moment it records
 /// ("Reconciled offline edits"); a live watcher batch leaves both unset and
 /// each ingest falls back to a per-file "Updated <basename>" summary with no
 /// correlation id.
@@ -82,16 +82,16 @@ pub struct CaptureProvenance {
 #[derive(Clone, Default)]
 pub struct SelfWriteSuppression {
     /// Root-path scope prefixed onto every workspace key. The registry is
-    /// process-global (multi-service suppression), but two ROOTS can carry
-    /// the SAME workspaceId — an unscoped key would let root A's settle
+    /// process-global (multi-service suppression), but two roots can carry
+    /// the same workspaceId — an unscoped key would let root A's settle
     /// swallow root B's genuine capture of identical bytes. The global
     /// instance has an empty scope; per-workspace users hold a
     /// [`Self::scoped`] view sharing the same map.
     scope: String,
-    /// Per (scoped workspace, path): the ORDERED pending settle identities.
+    /// Per (scoped workspace, path): the ordered pending settle identities.
     /// Two settles can land before capture consumes the first watcher
     /// event; a single-slot map would let the first `Changed` consume the
-    /// SECOND sha as a mismatch and ingest the daemon's own write as
+    /// second sha as a mismatch and ingest the daemon's own write as
     /// external.
     entries: Arc<Mutex<PendingWriteIdentities>>,
 }
@@ -100,7 +100,7 @@ pub struct SelfWriteSuppression {
 type PendingWriteIdentities = HashMap<(String, String), Vec<String>>;
 
 impl SelfWriteSuppression {
-    /// A view over the SAME shared registry whose keys are prefixed with
+    /// A view over the same shared registry whose keys are prefixed with
     /// the workspace root, so identical workspace ids under different roots
     /// cannot collide.
     pub fn scoped(&self, root: &std::path::Path) -> SelfWriteSuppression {
@@ -125,7 +125,7 @@ impl SelfWriteSuppression {
     }
 
     /// Consume on a `Changed` TEXT observation: when the observed sha
-    /// matches a pending identity, that identity AND every earlier one is
+    /// matches a pending identity, that identity and every earlier one is
     /// removed (their events were coalesced/superseded) and the observation
     /// suppresses. A non-matching observation is an external edit — every
     /// pending identity clears (none may survive to suppress a later revert)
@@ -190,7 +190,7 @@ impl dohc_engine_runtime::SelfWriteRecorder for SelfWriteSuppression {
     }
 
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str) {
-        // Remove ONE matching identity (the failed settle's own) — every
+        // Remove one matching identity (the failed settle's own) — every
         // other pending settle's entry must survive a stale retract.
         if let Ok(mut entries) = self.entries.lock() {
             let key = (self.scoped_workspace(workspace_id), path.to_owned());
@@ -291,12 +291,12 @@ pub struct StoreCaptureSink {
     author_json: Option<String>,
     search_policy: Arc<SearchPolicySnapshot>,
     files_policy: PolicyState,
-    /// Set when any op this run was HELD on an unreadable policy. The driver
+    /// Set when any op this run was held on an unreadable policy. The driver
     /// reads it after the apply to arm its policy-recovery trigger — a
-    /// DETERMINISTIC signal from the exact decision point, immune to the
+    /// deterministic signal from the exact decision point, immune to the
     /// blip being over before any re-read could observe it.
     policy_held: std::cell::Cell<bool>,
-    /// Lazily loaded-or-created on the FIRST secret capture (TS parity:
+    /// Lazily loaded-or-created on the first secret capture (TS parity:
     /// `loadSecretDataKey` create branch) so workspaces without secrets never
     /// mint a key file.
     secret_key: Option<SecretDataKey>,
@@ -304,18 +304,18 @@ pub struct StoreCaptureSink {
     provenance: CaptureProvenance,
 }
 
-/// The sink's view of `.dohc/files.toml`, split by WHY there are no rules.
+/// The sink's view of `.dohc/files.toml`, split by why there are no rules.
 enum PolicyState {
     /// A real answer: absent (default policy), parsed rules, or a MALFORMED
     /// file — the last lands here as `Known(None)` under the ratified WS-F
-    /// rule (writes are never dropped for a bad policy; SEARCH is where a
+    /// rule (writes are never dropped for a bad policy; search is where a
     /// broken policy fails closed).
     Known(Option<Vec<FilesPolicyRule>>),
-    /// The file exists but could not be READ (IO error, symlink refusal,
+    /// The file exists but could not be read (IO error, symlink refusal,
     /// oversize — possibly a transient editor lock). The narrowing set is
-    /// UNKNOWN: falling back to floor-only would durably capture paths the
+    /// unknown: falling back to floor-only would durably capture paths the
     /// user may have excluded, and the policy-retire branch would delete
-    /// heads the policy may still track. Policy-dependent ops HOLD instead —
+    /// heads the policy may still track. Policy-dependent ops hold instead —
     /// fail, stay dirty, retry next cycle — mirroring the driver's
     /// unknown-fingerprint debounce hold.
     Unavailable,
@@ -416,9 +416,9 @@ impl StoreCaptureSink {
         self_writes: SelfWriteSuppression,
         provenance: CaptureProvenance,
     ) -> Self {
-        // `.dohc/files.toml` can only NARROW engine ownership below the hard
+        // `.dohc/files.toml` can only narrow engine ownership below the hard
         // floor. See [`PolicyState`] for the absent/malformed/unreadable
-        // split: only a file that exists but cannot be READ makes ownership
+        // split: only a file that exists but cannot be read makes ownership
         // unknown; malformed keeps the WS-F floor-only rule.
         let snapshot = Arc::new(read_engine_search_policy(&shadow_root));
         let files_unreadable = snapshot.diagnostics.iter().any(|diagnostic| {
@@ -498,7 +498,7 @@ impl StoreCaptureSink {
             let key = match loaded {
                 Some(key) => key,
                 None => {
-                    // NEVER mint over existing encrypted state: a missing key
+                    // Never mint over existing encrypted state: a missing key
                     // file with live secret rows (a backup restored without
                     // the key, an accidental deletion) must fail closed and
                     // stay dirty for retry — silently minting would strand
@@ -577,9 +577,9 @@ impl StoreCaptureSink {
         }
     }
 
-    /// Re-read the CURRENT disk state for a planned ingest, mirroring the TS
+    /// Re-read the current disk state for a planned ingest, mirroring the TS
     /// oracle's `readDiskTextState`: lstat-refuse symlink leaves, route by
-    /// media type BEFORE UTF-8 sniffing, and apply the text/binary caps. The
+    /// media type before UTF-8 sniffing, and apply the text/binary caps. The
     /// reopen itself must not follow symlinks (a swap between the lstat and
     /// the open would otherwise read outside the workspace), and a symlinked
     /// ancestor directory must not carry the read off-root.
@@ -641,7 +641,7 @@ impl StoreCaptureSink {
             Arc::new(NoFaults),
         ) {
             Ok(_) => Ok(DomainIngest::Persisted),
-            // The store's admission gate is STRICTER than the scan floor
+            // The store's admission gate is stricter than the scan floor
             // (e.g. `..` substrings, byte-1 colons). A name the store refuses
             // is settled — retrying can never succeed, and one legal on-disk
             // filename must not poison every capture run as degraded.
@@ -695,8 +695,8 @@ impl StoreCaptureSink {
         }
     }
 
-    /// Capture one secret path: read the CURRENT plaintext (mirroring the TS
-    /// oracle's `readDiskSecretState` — text rules WITHOUT the media-type
+    /// Capture one secret path: read the current plaintext (mirroring the TS
+    /// oracle's `readDiskSecretState` — text rules without the media-type
     /// heuristic; non-UTF-8 is untracked, never binary) and write it through
     /// the encrypted store. The workspace key is loaded-or-created on first
     /// use.
@@ -748,7 +748,7 @@ impl StoreCaptureSink {
                     Err(RuntimeError::Domain(DomainError::InvalidPath { .. })) => {
                         Ok(IngestOutcome::NotOwned)
                     }
-                    // Foreign tip left intact; TRACK the disk identity so the
+                    // Foreign tip left intact; track the disk identity so the
                     // next observed edit arrives as `Changed` and captures.
                     Err(RuntimeError::Domain(DomainError::CaptureNotOwned)) => {
                         Ok(IngestOutcome::Captured { size, sha256 })
@@ -1165,7 +1165,7 @@ impl StoreCaptureSink {
         }
     }
 
-    /// Retire a path the CURRENT policy excludes, WITHOUT the absence check.
+    /// Retire a path the current policy excludes, without the absence check.
     ///
     /// The driver calls this for `retained_over_cap` paths: they are still on
     /// disk by definition (that is why the scanner retained them), so the
@@ -1254,18 +1254,18 @@ impl CaptureSink for StoreCaptureSink {
         media_type: &str,
         reason: IngestReason,
     ) -> Result<IngestOutcome, CaptureError> {
-        // Capture claims a head written by ANOTHER origin only when it
-        // OBSERVED the disk transition (`Changed`). On first sight (`Added`,
+        // Capture claims a head written by another origin only when it
+        // observed the disk transition (`Changed`). On first sight (`Added`,
         // e.g. a fresh or reset manifest) stale disk bytes are
         // indistinguishable from a genuine edit, so a foreign head is left
-        // intact — the path is still TRACKED (so the next real edit is seen
+        // intact — the path is still tracked (so the next real edit is seen
         // as `Changed` and captured), just not overwritten now.
         let claim_foreign_head = matches!(reason, IngestReason::Changed);
         // Plan hashes and sizes describe the scan observation only. Re-read the
         // path so settled rapid writes coalesce to the latest disk state.
         let normalized = match classify_engine_file_path_normalized(path) {
             (PathClassification::Ignored, _) => return Ok(IngestOutcome::NotOwned),
-            // Secret paths route to the ENCRYPTED store, never the plaintext
+            // Secret paths route to the encrypted store, never the plaintext
             // one (the secret floor outranks policy — `.dohc` files can never
             // unmark it). Same canonical-key rule as the tracked branch: a
             // scanned name that normalizes differently (a literal `%2eenv`)
@@ -1283,7 +1283,7 @@ impl CaptureSink for StoreCaptureSink {
             (PathClassification::Tracked, normalized) => normalized.ok_or(INGEST_FAILED)?,
         };
         // The domain stores under the CANONICAL relative path. A scanned disk
-        // name that normalizes to a DIFFERENT key (e.g. a literal `a%2fb.md`
+        // name that normalizes to a different key (e.g. a literal `a%2fb.md`
         // decoding to `a/b.md`) would persist content for a path that does not
         // exist on disk and could clobber the real file at that key. Refuse to
         // capture it — and never retire through it, the canonical key may
@@ -1296,16 +1296,16 @@ impl CaptureSink for StoreCaptureSink {
             // retire any stale head (TS: "Stopped tracking by policy") so
             // opted-out content is never left stale-but-authoritative.
             //
-            // KNOWN GAP, owned by the composition-driver sub-shard: this
-            // branch only runs when the diff emitted an op for the path. A
-            // policy flip on an UNCHANGED file emits none (`.dohc` is
-            // unwatched — policy edits generate no events, matching the TS
-            // oracle), so the driver must rebuild the controller with an
-            // empty manifest on a policy-snapshot change to re-offer every
-            // path through here.
+            // Known gap, tracked as #1023. This branch only runs when
+            // the diff emitted an op for the path. A policy flip on an
+            // unchanged file emits none (`.dohc` is unwatched, so policy
+            // edits generate no events), so a path narrowed out of ownership
+            // keeps its stale head until the driver rebuilds the controller
+            // with an empty manifest on a policy-snapshot change and re-offers
+            // every path through here.
             //
             // A pending self-write identity must not outlive the exclusion:
-            // if the path is tracked again later with the OLD settled bytes
+            // if the path is tracked again later with the old settled bytes
             // on disk, a stale entry would suppress a genuine external
             // revert.
             self.self_writes.clear_path(&self.workspace_id, path);
@@ -1313,7 +1313,7 @@ impl CaptureSink for StoreCaptureSink {
             return Ok(IngestOutcome::NotOwned);
         }
         // A Changed observation resolves suppression against what the
-        // re-read ACTUALLY contains: a matching TEXT observation suppresses
+        // re-read actually contains: a matching TEXT observation suppresses
         // (consuming that identity and its coalesced predecessors), a
         // non-matching one clears every pending identity, and a
         // binary/untracked resolution clears too — an entry left armed by
@@ -1321,7 +1321,7 @@ impl CaptureSink for StoreCaptureSink {
         let changed = matches!(reason, IngestReason::Changed);
         match self.read_current(path, media_type)? {
             CurrentContent::Text(text) => {
-                // Report the identity of the bytes ACTUALLY captured — the
+                // Report the identity of the bytes actually captured — the
                 // re-read can be newer than the plan's scan observation, and
                 // the manifest must record reality or a later revert to the
                 // scan-time bytes would diff clean and never re-ingest.
@@ -1333,7 +1333,7 @@ impl CaptureSink for StoreCaptureSink {
                 match self.ingest_text(path, text, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
-                    // Foreign head left intact: TRACK the disk identity so the
+                    // Foreign head left intact: track the disk identity so the
                     // next genuine edit arrives as `Changed` and is captured.
                     DomainIngest::ForeignHead => Ok(IngestOutcome::Captured { size, sha256 }),
                 }
@@ -1357,7 +1357,7 @@ impl CaptureSink for StoreCaptureSink {
                 // stale snapshot remains, and report NotOwned so the manifest
                 // forgets the path instead of recording the planned ingest.
                 //
-                // A MATERIALIZED Y.DOC head is exempt. A Y.Doc is bounded by
+                // A materialized Y.DOC head is exempt. A Y.Doc is bounded by
                 // nothing, so its own settled artifact routinely lands past
                 // the capture caps and arrives here as "non-ownable" — but it
                 // is the engine's own output, not content that stopped being
@@ -1365,14 +1365,14 @@ impl CaptureSink for StoreCaptureSink {
                 // editing out of the engine on every reconcile.
                 //
                 // NOTE: the desktop capture layer answers the same question
-                // with a DIFFERENT instrument — a `ydoc_docs` marker
+                // with a different instrument — a `ydoc_docs` marker
                 // (`hasYdocMarker`) rather than the head's origin. That is
                 // deliberate, not drift. Origin is what this layer already
                 // has in hand (the retire executor reads the head anyway);
                 // the marker is what the TS layer already has (it lists file
                 // metadata anyway). Origin is the stricter of the two — it
                 // stops protecting as soon as an ordinary capture claims the
-                // head — so this layer protects a SUBSET of what TS protects
+                // head — so this layer protects a subset of what TS protects
                 // and self-heals rather than latching.
                 self.retire_head_with(
                     path,
@@ -1430,7 +1430,7 @@ impl CaptureSink for StoreCaptureSink {
                 // Apply-time absence confirmation, mirroring both the TS
                 // oracle (`pathConfirmedAbsentOnDisk` runs immediately before
                 // `deleteIfTracked`) and `StdAbsenceProbe`'s semantics: a
-                // regular file that REAPPEARED between scan and apply must not
+                // regular file that reappeared between scan and apply must not
                 // be retired — fail the op so the path stays dirty and the
                 // rescan captures the live content instead.
                 let absolute = self.shadow_root.join(path);
@@ -1554,9 +1554,9 @@ fn read_contained_current(
     }
     // Between the capture cap and the SCAN cap (64 MiB) the scanner still
     // lists the file, so a grow-past-capture-cap lands here and retires.
-    // PAST the scan cap the plan classifies it `retained_over_cap` and the
-    // sink is never called — deliberately NOT a retire: the ratified CAL-3
-    // delta (BEHAVIOR_DELTA.md §7.1) keeps last-known-good rather than
+    // Past the scan cap the plan classifies it `retained_over_cap` and the
+    // sink is never called — deliberately not a retire: the ratified CAL-3
+    // delta keeps last-known-good rather than
     // false-deleting live user data behind an operational scan bound.
     // Collection schemas are a reserved engine control file. The generic
     // scanner deliberately classifies unknown extensions as binary, but
@@ -1579,7 +1579,7 @@ fn read_contained_current(
         return Ok(CurrentContent::NonOwnable);
     }
     if !text_media {
-        // Non-text media is engine-ownable BINARY content: the TS oracle
+        // Non-text media is engine-ownable binary content: the TS oracle
         // routes it to the binary store before any UTF-8 sniffing, so a
         // UTF-8-clean `.png` must never land in the plaintext store.
         return Ok(CurrentContent::Binary(bytes));
@@ -1643,7 +1643,7 @@ fn path_containment_with_root<'a>(
 
 /// The canonical location `rel_path` would have if NO ancestor were a
 /// symlink: the canonical root joined with the lexical segments. Any symlink
-/// anywhere in the chain — even one resolving INSIDE the root — makes the
+/// anywhere in the chain — even one resolving inside the root — makes the
 /// real canonical path differ from this, which is exactly the scanner-parity
 /// rule (the `Scanner` never descends symlinked directories, so the sink must
 /// never read through one either).
@@ -1655,11 +1655,11 @@ fn expected_absolute(real_root: &Path, rel_path: &str) -> PathBuf {
     out
 }
 
-/// Ancestor guard: the canonicalized parent must EQUAL the canonical root
+/// Ancestor guard: the canonicalized parent must equal the canonical root
 /// joined with the lexical parent segments — not merely resolve somewhere
 /// under the root. Strict equality rejects a symlinked ancestor regardless of
-/// where it points (off-root exfiltration AND in-root aliasing).
-/// Unresolvable-for-any-other-reason fails CLOSED as a refusal.
+/// where it points (off-root exfiltration and in-root aliasing).
+/// Unresolvable-for-any-other-reason fails closed as a refusal.
 fn contained_parent(canonical_root: &Path, rel_path: &str, canonical_parent: &Path) -> Containment {
     let parent_rel = rel_path.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
     if canonical_parent == expected_absolute(canonical_root, parent_rel) {
@@ -1669,8 +1669,8 @@ fn contained_parent(canonical_root: &Path, rel_path: &str, canonical_parent: &Pa
     }
 }
 
-/// Post-open containment recheck: re-resolve the OPENED path and require it
-/// EQUAL to its lexical location under the canonical root (same strict rule
+/// Post-open containment recheck: re-resolve the opened path and require it
+/// equal to its lexical location under the canonical root (same strict rule
 /// as [`contained_parent`]). Catches an ancestor swapped to a symlink between
 /// the pre-open check and the open. On Unix the opened descriptor's
 /// (dev, ino) must also match the re-resolved path, so a swap-back cannot
@@ -4039,7 +4039,7 @@ mod tests {
         supervisor.close(&db).expect("close actor");
     }
 
-    /// (metadata_summary, metadata_correlation_id) of the LATEST secret
+    /// (metadata_summary, metadata_correlation_id) of the latest secret
     /// moment for `path`.
     fn secret_moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
         let store = EngineStore::open(db, 100).expect("reopen store");
@@ -4056,7 +4056,7 @@ mod tests {
             .expect("secret moment metadata")
     }
 
-    /// (metadata_summary, metadata_correlation_id) of the LATEST moment for
+    /// (metadata_summary, metadata_correlation_id) of the latest moment for
     /// `path`.
     fn moment_metadata(db: &Path, path: &str) -> (Option<String>, Option<String>) {
         let store = EngineStore::open(db, 100).expect("reopen store");
@@ -4075,21 +4075,18 @@ mod tests {
 
     #[test]
     fn a_reconcile_run_stamps_its_summary_and_correlation_on_every_moment() {
-        // MUTATION: dropping the provenance plumb-through in ingest_text /
-        // ingest_binary / retire_head (or in the domain's capture paths)
-        // fails this: a multi-file offline reconcile would render as
-        // ungrouped unlabeled history rows, and a mid-pass DELETE would
-        // split the group (history groups only CONSECUTIVE same-correlation
-        // moments).
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor = WorkspaceSupervisor::new();
         // A pre-pass live capture that the reconcile pass will DELETE.
         write_file(scratch.path(), "gone.md", b"deleted while closed");
         let (db, mut live_sink) = sink_for(&scratch, &supervisor);
-        assert!(matches!(
-            ingest(&mut live_sink, "gone.md").expect("seed capture"),
-            IngestOutcome::Captured { .. }
-        ));
+        assert!(
+            matches!(
+                ingest(&mut live_sink, "gone.md").expect("seed capture"),
+                IngestOutcome::Captured { .. }
+            ),
+            "dropping the provenance plumb-through in ingest_text / ingest_binary / retire_head (or in the domain's capture paths) fails this: a multi-file offline reconcile would render as ungrouped unlabeled history rows, and a mid-pass DELETE would split the group (history groups only consecutive same-correlation moments)."
+        );
         drop(live_sink);
         std::fs::remove_file(scratch.path().join("gone.md")).expect("offline delete");
 
@@ -4128,7 +4125,7 @@ mod tests {
         drop(sink);
         supervisor.close(&db).expect("close actor");
 
-        // The delete moment carries the SAME provenance as the pass's
+        // The delete moment carries the same provenance as the pass's
         // writes, so the history group stays contiguous.
         for path in ["notes/a.md", "photo.png", "gone.md"] {
             let (summary, correlation) = moment_metadata(&db, path);
@@ -4153,7 +4150,7 @@ mod tests {
     #[test]
     fn live_text_captures_carry_no_summary_and_binary_captures_stay_labeled() {
         // TS parity: a live TEXT write carries NO summary (the renderer's
-        // copy for null is "Edited <basename>"); only BINARY (and secret)
+        // copy for null is "Edited <basename>"); only binary (and secret)
         // writes carry the per-file "Updated <basename>" label. Neither
         // mints a correlation id.
         let scratch = ScratchDir::new().expect("scratch");
@@ -4225,9 +4222,9 @@ mod tests {
         ));
         drop(sink);
 
-        // files.toml becomes UNREADABLE (a directory is deterministic on
+        // files.toml becomes unreadable (a directory is deterministic on
         // every platform: exists, not a regular file). The narrowing set is
-        // now unknown — a fresh sink must HOLD, not widen to floor-only and
+        // now unknown — a fresh sink must hold, not widen to floor-only and
         // not retire.
         std::fs::create_dir_all(scratch.path().join(".dohc/files.toml")).expect("dir-as-policy");
         write_file(scratch.path(), "kept.md", b"edited while unreadable");
@@ -4358,7 +4355,7 @@ mod tests {
             IngestOutcome::NotOwned
         );
         // Binary content captures as a BINHEAD binary head; secret content
-        // captures into the ENCRYPTED store (never the plaintext one).
+        // captures into the encrypted store (never the plaintext one).
         assert!(matches!(
             ingest(&mut sink, "binary.md").expect("binary capture"),
             IngestOutcome::Captured { .. }
@@ -4531,7 +4528,7 @@ mod tests {
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(scratch.path(), "a/b.md", b"real");
         ingest(&mut sink, "a/b.md").expect("capture the real file");
-        // A literal `a%2fb.md` on disk decodes to the SAME durable key as the
+        // A literal `a%2fb.md` on disk decodes to the same durable key as the
         // real `a/b.md`; capturing or retiring through it would clobber the
         // real file's head.
         write_file(scratch.path(), "a%2fb.md", b"evil");
@@ -4676,7 +4673,7 @@ mod tests {
         let (db, mut sink) = sink_for(&scratch, &supervisor);
         write_file(scratch.path(), "real/x.md", b"real content");
 
-        // An ancestor symlink that resolves INSIDE the workspace still aliases
+        // An ancestor symlink that resolves inside the workspace still aliases
         // content under a path the scanner would never enumerate (the scanner
         // skips symlinked dirs), so the sink must refuse it — strict-equality
         // containment, not merely under-root.
@@ -5180,7 +5177,7 @@ mod tests {
         };
 
         let result = apply_reconcile_plan(&plan, &mut sink, &FilesNoFaults);
-        // The text sibling AND the secret apply (the secret into the
+        // The text sibling and the secret apply (the secret into the
         // encrypted store); only the raced-away path settles as not-owned.
         assert_eq!(result.applied_paths, [".env", "b-good.md"]);
         assert_eq!(result.not_owned_paths, ["c-gone.md"]);
@@ -5261,7 +5258,7 @@ mod tests {
         assert!(made, "mkfifo unavailable on this unix host");
 
         // The advisory lstat rejects the at-rest FIFO; the O_NONBLOCK open is
-        // what guarantees a FIFO swapped in AFTER that check cannot hang the
+        // what guarantees a FIFO swapped in after that check cannot hang the
         // worker — exercise it directly.
         assert!(matches!(
             open_no_follow(&fifo_path),
@@ -5303,7 +5300,7 @@ mod tests {
         apply_then_ack(&mut controller, &plan, &mut sink, &FilesNoFaults).expect("seed ack");
         assert!(controller.tracks_path("flip.md"));
 
-        // Flip to binary: the binary head is CAPTURED and the manifest
+        // Flip to binary: the binary head is captured and the manifest
         // records the binary bytes' hash.
         write_file(scratch.path(), "flip.md", &[0xff, 0xfe, 0x00]);
         controller.mark_dirty();
@@ -5314,7 +5311,7 @@ mod tests {
             "a captured binary flip records the binary hash"
         );
 
-        // Revert to the EXACT original text bytes: the manifest holds the
+        // Revert to the exact original text bytes: the manifest holds the
         // binary hash, so this diffs as a change and re-ingests as text.
         write_file(scratch.path(), "flip.md", b"same bytes");
         controller.mark_dirty();
@@ -5478,7 +5475,7 @@ mod tests {
         write_file(scratch.path(), ".env", b"TOKEN=alpha");
         ingest(&mut sink, ".env").expect("seed secret");
 
-        // Binary-in-disguise is NOT capturable secret text (TS parity: the
+        // Binary-in-disguise is not capturable secret text (TS parity: the
         // secret read has no binary route) — the stale tip must retire.
         write_file(scratch.path(), ".env", &[0xff, 0x00, 0xfe]);
         assert_eq!(
@@ -5561,7 +5558,7 @@ mod tests {
     fn suppression_keeps_multiple_pending_identities_per_path() {
         // Two settles can land before capture consumes the first watcher
         // event. Mutation check: restore the single-slot HashMap<_, String>
-        // registry — the in-order case consumes sha2 for the FIRST event
+        // registry — the in-order case consumes sha2 for the first event
         // (mismatch → ingest) and this test fails.
         let writes = SelfWriteSuppression::default();
         // In-order delivery: each event consumes its own identity.
@@ -5570,7 +5567,7 @@ mod tests {
         assert!(writes.consume("ws", "a.md", "sha1"));
         assert!(writes.consume("ws", "a.md", "sha2"));
         assert!(!writes.consume("ws", "a.md", "sha2"), "single-shot");
-        // Coalesced delivery: matching the LATER identity consumes the
+        // Coalesced delivery: matching the later identity consumes the
         // superseded earlier one too.
         writes.record("ws", "a.md", "sha1");
         writes.record("ws", "a.md", "sha2");
@@ -5593,7 +5590,7 @@ mod tests {
 
     #[test]
     fn non_ownable_ingest_spares_a_ydoc_head_but_retires_a_capture_head() {
-        // AUDIT-SILENTSAVE. Pins the sink WIRING directly: that the
+        // AUDIT-SILENTSAVE. Pins the sink wiring directly: that the
         // NonOwnable branch passes allow_ydoc_origin=false. The rpc test
         // covers the same rule end to end, but only while the driver keeps
         // offering that path — this does not depend on the driver at all.
@@ -5658,7 +5655,7 @@ mod tests {
             IngestOutcome::NotOwned
         ));
 
-        // THE assertion: ownership decided, not the classification alone.
+        // The assertion: ownership decided, not the classification alone.
         assert!(
             snapshot(&db, "notes/settled.md").is_some(),
             "a settled Y.Doc head must survive a not-engine-ownable ingest"
