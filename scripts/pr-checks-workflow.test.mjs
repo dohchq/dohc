@@ -369,7 +369,7 @@ test("PR workflow validates the canonical verdict and installed cargo-deny versi
   );
 });
 
-test("both gate filters select on .gitignore, which the gates now read", () => {
+test("both gate filters select on ignore rules and vendored engine dependencies", () => {
   // The tree-provenance row reads `git status`, so an ignore rule decides
   // what the gate can see at all: ignoring a path removes it from every
   // reading, and ignoring the wiring probe would disable
@@ -388,6 +388,8 @@ test("both gate filters select on .gitignore, which the gates now read", () => {
   const jsFilter = filters.slice(filters.indexOf("\n            js:"));
   assert.match(rustFilter, /^ +- '\.gitignore'$/m);
   assert.match(jsFilter, /^ +- '\.gitignore'$/m);
+  assert.match(rustFilter, /^ +- 'vendor\/\*\*'$/m);
+  assert.match(jsFilter, /^ +- 'vendor\/\*\*'$/m);
   // Both slices must be real filter lists, or the assertions above pass by
   // reading the same text twice.
   assert.match(rustFilter, /- 'tools\/rust-engine-program\/\*\*'/);

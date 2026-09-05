@@ -34,7 +34,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use yrs::encoding::write::Write as _;
-use yrs::types::text::YChange;
+use yrs::types::text::{TextDiffChunk, YChange};
 use yrs::updates::decoder::Decode;
 use yrs::updates::encoder::{Encode, Encoder, EncoderV1};
 use yrs::{
@@ -1645,9 +1645,9 @@ fn projection_out_json<T: ReadTxn>(
         }
         Out::YText(text) => Ok(json!({
             "type": "text",
-            "delta": projection_diffs_json(
+            "delta": projection_text_json(
                 txn,
-                materialize_projection_diffs(&text, txn, *remaining_nodes)?,
+                &text,
                 depth + 1,
                 remaining_nodes,
                 source_bytes,
@@ -1696,35 +1696,16 @@ fn projection_out_json<T: ReadTxn>(
     }
 }
 
-fn materialize_projection_diffs<T, R>(
-    text: &R,
-    txn: &T,
-    remaining_nodes: usize,
-) -> ProjectionResult<Vec<yrs::types::text::Diff<YChange>>>
-where
-    T: ReadTxn,
-    R: Text,
-{
-    // `Text::diff` has no public incremental alternative in yrs 0.27.3: it
-    // always finishes a complete Vec<Diff>. Every emitted run contains at
-    // least one visible text unit or embed, so visible length is a conservative
-    // upper bound on run count. Refuse before calling `diff` when that bound
-    // cannot fit the remaining projection budget.
-    if text.len(txn) as usize > remaining_nodes {
-        return Err(CollabError::ProjectionTooComplex {
-            max_depth: MAX_PROJECTION_DEPTH,
-            max_nodes: MAX_PROJECTION_NODES,
-        });
-    }
-    #[cfg(test)]
-    PROJECTION_DIFF_MATERIALIZATIONS.with(|count| count.set(count.get() + 1));
-    Ok(text.diff(txn, YChange::identity))
-}
-
 #[cfg(test)]
 thread_local! {
-    static PROJECTION_DIFF_MATERIALIZATIONS: std::cell::Cell<usize> =
+    static PROJECTION_TEXT_BYTES_COPIED: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
+}
+
+fn append_admitted_projection_text(target: &mut String, text: &str) {
+    #[cfg(test)]
+    PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(count.get() + text.len()));
+    target.push_str(text);
 }
 
 fn projection_xml_json<T: ReadTxn>(
@@ -1765,9 +1746,9 @@ fn projection_xml_json<T: ReadTxn>(
         }
         XmlOut::Text(text) => Ok(json!({
             "type": "xmlText",
-            "delta": projection_diffs_json(
+            "delta": projection_text_json(
                 txn,
-                materialize_projection_diffs(&text, txn, *remaining_nodes)?,
+                &text,
                 depth + 1,
                 remaining_nodes,
                 source_bytes,
@@ -1802,44 +1783,101 @@ fn projection_out_json_attr<T: ReadTxn>(
     }
 }
 
-fn projection_diffs_json<T: ReadTxn, D>(
-    _txn: &T,
-    diffs: Vec<yrs::types::text::Diff<D>>,
+fn projection_text_json<T: ReadTxn, R: Text>(
+    txn: &T,
+    text: &R,
     depth: usize,
     remaining_nodes: &mut usize,
     source_bytes: &mut usize,
 ) -> ProjectionResult<Value> {
-    let mut items = Vec::new();
-    for diff in diffs {
+    let mut items: Vec<Value> = Vec::new();
+    text.try_visit_diff(txn, |chunk| -> ProjectionResult<()> {
+        if let TextDiffChunk::Text {
+            text,
+            continues_previous: true,
+            ..
+        } = &chunk
+        {
+            *source_bytes = checked_projection_len(*source_bytes, text.len())?;
+            if let Some(Value::String(previous)) =
+                items.last_mut().and_then(|item| item.get_mut("insert"))
+            {
+                append_admitted_projection_text(previous, text);
+            }
+            return Ok(());
+        }
         consume_projection_value_node(depth, remaining_nodes)?;
-        let insert = match diff.insert {
-            Out::Any(any) => {
-                projection_any_to_json(&any, depth + 1, remaining_nodes, source_bytes)?
+        let (insert, attrs) = match chunk {
+            TextDiffChunk::Text {
+                text, attributes, ..
+            } => {
+                projection_text_insert(text, attributes, depth + 1, remaining_nodes, source_bytes)?
             }
-            other => {
-                consume_projection_value_node(depth + 1, remaining_nodes)?;
-                json!(ensure_projection_string(format!("{other:?}"))?)
+            TextDiffChunk::Embed {
+                insert: Out::Any(Any::String(text)),
+                attributes,
+            } => {
+                projection_text_insert(&text, attributes, depth + 1, remaining_nodes, source_bytes)?
             }
-        };
-        let attrs = if let Some(attrs) = diff.attributes {
-            let mut sorted = BTreeMap::new();
-            for (key, value) in attrs.iter() {
-                *source_bytes = checked_projection_len(*source_bytes, key.len())?;
-                sorted.insert(
-                    key.to_string(),
-                    projection_any_to_json(value, depth + 1, remaining_nodes, source_bytes)?,
-                );
+            TextDiffChunk::Embed { insert, attributes } => {
+                let insert = match insert {
+                    Out::Any(any) => {
+                        projection_any_to_json(&any, depth + 1, remaining_nodes, source_bytes)?
+                    }
+                    other => {
+                        consume_projection_value_node(depth + 1, remaining_nodes)?;
+                        json!(ensure_projection_string(format!("{other:?}"))?)
+                    }
+                };
+                let attrs = projection_diff_attributes(
+                    attributes,
+                    depth + 1,
+                    remaining_nodes,
+                    source_bytes,
+                )?;
+                (insert, attrs)
             }
-            Some(Value::Object(sorted.into_iter().collect()))
-        } else {
-            None
         };
         items.push(match attrs {
             Some(attrs) => json!({ "insert": insert, "attrs": attrs }),
             None => json!({ "insert": insert }),
         });
-    }
+        Ok(())
+    })?;
     Ok(Value::Array(items))
+}
+
+fn projection_text_insert(
+    text: &str,
+    attributes: &yrs::types::Attrs,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<(Value, Option<Value>)> {
+    consume_projection_value_node(depth, remaining_nodes)?;
+    *source_bytes = checked_projection_len(*source_bytes, text.len())?;
+    let attrs = projection_diff_attributes(attributes, depth, remaining_nodes, source_bytes)?;
+    let mut value = String::new();
+    append_admitted_projection_text(&mut value, text);
+    Ok((Value::String(value), attrs))
+}
+
+fn projection_diff_attributes(
+    attrs: &yrs::types::Attrs,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_bytes: &mut usize,
+) -> ProjectionResult<Option<Value>> {
+    if attrs.is_empty() {
+        return Ok(None);
+    }
+    let mut sorted = BTreeMap::new();
+    for (key, value) in attrs {
+        *source_bytes = checked_projection_len(*source_bytes, key.len())?;
+        let value = projection_any_to_json(value, depth, remaining_nodes, source_bytes)?;
+        sorted.insert(key.to_string(), value);
+    }
+    Ok(Some(Value::Object(sorted.into_iter().collect())))
 }
 
 fn projection_any_to_json(
@@ -2294,86 +2332,34 @@ fn markdown_node<T: ReadTxn>(
     match node {
         XmlOut::Text(text) => {
             let mut runs = Vec::new();
-            for diff in materialize_projection_diffs(&text, txn, *remaining_nodes)? {
-                let text = match diff.insert {
-                    Out::Any(Any::String(text)) => {
-                        *source_text_bytes =
-                            checked_projection_len(*source_text_bytes, text.len())?;
-                        text.to_string()
-                    }
-                    _ => continue,
-                };
-                if *remaining_nodes == 0 {
-                    return Err(CollabError::ProjectionTooComplex {
-                        max_depth: MAX_PROJECTION_DEPTH,
-                        max_nodes: MAX_PROJECTION_NODES,
-                    });
-                }
-                *remaining_nodes -= 1;
-                let mut marks = Vec::new();
-                if let Some(attrs) = diff.attributes {
-                    for key in attrs.keys() {
-                        *source_text_bytes = checked_projection_len(*source_text_bytes, key.len())?;
-                    }
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Link,
-                        attrs.get("link"),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Highlight,
-                        attrs.get("highlight"),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Bold,
-                        attrs.get("bold").or_else(|| attrs.get("strong")),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Code,
-                        attrs.get("code"),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Italic,
-                        attrs.get("italic").or_else(|| attrs.get("em")),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Strike,
-                        attrs.get("strike").or_else(|| attrs.get("strikethrough")),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                    push_mark(
-                        &mut marks,
-                        MarkKind::Underline,
-                        attrs.get("underline"),
-                        depth + 2,
-                        remaining_nodes,
-                        source_text_bytes,
-                    )?;
-                }
-                runs.push(TextRun { text, marks });
-            }
+            text.try_visit_diff(txn, |chunk| match chunk {
+                TextDiffChunk::Text {
+                    text,
+                    attributes,
+                    continues_previous,
+                } => append_markdown_text(
+                    &mut runs,
+                    text,
+                    attributes,
+                    continues_previous,
+                    depth,
+                    remaining_nodes,
+                    source_text_bytes,
+                ),
+                TextDiffChunk::Embed {
+                    insert: Out::Any(Any::String(text)),
+                    attributes,
+                } => append_markdown_text(
+                    &mut runs,
+                    &text,
+                    attributes,
+                    false,
+                    depth,
+                    remaining_nodes,
+                    source_text_bytes,
+                ),
+                TextDiffChunk::Embed { .. } => Ok(()),
+            })?;
             Ok(MarkdownNode::Text(runs))
         }
         XmlOut::Element(element) => {
@@ -2411,6 +2397,90 @@ fn markdown_node<T: ReadTxn>(
                 .collect::<ProjectionResult<_>>()?,
         )),
     }
+}
+
+fn append_markdown_text(
+    runs: &mut Vec<TextRun>,
+    text: &str,
+    attrs: &yrs::types::Attrs,
+    continues_previous: bool,
+    depth: usize,
+    remaining_nodes: &mut usize,
+    source_text_bytes: &mut usize,
+) -> ProjectionResult<()> {
+    if continues_previous {
+        *source_text_bytes = checked_projection_len(*source_text_bytes, text.len())?;
+        if let Some(previous) = runs.last_mut() {
+            append_admitted_projection_text(&mut previous.text, text);
+        }
+        return Ok(());
+    }
+    consume_projection_value_node(depth, remaining_nodes)?;
+    *source_text_bytes = checked_projection_len(*source_text_bytes, text.len())?;
+    let mut marks = Vec::new();
+    for key in attrs.keys() {
+        *source_text_bytes = checked_projection_len(*source_text_bytes, key.len())?;
+    }
+    push_mark(
+        &mut marks,
+        MarkKind::Link,
+        attrs.get("link"),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Highlight,
+        attrs.get("highlight"),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Bold,
+        attrs.get("bold").or_else(|| attrs.get("strong")),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Code,
+        attrs.get("code"),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Italic,
+        attrs.get("italic").or_else(|| attrs.get("em")),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Strike,
+        attrs.get("strike").or_else(|| attrs.get("strikethrough")),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    push_mark(
+        &mut marks,
+        MarkKind::Underline,
+        attrs.get("underline"),
+        depth + 2,
+        remaining_nodes,
+        source_text_bytes,
+    )?;
+    let mut value = String::new();
+    append_admitted_projection_text(&mut value, text);
+    runs.push(TextRun { text: value, marks });
+    Ok(())
 }
 
 fn push_mark(
@@ -4803,7 +4873,7 @@ mod projection_tests {
     }
 
     #[test]
-    fn alternating_format_runs_are_refused_before_diff_materialization() {
+    fn alternating_format_runs_stop_before_copying_the_rejected_run() {
         const TEST_NODE_BUDGET: usize = 16;
         const RUNS: usize = TEST_NODE_BUDGET * 2;
 
@@ -4830,18 +4900,154 @@ mod projection_tests {
             .apply(&source.encode_full_state())
             .expect("hostile alternating-format update is valid");
 
-        PROJECTION_DIFF_MATERIALIZATIONS.with(|count| count.set(0));
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
         assert!(matches!(
             remote.project_richdoc_with_node_budget(TEST_NODE_BUDGET),
             Err(CollabError::ProjectionTooComplex { .. })
         ));
-        PROJECTION_DIFF_MATERIALIZATIONS.with(|count| {
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| {
             assert_eq!(
                 count.get(),
-                0,
-                "yrs diff must not eagerly materialize runs after the preflight refuses them"
+                (TEST_NODE_BUDGET - 2) / 2,
+                "only admitted runs are copied: paragraph and text cost two nodes, each run and mark cost two"
             );
         });
+    }
+
+    #[test]
+    fn two_mib_plain_body_uses_one_run_node() {
+        let body = "x".repeat(2 * 1024 * 1024);
+        let doc = remote_doc_with_body([paragraph(&body)]);
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+        assert_eq!(doc.project_richdoc_with_node_budget(3).unwrap(), body);
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+        assert!(matches!(
+            doc.project_richdoc_with_node_budget(2),
+            Err(CollabError::ProjectionTooComplex { .. })
+        ));
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
+    }
+
+    #[test]
+    fn json_text_and_xml_text_charge_actual_run_nodes() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("text");
+        let fragment = doc.get_or_insert_xml_fragment("xml");
+        let body = "é".repeat(128);
+        let xml_text;
+        {
+            let mut txn = doc.transact_mut();
+            text.insert(&mut txn, 0, &body);
+            xml_text = fragment.push_back(&mut txn, XmlTextPrelim::new(&body));
+        }
+        let txn = doc.transact();
+        for xml in [false, true] {
+            for budget in [2, 3] {
+                let mut remaining = budget;
+                let mut bytes = 0;
+                PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+                let value = if xml {
+                    projection_xml_json(
+                        &txn,
+                        XmlOut::Text(xml_text.clone()),
+                        0,
+                        &mut remaining,
+                        &mut bytes,
+                    )
+                } else {
+                    projection_out_json(
+                        &txn,
+                        Out::YText(text.clone()),
+                        0,
+                        &mut remaining,
+                        &mut bytes,
+                    )
+                };
+                if budget == 3 {
+                    assert_eq!(value.unwrap()["delta"], json!([{ "insert": body }]));
+                    assert_eq!(remaining, 0);
+                    assert_eq!(bytes, body.len());
+                    PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), body.len()));
+                } else {
+                    assert!(matches!(
+                        value,
+                        Err(CollabError::ProjectionTooComplex { .. })
+                    ));
+                    PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_utf8_and_attribute_budgets_refuse_before_copying() {
+        let doc = Doc::new();
+        let text = doc.get_or_insert_text("text");
+        text.insert(&mut doc.transact_mut(), 0, "😀");
+        let txn = doc.transact();
+        let mut remaining = MAX_PROJECTION_NODES;
+        let mut bytes = MAX_PROJECTION_BYTES - 3;
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+        assert!(matches!(
+            projection_text_json(&txn, &text, 0, &mut remaining, &mut bytes),
+            Err(CollabError::ProjectionTooLarge { actual, .. })
+                if actual == MAX_PROJECTION_BYTES + 1
+        ));
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
+
+        let mut remaining = 2;
+        let mut bytes = MAX_PROJECTION_BYTES - 4;
+        assert_eq!(
+            projection_text_json(&txn, &text, 0, &mut remaining, &mut bytes).unwrap(),
+            json!([{ "insert": "😀" }])
+        );
+        assert_eq!(bytes, MAX_PROJECTION_BYTES);
+
+        let attrs = Attrs::from([("bold".into(), Any::Bool(true))]);
+        for (node_budget, byte_budget) in [(1, 0), (2, MAX_PROJECTION_BYTES - 4)] {
+            let mut runs = Vec::new();
+            let mut remaining = node_budget;
+            let mut bytes = byte_budget;
+            PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+            let result =
+                append_markdown_text(&mut runs, "x", &attrs, false, 0, &mut remaining, &mut bytes);
+            if node_budget == 1 {
+                assert!(matches!(
+                    result,
+                    Err(CollabError::ProjectionTooComplex { .. })
+                ));
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(CollabError::ProjectionTooLarge { .. })
+                ));
+            }
+            assert!(runs.is_empty());
+            PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 0));
+        }
+    }
+
+    #[test]
+    fn markdown_continuations_charge_bytes_without_recharging_run_or_marks() {
+        let attrs = Attrs::from([("bold".into(), Any::Bool(true))]);
+        let mut runs = Vec::new();
+        let mut remaining = 2;
+        let mut bytes = MAX_PROJECTION_BYTES - 7;
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| count.set(0));
+        append_markdown_text(&mut runs, "x", &attrs, false, 0, &mut remaining, &mut bytes).unwrap();
+        assert_eq!(remaining, 0);
+        append_markdown_text(&mut runs, "é", &attrs, true, 0, &mut remaining, &mut bytes).unwrap();
+        assert_eq!(bytes, MAX_PROJECTION_BYTES);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "xé");
+        assert_eq!(runs[0].marks.len(), 1);
+        assert!(matches!(
+            append_markdown_text(&mut runs, "!", &attrs, true, 0, &mut remaining, &mut bytes),
+            Err(CollabError::ProjectionTooLarge { .. })
+        ));
+        assert_eq!(runs[0].text, "xé");
+        PROJECTION_TEXT_BYTES_COPIED.with(|count| assert_eq!(count.get(), 3));
     }
 
     #[test]
