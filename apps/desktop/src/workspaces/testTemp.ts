@@ -214,7 +214,7 @@ function scratchRunId(): string {
 /// not own — an external target with recent files would pin an abandoned run
 /// forever, and a cycle answers `ELOOP`, which reads as "still busy" and pins it
 /// the same way.
-export async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
+async function isIdleSince(path: string, nowMs: number): Promise<boolean> {
   let metadata;
   try {
     metadata = await lstat(path);

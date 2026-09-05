@@ -1,11 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-export type SystemThemeIcon = "light" | "dark";
-
-type NativeThemeIconState = {
-  shouldUseDarkColors: boolean;
-};
+type SystemThemeIcon = "light" | "dark";
 
 type IconWindow = {
   setIcon(iconPath: string): void;
@@ -19,17 +15,6 @@ export function resolveDesktopIconDirectory(options: {
 }): string {
   if (options.isPackaged && options.resourcesPath) return options.resourcesPath;
   return join(options.moduleDirectory, "../../build");
-}
-
-/**
- * Follow Electron's resolved system appearance. The desktop app does not
- * override nativeTheme.themeSource, so this signal tracks the OS on every
- * supported platform.
- */
-export function shouldUseDarkSystemIcon(
-  theme: NativeThemeIconState,
-): boolean {
-  return theme.shouldUseDarkColors;
 }
 
 /**

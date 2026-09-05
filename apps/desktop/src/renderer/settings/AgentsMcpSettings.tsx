@@ -11,7 +11,7 @@ import { PreferredNameControl } from "./PreferredNameControl";
 import { RunnerSettingsCard } from "./RunnerSettingsCard";
 import { SettingRow } from "./SettingRow";
 
-export function configSnippet(
+function configSnippet(
   config: Extract<McpConfigResult, { command: string }>,
 ): string {
   return JSON.stringify(

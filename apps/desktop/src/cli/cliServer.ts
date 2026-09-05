@@ -80,7 +80,7 @@ import { z } from "zod";
 import { isInside } from "../security/pathContainment";
 
 export const CLI_SOCKET_FILE = "dohc-cli.sock";
-export const CLI_TOKEN_FILE = "dohc-cli-token";
+const CLI_TOKEN_FILE = "dohc-cli-token";
 export const CLI_ENDPOINT_FILE = "dohc-cli-endpoint";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
@@ -222,7 +222,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
   collections?: CliCollectionsPort;
 }
 
-export interface CliMainIdentity {
+interface CliMainIdentity {
   displayName: string;
   authorUserId?: string;
   reactionAuthorId: string;
@@ -353,7 +353,7 @@ function shortenedEngineId(id: string, enginePrefix: string, cliPrefix: string):
     : id;
 }
 
-export function cliChannelId(id: string): string {
+function cliChannelId(id: string): string {
   return shortenedEngineId(id, "channel_", "ch_");
 }
 

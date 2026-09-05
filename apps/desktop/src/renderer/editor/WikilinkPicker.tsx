@@ -21,7 +21,7 @@ export type WikilinkPickerState =
  *    atom node directly, with a `label` attr set to the file's
  *    display name, so it reads like a Notion mention pill
  *    immediately (no decoration/round-trip needed). */
-export type WikilinkInsertMode = "text" | "node";
+type WikilinkInsertMode = "text" | "node";
 
 type PickerView = {
   coordsAtPos(pos: number): { left: number; top: number; bottom: number };

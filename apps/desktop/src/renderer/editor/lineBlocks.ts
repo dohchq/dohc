@@ -296,7 +296,7 @@ function closesFence(text: string, fence: Fence): boolean {
  *  is part of its span — the same rule the index has, where a gap line
  *  resolves to the block above it. `startLine` is 0 when no block opened at or
  *  above the line asked about: an empty body, or a line above the first one. */
-export type LineBlock = {
+type LineBlock = {
   index: number;
   startLine: number;
   endLine: number;

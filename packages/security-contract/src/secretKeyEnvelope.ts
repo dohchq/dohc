@@ -1,10 +1,10 @@
 import { createCipheriv, createDecipheriv, randomBytes, scrypt } from "node:crypto";
 import type { WorkspaceId } from "@dohc/workspace-contracts/engine";
 
-export const SECRET_KEY_ENVELOPE_FORMAT = "dohc-key-envelope-v1";
-export const SECRET_KEY_ENVELOPE_SCRYPT_N = 2 ** 17;
-export const SECRET_KEY_ENVELOPE_SCRYPT_R = 8;
-export const SECRET_KEY_ENVELOPE_SCRYPT_P = 1;
+const SECRET_KEY_ENVELOPE_FORMAT = "dohc-key-envelope-v1";
+const SECRET_KEY_ENVELOPE_SCRYPT_N = 2 ** 17;
+const SECRET_KEY_ENVELOPE_SCRYPT_R = 8;
+const SECRET_KEY_ENVELOPE_SCRYPT_P = 1;
 
 const KEY_BYTES = 32;
 const SALT_BYTES = 16;
@@ -34,7 +34,7 @@ export class SecretKeyEnvelopeError extends Error {
   }
 }
 
-export interface SecretKeyEnvelopeJson {
+interface SecretKeyEnvelopeJson {
   format: typeof SECRET_KEY_ENVELOPE_FORMAT;
   saltBase64: string;
   scryptN: number;

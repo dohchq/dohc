@@ -16,18 +16,18 @@ import { documentDir } from "./imageSrc";
 //   per-document  — a subfolder next to the document (`<folder>/x.png`)
 //   global-folder — one folder at the workspace root (`../<folder>/x.png`)
 //   same-folder   — directly beside the document (`x.png`)
-export type AttachmentLocation = "per-document" | "global-folder" | "same-folder";
+type AttachmentLocation = "per-document" | "global-folder" | "same-folder";
 
-export type AttachmentSettings = {
+type AttachmentSettings = {
   location: AttachmentLocation;
   // Subfolder name (per-document) or root folder name (global-folder). Ignored
   // for same-folder. Sanitized to a single safe path segment at use time.
   folderName: string;
 };
 
-export const DEFAULT_ATTACHMENT_FOLDER = "assets";
+const DEFAULT_ATTACHMENT_FOLDER = "assets";
 
-export const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
+const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
   location: "per-document",
   folderName: DEFAULT_ATTACHMENT_FOLDER,
 };
@@ -93,7 +93,7 @@ export function computeAttachmentPaths(
 
 // Refuse anything over 20MB: this matches the main-process asset write bound,
 // and images that large are almost never a paste the user meant.
-export const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // Extension by mime type, for clipboard images that arrive without a filename.
 const MIME_EXTENSIONS: Record<string, string> = {
@@ -119,7 +119,7 @@ const KNOWN_IMAGE_EXTENSIONS = new Set([
 
 // Writes image bytes into the workspace. Injected so tests can mock it; the
 // default (in MarkdownEditor) routes through the desktop bridge.
-export type WriteWorkspaceAsset = (
+type WriteWorkspaceAsset = (
   relativePath: string,
   bytes: Uint8Array,
 ) => Promise<void>;
@@ -135,20 +135,20 @@ export type PickedImage = {
 };
 
 // Opens the native picker and resolves with the chosen images ([] = cancelled).
-export type PickImages = () => Promise<readonly PickedImage[]>;
+type PickImages = () => Promise<readonly PickedImage[]>;
 
 // The ONE shape the write+insert path consumes, so a pasted File, a dropped
 // File, and a natively-picked file all travel the exact same code below. Bytes
 // stay lazy (`read()`) because a File's bytes still have to be pulled off disk,
 // while a picked image already carries them.
-export type ImageSource = {
+type ImageSource = {
   name: string;
   mimeType: string;
   size: number;
   read(): Promise<Uint8Array>;
 };
 
-export function fileImageSource(file: File): ImageSource {
+function fileImageSource(file: File): ImageSource {
   return {
     name: file.name,
     mimeType: file.type,
@@ -157,7 +157,7 @@ export function fileImageSource(file: File): ImageSource {
   };
 }
 
-export function pickedImageSource(picked: PickedImage): ImageSource {
+function pickedImageSource(picked: PickedImage): ImageSource {
   return {
     name: picked.name,
     mimeType: picked.mediaType,

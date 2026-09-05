@@ -4,7 +4,6 @@ import {
   applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
-  shouldUseDarkSystemIcon,
   systemThemeIconFileName,
 } from "./systemThemeIcon";
 
@@ -12,11 +11,6 @@ describe("system theme app icon", () => {
   it("selects the matching light or dark asset", () => {
     expect(systemThemeIconFileName(false)).toBe("icon-light.png");
     expect(systemThemeIconFileName(true)).toBe("icon-dark.png");
-  });
-
-  it("uses Electron's resolved system appearance", () => {
-    expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: true })).toBe(true);
-    expect(shouldUseDarkSystemIcon({ shouldUseDarkColors: false })).toBe(false);
   });
 
   it("resolves icon assets from packages and development builds", () => {

@@ -1,14 +1,14 @@
 // Phase 5 shared contract: the user-visible sync state. workspace-history /
 // the desktop bridge produce it; the shell's status surface binds to it.
 
-export type SyncState =
+type SyncState =
   | "synced"
   | "syncing"
   | "local-changes"
   | "conflict"
   | "cloud-disconnected";
 
-export interface SyncStatus {
+interface SyncStatus {
   state: SyncState;
   pendingChangeCount: number;
   lastSyncedAtMs: number | null;

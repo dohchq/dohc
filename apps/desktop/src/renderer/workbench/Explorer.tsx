@@ -45,7 +45,6 @@ import {
   clampOpenEditorsHeight,
   isCollectionTabPath,
   isGraphTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   isPluginDetailsTabPath,
@@ -55,7 +54,6 @@ import {
   isVersionCompareTabPath,
   isVirtualTabPath,
   parseCollectionTabPath,
-  parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginWebAppTabPath,
@@ -211,10 +209,6 @@ export function editorTitle(path: string, label?: string): string {
     return leafOf(parseCollectionTabPath(path) ?? "Collection");
   }
   if (isHistoryTabPath(path)) return "History";
-  if (isHistoryDiffTabPath(path)) {
-    const parsed = parseHistoryDiffTabPath(path);
-    return `Diff: ${leafOf(parsed?.filePath ?? "file")}`;
-  }
   if (isMomentDiffTabPath(path)) {
     return momentDiffName(label);
   }

@@ -65,7 +65,6 @@ import { lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promise
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { isInside } from "../security/pathContainment";
 import { assertResolvedWorkspacePath } from "./workspaceRealPath";
-import { workspaceRelativePathIsAtOrUnder } from "./workspaceRelativePathIdentity";
 import {
   type ActiveAgentRun,
 } from "./workspaceWatcher";
@@ -95,6 +94,10 @@ export {
   MAX_ENGINE_CAPTURE_BINARY_BYTES,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
 } from "./workspaceEngineCaptureLimits";
+
+function pathIsAtOrUnder(path: string, pathOrPrefix: string): boolean {
+  return path === pathOrPrefix || path.startsWith(`${pathOrPrefix}/`);
+}
 
 export const DAEMON_CAPTURE_HEALTH_POLL_MS = 5_000;
 
@@ -5047,7 +5050,7 @@ export function createWorkspaceEngineCapture(
       // a later payment would recreate it), `false` restores and re-arms
       // (the path is still there and still owes its write).
       const match = (p: string) =>
-        workspaceRelativePathIsAtOrUnder(p, pathOrPrefix);
+        pathIsAtOrUnder(p, pathOrPrefix);
       return enqueueResult("close live session for destructive op", async () => {
         await settleAndCloseLiveYDocSessions(
           match,
@@ -6305,10 +6308,10 @@ export function createWorkspaceEngineCapture(
         // path. Both the vacate right below and the debt drain further down
         // share this one match.
         const isSourceSide = (candidate: string): boolean =>
-          workspaceRelativePathIsAtOrUnder(candidate, fromPath);
+          pathIsAtOrUnder(candidate, fromPath);
         const endpointMatch = (candidate: string): boolean =>
           isSourceSide(candidate) ||
-          workspaceRelativePathIsAtOrUnder(candidate, toPath);
+          pathIsAtOrUnder(candidate, toPath);
         // A live Y.Doc session over either endpoint (or child) is vacated
         // FIRST, ahead of the detached-debt drain below (#681 round 2). A
         // session recovering a stood-down path (reopened, per every

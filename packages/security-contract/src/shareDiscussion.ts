@@ -3,7 +3,7 @@ export const SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT = 8_000;
 export const SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT = 40;
 export const SHARE_DISCUSSION_NAME_BYTE_LIMIT = 160;
 
-export type ShareDiscussionDisplayNameNormalization =
+type ShareDiscussionDisplayNameNormalization =
   | { ok: true; value: string }
   | { ok: false; reason: "too-long" | "empty" };
 

@@ -12,7 +12,7 @@ import { isInside } from "./pathContainment";
  * served by this, and nothing here knows what a panel is.
  */
 
-export interface StaticDirectoryPreview {
+interface StaticDirectoryPreview {
   url: string;
   root: string;
   stop(): Promise<void>;

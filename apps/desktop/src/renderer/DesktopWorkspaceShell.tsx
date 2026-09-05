@@ -204,7 +204,6 @@ import {
   HISTORY_TAB_PATH,
   isChatsTabPath,
   isGraphTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isPluginDetailsTabPath,
   isPluginPanelTabPath,
@@ -219,7 +218,6 @@ import {
   openTab,
   resizeEditorGroups,
   moveTabToNewGroup,
-  parseHistoryDiffTabPath,
   parsePluginDetailsTabPath,
   parsePluginPanelTabPath,
   parsePluginViewId,
@@ -6562,17 +6560,6 @@ export function DesktopWorkspaceShell(props: {
                   onRestored={refreshAfterHistoryRestore}
                 />
               )
-            ) : isHistoryDiffTabPath(tabPath) ? (
-              // A persisted pre-flip tab (legacy change-set diff). The legacy
-              // history store is retired; the tab stays closeable but renders
-              // an honest note instead of a broken page.
-              <div
-                data-testid="legacy-history-diff-gone"
-                className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-subtle"
-              >
-                This history diff came from the retired legacy history and is
-                no longer available. Current history lives in the History rail.
-              </div>
             ) : isVersionCompareTabPath(tabPath) ? (
               // A persisted compare tab reads THE version capability, like
               // every other version entry point. Gating it on the share fact

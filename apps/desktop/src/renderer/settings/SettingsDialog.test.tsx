@@ -14,7 +14,7 @@ import {
 } from "../../workspaces/workspaceSettings";
 import { pushOverlay, removeOverlay } from "../guestBlockingUi";
 import { Overlay } from "../Overlay";
-import { DesktopSettings } from "./DesktopSettings";
+import { SettingsDialog } from "./SettingsDialog";
 
 const config = {
   command: "dohc-mcp",
@@ -115,11 +115,9 @@ const bridge = {
   }),
   installUpdate: vi.fn(async (): Promise<{
     accepted: boolean;
-    completed: boolean;
     state: SettingsUpdateState;
   }> => ({
     accepted: updateReady,
-    completed: false,
     state: updateReady ? readyUpdateState : idleUpdateState,
   })),
   onUpdateState: vi.fn(() => () => {}),
@@ -203,10 +201,10 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("DesktopSettings", () => {
+describe("SettingsDialog", () => {
   it("renders the settings shell, searches sections, and shows an empty search state", async () => {
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     expect(await screen.findByTestId("settings-dialog")).toBeTruthy();
     expect(screen.getByTestId("settings-section-general")).toBeTruthy();
@@ -222,7 +220,7 @@ describe("DesktopSettings", () => {
 
   it("no longer carries plugins — they live in the activity bar", async () => {
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await user.type(await screen.findByTestId("settings-search"), "uninstall");
 
@@ -236,7 +234,7 @@ describe("DesktopSettings", () => {
     const onClose = vi.fn();
     render(
       <Overlay onClose={onClose}>
-        <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+        <SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
       </Overlay>,
     );
 
@@ -253,7 +251,7 @@ describe("DesktopSettings", () => {
           Go back
         </button>
         <Overlay onClose={onClose}>
-          <DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
+          <SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={onClose} />
         </Overlay>
       </>,
     );
@@ -283,7 +281,7 @@ describe("DesktopSettings", () => {
   it("persists appearance changes and applies them immediately", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -304,7 +302,7 @@ describe("DesktopSettings", () => {
   it("shows the window zoom as a percentage and steps it through settings", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -330,7 +328,7 @@ describe("DesktopSettings", () => {
       return () => undefined;
     });
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -365,7 +363,7 @@ describe("DesktopSettings", () => {
     const load = deferred<Awaited<ReturnType<typeof bridge.getUserSettings>>>();
     bridge.getUserSettings.mockImplementationOnce(() => load.promise);
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -407,7 +405,7 @@ describe("DesktopSettings", () => {
     const save = deferred<Awaited<ReturnType<typeof bridge.setUserSettings>>>();
     bridge.setUserSettings.mockImplementationOnce(() => save.promise);
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -446,7 +444,7 @@ describe("DesktopSettings", () => {
   it("saves a preferred name and previews agent attribution", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="general"
@@ -478,7 +476,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="general"
@@ -501,7 +499,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     bridge.setUserSettings.mockRejectedValueOnce(new Error("Disk full"));
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -526,7 +524,7 @@ describe("DesktopSettings", () => {
   it("supports arrow-key navigation inside segmented appearance controls", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="appearance"
@@ -551,7 +549,7 @@ describe("DesktopSettings", () => {
 
   it("shows the workspace path, a copyable MCP config snippet, and usage examples", async () => {
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/home/ice/dohc/personal"
         initialSection="agents"
@@ -576,7 +574,7 @@ describe("DesktopSettings", () => {
   it("does not claim an enabled MCP server is connected", async () => {
     mcpEnabled = true;
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -595,7 +593,7 @@ describe("DesktopSettings", () => {
   it("shows the trusted runner controls and persists command, toggle, and timeout", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -638,7 +636,7 @@ describe("DesktopSettings", () => {
   it("keeps runner enable disabled until the command draft is non-empty", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -675,7 +673,7 @@ describe("DesktopSettings", () => {
   it("saves the runner draft before self-test and reports success", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -718,7 +716,7 @@ describe("DesktopSettings", () => {
     });
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -750,7 +748,7 @@ describe("DesktopSettings", () => {
       source: "default" as const,
     });
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -780,7 +778,7 @@ describe("DesktopSettings", () => {
       source: "default" as const,
     });
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -805,7 +803,7 @@ describe("DesktopSettings", () => {
   it("keeps the restart visible after the setting is turned on without a recorder", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -834,7 +832,7 @@ describe("DesktopSettings", () => {
   // must not prescribe a restart that cannot make the self-test work.
   it("shows the shared-view note without a restart instruction", async () => {
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -861,7 +859,7 @@ describe("DesktopSettings", () => {
   it("disables the self-test in a shared view before the recorder status resolves", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -885,7 +883,7 @@ describe("DesktopSettings", () => {
     });
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -907,7 +905,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     stubClipboard();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -925,7 +923,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     bridge.writeClipboardText.mockRejectedValueOnce(new Error("Clipboard denied"));
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -944,7 +942,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     bridge.getMcpConfig.mockRejectedValueOnce(new Error("MCP unavailable"));
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -983,7 +981,7 @@ describe("DesktopSettings", () => {
         });
       });
       const view = render(
-        <DesktopSettings
+        <SettingsDialog
           workspaceId="ws-old"
           workspacePath="/old"
           initialSection="agents"
@@ -995,7 +993,7 @@ describe("DesktopSettings", () => {
       );
 
       view.rerender(
-        <DesktopSettings
+        <SettingsDialog
           workspaceId="ws-new"
           workspacePath="/new"
           initialSection="agents"
@@ -1019,7 +1017,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1048,7 +1046,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1074,7 +1072,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1110,7 +1108,7 @@ describe("DesktopSettings", () => {
     const user = userEvent.setup();
     const onAgentActiveChange = vi.fn();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="agents"
@@ -1141,7 +1139,7 @@ describe("DesktopSettings", () => {
   });
 
   it("shows current desktop update version and channel", async () => {
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
@@ -1154,7 +1152,7 @@ describe("DesktopSettings", () => {
 
   it("checks for updates and enables restart when an update is ready", async () => {
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -1173,7 +1171,7 @@ describe("DesktopSettings", () => {
   it("shows update check failures and re-enables checking", async () => {
     bridge.checkForUpdates.mockRejectedValueOnce(new Error("offline"));
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -1194,7 +1192,7 @@ describe("DesktopSettings", () => {
       state: idleUpdateState,
     });
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -1210,7 +1208,7 @@ describe("DesktopSettings", () => {
     const pending = deferred<{ checked: boolean; state: typeof readyUpdateState }>();
     bridge.checkForUpdates.mockImplementationOnce(() => pending.promise);
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await screen.findByTestId("desktop-updates-status");
 
     await user.click(screen.getByTestId("check-updates-button"));
@@ -1245,7 +1243,7 @@ describe("DesktopSettings", () => {
       pushUpdate = listener;
       return () => undefined;
     });
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "idle",
@@ -1277,7 +1275,7 @@ describe("DesktopSettings", () => {
       pushUpdate = listener;
       return () => undefined;
     });
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
 
     if (!pushUpdate) throw new Error("Update subscription was not registered.");
     pushUpdate(readyUpdateState);
@@ -1293,7 +1291,7 @@ describe("DesktopSettings", () => {
   it("restarts into a ready update from settings", async () => {
     updateReady = true;
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "ready",
@@ -1309,11 +1307,10 @@ describe("DesktopSettings", () => {
     updateReady = true;
     bridge.installUpdate.mockResolvedValueOnce({
       accepted: false,
-      completed: false,
       state: readyUpdateState,
     });
     const user = userEvent.setup();
-    render(<DesktopSettings workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
+    render(<SettingsDialog workspaceId="ws-1" workspacePath="/x" onClose={() => {}} />);
     await waitFor(() =>
       expect(screen.getByTestId("desktop-updates-status").getAttribute("data-state")).toBe(
         "ready",
@@ -1332,7 +1329,7 @@ describe("DesktopSettings", () => {
   it("persists the attachment location and hides the folder name for same-folder", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1367,7 +1364,7 @@ describe("DesktopSettings", () => {
   it("saves and resets the default site preview mode", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="workbench"
@@ -1417,7 +1414,7 @@ describe("DesktopSettings", () => {
 
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1456,7 +1453,7 @@ describe("DesktopSettings", () => {
   it("keeps an earlier edit when the next control is saved", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
@@ -1488,7 +1485,7 @@ describe("DesktopSettings", () => {
   // versions and chats surfaces give, for the same cause.
   it("tells the user to restart, not to reopen the workspace", async () => {
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -1515,7 +1512,7 @@ describe("DesktopSettings", () => {
   // nobody made and a recording that never happens.
   it("states the capability for a shared view instead of the engine toggle", async () => {
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         sharedView
@@ -1554,7 +1551,7 @@ describe("DesktopSettings", () => {
     });
 
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         sharedView
@@ -1574,7 +1571,7 @@ describe("DesktopSettings", () => {
 
   it("keeps the engine toggle for a workspace that is not a shared view", async () => {
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -1604,7 +1601,7 @@ describe("DesktopSettings", () => {
     };
 
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="advanced"
@@ -1625,7 +1622,7 @@ describe("DesktopSettings", () => {
   it("persists an edited attachment folder name", async () => {
     const user = userEvent.setup();
     render(
-      <DesktopSettings
+      <SettingsDialog
         workspaceId="ws-1"
         workspacePath="/x"
         initialSection="files"
