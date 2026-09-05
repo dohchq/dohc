@@ -52,11 +52,6 @@ function readPackageJson(path) {
 function checkServiceScripts() {
   const root = readPackageJson('package.json')
   record(
-    'root check:self-host script',
-    root.scripts?.['check:self-host'] === 'node scripts/check-self-host.mjs',
-    'package.json exposes pnpm check:self-host',
-  )
-  record(
     'root migrate script',
     root.scripts?.['migrate'] === 'node scripts/migrate-postgres.mjs',
     'package.json exposes pnpm migrate (Postgres schema bootstrap)',
@@ -146,7 +141,6 @@ function checkChatSurfaceSelfHostable() {
   const ALLOWED_RUNTIME_DEPS = new Set([
     '@dohc/security-contract',
     '@dohc/workspace-auth',
-    '@dohc/workspace-contracts',
     '@dohc/workspace-core',
     'better-auth', // rides the `postgres` auth core
     'pg', // rides the `postgres` auth core

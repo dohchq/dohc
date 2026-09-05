@@ -2,13 +2,9 @@ import { createWorkspaceAuth } from "@dohc/workspace-auth/betterAuth";
 import { toNodeHandler } from "better-auth/node";
 import { createServer } from "node:http";
 import { Pool } from "pg";
-import { withCors } from "./cors";
-import { createWorkspaceApiHandler } from "./server";
 
-// The dohc Cloud / self-host server process, reduced to its surviving surface:
-// ONE Postgres and Better Auth mounted on /api/auth/* (the desktop's device
-// sign-in flow). server.ts is the 404 catch-all for non-auth routes. This file
-// contains the production wiring and is the only place that reads env.
+// The auth host: one Postgres and Better Auth mounted on /api/auth/* (the
+// desktop's device sign-in flow). This file is the only place that reads env.
 
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;
@@ -39,11 +35,6 @@ if (!testAuthSeam && secret.length < 32) {
   process.exit(1);
 }
 
-// Browser web client: setting DOHC_WEB_ORIGIN enables CORS with credentials for
-// that ONE origin plus Better Auth origin trust. Unset (the default) leaves the
-// API same-origin/Bearer only.
-const webOrigin = process.env.DOHC_WEB_ORIGIN;
-
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
 });
@@ -51,13 +42,7 @@ const auth = createWorkspaceAuth({
   pool,
   baseURL,
   secret: secret || "dev-test-only-secret-0123456789abcdef",
-  ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
 });
-
-// No application routes survive on this service — it is the Better Auth server
-// only. Everything that is not /api/auth, /health, or the dev/test device seam
-// falls through to a 404.
-const workspaceHandler = createWorkspaceApiHandler();
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
 // test user so the desktop E2E can drive the real flow without a browser.
@@ -87,7 +72,7 @@ async function handleTestDeviceApprove(request: Request): Promise<Response> {
   return Response.json({ ok: true, email: testEmail });
 }
 
-const fetchHandler = withCors(async (request: Request): Promise<Response> => {
+async function fetchHandler(request: Request): Promise<Response> {
   const url = new URL(request.url);
   if (url.pathname.startsWith("/api/auth/")) return auth.handler(request);
   if (url.pathname === "/health") {
@@ -97,8 +82,8 @@ const fetchHandler = withCors(async (request: Request): Promise<Response> => {
   if (testAuthSeam && url.pathname === "/test/device/approve" && request.method === "POST") {
     return handleTestDeviceApprove(request);
   }
-  return workspaceHandler(request);
-}, webOrigin);
+  return Response.json({ ok: false, error: "route not found" }, { status: 404 });
+}
 
 const server = createServer(toNodeHandler(fetchHandler));
 // When the impersonation seam is on, bind loopback only so the dev-cloud

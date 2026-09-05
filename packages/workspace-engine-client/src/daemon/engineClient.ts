@@ -1,6 +1,4 @@
-// R13b transport for the opt-in Rust workspace-engine sidecar. The shipping
-// desktop launches it only behind the temporary migration flag; real workspace
-// consumers remain on the TypeScript engine until the atomic cutover.
+// Framed stdio transport to the workspace engine daemon.
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, type Hash } from "node:crypto";
@@ -33,7 +31,7 @@ const MAX_BUFFERED_BLOB_CHUNKS = 8192;
 // chunks, so this leaves ample headroom for legitimate chunking.
 const MAX_BLOB_CHUNKS_PER_STREAM = 4096;
 // Blob streaming gates on this negotiated hello/helloAck capability, never on
-// frame sniffing (ENGINE_PROTOCOL.md row 13).
+// frame sniffing.
 const BLOB_CAPABILITY = "blobs";
 // Leaves headroom for handshake and small control envelopes.
 const MIN_NEGOTIABLE_MAX_FRAME_BYTES = 64 * 1024;

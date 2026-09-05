@@ -1,4 +1,4 @@
-//! dohc engine testkit — CAL-1 calibration slice.
+//! dohc engine testkit: fixtures and the crash harness for the engine crates.
 //!
 //! Fixtures and the in-process crash/restart harness that produce the
 //! calibration signal for the storage + runtime slices:
@@ -17,8 +17,7 @@
 //!   file's plaintext never reaches `engine.db`, its `-wal`, or its `-shm`,
 //!   with the positive control that keeps the scan honest.
 //!
-//! This is dormant test infrastructure; nothing here is reachable from product
-//! code. The integration traces that consume it live in `tests/`.
+//! The integration tests that consume it live in each crate's `tests/`.
 
 #![forbid(unsafe_code)]
 

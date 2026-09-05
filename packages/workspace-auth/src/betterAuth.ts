@@ -14,14 +14,6 @@ export interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
   secret: string;
-  // The web client's origin (DOHC_WEB_ORIGIN) when browser cookie sessions
-  // are enabled; unset means same-origin/Bearer only (desktop flow).
-  // Session cookies keep Better Auth's SameSite=Lax default, so this origin
-  // must be SAME-SITE with the API (shared registrable domain, or a reverse
-  // proxy making them same-origin). A genuinely cross-site split — including
-  // localhost web vs 127.0.0.1 API in dev — silently drops the cookie on
-  // credentialed XHR and every authed call 401s.
-  trustedOrigins?: string[];
   // Dev/self-host email delivery is console logging; production providers
   // plug in here later without touching callers.
   sendEmail?: (to: string, subject: string, body: string) => Promise<void>;
@@ -45,7 +37,6 @@ export function createWorkspaceAuth(options: WorkspaceAuthOptions) {
         await sendEmail(user.email, "Verify your dohc email", url);
       },
     },
-    ...(options.trustedOrigins ? { trustedOrigins: options.trustedOrigins } : {}),
     plugins: [
       // The desktop authenticates API calls with `Authorization: Bearer
       // <session token>` (the device flow's access_token IS a session token).

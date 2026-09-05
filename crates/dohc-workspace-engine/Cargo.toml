@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "R13 shadow-only workspace engine daemon composition and replay harness."
+description = "The workspace engine daemon the desktop app runs: composes the engine crates behind the framed stdio protocol."
 
 [dependencies]
 # Constant-time token comparison on the daemon handshake. Already in the

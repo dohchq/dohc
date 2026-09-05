@@ -408,10 +408,6 @@ describe("YdocLiveAdapter", () => {
     }
   });
 
-  it("pins the dormant R13 resync wire method name", () => {
-    expect(YDOC_METHOD.resync).toBe("ydoc.resync");
-  });
-
   it("rejects direct seed updates after the loopback seeds absent lineage", async () => {
     const engine = seedPlaintextEngine("captured seed");
     const adapter = new YdocLiveAdapter(engine);
@@ -903,7 +899,7 @@ describe("YdocLiveAdapter", () => {
       "actor-second",
     ]);
     expect(
-      engine.requests.filter((request) => request.method === YDOC_METHOD.resync),
+      engine.requests.filter((request) => request.method === "ydoc.resync"),
     ).toHaveLength(1);
     await session.close({ settle: false });
     adapter.dispose();

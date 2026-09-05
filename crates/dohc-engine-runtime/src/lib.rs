@@ -1,4 +1,4 @@
-//! dohc engine runtime — CAL-1 calibration slice.
+//! dohc engine runtime: the workspace actor.
 //!
 //! The workspace actor model: each open workspace is a dedicated OS thread
 //! owning exactly one storage writer connection, addressed by clonable
@@ -19,8 +19,6 @@
 //!   closed`; dropping an actor or the supervisor joins the worker and releases
 //!   the connection — no detached task outlives its owner, and a panicking
 //!   worker still publishes `Closed`.
-//!
-//! The crate is dormant: nothing here is reachable from product code.
 
 #![forbid(unsafe_code)]
 

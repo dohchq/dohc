@@ -511,11 +511,9 @@ function assertDocUtf16IsSafe(
   // newFFFD = after − before + deleted. Reject any root with newFFFD > 0. This
   // catches the masked split (cross_engine.rs:264) without over-rejecting a
   // clean delete of pre-existing U+FFFD (a net decrease → newFFFD ≤ 0).
-  // R11a/R13 OBLIGATION (REQUIRED, not optional): the engine-side yjs↔yrs
-  // replay-parity gate must catch the general opaque split that no live
-  // TypeScript scan can reconstruct — see crates/dohc-engine-collab and the
-  // bypass1 probe. Ydoc::apply (crates/dohc-engine-collab/src/ydoc.rs) has no
-  // such gate today; R13 must add it before any encoded editor path journals.
+  // The general opaque split that no live TypeScript scan can reconstruct is
+  // caught engine-side by the replay-parity gate
+  // (crates/dohc-engine-collab/src/replay_parity.rs).
   const deleted = computeDeleted();
   for (const [root, current] of after) {
     const newReplacement =

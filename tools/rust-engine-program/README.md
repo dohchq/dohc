@@ -6,7 +6,7 @@ Scripts that run and guard the Rust workspace engine gate. `run-rust-checks.mjs`
 
 | Script | What it does |
 | --- | --- |
-| `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc` — nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget (WINDOWS_DEV.md): disk preflight, slot acquisition, capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
+| `run-rust-checks.mjs` | The gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc`; nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection`; those tests are compiled out of the plain workspace run), plus `cargo deny check` and `cargo audit` when installed (skip with a warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget: a 40 GB free-disk floor, one of 4 build slots, and capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 
 ## Requirements
@@ -32,7 +32,7 @@ From the repo root, in **PowerShell or Git Bash** (Windows-first; both work):
 node tools/rust-engine-program/run-rust-checks.mjs
 ```
 
-It prints an `EVIDENCE (paste into EXECUTION_LOG.md)` line, e.g.:
+It prints an `EVIDENCE (paste into the pull request)` line, e.g.:
 
 ```
 - 2026-08-13T14:55:16.852Z | run-rust-checks | win32/x64 (rust cfg x86_64/windows/msvc, jobs 8, test-threads 8, head b056a36b clean, 11 reads) | PASS | tree provenance=PASS native target=PASS fixture drift=PASS fmt --check=PASS clippy -D warnings=PASS build --workspace=PASS test --workspace=PASS doctests=PASS test collab crash tier=PASS cargo-deny=PASS cargo-audit=PASS scratch leak=PASS
@@ -56,48 +56,15 @@ and status codes, not contents, so a PASS over a dirty tree covers every path
 except the `N` already listed: one of those can be rewritten under the run and
 read the same. A PASS over a clean tree covers every path.
 
-Copy that line into `EXECUTION_LOG.md` under the relevant shard entry.
+Copy that line into the pull request.
 
-## The local-evidence workflow (replaces GitHub CI)
+## Where the gate runs
 
-Per Gate 0, the per-platform GitHub Actions matrix is retired. Evidence is
-collected on the founder's machine:
-
-**Run the JS suites too.** The runner retired in R16 was not a second Rust gate — its
-entire step list ran typecheck and test for the legacy TypeScript engine package, i.e. JS
-checks. Its deletion must not quietly drop JS coverage from this procedure, so from the
-repo root:
-
-```sh
-pnpm run typecheck
-pnpm run test
-```
-
-Those replace what the retired runner covered, and cover more than it did: the whole
-workspace rather than one package that R16 deletes. AGENTS.md already requires both before
-any merge; this is the same obligation stated where the evidence procedure lives, because
-CI is dispatch-only and nothing else will catch it.
-
-1. **Windows x64 (native, primary).** Run the Rust gate plus the two JS suites above, in
-   PowerShell or Git Bash on the dev machine. This is the primary dogfood platform and
-   the one a cutover candidate may ship to.
-2. **Linux x64 (via WSL).** Open WSL against the same checkout and run it
-   again:
-   ```sh
-   wsl
-   cd /mnt/c/Users/ice/dev/dohc   # or the WSL-native clone
-   node tools/rust-engine-program/run-rust-checks.mjs
-   pnpm run typecheck
-   pnpm run test
-   ```
-   Record the resulting `linux/x64` evidence line. (Prefer a WSL-native clone
-   over `/mnt/c` for realistic filesystem semantics.) The JS suites belong here
-   too: the retired runner ran its `pnpm` steps on **both** platforms, so
-   omitting them here would drop Linux-side JS coverage as well.
-3. **macOS x64 / arm64 — NOT covered during construction.** Producing macOS
-   native evidence is a **mandatory pre-release obligation** before any Mac
-   distribution (DECISIONS.md Gate 0 item 2). Until it exists, Gate 7's "every
-   supported platform" claim is scoped to `{Windows, Linux-WSL}`.
+CI is dispatch-only, so the gate runs locally. Run it on native Windows x64,
+then again from WSL for Linux x64 (a WSL-native clone gives realistic
+filesystem semantics; `/mnt/c` works). Run `pnpm typecheck` and `pnpm test`
+on both as well. macOS has no routine gate run; produce one before any Mac
+distribution.
 
 ## Native target
 
@@ -160,7 +127,7 @@ was built for, on a run that executed no cargo at all.
 ## Rust policy enforced here
 
 - `unsafe_code = "forbid"` is enforced at the workspace level (`Cargo.toml`
-  `[workspace.lints]`); ordinary crates inherit it via `[lints] workspace = true`.
+  `[workspace.lints]`); crates inherit it via `[lints] workspace = true`.
 - Warnings-as-errors is applied in `run-rust-checks.mjs` (clippy `-D warnings`),
   **not** baked into `Cargo.toml`, so day-to-day `cargo build` stays ergonomic
   while the gate stays strict.
