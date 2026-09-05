@@ -2734,11 +2734,6 @@ fn prepare_local_lineage_in_tx(
         result.content_kind == HeadContentKindV1::Text && result.object_id == current.object_id
     });
     match marker.lineage_claim_status {
-        LineageClaimStatus::Missing | LineageClaimStatus::Ambiguous => {
-            Err(SyncError::RetryableState {
-                reason: "ydoc-lineage-claim-unresolved",
-            })
-        }
         LineageClaimStatus::Unclaimed if result_is_same_text_object => {
             Ok(LocalLineagePlan::UnclaimedText {
                 key,
@@ -3119,9 +3114,6 @@ fn map_local_collab_error(error: dohc_engine_collab::CollabError) -> SyncError {
             } else {
                 "ydoc-incomplete-lineage"
             },
-        },
-        CollabError::LineageClaimUnresolved { .. } => SyncError::RetryableState {
-            reason: "ydoc-lineage-claim-unresolved",
         },
         CollabError::LineagePredecessorMismatch { .. }
         | CollabError::LineageStateVectorMismatch { .. }

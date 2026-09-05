@@ -1,5 +1,8 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   constantTimeHashEqual,
@@ -12,29 +15,23 @@ import {
   validateLinkCapability,
   verifyRelayExchangeKey,
 } from "./linkSecurity";
+import { linkSecret } from "./linkTestHelpers";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import {
   LINK_INVENTORY_PAGE_SIZE,
+  openSyncRelayStorage,
   type SyncRelayStorage,
 } from "./storage";
-import {
-  closeTestStorages,
-  json,
-  jsonBody,
-  linkSecret,
-  closeTestStorage,
-  reopenTestStorage,
-  request,
-  storagePath,
-  testStorage,
-} from "./linkTestHelpers";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-links";
 const OTHER_WORKSPACE = "workspace-links-other";
 const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
+
+const roots: string[] = [];
+const storages: SyncRelayStorage[] = [];
 
 interface InspectionStatement {
   all(...params: unknown[]): Record<string, unknown>[];
@@ -57,7 +54,10 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   ) => InspectionDatabase;
 };
 
-afterEach(closeTestStorages);
+afterEach(async () => {
+  for (const storage of storages.splice(0)) storage.close();
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
 
 describe("relay exchange key verification", () => {
   const exchangeKey = "share-web-relay-exchange-key-at-least-32";
@@ -75,6 +75,43 @@ describe("relay exchange key verification", () => {
     expect(verifyRelayExchangeKey(null, expectedHash)).toBe(false);
   });
 });
+
+function jsonBody(body: unknown): RequestInit {
+  return {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  };
+}
+
+function request(userId: string | null, path: string, init: RequestInit = {}): Request {
+  const headers = new Headers(init.headers);
+  if (userId) headers.set("authorization", `Bearer user:${userId}`);
+  headers.set("x-dohc-relay-client-ip", "192.0.2.10");
+  return new Request(`http://relay.test${path}`, { ...init, headers });
+}
+
+async function json(response: Response): Promise<Record<string, unknown>> {
+  return (await response.json()) as Record<string, unknown>;
+}
+
+async function newStorageWithPath(
+  options?: Parameters<typeof openSyncRelayStorage>[1],
+): Promise<{
+  storage: SyncRelayStorage;
+  dbPath: string;
+}> {
+  const root = await mkdtemp(join(tmpdir(), "dohc-link-grants-"));
+  roots.push(root);
+  const dbPath = join(root, "relay.sqlite");
+  const storage = openSyncRelayStorage(dbPath, options);
+  storages.push(storage);
+  return { storage, dbPath };
+}
+
+async function newStorage(): Promise<SyncRelayStorage> {
+  return (await newStorageWithPath()).storage;
+}
 
 function updateShareWorkspace(
   dbPath: string,
@@ -117,30 +154,13 @@ describe("workspace link inventory index", () => {
     expect(queryPlan.some((detail) => detail.includes("USE TEMP B-TREE"))).toBe(false);
   }
 
-  it("installs the index for new and reopened storage", async () => {
-    const storage = await testStorage();
-    const dbPath = storagePath(storage);
-    const initialInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
+  it("installs the index for new storage", async () => {
+    const { dbPath } = await newStorageWithPath();
+    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
     try {
-      expectWorkspaceIndex(initialInspection);
+      expectWorkspaceIndex(inspection);
     } finally {
-      initialInspection.close();
-    }
-
-    closeTestStorage(storage);
-    const writableInspection = new InspectionDatabaseSync(dbPath);
-    try {
-      writableInspection.exec(`DROP INDEX ${indexName}`);
-    } finally {
-      writableInspection.close();
-    }
-
-    const reopened = reopenTestStorage(dbPath);
-    const reopenedInspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expectWorkspaceIndex(reopenedInspection);
-    } finally {
-      reopenedInspection.close();
+      inspection.close();
     }
   });
 });
@@ -336,8 +356,7 @@ function hmac(secret: string): string {
 
 describe("atomic View and Comment link mint", () => {
   it("creates one View file share, one link grant, and one hashed credential", async () => {
-    const storage = await testStorage();
-    const dbPath = storagePath(storage);
+    const { storage, dbPath } = await newStorageWithPath();
     const h = handler(storage);
     expect(
       (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -418,7 +437,7 @@ describe("atomic View and Comment link mint", () => {
   });
 
   it("creates one comment file share, one link grant, and one hashed credential", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     expect(
       (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -458,7 +477,7 @@ describe("atomic View and Comment link mint", () => {
   });
 
   it("rolls back the share and grant when the credential insert fails", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     expect(
       storage.claimWorkspace({ workspaceId: WORKSPACE, ownerUserId: OWNER, createdAtMs: 1 }),
     ).toBe("created");
@@ -549,7 +568,7 @@ describe("atomic View and Comment link mint", () => {
   });
 
   it("rechecks ownership inside the transaction and rolls back on refusal", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const ownershipAnswers = [true, false];
     const guardedStorage = new Proxy(storage, {
       get(target, property, receiver) {
@@ -593,7 +612,7 @@ describe("atomic View and Comment link mint", () => {
     ["empty paths", { paths: [], access: "view" }],
     ["malformed paths", { paths: [42], access: "view" }],
   ])("refuses %s without creating storage", async (_label, body) => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
     const response = await h(
@@ -605,7 +624,7 @@ describe("atomic View and Comment link mint", () => {
   });
 
   it("refuses a non-owner without creating storage", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
     const response = await h(
@@ -628,7 +647,7 @@ describe("owner link contract", () => {
     ["malformed access", { access: 42 }],
     ["an extra field", { access: "view", extra: true }],
   ])("refuses add-link creation with %s without creating a link row", async (_label, body) => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
 
@@ -651,7 +670,7 @@ describe("owner link contract", () => {
   it.each(["rotate", "revoke"] as const)(
     "rejects a link-only %s request without workspaceId before writing",
     async (operation) => {
-      const storage = await testStorage();
+      const storage = await newStorage();
       const h = handler(storage);
       await seedFileShare(h);
       const created = await createLink(h);
@@ -683,7 +702,7 @@ describe("owner link contract", () => {
   );
 
   it("binds reset and link-only end to the share's immutable workspace", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const shareIds = ["share-workspace-b-reset", "share-workspace-b-end"];
     const grantIds = ["link-workspace-b-reset", "link-workspace-b-end"];
     const h = handler(storage, {
@@ -830,7 +849,7 @@ describe("owner link contract", () => {
   });
 
   it("uses the 32-byte CSPRNG bearer seam for create and rotate", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     let bearerByte = 1;
     let credentialId = 0;
     const random = vi.fn((size: number) => Buffer.alloc(size, bearerByte++));
@@ -975,7 +994,7 @@ describe("owner link contract", () => {
   });
 
   it("widens with one new URL and narrows with the current URL and dependent CAS", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h, "view");
@@ -1131,7 +1150,7 @@ describe("owner link contract", () => {
   it.each(["missing link key", "missing public origin"] as const)(
     "refuses a widening retune with %s before changing state",
     async (missing) => {
-      const storage = await testStorage();
+      const storage = await newStorage();
       const configured = handler(storage);
       await seedFileShare(configured);
       const created = await createLink(configured, "view");
@@ -1167,7 +1186,7 @@ describe("owner link contract", () => {
 
   it("refuses attach creation and retuning to edit", async () => {
     const access = "edit";
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const attached = await createLink(h);
@@ -1207,7 +1226,7 @@ describe("owner link contract", () => {
   it.each(["view", "comment"] as const)(
     "refuses retuning an active Edit link down to %s before Phase 4",
     async (access) => {
-      const storage = await testStorage();
+      const storage = await newStorage();
       const h = handler(storage);
       await seedFileShare(h);
       const grantId = `storage-seeded-edit-to-${access}`;
@@ -1254,7 +1273,7 @@ describe("owner link contract", () => {
   );
 
   it("lets narrowing retune run without an origin but refuses every minting route first", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const configured = handler(storage);
     await seedFileShare(configured);
     const attached = await createLink(configured);
@@ -1352,7 +1371,7 @@ describe("owner link contract", () => {
   });
 
   it("does not expose a minted URL or fragment through errors or diagnostics", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const shareIds = ["first-atomic-share", "failed-atomic-share"];
     const fixedSecret = "q".repeat(43);
     const h = handler(storage, {
@@ -1395,7 +1414,7 @@ describe("owner link contract", () => {
   });
 
   it("promotes a derived named grant permanently and reverses only by named revoke", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage, {
       newLinkBearer: () => "r".repeat(43),
     });
@@ -1561,7 +1580,7 @@ describe("owner link contract", () => {
   });
 
   it("binds retune, named promotion, and named revoke to the requested workspace", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h, "edit");
     expect(
@@ -1756,8 +1775,7 @@ describe("owner link contract", () => {
 
   it("rechecks the requested workspace inside link and named grant transactions", async () => {
     for (const transition of ["retune", "promote", "revoke"] as const) {
-      const storage = await testStorage();
-      const dbPath = storagePath(storage);
+      const { storage, dbPath } = await newStorageWithPath();
       const configured = handler(storage);
       await seedFileShare(configured, "edit");
       expect(
@@ -1833,7 +1851,7 @@ describe("owner link contract", () => {
   });
 
   it("refuses stale or invalid named grant transitions without mutation or identity input", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h, "edit");
     seedStorageLink(storage, { grantId: "link-validation", access: "comment" });
@@ -2083,7 +2101,7 @@ describe("owner link contract", () => {
 
 describe("owner link inventory and impact preconditions", () => {
   it("pages 1,001 promoted recipients for one linked share", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     expect(
       storage.claimWorkspace({
         workspaceId: WORKSPACE,
@@ -2182,7 +2200,7 @@ describe("owner link inventory and impact preconditions", () => {
   }, 30_000);
 
   it("pages 1,001 links without splitting dependents or losing concurrent changes", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const independentGrantPageReads: unknown[][] = [];
     const countedStorage = new Proxy(storage, {
       get(target, property, receiver) {
@@ -2491,7 +2509,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("lists distinct active, revoked, and damaged links with resolved and unresolved dependents", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage, {
       lookupUserEmail: async (userId) => {
         if (userId === "resolved-user") return "resolved@example.test";
@@ -2661,7 +2679,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("gives non-owners and former owners the byte-identical generic 404", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     await createLink(h);
@@ -2706,7 +2724,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("projects conversion, promotion, rotate, retune, and revoke changes", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage, {
       lookupUserEmail: (userId) => `${userId}@example.test`,
     });
@@ -2810,7 +2828,7 @@ describe("owner link inventory and impact preconditions", () => {
   it.each(["rotate", "retune", "revoke"] as const)(
     "refuses a stale confirmation after conversion before %s, then accepts the fresh set",
     async (operation) => {
-      const storage = await testStorage();
+      const storage = await newStorage();
       const bearer = vi.fn(() => "r".repeat(43));
       const h = handler(storage, {
         lookupUserEmail: (userId) => `${userId}@example.test`,
@@ -2933,7 +2951,7 @@ describe("owner link inventory and impact preconditions", () => {
   );
 
   it("refuses a stale confirmation after promotion so the warning cannot overstate impact", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
@@ -2989,7 +3007,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("normalizes expected-id order and duplicates and refuses missing, malformed, unknown, or extra ids without writes", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
@@ -3068,7 +3086,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("does not mint or retire a widening credential when the dependent set changed", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h, "edit");
     seedStorageLink(storage, { grantId: "link-widening", access: "comment" });
@@ -3108,7 +3126,7 @@ describe("owner link inventory and impact preconditions", () => {
   });
 
   it("refuses link revocation by the former owner after ownership transfer", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
@@ -3202,7 +3220,7 @@ describe("owner link inventory and impact preconditions", () => {
 
 describe("durable link usage inventory", () => {
   it("records a successful exchange and advances usage on a later successful refresh", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-usage-key";
     let now = 2_000;
     let bearerByte = 1;
@@ -3257,7 +3275,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("does not record wrong secrets, exchange-key refusals, rate limits, or failed session inserts", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-usage-refusal-key";
     const limiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
     let now = 2_000;
@@ -3352,8 +3370,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("keeps links distinct and survives eviction, expired-session sweep, and close/reopen", async () => {
-    const storage = await testStorage({ linkSessionsPerGrantLimit: 1 });
-    const dbPath = storagePath(storage);
+    const { storage, dbPath } = await newStorageWithPath({ linkSessionsPerGrantLimit: 1 });
     let now = 2_000;
     const h = handler(storage, { nowMs: () => now });
     await seedFileShare(h);
@@ -3399,8 +3416,12 @@ describe("durable link usage inventory", () => {
     expect(storage.findLinkSessionByCapabilityHash(hmac("usage-eviction-capability"))).toBeNull();
     expect(await ownerLinkInventoryRow(h, firstGrantId)).toMatchObject({ lastUsedAtMs: 3_100 });
 
-    closeTestStorage(storage);
-    const reopened = reopenTestStorage(dbPath, { linkSessionsPerGrantLimit: 1 });
+    const trackedIndex = storages.indexOf(storage);
+    expect(trackedIndex).toBeGreaterThanOrEqual(0);
+    storage.close();
+    storages.splice(trackedIndex, 1);
+    const reopened = openSyncRelayStorage(dbPath, { linkSessionsPerGrantLimit: 1 });
+    storages.push(reopened);
     const reopenedHandler = handler(reopened);
     expect(await ownerLinkInventoryRow(reopenedHandler, firstGrantId)).toMatchObject({
       lastUsedAtMs: 3_100,
@@ -3411,7 +3432,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("clears usage on rotation and starts the replacement URL from its own mint time", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     let now = 2_000;
     const h = handler(storage, { nowMs: () => now });
     await seedFileShare(h);
@@ -3462,7 +3483,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("preserves usage and URL mint time on narrowing but resets usage on widening", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h, "edit");
     const grantId = "storage-seeded-usage-link";
@@ -3516,8 +3537,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("keeps final usage on revoke and cascades it when the containing share is deleted", async () => {
-    const storage = await testStorage();
-    const dbPath = storagePath(storage);
+    const { storage, dbPath } = await newStorageWithPath();
     let now = 2_000;
     const h = handler(storage, { nowMs: () => now });
     await seedFileShare(h);
@@ -3576,7 +3596,7 @@ describe("durable link usage inventory", () => {
   });
 
   it("never moves usage backward when an earlier session mint arrives late", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
@@ -3603,7 +3623,7 @@ describe("durable link usage inventory", () => {
 
 describe("relay link grants", () => {
   it("conforms to every accepted state-machine transition", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
 
@@ -3859,7 +3879,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses keyed revoke bodies without a valid grantId", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -3885,7 +3905,7 @@ describe("relay link grants", () => {
   });
 
   it("requires an absent body to revoke a whole share", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const firstLink = await createLink(h);
@@ -3918,7 +3938,7 @@ describe("relay link grants", () => {
   });
 
   it("uses the highest authority across every active recipient grant", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedIndependentEditAndDependentView(storage, h);
 
@@ -3958,7 +3978,7 @@ describe("relay link grants", () => {
   });
 
   it("keeps independent authority after revoking a parent link", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     const { dependentGrantId, linkGrantId } =
       await seedIndependentEditAndDependentView(storage, h);
@@ -4003,7 +4023,7 @@ describe("relay link grants", () => {
   });
 
   it("keeps link grants out of legacy share lists and summaries", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     await createLink(h);
@@ -4036,7 +4056,7 @@ describe("relay link grants", () => {
   });
 
   it("keeps link dependents out of ordinary granted shares", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const link = await createLink(h);
@@ -4076,7 +4096,7 @@ describe("relay link grants", () => {
   });
 
   it("requires current workspace ownership to create a link", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     let ownershipAnswers = [true];
     const ownershipStorage = new Proxy(storage, {
       get(target, property, receiver) {
@@ -4144,7 +4164,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses whole-share revocation by the former owner after ownership transfer", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -4202,7 +4222,7 @@ describe("relay link grants", () => {
   });
 
   it("keeps the link generation and bumps every dependent generation when it narrows", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const grantId = "storage-seeded-comment-generation-link";
@@ -4281,7 +4301,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses every invalid state-machine transition without changing records", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -4478,8 +4498,7 @@ describe("relay link grants", () => {
   });
 
   it("bounds retired credential history across rotations and widening retunes", async () => {
-    const storage = await testStorage();
-    const dbPath = storagePath(storage);
+    const { storage, dbPath } = await newStorageWithPath();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -4594,10 +4613,9 @@ describe("relay link grants", () => {
 
   it("bounds live sessions per link grant without touching another grant", async () => {
     const limit = 3;
-    const storage = await testStorage({
+    const { storage, dbPath } = await newStorageWithPath({
       linkSessionsPerGrantLimit: limit,
     });
-    const dbPath = storagePath(storage);
     const h = handler(storage);
     await seedFileShare(h);
     const cappedGrantId = String((await createLink(h)).grantId);
@@ -4677,7 +4695,7 @@ describe("relay link grants", () => {
 
   it("refuses an active edit link grant exactly like an unknown secret", async () => {
     const access = "edit";
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const secret = "e".repeat(43);
@@ -4763,7 +4781,7 @@ describe("relay link grants", () => {
   });
 
   it("exchanges a current secret for an HMAC-stored short-lived capability", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -4843,7 +4861,7 @@ describe("relay link grants", () => {
   });
 
   it("refreshes a valid capability and retires the old session", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let tokenId = 30;
     const h = handler(storage, {
@@ -4912,7 +4930,7 @@ describe("relay link grants", () => {
   });
 
   it("refreshes a capability expired by an hour and retires the old session", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let now = 2_000;
     let tokenId = 40;
@@ -4993,7 +5011,7 @@ describe("relay link grants", () => {
   });
 
   it("rate-limits refresh with the capability read bucket", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     await seedFileShare(h);
@@ -5021,7 +5039,7 @@ describe("relay link grants", () => {
   });
 
   it("spends refreshes from the grant read budget", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage, {
       linkReadRateLimiter: new LinkReadRateLimiter(10, 0.000_001, 10),
       linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
@@ -5060,7 +5078,7 @@ describe("relay link grants", () => {
   });
 
   it("refreshes a valid capability when the relay exchange key is not configured", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
     const created = await createLink(h);
@@ -5083,7 +5101,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses refresh without the configured relay exchange key", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     const h = handler(storage, { relayExchangeKey });
     await seedFileShare(h);
@@ -5114,7 +5132,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses refresh after the link grant is revoked", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let now = 2_000;
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
@@ -5164,7 +5182,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses an in-grace refresh after rotation changes the generation", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let now = 2_000;
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
@@ -5215,7 +5233,7 @@ describe("relay link grants", () => {
   });
 
   it("refuses refresh when revocation wins before session replacement", async () => {
-    const target = await testStorage();
+    const target = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let grantId = "";
     let armed = false;
@@ -5278,7 +5296,7 @@ describe("relay link grants", () => {
 
   it("accepts the renewal grace boundary and refuses beyond it", async () => {
     expect(LINK_SESSION_RENEWAL_GRACE_MS).toBe(7 * 24 * 60 * 60 * 1_000);
-    const storage = await testStorage();
+    const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-refresh-exchange-key";
     let now = 2_000;
     const h = handler(storage, { relayExchangeKey, nowMs: () => now });
@@ -5336,7 +5354,7 @@ describe("relay link grants", () => {
   });
 
   it("requires the configured relay exchange key before rate limiting", async () => {
-    const target = await testStorage();
+    const target = await newStorage();
     let credentialLookups = 0;
     const counted = new Proxy(target, {
       get(storage, property, receiver) {
@@ -5393,7 +5411,7 @@ describe("relay link grants", () => {
   });
 
   it("makes every exchange refusal byte-identical", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const h = handler(storage);
     await seedFileShare(h);
 
@@ -5562,7 +5580,7 @@ describe("relay link grants", () => {
   });
 
   it("returns the standard unexpected-error response when exchange storage fails", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const throwingStorage = new Proxy(storage, {
       get(target, property, receiver) {
         if (property === "findLinkGrantByCredentialHash") {
@@ -5597,7 +5615,7 @@ describe("relay link grants", () => {
   });
 
   it("rate-limits by socket IP before a storage lookup and bounds the bucket map", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     let lookups = 0;
     const counted = new Proxy(storage, {
       get(target, property, receiver) {
@@ -5632,7 +5650,7 @@ describe("relay link grants", () => {
   });
 
   it("never writes a minted secret or capability to relay logs", async () => {
-    const storage = await testStorage();
+    const storage = await newStorage();
     const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
     const infoLog = vi.spyOn(console, "log").mockImplementation(() => undefined);
     try {
@@ -5656,8 +5674,9 @@ describe("relay link grants", () => {
     }
   });
 
+
   it("refuses an old-secret exchange without recording usage when rotation wins before session mint", async () => {
-    const target = (await testStorage()) as RaceStorage;
+    const target = (await newStorage()) as RaceStorage;
     let raceGrantId = "";
     let armed = false;
     const raced = new Proxy(target, {

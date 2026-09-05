@@ -752,7 +752,7 @@ fn fork_copies_secret_tips_verbatim() {
     {
         let mut secrets = SecretFileStore::new(&mut store, &key);
         secrets
-            .fork_version(WS, "main", "feat", 21, &NO_FAULTS)
+            .fork_version(WS, "main", "feat", &NO_FAULTS)
             .expect("fork secrets");
     }
 
@@ -1416,7 +1416,7 @@ fn secret_compare_ciphertext_identical_is_not_modified() {
     let mut store = EngineStore::open(&db, 2).unwrap();
     write(&mut store, &key, ".env", "same", "main-same", 10);
     create_feature(&mut store);
-    fork_version_keyless(&mut store, WS, "main", "feat", 11, &NO_FAULTS).unwrap();
+    fork_version_keyless(&mut store, WS, "main", "feat", &NO_FAULTS).unwrap();
     let entries = compare_secret_files_page_keyless(&store, None, WS, "feat", "main", None, 100)
         .unwrap()
         .entries;

@@ -242,7 +242,7 @@ pub struct MomentRecord {
     pub after_blob_sha256: Option<String>,
     pub after_binary_sha256: Option<String>,
     /// `true` when a concrete rollback preimage was recorded. This represents
-    /// TS `before_present = 2`; `false` covers both no preimage and legacy-unset.
+    /// TS `before_present = 2`; `false` covers both no preimage and unrecorded.
     pub before_present: bool,
     pub before_blob_sha256: Option<String>,
     pub before_content_kind: String,
@@ -262,12 +262,7 @@ pub struct MomentRecord {
     /// before TEXT bodies (None for binary, absent, or OVER-CAP sides —
     /// bodies above the 48 KiB in-band cap are never loaded out of SQL;
     /// the byte lengths always are) and the COALESCEd text/binary byte
-    /// lengths. The oracle's
-    /// payload_before_* columns are in the Rust schema as of migration
-    /// ordinal 15; its before-snapshot IDENTITY fields (before_object_id,
-    /// before_version_id, before_path, before_updated_at_ms,
-    /// before_metadata_*) are still absent — the remaining part of that
-    /// recorded pre-R15 schema obligation.
+    /// lengths.
     pub after_text: Option<String>,
     pub after_byte_length: Option<i64>,
     pub before_text: Option<String>,
@@ -486,7 +481,6 @@ pub struct RollbackTextFileMutation {
     pub path: String,
     pub mutation_moment_id: String,
     pub request_id: Option<String>,
-    pub legacy_before_text: Option<String>,
     pub metadata_origin: String,
     pub author_json: Option<String>,
 }

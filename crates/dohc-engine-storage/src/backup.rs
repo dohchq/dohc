@@ -49,8 +49,6 @@ const COMPARED_TABLES: &[&str] = &[
     "engine_migrations",
     "engine_ownership",
     "engine_requests",
-    "documents",
-    "replication_journal",
     "versioned_workspaces",
     "versions",
     "active_versions",

@@ -498,12 +498,6 @@ impl VersionedTextStore<'_> {
                     reason: "conflict_id already exists",
                 });
             }
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'conflict.open', ?2)",
-                params![conflict.conflict_id, conflict.created_at_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             let result = MergeTextFileResult::Conflict {
                 comparison,
                 conflict: Box::new(conflict),

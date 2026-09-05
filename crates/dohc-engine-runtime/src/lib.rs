@@ -33,8 +33,8 @@ pub use actor::{
     MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, MergeExecutionResult,
     PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
     RollbackExecutionResult, SelfWriteRecorder, ShareViewIdentityRecord, SharingDeclined,
-    StoreSnapshot, UnitsOutcome, WorkspaceActor, WorkspaceRootGuard, YdocAppend,
-    YdocCloseSessionOutcome, YdocOpenState, YdocSettleOutcome, YdocSettlement,
+    WorkspaceActor, WorkspaceRootGuard, YdocAppend, YdocCloseSessionOutcome, YdocOpenState,
+    YdocSettleOutcome, YdocSettlement,
 };
 pub use error::RuntimeError;
 pub use identity::EngineDbIdentity;
@@ -47,8 +47,7 @@ pub use supervisor::{SupervisorOpen, WorkspaceSupervisor};
 // Re-export the storage surface callers need so a downstream host depends on
 // one crate for the common path.
 pub use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
-    WriteOutcome,
+    EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome,
     faults::{FaultAction, FaultPoint},
 };
 

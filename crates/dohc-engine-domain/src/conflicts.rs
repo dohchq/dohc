@@ -5,11 +5,10 @@ use crate::records::{
     DeleteResult, DeleteTextFile, RenameResult, TextSnapshot, WriteResult, WriteText,
 };
 use crate::store::{
-    VersionedTextStore, delete_text_in_tx_without_diagnostic_journal, hash_author_fields,
-    hash_fields, hash_optional_text_fields, lookup_request, moment_exists, next_moment_order,
-    record_request, validate_delete_input, validate_identifier, validate_moment_id,
-    validate_moment_metadata, validate_path, validate_write_input, version_is_active,
-    write_text_in_tx_without_diagnostic_journal,
+    VersionedTextStore, delete_text_in_tx, hash_author_fields, hash_fields,
+    hash_optional_text_fields, lookup_request, moment_exists, next_moment_order, record_request,
+    validate_delete_input, validate_identifier, validate_moment_id, validate_moment_metadata,
+    validate_path, validate_write_input, version_is_active, write_text_in_tx,
 };
 use dohc_engine_storage::{
     FaultInjector, MaterializationJobSpec, Preimage, StorageError, TxnOutcome, enqueue_delete_job,
@@ -935,10 +934,7 @@ impl VersionedTextStore<'_> {
                                     &conflict.path,
                                 );
                                 validate_delete_input(&delete_input)?;
-                                let result = delete_text_in_tx_without_diagnostic_journal(
-                                    tx,
-                                    &delete_input,
-                                )?;
+                                let result = delete_text_in_tx(tx, &delete_input)?;
                                 enqueue_delete(tx, &result, "resolve")?;
                                 deletion = Some(result);
                             }
@@ -958,7 +954,7 @@ impl VersionedTextStore<'_> {
                                 materialize: Some(conflict_state_preimage(&conflict.current)),
                                 now_ms: input.now_ms,
                             };
-                            write_binary_file_in_tx_without_diagnostic_journal(tx, &binary_input)?;
+                            write_binary_file_in_tx(tx, &binary_input)?;
                             binary_write = Some(BinaryResolveWrite {
                                 path: destination,
                                 binary_sha256,
@@ -973,8 +969,7 @@ impl VersionedTextStore<'_> {
                                 &input.write_moment_id,
                             );
                             validate_write_input(&write_input)?;
-                            let result =
-                                write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
+                            let result = write_text_in_tx(tx, &write_input)?;
                             let preimage = if destination == conflict.path {
                                 conflict_state_preimage(&conflict.current)
                             } else {
@@ -987,8 +982,7 @@ impl VersionedTextStore<'_> {
                         let delete_input =
                             delete_input(input, &conflict.target_version_id, &conflict.path);
                         validate_delete_input(&delete_input)?;
-                        let result =
-                            delete_text_in_tx_without_diagnostic_journal(tx, &delete_input)?;
+                        let result = delete_text_in_tx(tx, &delete_input)?;
                         // A binary head's removal carries its own preimage and
                         // job id; the text enqueue would hash an empty body.
                         if !enqueue_binary_delete(tx, &result)? {
@@ -1010,7 +1004,7 @@ impl VersionedTextStore<'_> {
                         &input.write_moment_id,
                     );
                     validate_write_input(&write_input)?;
-                    let result = write_text_in_tx_without_diagnostic_journal(tx, &write_input)?;
+                    let result = write_text_in_tx(tx, &write_input)?;
                     let preimage = conflict
                         .current
                         .snapshot
@@ -1214,23 +1208,6 @@ pub fn write_binary_file_in_tx(
     tx: &Transaction<'_>,
     input: &WriteBinaryFile,
 ) -> Result<(), DomainError> {
-    write_binary_file_in_tx_with_journal(tx, input, true)
-}
-
-/// Apply a binary write inside a caller-owned compound replication
-/// transaction without appending the legacy payload-free journal row.
-fn write_binary_file_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &WriteBinaryFile,
-) -> Result<(), DomainError> {
-    write_binary_file_in_tx_with_journal(tx, input, false)
-}
-
-fn write_binary_file_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &WriteBinaryFile,
-    journal: bool,
-) -> Result<(), DomainError> {
     validate_moment_metadata(
         input.metadata_origin.as_str(),
         input.metadata_summary.as_deref(),
@@ -1360,7 +1337,7 @@ fn write_binary_file_in_tx_with_journal(
         (input.object_id.clone(), None)
     };
 
-    let moment_order = persist_binary_head_in_tx_with_journal(
+    let moment_order = persist_binary_head_in_tx(
         tx,
         &PersistBinaryHead {
             workspace_id: &input.workspace_id,
@@ -1376,7 +1353,6 @@ fn write_binary_file_in_tx_with_journal(
             now_ms: input.now_ms,
         },
         before,
-        journal,
     )?;
     if let Some(preimage) = &input.materialize
         && version_is_active(tx, &input.workspace_id, &input.version_id)?
@@ -1398,8 +1374,8 @@ fn write_binary_file_in_tx_with_journal(
     Ok(())
 }
 
-/// The durable-head triple every verified binary write appends: one moment,
-/// one current snapshot (upsert), one replication-journal record. Shared by
+/// The durable-head pair every verified binary write appends: one moment and
+/// one current snapshot (upsert). Shared by
 /// the mirrored-resolve writer ([`write_binary_file_in_tx`], which follows it
 /// with a materialization job) and the capture-ingest path (which must not
 /// materialize — its bytes came FROM disk). Returns the committed moment
@@ -1423,15 +1399,6 @@ pub fn persist_binary_head_in_tx(
     tx: &Transaction<'_>,
     head: &PersistBinaryHead<'_>,
     before: Option<(String, Option<String>, Option<String>, String)>,
-) -> Result<i64, DomainError> {
-    persist_binary_head_in_tx_with_journal(tx, head, before, true)
-}
-
-fn persist_binary_head_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    head: &PersistBinaryHead<'_>,
-    before: Option<(String, Option<String>, Option<String>, String)>,
-    journal: bool,
 ) -> Result<i64, DomainError> {
     let moment_order = next_moment_order(tx)?;
     let (
@@ -1519,14 +1486,6 @@ fn persist_binary_head_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![head.object_id, head.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     Ok(moment_order)
 }
 
@@ -2174,16 +2133,6 @@ mod tests {
         }
     }
 
-    fn diagnostic_journal_count(store: &EngineStore) -> i64 {
-        store
-            .read_with(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
-                    row.get(0)
-                })
-            })
-            .expect("count diagnostic journal")
-    }
-
     #[test]
     fn binary_conflict_sides_round_trip() {
         let (_scratch, mut store) = open_store();
@@ -2579,12 +2528,6 @@ mod tests {
                                 ))
                             },
                         )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM replication_journal \
-                             WHERE doc_id='conflict-replay-gate' AND op_kind='conflict.resolve'",
-                            [],
-                            |row| row.get::<_, i64>(0),
-                        )?,
                         conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
                             row.get::<_, i64>(0)
                         })?,
@@ -2702,94 +2645,6 @@ mod tests {
     }
 
     #[test]
-    fn compound_resolution_effects_leave_no_payload_free_journal_rows() {
-        let mut deltas = Vec::new();
-
-        for (conflict_id, incoming, resolution) in [
-            (
-                "same-path-text",
-                ConflictFileState::text("doc.md", Some(text_snapshot("doc.md", "incoming"))),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-            (
-                "same-path-delete",
-                ConflictFileState::text("doc.md", None),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-            (
-                "moved-text",
-                ConflictFileState::text(
-                    "moved.md",
-                    Some(text_snapshot("moved.md", "incoming move")),
-                ),
-                ResolveConflictKind::ApplyIncoming,
-            ),
-        ] {
-            let (_scratch, mut store) = open_store();
-            let current = seed_main_and_current(&mut store, "doc.md");
-            let open = conflict(
-                conflict_id,
-                ConflictFileState::text("doc.md", None),
-                ConflictFileState::text("doc.md", Some(current)),
-                incoming,
-            );
-            store
-                .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
-                .expect("insert conflict");
-            let before = diagnostic_journal_count(&store);
-            VersionedTextStore::new(&mut store)
-                .resolve_text_conflict(&resolve_input(conflict_id, resolution), &NoFaults)
-                .expect("resolve conflict");
-            deltas.push((conflict_id, diagnostic_journal_count(&store) - before));
-        }
-
-        let (_scratch, mut store) = open_store();
-        let current = seed_main_and_current(&mut store, "asset.bin");
-        let incoming_bytes = b"incoming binary";
-        let incoming_sha = store
-            .put_binary_blob(incoming_bytes)
-            .expect("store incoming binary");
-        let open = conflict(
-            "same-path-binary",
-            ConflictFileState::text("asset.bin", None),
-            ConflictFileState::text("asset.bin", Some(current)),
-            ConflictFileState::binary_head(
-                "asset.bin",
-                incoming_sha,
-                incoming_bytes.len() as i64,
-                "incoming-binary-object",
-                "incoming-binary-moment",
-                19,
-            ),
-        );
-        store
-            .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &open))
-            .expect("insert binary conflict");
-        let before = diagnostic_journal_count(&store);
-        VersionedTextStore::new(&mut store)
-            .resolve_text_conflict(
-                &resolve_input("same-path-binary", ResolveConflictKind::ApplyIncoming),
-                &NoFaults,
-            )
-            .expect("resolve binary conflict");
-        deltas.push((
-            "same-path-binary",
-            diagnostic_journal_count(&store) - before,
-        ));
-
-        assert_eq!(
-            deltas,
-            [
-                ("same-path-text", 0),
-                ("same-path-delete", 0),
-                ("moved-text", 0),
-                ("same-path-binary", 0),
-            ],
-            "the compound carrier owns every resolution effect; the payload-free journal owns none"
-        );
-    }
-
-    #[test]
     fn compound_after_hook_failure_rolls_back_the_resolution() {
         let (_scratch, mut store) = open_store();
         let current = seed_main_and_current(&mut store, "doc.md");
@@ -2836,11 +2691,6 @@ mod tests {
                                     row.get::<_, i64>(3)?,
                                 ))
                             },
-                        )?,
-                        conn.query_row(
-                            "SELECT COUNT(*) FROM replication_journal",
-                            [],
-                            |row| row.get::<_, i64>(0),
                         )?,
                         conn.query_row("SELECT COUNT(*) FROM engine_requests", [], |row| {
                             row.get::<_, i64>(0)

@@ -44,11 +44,6 @@ pub enum LineageClaimStatus {
     Unclaimed,
     /// The exact base blob digest is known.
     Exact,
-    /// A legacy base was compacted and no candidate base envelope remains.
-    Missing,
-    /// A legacy base was compacted and one or more candidate base envelopes
-    /// remain, but none can be proven to be the active base.
-    Ambiguous,
 }
 
 impl LineageClaimStatus {
@@ -56,23 +51,18 @@ impl LineageClaimStatus {
         match self {
             Self::Unclaimed => "unclaimed",
             Self::Exact => "exact",
-            Self::Missing => "missing",
-            Self::Ambiguous => "ambiguous",
         }
     }
 
-    /// Whether this marker has already accepted a replicated base, including
-    /// legacy rows whose exact claim cannot be recovered.
+    /// Whether this marker has already accepted a replicated base.
     pub const fn has_claimed_base(self) -> bool {
-        !matches!(self, Self::Unclaimed)
+        matches!(self, Self::Exact)
     }
 
     fn parse(raw: &str) -> Result<Self, CollabError> {
         match raw {
             "unclaimed" => Ok(Self::Unclaimed),
             "exact" => Ok(Self::Exact),
-            "missing" => Ok(Self::Missing),
-            "ambiguous" => Ok(Self::Ambiguous),
             _ => Err(CollabError::Corrupt {
                 reason: format!("unknown Y.Doc lineage claim status {raw:?}"),
             }),
@@ -1660,11 +1650,6 @@ fn claim_base_with_coordinate_in_tx(
                     }),
                 };
             }
-            unresolved => {
-                return Err(CollabError::LineageClaimUnresolved {
-                    status: unresolved.as_str().to_owned(),
-                });
-            }
         }
 
         let base_sha = put_binary_blob_with_sha(tx, base_bytes, &incoming_claim_id)?;
@@ -2125,11 +2110,6 @@ fn load_exact_active_lineage(
     expected_state_vector_sha256: &str,
 ) -> Result<(Marker, Ydoc, Vec<u8>), CollabError> {
     let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-    if marker.lineage_claim_status != LineageClaimStatus::Exact {
-        return Err(CollabError::LineageClaimUnresolved {
-            status: marker.lineage_claim_status.as_str().to_owned(),
-        });
-    }
     if marker.lineage_claim_id.as_deref() != Some(expected_claim_id) {
         return Err(CollabError::LineagePredecessorMismatch {
             expected: expected_claim_id.to_owned(),

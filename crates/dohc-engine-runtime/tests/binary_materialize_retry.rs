@@ -106,7 +106,6 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         path: "asset.bin".to_owned(),
         mutation_moment_id: "binary-original-moment".to_owned(),
         request_id: Some("binary-rollback-request".to_owned()),
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
@@ -220,7 +219,6 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
                 path: "asset.bin".to_owned(),
                 mutation_moment_id: "binary-original-moment".to_owned(),
                 request_id: Some("inactive-binary-rollback".to_owned()),
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
