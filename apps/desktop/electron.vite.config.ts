@@ -11,6 +11,7 @@ const electronRendererTarget = "chrome150";
 
 export const mainBundledWorkspaceDeps = [
   "@dohc/cli",
+  "@dohc/live-session-contract",
   "@dohc/sdk",
   "@dohc/security-contract",
   "@dohc/workspace-core",
