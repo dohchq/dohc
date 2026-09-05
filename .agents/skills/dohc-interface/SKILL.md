@@ -73,7 +73,7 @@ Each names the actor, states one fact, and uses the user's noun. Their spelled n
 
 ### Empty states
 
-An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that says what is missing and what to do about it, per the `EmptyState` recipe in `ui-language.md`.
+An empty state is a **Next**, not a shrug. One `text-sm text-muted` line that says what is missing and what to do about it, per the `EmptyState` control below.
 
 **The Next must work on that surface.** Verify the control or the flow exists there before you write the instruction. An empty state that tells the user to do something the surface does not offer is worse than one that says nothing, because it costs them a search.
 
@@ -96,7 +96,7 @@ Agent activity gets the olive `agent` voice visually. In words:
 ### Destructive and irreversible actions
 
 - Name the exact thing and the exact count. `Delete 12 files from Research?`
-- **State the true recovery path, including the fallback.** dohc file deletes are always recoverable: the system trash, or `<workspace>/.dohc/trash` whenever the system-trash operation fails. Which is any rejection, not only a drive that lacks a trash. Name both locations. Never write `This cannot be undone.` here. (The shipping dialog at `Explorer.tsx:1528` says "on drives without one", which understates the trigger, `deletePath` catches *any* `trashItem` error. Correct it when you touch that dialog.)
+- **State the true recovery path, including the fallback.** dohc file deletes are always recoverable: the system trash, or `<workspace>/.dohc/trash` whenever the system-trash operation fails. Which is any rejection, not only a drive that lacks a trash. Name both locations. Never write `This cannot be undone.` here.
 - Write `This cannot be undone` only where it is true, and verify before you write it. Durability is a contract, not a tone, see the product invariants in `AGENTS.md`.
 - Label the confirm button with the verb, not `OK`. `Delete files`.
 - Never use `Are you sure?` as the whole question. It states nothing.
@@ -120,15 +120,14 @@ But most apparent violations are not one bad string. dohc's UI vocabulary is **u
 
 **Settle a vocabulary, do not rename a string.** Choosing what a thing is called is a deliberate decision taken across every surface that shows it, and it has to be made before any renaming starts.
 
-**Never touch a pinned name.** `ui-language.md` states it as a hard invariant: every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e and must never be renamed, removed, or restructured away. Updating the tests does not buy you permission. Change the visible copy and leave the accessible name as it is.
+**Never touch a pinned name.** Every `data-testid`, `aria-*`, `role`, and accessible name is pinned by e2e and must never be renamed, removed, or restructured away. Updating the tests does not buy you permission. Change the visible copy and leave the accessible name as it is.
 
 Known so far:
 
 - The editor and linking surface is **mixed, and the term is unsettled**. It says `page` in `Link another page` (`slashCommands.tsx:83`), `aria-label="page links"` (`WikilinkPicker.tsx:210`) and `aria-label="Page title"` (`PageIdentity.tsx:260`), but `file` in `No files match "…"` (`WikilinkPicker.tsx:218`), inside the very same component. Decide the vocabulary before changing anything, and leave the two pinned `aria-label`s alone regardless.
 - `apps/desktop/src/renderer/settings/SettingsDialog.tsx` is **mixed**: `document` at `:487`, `:662` and `:669`, but `files` at `:630` a few rows above them.
-- `apps/desktop/src/renderer/workbench/Explorer.tsx:1528`, the delete dialog says the trash fallback happens "on drives without one", but `deletePath` falls back on *any* `trashItem` rejection. The stated condition is narrower than the real one.
 
-Do not read existing copy as an example of the rules. And note that `${confirmDelete.length} items` in that same delete dialog is *correct*, the selection can mix files and folders, so `files` would be false.
+Do not read existing copy as an example of the rules. And note that `${confirmDelete.length} items` in the Explorer delete dialog is *correct*, the selection can mix files and folders, so `files` would be false.
 
 ### Checklist per string
 

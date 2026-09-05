@@ -75,7 +75,6 @@ function engine(input: {
   onChange?: () => void;
   syncSharedChannels?: () => Promise<void>;
   afterSuccessfulPull?: () => Promise<void>;
-  onRustEngineAdapterPull?: () => Promise<void>;
   operations?: RelaySyncOperations;
 }) {
   return createRelaySyncEngine({
@@ -86,9 +85,6 @@ function engine(input: {
     ...(input.syncSharedChannels ? { syncSharedChannels: input.syncSharedChannels } : {}),
     ...(input.afterSuccessfulPull
       ? { afterSuccessfulPull: input.afterSuccessfulPull }
-      : {}),
-    ...(input.onRustEngineAdapterPull
-      ? { onRustEngineAdapterPull: input.onRustEngineAdapterPull }
       : {}),
     operations: input.operations ?? mockOperations(),
     debounceMs: 100,
@@ -177,34 +173,6 @@ describe("relaySyncEngine", () => {
     expect(pushMock).not.toHaveBeenCalled();
     expect(pullMock).not.toHaveBeenCalled();
     expect(recoverMock).not.toHaveBeenCalled();
-    await sync.stop();
-  });
-
-  it("runs the dormant Rust adapter hook after a durable pull and contains failure", async () => {
-    const calls: string[] = [];
-    const cap = capture();
-    pullMock.mockImplementation(async (materializePage) => {
-      await materializePage([]);
-      calls.push("commit");
-      return pullResult();
-    });
-    const onRustEngineAdapterPull = vi.fn(async () => {
-      calls.push("rust-shadow");
-      throw new Error("dormant adapter unavailable");
-    });
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    const sync = engine({ capture: cap, onRustEngineAdapterPull });
-
-    await expect(sync.start()).resolves.toBeUndefined();
-    expect(calls).toEqual(["commit", "rust-shadow"]);
-    expect(sync.snapshot().lastSyncedAtMs).toBe(12345);
-    expect(sync.snapshot().syncFailing).toBeFalsy();
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("Rust engine adapter post-pull failed"),
-      expect.any(Error),
-    );
-
-    errorSpy.mockRestore();
     await sync.stop();
   });
 

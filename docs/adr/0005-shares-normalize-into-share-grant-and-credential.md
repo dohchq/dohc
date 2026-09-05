@@ -4,7 +4,7 @@ The original relay model stored one row per grant: one share id, one recipient, 
 
 We replaced the model instead of extending it. A **share** owns the workspace, selector scope, discussion, and history. A **grant** owns its principal kind, access, generation, status, and timestamps. A **link credential** owns a secret hash and rotation metadata for one link grant. A grant named through "Open in dohc" stays dependent on its parent link grant (rotation and revoke reach it) until the owner promotes it explicitly. Access moves from the selector to the grant; every derived credential and session binds to `{grant, generation, access}` and is rechecked at the authoritative mutation transaction. Raising a link's level mints a new secret, so a leaked View URL can never silently become a write credential.
 
-dohc is pre-launch, so this replaces the old rows outright: no nullable fields, no compatibility paths. The TS and Rust engines still receive one effective selector plus access after the server resolves the grant; they never see credentials or principal records.
+dohc is pre-launch, so this replaces the old rows outright: no nullable fields, no compatibility paths. The engine receives one effective selector plus access after the server resolves the grant; it never sees credentials or principal records.
 
 ## Consequences
 

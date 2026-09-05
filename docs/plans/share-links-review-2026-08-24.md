@@ -1,6 +1,8 @@
+Delete when the share-links Phase 5 gate closes. Until then H1-H9 and "What's missing" carry Phase 4 and 5 threat detail that is nowhere else.
+
 # Share links design review
 
-Review target: `share-links-design-brief.md`, checked against dohc at `cc015f7787b7440357d59314d24e7c8947cf3c90`.
+Review of the original share-links design brief, checked against dohc at `cc015f7787b7440357d59314d24e7c8947cf3c90`. ADRs 0001 to 0006 superseded the brief.
 
 The design is not ready for implementation planning. The product direction can survive, including accountless links and direct multiplayer editing, but the design has not settled the authority, identity, durability, and recovery contracts that make those decisions safe. Planning now would harden the wrong share data model and hide a distributed-writer problem behind the term "session host."
 

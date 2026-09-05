@@ -1,4 +1,4 @@
-//! Pre-cutover shadow-build fence.
+//! Binds a workspace root to its engine database through a marker token.
 //!
 //! A writable root must contain `.dohc/engine/SHADOW_CLONE` whose complete
 //! contents are exactly 64 lowercase hexadecimal ASCII bytes (a harness-issued
