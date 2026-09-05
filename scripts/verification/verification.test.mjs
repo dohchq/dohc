@@ -10,6 +10,59 @@ import { changedFiles, postgres, selectedGates } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { createPrepareFixture } from "./prepare-fixture.mjs";
+import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
+
+test("command text decodes UTF-8 across pipe chunks while retaining raw log bytes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-utf8-pipes-"));
+  try {
+    const log = join(root, "output.log");
+    const result = await run(process.execPath, ["-e", `process.stdout.write(JSON.stringify({path:'雪/😀'}));process.stderr.write('é診断');`], {
+      log, quietStdout: true, timeoutMs: 5000,
+      onSpawn: (child) => {
+        for (const stream of [child.stdout, child.stderr]) {
+          const emit = stream.emit;
+          stream.emit = function (event, ...args) {
+            if (event !== "data") return emit.call(this, event, ...args);
+            for (const byte of args[0]) emit.call(this, "data", Buffer.from([byte]));
+            return true;
+          };
+        }
+      },
+    });
+    assert.deepEqual(JSON.parse(result.stdout), { path: "雪/😀" });
+    assert.equal(result.stderr, "é診断");
+    const bytes = readFileSync(log);
+    assert.equal(bytes.includes(Buffer.from(result.stdout)), true);
+    assert.equal(bytes.includes(Buffer.from(result.stderr)), true);
+    assert.equal(bytes.includes(Buffer.from("�")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("command decoders flush incomplete final UTF-8 without altering log bytes", async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-utf8-flush-"));
+  try {
+    const log = join(root, "output.log");
+    const result = await run(process.execPath, ["-e", "process.stdout.write(Buffer.from([0xe2,0x82]));process.stderr.write(Buffer.from([0xc3]));"], {
+      log, quietStdout: true, timeoutMs: 5000,
+    });
+    assert.equal(result.stdout, "�");
+    assert.equal(result.stderr, "�");
+    const bytes = readFileSync(log);
+    assert.equal(bytes.length, 3);
+    assert.equal(bytes.includes(Buffer.from([0xe2, 0x82])), true);
+    assert.equal(bytes.includes(0xc3), true);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("debug retains evidence when the app or child closes during startup", () => {
+  for (const closed of ["app", "child"]) {
+    const result = runEarlyCloseDebugFixture(new URL("./debug.mjs", import.meta.url), closed);
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /Evidence retained at/);
+    assert.deepEqual(result.files.sort(), ["desktop.jsonl", "instance.json", "last-screen.png", "trace.zip"]);
+  }
+});
 
 test("standalone preparation installs frozen dependencies before building, sealing, or reuse", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-prepare-install-"));

@@ -67,7 +67,18 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     await writeWorkspaceFiles(second, [{ path: "shared.md", contents: rightText }]);
     await expect.poll(() => momentCount(left!)).toBeGreaterThan(beforeLeft);
     await expect.poll(() => momentCount(right!)).toBeGreaterThan(beforeRight);
+    await right.close();
+    right = null;
+    const lastLeftSync = () => left!.page.evaluate(async (workspaceId) => {
+      const status = await (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.getSyncStatus({ workspaceId });
+      return status.lastSyncedAtMs ?? 0;
+    }, workspaceId);
+    const beforeReconnect = await lastLeftSync();
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
+    await expect.poll(lastLeftSync, { timeout: 30_000 }).toBeGreaterThan(beforeReconnect);
+    right = await launchDesktopApp({ workspace: second });
+    await openWorkspaceFromFirstRun(right.page, second);
+    await waitForWorkspaceFile(right.page, workspaceId, "shared.md");
     await expect(right.page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict", { timeout: 90_000 });
     await right.page.getByTestId("notice-center-toggle").click();
     await right.page.getByTestId("notice-sync-conflict").getByRole("button", { name: "Review", exact: true }).click();

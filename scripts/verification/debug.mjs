@@ -43,6 +43,7 @@ const home = join(directory, "home");
 const workspace = join(directory, "workspace");
 let app;
 let processHandle;
+let stop;
 const logs = [];
 try {
   await prepare();
@@ -54,6 +55,16 @@ try {
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
   processHandle = app.process();
+  const stopped = new Promise((done) => {
+    stop = () => {
+      app.off("close", stop); processHandle.off("exit", stop);
+      process.off("SIGINT", stop); process.off("SIGTERM", stop);
+      done();
+    };
+    app.once("close", stop); processHandle.once("exit", stop);
+    process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
+  });
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
   app.process().stdout?.on("data", (text) => record("main.stdout", text));
   app.process().stderr?.on("data", (text) => record("main.stderr", text));
@@ -82,13 +93,11 @@ try {
     console.log("[debug] Independent debugger connections verified the Electron PID and renderer context.");
   }
   console.log("Close the debug app or press Ctrl+C to stop this session and save its evidence.");
-  await new Promise((done) => {
-    const stop = () => { process.off("SIGINT", stop); process.off("SIGTERM", stop); done(); };
-    app.once("close", stop); process.once("SIGINT", stop); process.once("SIGTERM", stop);
-    if (process.argv.includes("--probe")) stop();
-  });
+  if (process.argv.includes("--probe")) stop();
+  await stopped;
 } catch (error) { console.error(error.message); logs.push({ source: "launcher", text: String(error) }); process.exitCode = 1; }
 finally {
+  stop?.();
   try {
     if (app && processHandle) await closeDebugApplication(app, processHandle, directory);
   } catch (error) {
