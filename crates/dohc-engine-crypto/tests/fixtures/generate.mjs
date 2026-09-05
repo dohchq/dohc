@@ -1,9 +1,9 @@
-// Cross-engine parity fixture generator (R08).
+// Cross-engine parity fixture generator.
 //
-// Produces byte-exact fixtures using the SAME Node crypto primitives used by
+// Produces byte-exact fixtures using the same Node crypto primitives used by
 // the frozen TypeScript oracle. The Rust `dohc-engine-crypto` crate decrypts
 // these and — because AES-256-GCM is deterministic given key+IV+AAD+plaintext —
-// re-encrypts with the SAME recorded IV and asserts the ciphertext+tag bytes
+// re-encrypts with the same recorded IV and asserts the ciphertext+tag bytes
 // match, proving cross-engine AEAD parity against a REAL TS-produced artifact
 // (not the Rust engine's own output).
 //
@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
-// --- secret AEAD parity (secretFileStore.ts encryptSecretText) -------------
+// --- secret AEAD parity (encryptSecretText) --------------------------------
 const SECRET_AAD_PREFIX = "dohc-secret-v1";
 function secretAad(workspaceId, path) {
   return Buffer.from(`${SECRET_AAD_PREFIX}\0${workspaceId}\0${path}`, "utf8");
@@ -55,7 +55,7 @@ const entryA = {
   plaintext,
   ...encryptSecret(dataKeyHex, workspaceId, pathA, ivHex, plaintext),
 };
-// Same key + IV + plaintext but a DIFFERENT path — proves the AAD binds the
+// Same key + IV + plaintext but a different path — proves the AAD binds the
 // path: the tag differs, and decrypting entryA's ciphertext under pathB's AAD
 // must fail closed on the Rust side.
 const entryB = {

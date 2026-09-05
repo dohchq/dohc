@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 // Four suites each answered it differently and one of them answered wrong: it
 // looked only under the repo root, so its coverage appeared or vanished
 // depending on whether somebody had run `cargo build` first, and a clean
-// checkout reported green having run nothing (#390).
+// checkout reported green having run nothing.
 //
 // Candidates, tried in order:
 // 1. DOHC_TEST_ENGINE_BINARY — explicit override, resolved absolute, and nothing

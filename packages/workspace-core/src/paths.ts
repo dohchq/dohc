@@ -25,7 +25,7 @@ export function validateAttachedFolder(path: string): FolderValidation {
 // Windows silently strips trailing dots/spaces from path segments, so
 // ".dohc." and ".dohc " alias the reserved directory there. Strip them before
 // any segment comparison. Exported so the engine path floor (secret vs tracked
-// classification) applies the SAME alias normalization these reserved/ignored
+// classification) applies the same alias normalization these reserved/ignored
 // guards do — otherwise `secret.env ` classifies as tracked on Windows while
 // naming the real `secret.env` secret on disk.
 export function stripWindowsAliasSuffix(segment: string): string {
@@ -35,7 +35,7 @@ export function stripWindowsAliasSuffix(segment: string): string {
 // On Windows an 8.3 short-name alias resolves to its long form, so `DOHC~1`
 // addresses `.dohc` and `SHARED~1` addresses `shared-with-me`. A reserved guard
 // that only compared literal segments would let those aliases through. This
-// detects a short-name-shaped segment whose expansion COULD be `stem` (the 8.3
+// detects a short-name-shaped segment whose expansion could be `stem` (the 8.3
 // base of a reserved name): Windows keeps `base + "~" + digits` within 8 chars,
 // shrinking the base as the collision index grows, so the alias prefix is the
 // stem truncated to that width. Platform-independent on purpose — a reservation
@@ -52,12 +52,12 @@ const SHARED_WITH_ME_SHORT_NAME_STEM = "SHARED"; // 8.3 base of `shared-with-me`
 
 // Case-insensitive: on default macOS/Windows filesystems .DOHC aliases .dohc,
 // so a case-sensitive guard would let writes overwrite dohc metadata. Reserved
-// at ANY depth — a nested `notes/.dohc/x` is just as internal as a top-level
+// at any depth — a nested `notes/.dohc/x` is just as internal as a top-level
 // one (the watcher/tree suppress `.dohc` everywhere via hasIgnoredSegment), so
 // a user/agent write into one must be refused, not just the first segment.
 //
 // Exported because this is the READ-side reservation: callers that re-decide
-// the reservation on a RESOLVED path (a symlink can spell `.dohc` under any
+// the reservation on a resolved path (a symlink can spell `.dohc` under any
 // name — #638) need the same predicate validateUserReadPath uses, not a copy.
 export function isDohcMetadataPath(relativePath: string): boolean {
   return relativePath
@@ -69,7 +69,7 @@ export function isDohcMetadataPath(relativePath: string): boolean {
 }
 
 // The top-level shared-with-me projection: share mounts materialize there,
-// and only mount refresh may write it. It is deliberately a WRITE reservation
+// and only mount refresh may write it. It is deliberately a write reservation
 // only — the folder exists to be read (user, agent, local sites), so read
 // validation (validateUserReadPath) allows it while every write surface
 // refuses it.
@@ -82,7 +82,7 @@ export function isReservedPath(relativePath: string): boolean {
   return isDohcMetadataPath(relativePath) || isSharedWithMePath(relativePath);
 }
 
-// Path segments that are dohc/system internals at ANY depth — hidden from the
+// Path segments that are dohc/system internals at any depth — hidden from the
 // file tree and never recorded into history. One predicate shared by the
 // tree walker and the watcher so the two views of "what exists" cannot drift.
 // The `.dohc-write-*` prefix is reserved for visible-directory atomic staging:
@@ -139,16 +139,16 @@ function isWindowsDeviceSegment(segment: string): boolean {
   return WINDOWS_DEVICE_NAME_RE.test(stripWindowsAliasSuffix(base));
 }
 
-// A generated-8.3-SHAPED segment that does NOT alias a reserved name (those
+// A generated-8.3-SHAPED segment that does not alias a reserved name (those
 // are caught by Check A). Used only by Check B below.
 const SHORT_NAME_ALIAS_RE = /^[^.\s]{1,8}~\d+(?:\.[^.\s]{1,3})?$/;
 
 // CHECK B — MATERIALIZE HAZARD (disk-write safety only). A segment that is
-// unsafe to WRITE onto a Windows disk but is otherwise host-legal: an NTFS
+// unsafe to write onto a Windows disk but is otherwise host-legal: an NTFS
 // Alternate Data Stream / drive-relative colon, a reserved device basename, or
 // a generic 8.3-shape name (`report~1.pdf`). A colon is a legal filename byte
 // off Windows and these names are ordinary files there, so this is gated to
-// win32 by the caller and runs ONLY at actual disk write/create sinks — never
+// win32 by the caller and runs only at actual disk write/create sinks — never
 // on classify/capture/read (that was the over-block). Reserved aliases are
 // already refused by Check A before this runs.
 function hasMaterializeHazard(segment: string): boolean {
@@ -182,7 +182,7 @@ export function validateUserWritePath(
   });
 }
 
-// Disk-write validation — CHECK A + CHECK B. THE validator for every sink that
+// Disk-write validation — CHECK A + CHECK B. The validator for every sink that
 // does writeFile/mkdir/rename/create of a user-controlled path. Check B is
 // gated to Windows (it protects the LOCAL disk), so a name that cannot be
 // written here (`nul.md`, `a:b`, `report~1.pdf`) is refused with
@@ -201,11 +201,11 @@ export function validateUserMaterializePath(
 }
 
 // Read-side validation — CHECK A only (read variant). The shared-with-me
-// projection is readable (a WRITE reservation, not a secret), so only `.dohc`
+// projection is readable (a write reservation, not a secret), so only `.dohc`
 // metadata stays refused at any depth. Traversal / encoding / ignored-segment
-// rules are byte-identical to the write side. The materialize hazard is NOT
+// rules are byte-identical to the write side. The materialize hazard is not
 // applied to reads (an existing on-disk file must be readable on every
-// platform, whatever its name) with ONE win32-only exception: a colon in a
+// platform, whatever its name) with one win32-only exception: a colon in a
 // workspace-RELATIVE read path is always an NTFS Alternate Data Stream
 // reference (relative paths carry no drive letters), which dohc never reads —
 // so it is refused on Windows. Off Windows a colon is a legal filename byte and
@@ -251,7 +251,7 @@ function validateWorkspacePath(
   if (isAbsolutePathLike(decoded)) return { ok: false, reason: "absolute" };
   const segments = decoded.replaceAll("\\", "/").split("/");
   // Windows strips trailing dots/spaces from segments, so ".. ", "..." and
-  // friends can alias ".." or "." there — any segment made ONLY of dots and
+  // friends can alias ".." or "." there — any segment made only of dots and
   // spaces (beyond the exact "" / "." pass-throughs) is rejected outright,
   // as traversal when it smells like one.
   for (const segment of segments) {
@@ -267,7 +267,7 @@ function validateWorkspacePath(
     .filter((segment) => segment !== "" && segment !== ".")
     .join("/");
   if (normalized.length === 0) return { ok: false, reason: "invalid" };
-  // Check A (reserved) runs BEFORE Check B so a reserved alias always reports
+  // Check A (reserved) runs before Check B so a reserved alias always reports
   // "reserved", never "unsupported-name".
   if (options.reserved(normalized)) return { ok: false, reason: "reserved" };
   if (!options.allowIgnoredSegments && hasIgnoredSegment(normalized)) {
@@ -289,7 +289,7 @@ function validateWorkspacePath(
 }
 
 // Lexical normalization: resolves "." and ".." segments and separator noise
-// WITHOUT touching the filesystem, so dot-segment disguises ("/home/ice/.")
+// without touching the filesystem, so dot-segment disguises ("/home/ice/.")
 // cannot slip past string comparisons. Preserves drive and UNC prefixes.
 export function normalizeAbsolutePath(path: string): string {
   const drive = /^[A-Za-z]:/.exec(path)?.[0] ?? "";
@@ -362,7 +362,7 @@ export function classifyPath(relativePath: string): PathClassification {
   return { kind: "file" };
 }
 
-// The ONE extension -> media-type table (check-architecture-debt single-owner
+// The one extension -> media-type table (check-architecture-debt single-owner
 // rule). Returns null for unknown extensions — each caller owns its fallback.
 const MEDIA_TYPES: Record<string, string> = {
   cjs: "text/javascript",

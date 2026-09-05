@@ -30,7 +30,7 @@ pub fn media_type_for_path(rel_path: &str) -> &'static str {
     }
 }
 
-/// The text/binary routing decision the capture pipeline makes BEFORE any
+/// The text/binary routing decision the capture pipeline makes before any
 /// UTF-8 sniffing. Ports `isTextMediaType` (`packages/workspace-fs/src/metadata.ts`)
 /// byte-for-byte, including its quirks (a `.ts` file outside a site source
 /// tree routes as binary; `.js` routes as text): the differential harness

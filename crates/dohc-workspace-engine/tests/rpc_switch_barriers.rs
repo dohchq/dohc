@@ -336,9 +336,6 @@ async fn set_active_settles_live_ydoc_into_old_version_and_closes_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn version_fence_uses_the_latest_plaintext_settlement_as_its_preimage() {
-    // MUTATION: use open_head_sha instead of last_settled_sha in the fence
-    // session view -> the second settlement is fenced against the original
-    // open head instead of the settlement it follows.
     let (_scratch, transport, handle, workspace_id) =
         fixture("latest-settle-preimage", EngineService::new()).await;
     let opened = call(
@@ -458,17 +455,16 @@ async fn set_active_forced_scan_captures_edit_while_live_driver_is_gated() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_forced_scan_stamps_fence_provenance() {
-    // The fence's forced reconcile is a capture PASS: its moments must carry
+    // The fence's forced reconcile is a capture pass: its moments must carry
     // the fence's own summary and a version-switch correlation id (TS
     // parity), or the "nothing is ever lost" pre-switch capture renders as
-    // ungrouped "Updated notes.md" rows. MUTATION: reverting the fence's
-    // provenance to CaptureProvenance::default() fails both assertions.
+    // ungrouped "Updated notes.md" rows.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (scratch, transport, handle, workspace_id) = fixture("fence-provenance", service).await;
     let feature = create_feature(&transport, &handle, &workspace_id, 2).await;
 
-    // Gate the live driver so ONLY the fence's forced scan can capture the
+    // Gate the live driver so only the fence's forced scan can capture the
     // edit (same seam as set_active_forced_scan_captures_edit_...).
     probe.pause_next_version_fence();
     let switch_transport = Arc::clone(&transport);
@@ -761,9 +757,6 @@ async fn set_active_blocks_ydoc_admission_between_sweep_and_switch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_fence_does_not_block_ydoc_admission_in_another_workspace() {
-    // MUTATION: put session_ops back on EngineService and acquire that global
-    // gate in the fence + ydoc.open -> workspace B remains queued here while
-    // workspace A is paused in its destructive continuation.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_first_scratch, transport, first_handle, first_workspace) =
@@ -833,8 +826,6 @@ async fn set_active_fence_does_not_block_ydoc_admission_in_another_workspace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancelled_set_active_keeps_the_owned_fence_until_the_switch_finishes() {
-    // MUTATION: run the destructive continuation in the request future instead
-    // of the owned task -> abort drops both guards and the switch never commits.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("cancel-owned", service).await;
@@ -1055,8 +1046,6 @@ async fn create_named_fences_live_ydoc_and_unannounced_disk_edits_into_fork() {
         );
     }
 
-    // MUTATION: omit the live-manifest refresh -> the driver's old manifest
-    // never learned this forced-scan-only add, so its deletion emits no Retire.
     std::fs::remove_file(scratch.path().join("disk-only.md")).expect("delete forced-scan add");
     flush_until_settled(&transport, &handle, 7).await;
     assert_eq!(
@@ -1144,15 +1133,15 @@ async fn forced_pre_fork_capture_retains_the_active_agent_author() {
         .map(serde_json::from_str::<Value>)
         .transpose()
         .expect("valid author");
-    // MUTATION: pass None to reconcile_full_for_switch. The only scan allowed
-    // to observe this edit records an actor-neutral moment.
-    assert_eq!(captured, Some(author));
+    assert_eq!(
+        captured,
+        Some(author),
+        "pass None to reconcile_full_for_switch. The only scan allowed to observe this edit records an actor-neutral moment."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected() {
-    // MUTATION: remove the source-version filter from the sweep -> this session
-    // closes and its inactive bytes can be captured into the version being left.
     let (scratch, transport, handle, workspace_id) =
         fixture("switch-session-scope", EngineService::new()).await;
     let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
@@ -1209,8 +1198,6 @@ async fn set_active_leaves_sessions_for_unrelated_versions_open_and_unprojected(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
-    // MUTATION: make the richdoc refusal or session sweep workspace-wide ->
-    // this valid fork is refused or the unrelated session disappears.
     let (_scratch, transport, handle, workspace_id) =
         fixture("fork-session-scope", EngineService::new()).await;
     let unrelated = create_feature(&transport, &handle, &workspace_id, 2).await;
@@ -1265,9 +1252,6 @@ async fn create_named_ignores_and_preserves_an_unrelated_richdoc_session() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
-    // MUTATION: use fromVersionId as the pre-fork reconcile target -> this
-    // untouched inactive session is closed even though the working tree is
-    // still materializing main.
     let (scratch, transport, handle, workspace_id) =
         fixture("inactive-fork-source", EngineService::new()).await;
     let inactive = create_feature(&transport, &handle, &workspace_id, 2).await;
@@ -1444,8 +1428,6 @@ fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
 
 #[test]
 fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
-    // MUTATION: spawn drop cleanup onto Handle::try_current() and immediately
-    // drop this current-thread runtime; the cleanup task is never polled.
     let scratch = ScratchDir::new().expect("scratch");
     write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
@@ -1515,8 +1497,6 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn workspace_close_and_set_active_share_capture_then_session_lock_order() {
-    // MUTATION: restore close's session→capture acquisition -> the bounded
-    // setActive join times out on the deterministic three-party deadlock.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("close-order", service).await;
@@ -1594,8 +1574,6 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_preflight_keeps_live_session_for_invalid_and_replayed_requests() {
-    // MUTATION: bypass the actor preflight -> every rejected/replayed request
-    // increments the scan probe and closes the live session.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("create-preflight", service).await;
@@ -1710,8 +1688,6 @@ async fn create_named_preflight_keeps_live_session_for_invalid_and_replayed_requ
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_create_named_revalidates_before_sweeping_sessions() {
-    // MUTATION: remove the fenced preflight -> the queued name conflict scans
-    // and closes the session admitted after the winning create.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("create-race", service).await;
@@ -1838,8 +1814,7 @@ async fn queued_create_named_revalidates_before_sweeping_sessions() {
 async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
     // Richdoc settles since the full-fidelity projection (R15-3): the fence
     // sweeps a live richdoc session with a settling close, so the fork carries
-    // the live edit instead of refusing. MUTATION: skip the fence's settling
-    // sweep -> the fork's notes.md omits "live richdoc edit" below.
+    // the live edit instead of refusing.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("richdoc-fork", service).await;
@@ -1891,7 +1866,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
         );
     }
 
-    // The fence settled AND closed the source session — a follow-up update
+    // The fence settled and closed the source session — a follow-up update
     // must refuse instead of journaling into a released lease.
     let second = base64::engine::general_purpose::STANDARD
         .encode(doc.richdoc_append_paragraph("session remains live"));
@@ -1910,8 +1885,7 @@ async fn create_named_fences_a_live_richdoc_session_into_the_fork() {
 async fn create_named_succeeds_after_a_normally_closed_richdoc_settled() {
     // A default (settle-unless-refused) close settles richdoc now, so the
     // persisted lineage's projection matches its materialized snapshot and the
-    // durable preflight passes. MUTATION: make the default close skip the
-    // richdoc settle -> the preflight sees a stale snapshot and refuses.
+    // durable preflight passes.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("closed-richdoc-fork", service).await;
@@ -1973,8 +1947,6 @@ async fn create_named_succeeds_after_a_normally_closed_richdoc_settled() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage() {
-    // MUTATION: restore `docs.content_kind = 'richdoc'` in the persisted-state
-    // query -> the fork succeeds from the stale main snapshot.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (scratch, transport, handle, workspace_id) =
@@ -2072,8 +2044,6 @@ async fn create_named_fails_closed_for_a_persisted_unsettled_plaintext_lineage()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn queued_same_target_set_active_rechecks_before_sweep_or_scan() {
-    // MUTATION: remove the active-version recheck inside the fence -> the
-    // second request increments the scan probe and closes the admitted session.
     let probe = CaptureApplyProbe::default();
     let service = EngineService::with_capture_apply_probe_for_harness(probe.clone());
     let (_scratch, transport, handle, workspace_id) = fixture("same-target", service).await;

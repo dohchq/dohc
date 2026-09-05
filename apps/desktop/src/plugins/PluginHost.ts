@@ -156,7 +156,7 @@ interface PluginSpawn {
    * Settles when this spawn stops being "starting": resolved once activation
    * succeeded, rejected with the reason it never will. A spawn id exists from
    * the moment the process is asked for, which is before the plugin can serve
-   * anything, so this is what a caller waits on (#798).
+   * anything, so this is what a caller waits on.
    */
   activated: Promise<void>;
   resolveActivated: () => void;
@@ -174,7 +174,7 @@ interface PluginRecord {
   pluginRoot: string;
   /** The discovered SOURCE directory's own name, passed explicitly into
    * start() — never derived from pluginRoot, which production starts a
-   * plugin from as its BUILT root, not its source folder. The identity a
+   * plugin from as its built root, not its source folder. The identity a
    * manifest's own declared name cannot stand in for when it differs from
    * the folder it was found in. */
   directoryName: string;
@@ -277,7 +277,7 @@ export class PluginHost {
   async start(
     pluginRoot: string,
     // The discovered SOURCE directory's own name under plugins/ — never
-    // derived from pluginRoot. Production starts a plugin from its BUILT
+    // derived from pluginRoot. Production starts a plugin from its built
     // root (dohc's own .dohc/plugins/<safe-path> staging, not the source
     // folder discovery found it at), so basename(pluginRoot) would read
     // dohc's internal build-path segment instead of the actual directory a
@@ -619,7 +619,7 @@ export class PluginHost {
    *
    * `directoryName` must match the running record's own — two directories
    * can share a manifest id (a broken manifest's directory-derived fallback
-   * colliding with some other, unrelated plugin's real id), and only ONE of
+   * colliding with some other, unrelated plugin's real id), and only one of
    * them can ever be the process actually running under this id at a time.
    * Settings are saved per directory; telling whichever process happens to
    * be running under the shared id, rather than the one the save was
@@ -698,7 +698,7 @@ export class PluginHost {
    * with the reason it never will. A caller that is about to ask the plugin
    * for something waits on this instead of reading a spawn id or a status:
    * both say "running" while the plugin is still activating, and every
-   * request in that window is refused (#798).
+   * request in that window is refused.
    *
    * The wait is bounded by the activation deadline this host already races
    * every activation against.

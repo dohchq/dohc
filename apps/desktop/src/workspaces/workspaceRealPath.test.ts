@@ -19,19 +19,16 @@ import { createDefaultDiskWriter } from "./workspaceEngineCapture";
 import { startStaticDirectoryPreview } from "../security/staticDirectoryPreview";
 import { createTestScratch } from "./testTemp";
 
-// ONE fact, tested per surface: every desktop guard used to read a path as
-// SPELLED and then prove only that it stays INSIDE the workspace root. A
+// One fact, tested per surface: every desktop guard used to read a path as
+// spelled and then prove only that it stays inside the workspace root. A
 // symlink planted inside the workspace passes that proof, so `meta -> .dohc`
 // named the workspace's own control plane under an ordinary name and every
-// surface below followed it (#667).
+// surface below followed it.
 //
 // Each test here plants that alias, drives the real entry point, and asserts
-// BOTH the refusal and the disk. Reverting the resolved-path decision at any
+// both the refusal and the disk. Reverting the resolved-path decision at any
 // one site turns exactly one of these red.
 //
-// MUTATION NOTE: pass `access: "read"` where a site passes "write", or drop the
-// `assertResolvedWorkspacePath` call from a site, and that site's test fails on
-// the disk assertion, not only on the message.
 
 let root: string;
 
@@ -74,7 +71,7 @@ describe("workspaceFiles through an in-workspace alias", () => {
     expect(existsSync(join(root, "notes", "plan.md"))).toBe(true);
   });
 
-  it("movePath refuses a move OUT of .dohc into the visible tree", async () => {
+  it("movePath refuses a move out of .dohc into the visible tree", async () => {
     // The leak the containment check can never see: both ends are inside the
     // root, and the destination is an ordinary, syncable, exportable path.
     await expect(
@@ -102,7 +99,7 @@ describe("workspaceFiles through an in-workspace alias", () => {
   });
 
   it("collectZipEntries refuses to export a secret an ordinary name points at", async () => {
-    // The floor is decided on BOTH spellings: the archive would carry the
+    // The floor is decided on both spellings: the archive would carry the
     // secret's bytes under the link's innocent name.
     await writeFile(join(root, ".env"), "TOKEN=hunter2");
     await symlink(join(root, ".env"), join(root, "notes.md"));
@@ -111,7 +108,7 @@ describe("workspaceFiles through an in-workspace alias", () => {
     );
   });
 
-  // Both ends of a move are entries, so both keep the name as SPELLED under a
+  // Both ends of a move are entries, so both keep the name as spelled under a
   // resolved parent. Resolving the destination instead would answer with the
   // existing file's casing on a case-insensitive filesystem, and the rename
   // would become a no-op that silently loses the user's capitalization.
@@ -159,10 +156,9 @@ describe("workspaceAssets through an in-workspace alias", () => {
     );
   });
 
-  // A restore commits with rename over the entry, so it never writes THROUGH
+  // A restore commits with rename over the entry, so it never writes through
   // the leaf. Following it would refuse the very file the restore repairs.
   //
-  // MUTATION NOTE: give writeContainedFile "write" access and these two fail.
   it("heals a file someone replaced with a link into .dohc", async () => {
     await symlink(join(root, ".dohc", "settings.json"), join(root, "note.md"));
     await restoreWorkspaceText(root, "note.md", "# Restored\n");
@@ -184,12 +180,10 @@ describe("workspaceAssets through an in-workspace alias", () => {
     expect(await readFile(join(root, "note.md"), "utf8")).toBe("# Restored\n");
   });
 
-  // `wx` does NOT refuse every existing entry: on a DANGLING link it follows
+  // `wx` does not refuse every existing entry: on a dangling link it follows
   // the link and creates its target. So the exclusive path judges the leaf
   // while the rename path does not — the commit mode decides.
   //
-  // MUTATION NOTE: give the exclusive path "entry" access and this writes
-  // into .dohc.
   it("refuses an exclusive create through a dangling link into .dohc", async () => {
     await symlink(join(root, ".dohc", "planted.json"), join(root, "note.md"));
     await expect(
@@ -218,7 +212,7 @@ describe("the static directory preview through an in-workspace alias", () => {
   it("refuses a served root that resolves into .dohc", async () => {
     // The entry exists, so before the resolved-path decision this preview
     // started and served the workspace's control plane over HTTP. The alias
-    // spells an ordinary folder; only the RESOLVED root gives it away.
+    // spells an ordinary folder; only the resolved root gives it away.
     await writeFile(join(root, ".dohc", "index.html"), "<h1>state</h1>");
     await expect(
       startStaticDirectoryPreview(join(root, "meta"), {
@@ -254,7 +248,7 @@ describe("the static directory preview through an in-workspace alias", () => {
   it("still serves a benign alias directory from the guard's own resolution", async () => {
     // The serve path now uses the resolution the guard produced instead of
     // realpathing the request spelling a second time. That closes a window a
-    // test cannot open without a concurrent swap, so this does NOT pin the
+    // test cannot open without a concurrent swap, so this does not pin the
     // window — it pins the part that IS observable: the guard's resolution is
     // a usable canonical path, and alias directories still serve through it.
     await writeFile(join(root, "index.html"), "<h1>page</h1>");
@@ -292,14 +286,13 @@ describe("engine disk writer through an in-workspace alias", () => {
   });
 
   // The writer now mkdirs, checks, and writes on the resolution the guard
-  // judged rather than re-walking the spelling. That narrowing is NOT what
+  // judged rather than re-walking the spelling. That narrowing is not what
   // these pin — a benign alias lands in the same place either way, and opening
   // the window needs a concurrent swap.
   //
   // What they DO pin is `resolvedAbsolute` itself, which six call sites now
   // act on: the resolved parent is where the bytes land, and a still-absent
-  // parent chain under it is created correctly. MUTATION NOTE: drop the
-  // absent-tail join in realRelativeInRoot and all three fail.
+  // parent chain under it is created correctly.
   it("writes through a benign alias directory at its canonical location", async () => {
     await symlink(join(root, "notes"), join(root, "inbox"), "dir");
     const writer = createDefaultDiskWriter(root);

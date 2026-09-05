@@ -184,7 +184,7 @@ describe("refreshLinuxStableCliBin", () => {
 
   it("keeps resolving to targetDir when a refresh fails but a previously published pair is intact", async () => {
     // A boot's own refresh can fail for reasons that have nothing to do
-    // with whether the LAST successful boot's launcher still works (a full
+    // with whether the last successful boot's launcher still works (a full
     // disk, a permissions hiccup) -- the config an already-configured agent
     // is holding must keep pointing at something real either way.
     const root = mkdtempSync(join(tmpdir(), "dohc-linux-cli-bin-"));

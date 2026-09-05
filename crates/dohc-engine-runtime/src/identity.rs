@@ -10,7 +10,7 @@
 //! bytes. File identity collapses all of them onto one key.
 //!
 //! Identity is obtained via a metadata-only probe (a short-lived read handle
-//! closed immediately — it does NOT open a second writer connection). The
+//! closed immediately — it does not open a second writer connection). The
 //! `file-id` crate performs the platform-specific call behind a safe API, so
 //! these crates keep `#![forbid(unsafe_code)]`.
 

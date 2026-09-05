@@ -7,7 +7,7 @@ import * as Y from "yjs";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 import { FileInspector } from "./FileInspector";
 
-// Finding: in engine mode the DocumentMenu export must serialize the LIVE
+// Finding: in engine mode the DocumentMenu export must serialize the live
 // editor (collab-bound to the engine Y.Doc), not the stale props.body that
 // serializeDraftRef falls back to whenever the inline properties surface is
 // present or the doc opened in read/truncated mode. We prove this with the
@@ -111,7 +111,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
 
   it("copies the live editor markdown even while the properties panel is open", async () => {
     const user = userEvent.setup();
-    // navigator.clipboard is defined AFTER userEvent.setup() so its own stub
+    // navigator.clipboard is defined after userEvent.setup() so its own stub
     // doesn't shadow ours (same ordering the DocumentMenu unit test relies on).
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },
@@ -152,7 +152,7 @@ describe("engine-mode DocumentMenu exports the live editor body, not stale props
     expect(flushPendingLocalUpdates).toHaveBeenCalledOnce();
   });
 
-  it("carries LIVE frontmatter (title/icon) edits, not the mount-time markdown", async () => {
+  it("carries live frontmatter (title/icon) edits, not the mount-time markdown", async () => {
     const user = userEvent.setup();
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },

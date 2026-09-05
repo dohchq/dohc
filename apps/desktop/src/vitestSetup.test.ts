@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 
-// Guards that `vitest.setup.ts` is REGISTERED, not what it does.
+// Guards that `vitest.setup.ts` is registered, not what it does.
 //
 // The setup file gives jsdom the document.elementFromPoint that
 // prosemirror-view's posAtCoords calls. Without it that call throws inside a
 // mousedown listener rather than inside a test, so vitest fails the run on an
 // unhandled error and reports 0 failed tests. A run that exits 1 while naming
-// nothing costs a review round to attribute (#590, #635).
+// nothing costs a review round to attribute.
 //
 // So the protection needs a name of its own. Drop `./vitest.setup.ts` from
 // `setupFiles` and these two tests fail, deterministically, in one worker,

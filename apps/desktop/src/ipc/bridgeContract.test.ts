@@ -1686,7 +1686,7 @@ describe("workspace graph IPC contract", () => {
   });
 });
 
-describe("collection IPC contracts (Phase 2 views)", () => {
+describe("collection IPC contracts", () => {
   it("round-trips a queried record with a bigint value and a flagged validation", () => {
     const result = QueryCollectionRecordsResult.parse({
       collection: { path: "tasks", status: "valid", reasons: [] },
@@ -1817,7 +1817,7 @@ describe("collection IPC contracts (Phase 2 views)", () => {
   it("accepts a record populated up to the shared schema field limit", () => {
     // An agent-authored collection can legally carry more than 1,000 fields;
     // the transport cap follows MAX_SCHEMA_COLLECTION_ITEMS, not a private
-    // bound (PR #996 round 3).
+    // bound.
     const values = Array.from({ length: 1_500 }, (_, index) => ({
       field: `field_${index}`,
       value: index,
@@ -3139,7 +3139,7 @@ describe("plugin guest SDK IPC contract", () => {
   });
 });
 
-describe("workspace versions IPC contract (PR 0M-4)", () => {
+describe("workspace versions IPC contract", () => {
   it("accepts well-formed version payloads and results", () => {
     expect(
       CreateWorkspaceVersionPayload.parse({
@@ -3225,7 +3225,7 @@ describe("workspace versions IPC contract (PR 0M-4)", () => {
   });
 });
 
-describe("try-in-version IPC contract (PR 0N-2)", () => {
+describe("try-in-version IPC contract", () => {
   it("accepts a well-formed gesture payload and state shapes", () => {
     expect(
       TryInWorkspaceVersionPayload.parse({
@@ -3312,7 +3312,7 @@ describe("try-in-version IPC contract (PR 0N-2)", () => {
   });
 });
 
-describe("sync status IPC contract (#505, #540)", () => {
+describe("sync status IPC contract", () => {
   it("refuses a status that cannot say why history is off", () => {
     const status = {
       state: "synced",
@@ -3382,7 +3382,7 @@ describe("sync status IPC contract (#505, #540)", () => {
   });
 });
 
-describe("engine history and linked Chats IPC contract (PR 0M-5)", () => {
+describe("engine history and linked Chats IPC contract", () => {
   it("admits the auto-provisioned agent channel kind", () => {
     expect(
       ChatChannelRecord.parse({
@@ -3923,7 +3923,7 @@ describe("engine Y.Doc update IPC contract", () => {
   });
 });
 
-// A refusal is data the engine PERSISTS into the registry and this schema
+// A refusal is data the engine persists into the registry and this schema
 // reads back. The relay picks the op kind, so the engine replaces an unusable
 // one with a bounded placeholder before recording it
 // (`crates/dohc-engine-sync/src/relay.rs`, `ShareViewRefusal::new`). These are
@@ -3967,16 +3967,16 @@ describe("a persisted share refusal stays readable", () => {
   it("rejects the raw values the placeholder stands in for", () => {
     expect(
       () => WorkspaceSummary.parse(summary("")),
-      "MUTATION: an empty op kind reaches the registry and the listing that reads it back",
+      "an empty op kind reaches the registry and the listing that reads it back",
     ).toThrow();
     expect(
       () => WorkspaceSummary.parse(summary("k".repeat(200))),
-      "MUTATION: an oversized op kind reaches the registry and breaks every later listing",
+      "an oversized op kind reaches the registry and breaks every later listing",
     ).toThrow();
   });
 });
 
-// #718: aggregate chat reads answer from the local store after ONE bounded
+// Aggregate chat reads answer from the local store after one bounded
 // shared-channel pass. The remainder rides the response so an agent reading it
 // through the CLI or MCP can see the answer is partially fresh — a console line
 // reaches nobody. Absent means fully covered, so the field can never be zero.
@@ -4006,7 +4006,7 @@ describe("partial-freshness marker on aggregate chat reads", () => {
       ];
       expect(
         () => schema.parse({ ...base(), sharedChannelRowsUncovered: 0 }),
-        `MUTATION (${name}): "0 rows uncovered" is a full refresh reported as a partial one`,
+        `${name}: "0 rows uncovered" is a full refresh reported as a partial one`,
       ).toThrow();
     }
   });
@@ -4050,11 +4050,11 @@ describe("joined workspace passphrase boundary", () => {
   });
 });
 
-// #646 PR3a. The share-changes channels cross a boundary between two
+// The share-changes channels cross a boundary between two
 // accounts: one side's relay body becomes the other side's review screen, and
 // accepting writes into the reviewer's own workspace. Every field is checked
 // rather than coerced, and a malformed one is refused whole.
-describe("share changes IPC contract (#646 PR3a)", () => {
+describe("share changes IPC contract", () => {
   const proposal = () => ({
     proposalId: "proposal-1",
     shareId: "share-1",
@@ -4063,14 +4063,14 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     ops: 2,
   });
 
-  // The listing a timer polls. It says WHO and HOW MANY; the file rows come
+  // The listing a timer polls. It says who and how many; the file rows come
   // from the one proposal a granter opens.
   it("carries a granter's review listing as counts, with no file rows", () => {
     const parsed = ListShareProposalsResult.parse({ proposals: [proposal()] });
     expect(parsed.proposals[0]?.ops).toBe(2);
     expect(
       Object.keys(parsed.proposals[0] ?? {}).sort(),
-      "MUTATION: carrying file rows on the polled listing costs a base resolution " +
+      "carrying file rows on the polled listing costs a base resolution " +
         "per file of every open proposal on every tick",
     ).toEqual(["createdAtMs", "ops", "proposalId", "proposedByEmail", "shareId"]);
   });
@@ -4089,7 +4089,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
         ListShareProposalsResult.parse({
           proposals: [{ ...proposal(), ops: -1 }],
         }),
-      "MUTATION: a negative count renders a review nobody can have",
+      "a negative count renders a review nobody can have",
     ).toThrow();
     expect(() =>
       ListMyShareChangesResult.parse({
@@ -4116,7 +4116,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
           proposedByEmail: null,
           files: [{ opIndex: 0, path: "a.md", operation: "write", afterByteLength: 1 }],
         }),
-      "MUTATION: an absent drift flag reads as `not drifted` and hides the warning",
+      "an absent drift flag reads as `not drifted` and hides the warning",
     ).toThrow();
   });
 
@@ -4170,7 +4170,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     ).toBeNull();
   });
 
-  // The review row describes a file WITHOUT its content, which is what lets
+  // The review row describes a file without its content, which is what lets
   // one review carry a repository-sized folder. A row that carried text again
   // would put every file's two sides back into the opening read.
   it("states no content on a review row", () => {
@@ -4190,7 +4190,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     });
     expect(
       Object.keys(parsed.files[0] ?? {}).sort(),
-      "MUTATION: carrying text on the row restores the eager read this bound depends on",
+      "carrying text on the row restores the eager read this bound depends on",
     ).toEqual(["afterByteLength", "drifted", "opIndex", "operation", "path"]);
   });
 
@@ -4254,7 +4254,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
 
   // The bound that decides whether a review can be read at all. `incomingText`
   // is validated by the EDITOR's text bound, so main must guard the blob it
-  // fetches with the SAME number — a larger guard admits a body this schema
+  // fetches with the same number — a larger guard admits a body this schema
   // then refuses, and one unreadable file takes every other file in the
   // review down with it.
   it("refuses an incoming side over the editor's text bound, and admits one at it", () => {
@@ -4267,26 +4267,26 @@ describe("share changes IPC contract (#646 PR3a)", () => {
         ReadShareProposalFileContentResult.parse(
           row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES + 1)),
         ),
-      "MUTATION: guarding at a LARGER bound sends a body this schema refuses",
+      "guarding at a LARGER bound sends a body this schema refuses",
     ).toThrow();
     expect(
       ReadShareProposalFileContentResult.parse(
         row("x".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
       ).incomingText?.length,
     ).toBe(WORKSPACE_TEXT_EDITOR_MAX_BYTES);
-    // BYTES, not characters. One "é" is two bytes in UTF-8, so a string of
-    // exactly the bound in CHARACTERS is twice the bound in bytes — and a
+    // Bytes, not characters. One "é" is two bytes in UTF-8, so a string of
+    // exactly the bound in characters is twice the bound in bytes — and a
     // guard that counted characters would admit a body the relay then refuses.
     expect(
       () =>
         ReadShareProposalFileContentResult.parse(
           row("é".repeat(WORKSPACE_TEXT_EDITOR_MAX_BYTES)),
         ),
-      "MUTATION: counting characters instead of bytes doubles the real bound",
+      "counting characters instead of bytes doubles the real bound",
     ).toThrow();
   });
 
-  // What a submit LEFT BEHIND is not optional. Softened to a default, a
+  // What a submit left behind is not optional. Softened to a default, a
   // recipient is told everything went when some of it did not.
   it("refuses a submit result that does not say what it left behind", () => {
     expect(() =>
@@ -4313,7 +4313,7 @@ describe("share changes IPC contract (#646 PR3a)", () => {
     );
     expect(
       () => WithdrawShareChangesResult.parse({ state: "accepted" }),
-      "MUTATION: a widened withdraw result tells the sender their changes are back when the granter has them",
+      "a widened withdraw result tells the sender their changes are back when the granter has them",
     ).toThrow();
   });
 
@@ -4376,14 +4376,13 @@ describe("one driver id, every contract on its path", () => {
     expect(DohcPluginManifest.safeParse(manifestWith(atCap)).success).toBe(true);
     expect(AgentPanelSnapshotResult.parse(panelWith(atCap)).selectedDriverId)
       .toBe(atCap);
-    // MUTATION (the try payload keeps a tighter bound): the panel offers this
-    // driver, the dialog posts it, and this one boundary refuses it.
     expect(
       TryInWorkspaceVersionPayload.parse({
         workspaceId: "ws-try",
         task: "tidy the notes",
         driverId: atCap,
       }).driverId,
+      "the try payload keeps a tighter bound: the panel offers this driver, the dialog posts it, and this one boundary refuses it.",
     ).toBe(atCap);
   });
 
@@ -4408,8 +4407,6 @@ describe("one driver id, every contract on its path", () => {
       entry: "plugin.mjs",
       drivers: [{ id: "fixture-harness", displayName: name }],
     }).success).toBe(true);
-    // MUTATION (the two display-name bounds drift apart): a manifest dohc
-    // accepts names a driver the panel cannot describe.
     expect(
       AgentPanelSnapshotResult.parse({
         drivers: [
@@ -4424,6 +4421,7 @@ describe("one driver id, every contract on its path", () => {
         session: null,
         selectedDriverId: "fixture-harness",
       }).drivers[0]?.displayName,
+      "the two display-name bounds drift apart: a manifest dohc accepts names a driver the panel cannot describe.",
     ).toBe(name);
   });
 });

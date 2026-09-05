@@ -434,8 +434,6 @@ mod tests {
 
     #[tokio::test]
     async fn completion_handoff_precedes_cancel_registry_release() {
-        // MUTATION: invoke before_cancel_release after removing the supervisor
-        // cancel entry -> cancel(77) returns false and the egress stays live.
         let supervisor = Arc::new(Supervisor::new(config(1, 1), Arc::new(BlobCompletion)));
         let hook_supervisor = Arc::clone(&supervisor);
         let handed_off = Arc::new(Mutex::new(None::<CancelSignal>));

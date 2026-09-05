@@ -8,7 +8,7 @@ import {
   type PMNodeLike,
 } from './inlineAtomPlugin'
 
-// Offline test of the decoration RANGE logic (the offset-sensitive,
+// Offline test of the decoration range logic (the offset-sensitive,
 // previously-untested surface). No ProseMirror/jsdom — a hand-built
 // doc whose `descendants` mirrors ProseMirror's (node, pos, parent).
 
@@ -58,7 +58,7 @@ describe('computeAtomRanges — offsets', () => {
   })
 })
 
-describe('computeAtomRanges — code is verbatim (the bug Codex flagged)', () => {
+describe('computeAtomRanges — code is verbatim', () => {
   it('skips Tiptap inline-code mark (`inlineCode`)', () => {
     expect(
       computeAtomRanges(fakeDoc([{ text: '{hours: 6}', pos: 1, mark: 'inlineCode' }])),

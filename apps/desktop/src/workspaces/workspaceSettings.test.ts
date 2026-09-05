@@ -24,7 +24,7 @@ import { startWorkspaceWatch } from "./workspaceWatcher";
 import { createTestScratch } from "./testTemp";
 
 // A seam for the write-ordering test below: every settings read and write
-// resolves the metadata directory first, so a gate here can hold ONE of them
+// resolves the metadata directory first, so a gate here can hold one of them
 // open while another write is fired. Pass-through until a test arms it.
 const metadataGate = vi.hoisted(() => ({ pending: null as Promise<void> | null }));
 vi.mock("./workspaceMetadata", async (importOriginal) => {
@@ -89,7 +89,7 @@ describe("workspace settings model", () => {
     });
   });
 
-  it("WS-H1 flag flip: the engine defaults ON everywhere absent, and explicit false still opts out", () => {
+  it("the engine defaults on everywhere absent, and explicit false still opts out", () => {
     // The single-source default: the schema group default, the canonical
     // DEFAULT_WORKSPACE_SETTINGS, and a from-nothing parse must all agree ON.
     expect(DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha).toBe(true);
@@ -192,7 +192,7 @@ describe("workspace settings file store", () => {
       source: "stored",
     });
     // WS-H1 flag-flip regression: this pre-experimental on-disk file has no
-    // experimental key, and it must OPEN FLAGGED (engine on) — the exact
+    // experimental key, and it must open flagged (engine on) — the exact
     // cold-adoption read engineCaptureGate performs at workspace open.
     expect(result.settings.experimental.workspaceEngineAlpha).toBe(true);
   });
@@ -228,7 +228,7 @@ describe("workspace settings file store", () => {
     // readers share one schema, so neither may turn the engine ON for a body it
     // rejects. They differ in what they report: this reader recovers to
     // engine-off settings, and MCP answers "unknown" rather than naming an
-    // opt-out it cannot read (#641).
+    // opt-out it cannot read.
     for (const body of [
       JSON.stringify({ version: 2 }),
       JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
@@ -266,7 +266,7 @@ describe("workspace settings file store", () => {
   it("an untrustworthy .dohc FOLDER reads as opted out and names the folder", async () => {
     // The metadata resolver refuses a non-directory .dohc by throwing, and
     // its contract says readers stay tolerant. Left uncaught, the throw
-    // reached the #505 build-failure notice, whose restart step repeats the
+    // reached the build-failure notice, whose restart step repeats the
     // identical failure — the folder, not the app session, is what is broken.
     const root = await tempRoot();
     await writeFile(join(root, ".dohc"), "a file squatting the metadata dir");
@@ -280,7 +280,7 @@ describe("workspace settings file store", () => {
 
   it("an unreadable settings file stops the engine capture gate", async () => {
     // The gate is the reader that decides whether anything is recorded, so the
-    // fail-closed read is asserted THROUGH it, not only at the file layer.
+    // fail-closed read is asserted through it, not only at the file layer.
     const root = await tempRoot();
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     expect(await workspaceEngineEnabled(root)).toBe(true);
@@ -290,7 +290,7 @@ describe("workspace settings file store", () => {
   });
 
   it("refuses to save over an unreadable file, and reset still replaces it", async () => {
-    // #483: over an unreadable file the caller's resolved settings carry the
+    // Over an unreadable file the caller's resolved settings carry the
     // fail-closed opt-out, so saving any control would record a deliberate
     // opt-out the user never chose and the warning would disappear with it.
     // The file must survive the save byte for byte.
@@ -319,7 +319,7 @@ describe("workspace settings file store", () => {
     expect((await readWorkspaceSettingsFile(root)).source).toBe("stored");
   });
 
-  it("applies a save to the file as it is NOW, not to the caller's copy", async () => {
+  it("applies a save to the file as it is now, not to the caller's copy", async () => {
     // The recovery path the refusal prescribes: the user repairs the file
     // while the Settings dialog still holds the resolved copy from before the
     // repair — a copy carrying the fail-closed opt-out. The next save must not
@@ -375,7 +375,7 @@ describe("workspace settings file store", () => {
     expect(await readWorkspaceSettingsFile(root)).toEqual(saved);
   });
 
-  it("saves over a MISSING file — a new workspace is not born refused", async () => {
+  it("saves over a missing file — a new workspace is not born refused", async () => {
     const root = await tempRoot();
     expect(
       await saveWorkspaceSettingsFile(root, { privacy: { confirmExternalLinks: false } }),
@@ -409,7 +409,7 @@ describe("workspace settings file store", () => {
 
   it("a reset lands last over a save already in flight", async () => {
     // Reset shares the save queue. Off it, a patch already reading the file
-    // writes its merge back AFTER the reset returns, so the dialog says the
+    // writes its merge back after the reset returns, so the dialog says the
     // reset landed while the file sits somewhere the user never asked for.
     const root = await tempRoot();
     await writeWorkspaceSettingsFile(root, {
@@ -432,7 +432,7 @@ describe("workspace settings file store", () => {
     const [saved, wasReset] = await Promise.all([save, reset]);
     expect(saved.settings.privacy.confirmExternalLinks).toBe(false);
     expect(wasReset.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
-    // The file ends where the user's LAST instruction put it. (The renderer
+    // The file ends where the user's last instruction put it. (The renderer
     // drops the older save's reply: SettingsDialog bumps the same request
     // token for a reset, so the stale response never repaints.)
     expect(await readWorkspaceSettingsFile(root)).toEqual({
@@ -460,7 +460,7 @@ describe("workspace settings file store", () => {
         .refusal,
     ).toBeTruthy();
 
-    // What the Reset control does. The directory is MOVED, never deleted: the
+    // What the Reset control does. The directory is moved, never deleted: the
     // user asked to replace their settings, not to lose whatever sat at that
     // path — so every descendant survives, in the workspace trash dohc already
     // teaches for anything it removes.
@@ -488,7 +488,7 @@ describe("workspace settings file store", () => {
   it("a reset over a FILE squatting .dohc/trash names the squatter, never a raw errno", async () => {
     // Reset moves the settings-path squatter into .dohc/trash. A plain file
     // at .dohc/trash made that mkdir throw raw "EEXIST: file already exists,
-    // mkdir …" straight into the Settings dialog (#544), while reset is the
+    // mkdir …" straight into the Settings dialog, while reset is the
     // advertised recovery from an unreadable settings file. The refusal must
     // name .dohc/trash, what squats it, and the way out.
     const root = await tempRoot();
@@ -508,7 +508,7 @@ describe("workspace settings file store", () => {
   // Reset is what an unreadable settings file tells the user to reach for, and
   // it runs through the metadata resolver first. A FILE at .dohc used to be
   // refused in developer vocabulary ("must be a real directory inside the
-  // workspace") — the wrong noun for this surface, and no next step (#586).
+  // workspace") — the wrong noun for this surface, and no next step.
   it("a reset when a FILE squats .dohc names the squatter in the same words", async () => {
     const root = await tempRoot();
     await writeFile(join(root, ".dohc"), "squatting");
@@ -530,7 +530,7 @@ describe("workspace settings file store", () => {
     ).rejects.toThrow(
       "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
     );
-    // The READ stays tolerant, like the symlinked-file case below: fail
+    // The read stays tolerant, like the symlinked-file case below: fail
     // closed (opted out, warning names the folder), and never follow the
     // link — nothing is read from or written into the link target.
     const read = await readWorkspaceSettingsFile(root);
@@ -573,7 +573,7 @@ describe("workspace settings writes never reach history", () => {
       mode: defaultWorkspaceMode("personal"),
     };
 
-    // Retirement Phase C: the engine capture is the only recorder — assert
+    // The engine capture is the only recorder — assert
     // against what the watcher enqueues into it, not a legacy store.
     const capturedPaths: string[] = [];
     let resolveFirst: (() => void) | null = null;

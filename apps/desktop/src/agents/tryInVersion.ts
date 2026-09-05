@@ -1,5 +1,5 @@
 // PR 0N-2 "Try it in a version" — the agent-loop gesture. One main-side
-// orchestration that COMPOSES existing operations, never re-implements them:
+// orchestration that composes existing operations, never re-implements them:
 //
 //   1. name the fork after the task ("Try: <short snippet>", suffixed on
 //      collision),
@@ -35,7 +35,7 @@ export interface TryVersionOperations {
   listVersions(): Promise<TryVersionSnapshotLike>;
   createVersion(name: string): Promise<TryVersionSnapshotLike>;
   // The review card needs the count only; counting reads the engine's
-  // metadata listing and hydrates no text (#562).
+  // metadata listing and hydrates no text.
   compareVersionsChangedCount(sourceVersionId: string): Promise<number>;
 }
 

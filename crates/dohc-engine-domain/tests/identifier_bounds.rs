@@ -6,9 +6,9 @@
 //! `moment.objectId`, and the moment id across the snapshot and the moment,
 //! and reserves no response bytes for either. So an identifier no rule bounds
 //! turns a request that fits its 8 MiB control frame into a response that
-//! cannot — after the write has committed (#654).
+//! cannot — after the write has committed.
 //!
-//! This is NOT the bound on a conflict row's identifiers.
+//! This is not the bound on a conflict row's identifiers.
 //! `CONFLICT_METADATA_BUDGET_BYTES` owns those, derived from what one
 //! `conflicts.list` page can serve, and it admits a far longer id on purpose.
 
@@ -51,8 +51,6 @@ fn open(scratch: &ScratchDir) -> EngineStore {
 /// constraint, the limit, the unit and the observed length — everything an
 /// agent needs to shorten the id it sent.
 ///
-/// MUTATION: drop the `bounded_identifier` call from `normalized_write_input`
-/// and the object-id case commits instead of refusing.
 #[test]
 fn an_over_long_identifier_is_refused_with_its_measurements() {
     let scratch = ScratchDir::new().expect("scratch");

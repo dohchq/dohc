@@ -556,7 +556,7 @@ export function ProductDemo() {
       </header>
 
       <div className="demo-workbench">
-        {/* The demo's chats panel is currently UNREACHABLE: this prop was the
+        {/* The demo's chats panel is currently unreachable: this prop was the
             only thing that could select it, and ActivityBar stopped accepting
             a chats prop in eb2c578b when chats became the app's right-side
             panel. React silently drops unknown props, so the toggle has been

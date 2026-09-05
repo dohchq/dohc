@@ -84,8 +84,6 @@ describe("queryWorkspaceSearchDaemon", () => {
   });
 
   it("follows an empty page when its continuation cursor advances", async () => {
-    // MUTATION: treat an empty result page as zero progress and the second
-    // bounded scan page is never requested.
     const queryPage = vi
       .fn()
       .mockResolvedValueOnce({
@@ -129,8 +127,6 @@ describe("queryWorkspaceSearchDaemon", () => {
   });
 
   it("restarts from page one when the active version changes", async () => {
-    // MUTATION: ignore restartRequired and the final array mixes old-generation
-    // first.md with new-generation replacement.md.
     const queryPage = vi
       .fn()
       .mockResolvedValueOnce({
@@ -188,8 +184,6 @@ describe("queryWorkspaceSearchDaemon", () => {
   });
 
   it("returns null when the workspace becomes stale after a page resolves", async () => {
-    // MUTATION: remove the post-page isCurrent guard and this completed page is
-    // surfaced after the renderer has switched workspaces.
     const queryPage = vi.fn().mockResolvedValue({
       results: [
         {
@@ -225,8 +219,6 @@ describe("queryWorkspaceSearchDaemon", () => {
   });
 
   it("converts astral preview byte offsets to in-bounds UTF-16 offsets", async () => {
-    // MUTATION: pass Rust byte offsets through and matchEnd exceeds the
-    // JavaScript preview length, causing the IPC result validator to reject it.
     const prefix = "😀".repeat(80);
     const preview = `${prefix}needle`;
     const matchStart = Buffer.byteLength(prefix);

@@ -15,7 +15,7 @@ describe("splitMarkdownBlocks", () => {
     const doc = `${filler}\n\n${fence}\n\n${filler}`;
     const chunks = splitMarkdownBlocks(doc);
     expect(chunks.length).toBeGreaterThan(1);
-    // The full fence (including its interior blank lines) lives in ONE chunk.
+    // The full fence (including its interior blank lines) lives in one chunk.
     const holders = chunks.filter((c) => c.includes("const a = 1;"));
     expect(holders).toHaveLength(1);
     expect(holders[0]).toContain("const b = 2;");

@@ -4,7 +4,7 @@ import type { PluginAutomationDeclaration } from "./pluginManifestSchema";
 import type { PluginPipelineStatusEvent } from "./PluginPipeline";
 import type { PluginAutomationRunAuthority } from "./pluginSdkHost";
 
-// The origin-device automation executor for ONE workspace (ADR 0008).
+// The origin-device automation executor for one workspace (ADR 0008).
 //
 // It keeps the engine's automation subscriptions in step with the installed,
 // enabled plugins' declared automations, and drains the engine's durable
@@ -21,7 +21,7 @@ const MAX_SETTLE_ERROR_CHARS = 1000;
 // never resolves would otherwise wedge this workspace's serial drain for
 // good. Deliberately shorter than the engine reaper's idle bound
 // (AUTOMATION_CLAIM_REAP_IDLE_MS, 10 minutes): the deadline settles the
-// claim failed HERE first, so the reaper never requeues a claim whose
+// claim failed here first, so the reaper never requeues a claim whose
 // handler this desktop is still holding. The risk this accepts: if the
 // desktop dies with a run in flight, the reaper's requeue runs the handler
 // a second time — dohc bounds the handler, it does not retry it, and
@@ -68,7 +68,7 @@ export interface AutomationEngineAdapter {
  * How a run attempt ended. "completed" is the handler resolving. "refused"
  * is the host declining to take the run at all (mid-change on that plugin,
  * or closing) — transient, so the claim is deferred, never settled failed.
- * A thrown handler REJECTS instead; that one is terminal.
+ * A thrown handler rejects instead; that one is terminal.
  */
 export type PluginAutomationRunOutcome = "completed" | "refused";
 
@@ -372,7 +372,7 @@ export class PluginAutomations {
         // Startup ordering: claimNext serves the oldest pending claim
         // workspace-wide, but `registered` fills per plugin as each one's
         // pipeline status lands. An installed declarer that has not
-        // registered YET is not a failure — that plugin's own reconcile
+        // registered yet is not a failure — that plugin's own reconcile
         // re-drains this claim.
         return "defer";
       }

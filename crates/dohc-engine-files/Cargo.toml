@@ -26,7 +26,7 @@ thiserror = "2"
 # OS thread (never the async runtime); commands flow over tokio::sync channels
 # and the worker receives them via `blocking_recv` — the CAL-2 actor model.
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
-# Cooperative cancellation tree (PORTING.md §12): checked BETWEEN bounded
+# Cooperative cancellation tree: checked BETWEEN bounded
 # units (per-file / per-batch), never inside a hash of a single file's stream.
 tokio-util = "0.7"
 # Native workspace notifications. The watcher owns `RecommendedWatcher` on a

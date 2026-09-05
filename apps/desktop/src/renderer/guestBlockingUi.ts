@@ -39,7 +39,7 @@ export function removeOverlay(id: symbol): void {
 /** True while `id` is the overlay a keystroke belongs to. Nested overlays each
  * listen on document, and listeners on one node all run for the same event
  * regardless of stopPropagation — without this, one Escape closed every open
- * overlay instead of the one on top (#779 round 4 finding 4). */
+ * overlay instead of the one on top. */
 export function isTopOverlay(id: symbol): boolean {
   return escapeStack[escapeStack.length - 1] === id;
 }

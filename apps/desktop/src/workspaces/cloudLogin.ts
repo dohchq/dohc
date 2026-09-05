@@ -9,7 +9,7 @@ import { canonicalCloudOrigin } from "./cloudConfiguration";
 // a self-host server): start() asks the server for a short user code, the
 // user approves it in the system browser, poll() exchanges the device code
 // for a session token once approved. The token is persisted via the injected
-// store (safeStorage-encrypted in production) and NEVER returned to callers —
+// store (safeStorage-encrypted in production) and never returned to callers —
 // the renderer only ever sees status + email.
 
 const CLIENT_ID = "dohc-desktop";
@@ -17,7 +17,7 @@ const CLIENT_ID = "dohc-desktop";
 // The invalid-session marker: a session the relay proved dead whose
 // credential record could not be deleted. It persists across restarts so the
 // dead record can never be read back as connected, and it holds a token
-// HASH, never the token.
+// hash, never the token.
 export interface InvalidSessionMarker {
   serverUrl: string;
   userId: string;
@@ -45,11 +45,11 @@ export interface CloudLogin {
   poll(): Promise<{ status: "pending" | "complete" | "denied" | "expired"; email?: string }>;
   status(): Promise<{ connected: boolean; email?: string; serverUrl?: string; relayUrl?: string }>;
   logout(): Promise<void>;
-  // Atomically clear the saved session ONLY while it still matches the given
+  // Atomically clear the saved session only while it still matches the given
   // identity. Runs inside the store's mutation queue, so a login save cannot
   // land between the compare and the clear — a 401 from an outgoing session
   // can never delete a login that just completed. Unlike logout, it does not
-  // cancel an in-progress login attempt: the attempt belongs to the NEXT
+  // cancel an in-progress login attempt: the attempt belongs to the next
   // session, not the dead one.
   invalidateSessionIf(expected: {
     serverUrl: string;
@@ -66,8 +66,8 @@ export interface CompletedCloudLoginSessionOptions {
   closeRelayTransportWorkspaces(): Promise<void>;
   refreshCredentialCache(): Promise<void>;
   reconcileCloud(): void;
-  // The immediate broadcast, fired at the clear, BEFORE cleanup that can
-  // stall. The caller computes the INCOMING session's identity before this
+  // The immediate broadcast, fired at the clear, before cleanup that can
+  // stall. The caller computes the incoming session's identity before this
   // transition starts and sends that — never a signed-out interim, which a
   // same-account rotation would read as a switch and clear rows the
   // same-key rule exists to preserve.
@@ -213,7 +213,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
       tokenHash: hashToken(session.token),
     };
   }
-  // Dead by the in-memory tombstone OR by the PERSISTED marker — the marker
+  // Dead by the in-memory tombstone OR by the persisted marker — the marker
   // is what survives a restart while the store still holds the dead record.
   async function sessionIsDead(credentials: CloudCredentials): Promise<boolean> {
     if (matchesInvalidatedSession(credentials)) return true;
@@ -449,7 +449,7 @@ export function createCloudLogin(options: CloudLoginOptions): CloudLogin {
           await options.store.clearInvalidMarker().catch(() => undefined);
         } catch (error) {
           // Deletion failed, but the session is still dead: hold the
-          // in-memory tombstone AND persist the marker (best-effort), so
+          // in-memory tombstone and persist the marker (best-effort), so
           // even a restart cannot read the dead record back as connected.
           // Fail loudly — the next read or invalidation retries the
           // deletion.

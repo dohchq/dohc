@@ -45,7 +45,7 @@ import { spawn } from "node:child_process";
  * The cross-device proof for the plugin design's marquee security claim:
  * "executed code is device-approved, not just workspace-synced."
  *
- * Real sync (#356) replicates `plugins/` source like any other workspace
+ * Real sync replicates `plugins/` source like any other workspace
  * content. This suite runs two real daemons through one real relay and asks
  * what device B does with plugin source it never approved. The pin is
  * positive, not a status read: device B's plugin host really imports and runs
@@ -370,7 +370,7 @@ function statusOf(device: Device): string | undefined {
  * at all (main.ts:2621), so it can execute nothing until the next reopen —
  * the path this test drives.
  *
- * An OPEN workspace holds at pull time instead. The pipeline hears about disk
+ * An open workspace holds at pull time instead. The pipeline hears about disk
  * changes through `handleWatcherEvents`, whose one caller is `main.ts`'s
  * `onWatcherBatch` (main.ts:2229) by way of `onSettledBatch`
  * (workspaceActivity.ts:243). Expected-event suppression does not hide the
@@ -477,7 +477,7 @@ it.skipIf(engine.missing)(
       expect(await readFile(join(rootB, `${PLUGIN_DIR}/src/index.ts`), "utf8"))
         .toBe(pluginEntrySource("one"));
 
-      // 3. THE CLAIM: B discovers the plugin and runs not one byte of it.
+      // 3. The claim: B discovers the plugin and runs not one byte of it.
       // B has no approval record for it, because an approval lives in the
       // device's own userData and never travels with the workspace.
       deviceB = await openDevice(rootB, stateB);

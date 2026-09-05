@@ -52,8 +52,8 @@ describe("engineOriginLabel", () => {
   });
 });
 
-// PR 0N-1: agent-authored moments display as "<User Name>'s agent" — the
-// SAME formatting rule the chat rail uses — while everything else keeps its
+// Agent-authored moments display as "<User Name>'s agent" — the
+// same formatting rule the chat rail uses — while everything else keeps its
 // actor-neutral origin label.
 describe("engineMomentSourceLabel", () => {
   it("shows an agent-authored moment as \"<User Name>'s agent\"", () => {

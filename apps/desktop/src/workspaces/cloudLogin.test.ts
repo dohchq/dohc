@@ -608,7 +608,7 @@ describe("completed cloud login session", () => {
       "clear credentials",
       // Immediately after the clear — engine cleanup can stall behind an
       // in-flight sync pass, and views must not wait on it. This broadcast
-      // carries the INCOMING identity the caller computed before the clear.
+      // carries the incoming identity the caller computed before the clear.
       "notify session changing",
       "stop engines",
       "close relay workspaces",
@@ -794,7 +794,7 @@ describe("cloud logout transition", () => {
   });
 });
 
-// The 401 path's persistent invalidation: ONE serialized compare-and-clear
+// The 401 path's persistent invalidation: one serialized compare-and-clear
 // inside the store's mutation queue. A login save can never land between the
 // check and the clear — the queue orders them whole.
 describe("invalidateSessionIf", () => {
@@ -889,7 +889,7 @@ describe("invalidateSessionIf", () => {
   });
 
   // A failed deletion must not manufacture a live session: the record is
-  // still on disk, but the session layer KNOWS it is dead. The tombstone
+  // still on disk, but the session layer knows it is dead. The tombstone
   // holds until a deletion succeeds — status() reports disconnected and
   // credentials() stops handing the dead token to sync engines.
   it("tombstones a dead session whose deletion failed until a retry succeeds", async () => {
@@ -913,7 +913,7 @@ describe("invalidateSessionIf", () => {
     };
 
     // The deletion fails loudly — and the dead record stops answering. The
-    // marker also PERSISTS, so a restart cannot resurrect the session.
+    // marker also persists, so a restart cannot resurrect the session.
     await expect(login.invalidateSessionIf(identity)).rejects.toThrow(
       "store unavailable",
     );
@@ -990,7 +990,7 @@ describe("invalidateSessionIf", () => {
       }),
     ).rejects.toThrow("store unavailable");
 
-    // A NEW session lands (a completed login overwrote the record): the
+    // A new session lands (a completed login overwrote the record): the
     // tombstone names the dead token only, and the new session answers.
     store.saved = { ...SESSION_A, userId: "usr_b", token: "token-b" };
     await expect(login.status()).resolves.toMatchObject({ connected: true });

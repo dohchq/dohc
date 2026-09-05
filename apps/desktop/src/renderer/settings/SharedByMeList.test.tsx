@@ -67,7 +67,7 @@ describe("SharedByMeList", () => {
     expect(screen.queryByTestId("shared-by-me-revoke-start")).toBeNull();
   });
 
-  // Every row carries its level (#646). A badge shown only on some rows
+  // Every row carries its level. A badge shown only on some rows
   // teaches the reader nothing when it is absent.
   it("shows the level on every row, at whatever level the share carries", async () => {
     bridgeMock.listRelayShares.mockResolvedValue({
@@ -109,7 +109,7 @@ describe("SharedByMeList", () => {
     await screen.findByTestId("shared-by-me-row");
     expect(
       screen.queryByTestId("shared-by-me-copy"),
-      "MUTATION: handing out a code for a share the relay cannot read",
+      "handing out a code for a share the relay cannot read",
     ).toBeNull();
     expect(screen.queryByTestId("shared-by-me-revoke-start")).not.toBeNull();
     expect(screen.queryByTestId("share-access-badge")).toBeNull();
@@ -125,8 +125,8 @@ describe("SharedByMeList", () => {
     });
   });
 
-  // The row states what is waiting and opens the review that decides it
-  // (#646 PR3a). A grant inventory with a count is still an inventory.
+  // The row states what is waiting and opens the review that decides it.
+  // A grant inventory with a count is still an inventory.
   it("counts the changes waiting on a row and opens the review", async () => {
     const user = userEvent.setup();
     bridgeMock.listShareProposals.mockResolvedValue({
@@ -211,7 +211,7 @@ describe("SharedByMeList", () => {
     await user.click(await screen.findByTestId("shared-by-me-revoke-start"));
     expect(
       (await screen.findByTestId("shared-by-me-revoke-confirm")).textContent,
-      "MUTATION: ending a share silently discards work the recipient cannot resend",
+      "ending a share silently discards work the recipient cannot resend",
     ).toBe(
       "End this share and decline 2 changes friend@dohc.test sent? They cannot send them again.",
     );
@@ -239,7 +239,7 @@ describe("SharedByMeList", () => {
     await screen.findByTestId("shared-by-me-row");
     expect(
       screen.queryByTestId("shared-by-me-review"),
-      "MUTATION: offering a review for a share with no waiting changes",
+      "offering a review for a share with no waiting changes",
     ).toBeNull();
   });
 

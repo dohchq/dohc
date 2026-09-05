@@ -31,7 +31,7 @@ const DOHC_SCHEMA_VERSION = 1
 const PLAIN_TEXT_CONTENT_KIND = 'plain-text'
 
 // Match packages/ydoc-projection's rewriteCodeBlockFences/backtickFence rule.
-// This prevents content from closing its own fence (#704). Exported so every
+// This prevents content from closing its own fence. Exported so every
 // markdown-serializing editor surface (this module and MarkdownEditor.tsx's
 // live editor) registers the same widened fence instead of drifting again.
 // Named distinctly from extensions.ts's DohcCodeBlock, which parses the
@@ -146,7 +146,7 @@ export function getDohcProseMirrorSchema() {
 }
 
 // Renders BODY markdown (post-frontmatter — split a full document string
-// with parseFrontmatter first) to HTML through the SAME schema/extensions
+// with parseFrontmatter first) to HTML through the same schema/extensions
 // the editor and Y.Doc conversions use, so custom nodes (wikilinks,
 // callouts, highlight marks, task lists) render via their own renderHTML —
 // never a generic/lossy fallback. Used by the document export menu

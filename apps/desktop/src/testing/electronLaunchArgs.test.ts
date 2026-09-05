@@ -17,7 +17,7 @@ describe("electronLaunchArgs", () => {
 
   // Two concurrent runs must not share a user data dir: that directory is what
   // Electron keys its single-instance lock on, so a shared one makes the second
-  // app quit at launch (#530).
+  // app quit at launch.
   it("gives two runs different user data dirs", () => {
     const first = electronLaunchArgs({
       mainEntry: MAIN,

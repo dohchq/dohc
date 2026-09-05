@@ -17,8 +17,8 @@ import {
 // the SERVER side of a version switch safe (switchVersion settles+closes every
 // live engine Y.Doc session before materializing), but the OPEN EDITOR did not
 // re-bind: useEngineDoc keyed on (workspaceId, path, enabled), so switching the
-// active version while the SAME rich file stayed open left the editor showing
-// the OLD version's live doc. The fix keys useEngineDoc on the active version
+// active version while the same rich file stayed open left the editor showing
+// the old version's live doc. The fix keys useEngineDoc on the active version
 // (the shell's versionEpoch), so a switch flushes+reopens the session against
 // the now-active version's Y.Doc lineage — resume-never-reseed for a replicated
 // doc, reseed-from-the-freshly-materialized-file for a local-only doc. This
@@ -155,7 +155,7 @@ test("switching the active version while a rich doc stays open re-binds the edit
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(mainSentinel);
 
-    // Type a Draft-only edit into the LIVE editor and let the settle land — it
+    // Type a Draft-only edit into the live editor and let the settle land — it
     // must journal into Draft, never Main.
     const editor = page.getByTestId("markdown-editor");
     await editor.click();
@@ -168,9 +168,9 @@ test("switching the active version while a rich doc stays open re-binds the edit
     );
     await expect.poll(() => editorText(page), { timeout: 15_000 }).toContain(draftSentinel);
 
-    // THE RE-BIND: switch back to Main while the SAME file stays open. Before
+    // THE RE-BIND: switch back to Main while the same file stays open. Before
     // the fix the editor kept showing Draft's live doc; now it re-binds to
-    // Main's lineage — Main's content, WITHOUT the draft edit.
+    // Main's lineage — Main's content, without the draft edit.
     await switchVersionViaMenu(page, "Main");
     await waitForEngineEditor(page);
     await expect.poll(() => editorText(page), { timeout: 20_000 }).toContain(mainSentinel);

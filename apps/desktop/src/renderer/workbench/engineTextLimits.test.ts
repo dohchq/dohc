@@ -1,10 +1,10 @@
-// The conflict surface bounds what "Combine by hand" will edit (#536). That
+// The conflict surface bounds what "Combine by hand" will edit. That
 // bound is only honest while it stays inside what `conflicts.resolve` accepts,
 // and #569 changed what that is: there is no longer a cap on the merged body.
 // A resolve succeeds when the whole JSON-ENCODED request fits one control
 // frame, so what a body may weigh is whatever the rest of its request leaves.
 //
-// #566: the gate no longer restates the engine's number. It IMPORTS the
+// The gate no longer restates the engine's number. It imports the
 // contract from `@dohc/workspace-engine-client/limits` — a leaf module that
 // imports nothing, so a renderer can take it without pulling `node:crypto`
 // into the browser bundle — and proves the renderer's own editing bound fits
@@ -35,7 +35,7 @@ const RESOLVE_REQUEST_OVERHEAD_BUDGET = 128 * 1024;
 describe("the bound on what a combined copy can be edited to", () => {
   it("leaves a whole worst-case body inside the resolve frame", () => {
     // The worst case is not the raw byte count. U+0001 is one UTF-8 byte and
-    // SIX JSON-encoded ones, the highest ratio the encoder produces, so a body
+    // six JSON-encoded ones, the highest ratio the encoder produces, so a body
     // full of them is the largest a body at this bound can become on the wire.
     const worstCase = String.fromCharCode(1).repeat(
       CONFLICT_COMBINED_EDIT_MAX_BYTES,
@@ -49,7 +49,7 @@ describe("the bound on what a combined copy can be edited to", () => {
 
   it("sits above the largest healthy document, in the unit it is enforced in", () => {
     // Both numbers are UTF-8 bytes. Comparing the byte limit against a
-    // CHARACTER count proved nothing for any multi-byte script — see below.
+    // character count proved nothing for any multi-byte script — see below.
     expect(CONFLICT_COMBINED_EDIT_MAX_BYTES).toBeGreaterThan(
       CONFLICT_HEALTHY_DOCUMENT_MAX_BYTES,
     );
@@ -57,7 +57,7 @@ describe("the bound on what a combined copy can be edited to", () => {
 
   it("measures a multi-byte document in bytes, not characters", () => {
     // The case that made the unit matter: a CJK document well under the
-    // corpus's CHARACTER maximum, and over the bound in bytes. If the enforced
+    // corpus's character maximum, and over the bound in bytes. If the enforced
     // limit ever went back to counting characters, this document would be
     // accepted and then refused by the engine.
     const han = String.fromCodePoint(0x65e5);

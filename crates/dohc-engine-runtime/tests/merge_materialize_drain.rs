@@ -33,12 +33,10 @@ fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> Writ
     }
 }
 
-/// A fast-forwarded BINARY head must reach the folder in the same call. Its
+/// A fast-forwarded binary head must reach the folder in the same call. Its
 /// materialization job shares the moment's id (the generation-sharing contract
 /// for a binary write), where the text seams prefix theirs.
 ///
-/// MUTATION: look the job up under the text seam's `merge-mat_` prefix -> the
-/// merge reports `Error`, materializes nothing, and logo.png never lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -146,8 +144,6 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_merge_drains_materialization_before_rpc_return_even_when_completion_faults() {
-    // MUTATION: return the committed merge without draining merge-mat_ -> the
-    // injected materializer fault never fires and active.md remains "base".
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();

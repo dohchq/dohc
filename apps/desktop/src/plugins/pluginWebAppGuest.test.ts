@@ -283,9 +283,7 @@ describe("createPluginWebAppGuest", () => {
   it("creates the view with the hardened preferences and no preload", () => {
     const { created, guest } = createGuest();
     expect(created).toHaveLength(1);
-    // MUTATION (preload on the guest): a preload would grant the plugin's
-    // page a scripting foothold in the renderer's world.
-    expect(created[0]!.webPreferences).toEqual(
+    expect(created[0]!.webPreferences, "preload on the guest: a preload would grant the plugin's page a scripting foothold in the renderer's world.").toEqual(
       guestWebPreferences(pluginWebAppPartition(WORKSPACE_ROOT, PLUGIN_ID)),
     );
     expect(created[0]!.webPreferences).not.toHaveProperty("preload");
@@ -297,9 +295,7 @@ describe("createPluginWebAppGuest", () => {
   it("locks navigation to the started URL's own origin", () => {
     const { created } = createGuest();
     const view = created[0]!.view;
-    // MUTATION (harden against a fixed origin the guest never uses): the
-    // guest's own pages would be blocked and any other page allowed.
-    expect(view.navigate("http://127.0.0.1:52835/threads/1")).toBe(false);
+    expect(view.navigate("http://127.0.0.1:52835/threads/1"), "harden against a fixed origin the guest never uses: the guest's own pages would be blocked and any other page allowed.").toBe(false);
     expect(view.navigate("http://127.0.0.1:1/")).toBe(true);
     expect(view.navigate("https://example.com/")).toBe(true);
   });
@@ -309,19 +305,15 @@ describe("createPluginWebAppGuest", () => {
     const first = createGuest({ hardenedPartitions });
     expect(first.created[0]!.view.permissionHandlerSet).toBe(1);
 
-    // MUTATION (invert the hardened-partition branch): the first guest of a
-    // partition is the one that must be hardened, and it never would be.
     const second = createGuest({ hardenedPartitions });
-    expect(second.created[0]!.view.permissionHandlerSet).toBe(0);
+    expect(second.created[0]!.view.permissionHandlerSet, "invert the hardened-partition branch: the first guest of a partition is the one that must be hardened, and it never would be.").toBe(0);
     expect(hardenedPartitions.has(first.guest.partition)).toBe(true);
     expect(hardenedPartitions.size).toBe(1);
   });
 
   it("gives the credential to loadURL only, and reports the bare origin", () => {
     const { created, attached, guest } = createGuest();
-    // MUTATION (origin: started.url minus its fragment): the renderer and the
-    // registry would receive the credential-bearing URL's path instead.
-    expect(guest.origin).toBe("http://127.0.0.1:52835");
+    expect(guest.origin, "origin: started.url minus its fragment: the renderer and the registry would receive the credential-bearing URL's path instead.").toBe("http://127.0.0.1:52835");
     expect(attached).toEqual([
       {
         origin: "http://127.0.0.1:52835",
@@ -398,9 +390,7 @@ describe("clearPluginWebAppPartition", () => {
       },
     });
 
-    // MUTATION (clear a partition no guest ever used): uninstall would leave
-    // the real partition's session cookies for the next installation.
-    expect(cleared).toEqual([pluginWebAppPartition(WORKSPACE_ROOT, PLUGIN_ID)]);
+    expect(cleared, "clear a partition no guest ever used: uninstall would leave the real partition's session cookies for the next installation.").toEqual([pluginWebAppPartition(WORKSPACE_ROOT, PLUGIN_ID)]);
     expect(hardenedPartitions.size).toBe(0);
   });
 
@@ -454,9 +444,6 @@ describe("hardenGuestSession", () => {
 describe("createPluginWebAppGuest across instances of one web app", () => {
   const SECOND_INSTANCE_URL = "http://127.0.0.1:52836/pair#token=second";
 
-  // MUTATION (harden every guest against the first instance's origin, or
-  // against a partition-wide origin): one preview could navigate itself into
-  // another preview's server, which is a different site's content.
   it("locks each instance to its own origin, not its sibling's", () => {
     const first = createGuest();
     const second = createGuest({ url: SECOND_INSTANCE_URL });

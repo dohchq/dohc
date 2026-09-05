@@ -111,7 +111,7 @@ export interface WorkspaceSdkReadPort {
   readDatabase(path: string): Promise<DatabaseSnapshotView>;
   // Collection reads share the port's path scope with file reads: a port
   // scoped to a prefix filters its listing and refuses a collection or
-  // record outside it. This host validates path SHAPE only; the port owns
+  // record outside it. This host validates path shape only; the port owns
   // visibility, exactly like readText.
   listCollections(): Promise<CollectionListResult>;
   getCollection(params: CollectionGetParams): Promise<CollectionGetResult>;

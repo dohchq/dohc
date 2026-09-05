@@ -1,20 +1,20 @@
 // Criterion 1 — fidelity corpus (synthetic + harvested) through yrs.
 //
 // For each doc, the JS reference (Yjs 13.6.30 + @dohc/ydoc-projection) and
-// the Rust harness (yrs) must agree on CONTENT — canonical doc JSON (maps,
-// text deltas with attributes, full XML tree) AND the markdown projection —
+// the Rust harness (yrs) must agree on content — canonical doc JSON (maps,
+// text deltas with attributes, full XML tree) and the markdown projection —
 // in both directions:
-//   JS -> Rust : yrs applies the JS-encoded updates (in order AND in reverse
+//   JS -> Rust: yrs applies the JS-encoded updates (in order and in reverse
 //                order, exercising the pending-update store) and its content
 //                view equals the Yjs view.
 //   Rust -> JS : yrs re-encodes its full state; a fresh Y.Doc built from
-//                those bytes projects the SAME canonical JSON and markdown.
+//                those bytes projects the same canonical JSON and markdown.
 // Plus: state vectors agree semantically, cross diffs are no-ops, and a yrs
 // merge_updates of the whole log reconstructs the same content (compaction).
 //
 // Usage: pnpm --filter @dohc/yrs-spike-scripts fidelity [-- --require-harvested]
 // Harvested fixtures are optional for a dev run (scripts/harvest.mjs
-// produces them); CERTIFICATION runs must pass --require-harvested so the
+// produces them); certification runs must pass --require-harvested so the
 // real-lineage half of criterion 1 cannot silently drop out.
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
@@ -91,7 +91,7 @@ function loadCases(requireHarvested: boolean): { cases: DocCase[]; harvestedPres
     };
   });
   cases.push(...incrementalCases());
-  // "Present" means present AND non-degenerate: an empty manifest (e.g. the
+  // "Present" means present and non-degenerate: an empty manifest (e.g. the
   // wrong copied DB with no ydoc_docs) or a doc with zero blob files would
   // let certification report a pass with zero real durable lineages.
   let harvestedPresent = false;
@@ -135,8 +135,8 @@ function svMap(sv: Uint8Array): string {
 }
 
 // SPIKE FINDING (pinned by doc-05/doc-09 of the harvested corpus):
-// yDocToMarkdown is NOT read-only. y-prosemirror's createNodeFromYElement
-// DELETES a PM-schema-invalid element (e.g. an empty listItem, which is
+// yDocToMarkdown is not read-only. y-prosemirror's createNodeFromYElement
+// deletes a PM-schema-invalid element (e.g. an empty listItem, which is
 // CRDT-legal) from the Y.Doc as a side effect of projection. Projections in
 // this harness therefore always run on a throwaway doc built from encoded
 // state, never on a doc that later gets re-encoded for comparison.
@@ -144,7 +144,7 @@ function projectMarkdown(state: Uint8Array): { markdown: string; afterProjection
   const scratch = new Y.Doc();
   Y.applyUpdate(scratch, state);
   const markdown = yDocToMarkdown(scratch);
-  // The doc AFTER projection (post any schema-normalization deletions) — both
+  // The doc after projection (post any schema-normalization deletions) — both
   // lineages must normalize identically.
   return { markdown, afterProjection: canonicalContent(scratch, DOHC_SCHEMA) };
 }
@@ -154,10 +154,10 @@ function projectMarkdown(state: Uint8Array): { markdown: string; afterProjection
 // yrs RE-ENCODE emits nested map entries in nondeterministic (per-process)
 // order, while Yjs preserves insertion order. Convergence and semantic
 // content are unaffected; the only projection-visible surface is YAML key
-// order of NESTED frontmatter objects (top-level keys are sorted by
+// order of nested frontmatter objects (top-level keys are sorted by
 // orderFrontmatter). Markdown mismatches whose sole difference is
 // frontmatter key order are classified as this caveat, not a failure.
-// The caveat is admitted ONLY when: both markdowns carry frontmatter, the
+// The caveat is admitted only when: both markdowns carry frontmatter, the
 // bodies are byte-identical, and the two YAML docs parse deep-equal (so the
 // difference is strictly key sequence, nothing else).
 const FM_RE = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n)?([\s\S]*)$/;
@@ -181,7 +181,7 @@ function frontmatterOrderOnly(a: string, b: string): boolean {
 
 // yaml.load can return non-plain values (it parses `due: 2024-01-01` to a
 // Date), and stableStringify renders any non-plain object as "{}" — which
-// would make DIFFERENT dates compare equal and misclassify a real content
+// would make different dates compare equal and misclassify a real content
 // change as the non-failing key-order caveat. Stringify every non-plain
 // value so distinct values stay distinct.
 function yamlPlain(value: unknown): unknown {
@@ -215,7 +215,7 @@ function checkMarkdown(name: string, expected: string, actual: string, label: st
   check(name, false, () => `expected: ${JSON.stringify(expected.slice(0, 400))}\nactual:   ${JSON.stringify(actual.slice(0, 400))}`);
 }
 
-// undeclaredRoot placeholders compare equal WITHOUT their contents being
+// undeclaredRoot placeholders compare equal without their contents being
 // read — any occurrence means the declared schema no longer covers the doc
 // and the comparison is unsound. Hard failure.
 function checkNoUndeclared(name: string, ...contents: unknown[]): void {
@@ -293,7 +293,7 @@ async function runCase(rust: RustPeer, c: DocCase): Promise<void> {
   const rustProjection = projectMarkdown(rustState.update);
   checkMarkdown(`${c.name} / markdown projection Rust->JS`, jsMarkdown, rustProjection.markdown, "projection");
   // The projection's schema-normalization side effect (invalid-node deletion)
-  // must land IDENTICALLY on both lineages — a settle after either path
+  // must land identically on both lineages — a settle after either path
   // yields the same normalized doc.
   check(
     `${c.name} / post-projection normalization matches`,
@@ -403,7 +403,7 @@ async function bytesModeProbe(rust: RustPeer): Promise<void> {
     () => JSON.stringify(bytesText),
   );
 
-  // 2. Mid-char byte offset panics yrs — run on a DISPOSABLE peer (the panic
+  // 2. Mid-char byte offset panics yrs — run on a disposable peer (the panic
   // kills the child; the shared peer must survive the probe).
   const crashPeer = new RustPeer();
   let crashed = false;
@@ -424,15 +424,15 @@ async function bytesModeProbe(rust: RustPeer): Promise<void> {
   );
 }
 
-// SPIKE PROBE — truncation atomicity, pinned over EVERY cut point (fault
+// SPIKE PROBE — truncation atomicity, pinned over every cut point (fault
 // model: truncation only; arbitrary-byte robustness is future cargo-fuzz
-// work). NEW FINDING from the review batch: yjs 13.6.30 applyUpdate is NOT
+// work). NEW FINDING from the review batch: yjs 13.6.30 applyUpdate is not
 // atomic on malformed input — a rejected truncated update can leave a
 // partially-integrated prefix of the real items. yrs decodes fully before
 // applying, so it IS atomic. The invariants pinned here:
-//   - neither side ever ACCEPTS a truncated update (every cut rejects),
+//   - neither side ever accepts a truncated update (every cut rejects),
 //   - yrs state is byte-unchanged across every rejected cut (atomic),
-//   - yjs partial prefixes ALWAYS converge once the full update arrives
+//   - yjs partial prefixes always converge once the full update arrives
 //     (0 permanent divergences across every cut).
 async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
   const doc = new Y.Doc();
@@ -449,8 +449,8 @@ async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
   // Atomicity is certified at CRDT-STATE level, not just visible content: a
   // rejected cut that advanced the state vector, pending store, or
   // tombstones without changing visible text would silently break later
-  // diffs/compaction. Compare the encoded state vector AND full state
-  // re-encode byte-for-byte, after EVERY rejected cut.
+  // diffs/compaction. Compare the encoded state vector and full state
+  // re-encode byte-for-byte, after every rejected cut.
   const bytesEqual = (a: Uint8Array, b: Uint8Array) => Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
   const rustBaselineContent = await rust.content(id, DOHC_SCHEMA);
   const rustBaselineState = await rust.state(id);
@@ -519,7 +519,7 @@ async function truncationAtomicityProbe(rust: RustPeer): Promise<void> {
 }
 
 // Classifier regressions: distinct YAML timestamp VALUES (identical bodies)
-// must NOT be admitted as the key-order caveat (yaml.load parses them to
+// must not be admitted as the key-order caveat (yaml.load parses them to
 // Dates; a naive stringify collapsed all Dates to "{}"), while a pure key
 // reorder still must be.
 check(

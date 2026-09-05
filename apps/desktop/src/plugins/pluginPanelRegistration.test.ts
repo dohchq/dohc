@@ -215,7 +215,7 @@ describe("plugin panel registration", () => {
     })).rejects.toThrow(/Invalid asset path|escapes the workspace/);
   });
 
-  it("refuses to open a panel or web app from the failed candidate's own manifest when nothing could be recovered (#779 round 23 finding 1)", async () => {
+  it("refuses to open a panel or web app from the failed candidate's own manifest when nothing could be recovered", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const pluginRoot = join(workspace, "plugins", "hello-plugin");
     // The on-disk manifest here is the failed, never-approved candidate's
@@ -327,7 +327,7 @@ describe("plugin panel registration", () => {
     ).rejects.toThrow(/does not declare panel/);
   });
 
-  it("serves the panels of the manifest as it is now, not as first registered (#779 round 10 B7)", async () => {
+  it("serves the panels of the manifest as it is now, not as first registered", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const pluginRoot = join(workspace, "plugins", "hello-plugin");
     await writePlugin(pluginRoot);
@@ -413,7 +413,7 @@ describe("plugin panel registration", () => {
     ).toEqual({ id: "hello.write", title: "Write hello note" });
   });
 
-  it("forgets an uninstalled plugin, and only when uninstall succeeded (#779 round 10 B7)", () => {
+  it("forgets an uninstalled plugin, and only when uninstall succeeded", () => {
     const registration: RegisteredPlugin = {
       pluginRoot: "plugins/hello-plugin",
       manifest: { version: 1, name: "hello-plugin", entry: "plugin.mjs" },
@@ -448,7 +448,7 @@ describe("plugin panel registration", () => {
       directoryName: "winner-dir",
     };
     const registrations = new Map([["shared-id", registration]]);
-    // The loser at a DIFFERENT directory left — not the winner this id's
+    // The loser at a different directory left — not the winner this id's
     // registration actually traces to.
     forgetUninstalledPlugin({
       registrations,
@@ -457,7 +457,7 @@ describe("plugin panel registration", () => {
       released: true,
     });
     expect(registrations.get("shared-id")).toBe(registration);
-    // The winner's OWN directory leaving is still forgotten normally.
+    // The winner's own directory leaving is still forgotten normally.
     forgetUninstalledPlugin({
       registrations,
       pluginId: "shared-id",
@@ -476,7 +476,7 @@ describe("plugin panel registration", () => {
   // carry the pipeline's discovered name explicitly, never re-derive it.
   it("carries the discovered directoryName through registration, even when it differs from pluginRoot's own basename", () => {
     const registrations = new Map<string, RegisteredPlugin>();
-    // A symlinked plugin root's REAL target has a different final path
+    // A symlinked plugin root's real target has a different final path
     // segment than the directory the pipeline actually discovered this
     // plugin under.
     const remembered = rememberPluginRegistration(registrations, {
@@ -524,7 +524,7 @@ describe("plugin panel registration", () => {
     ).toThrow(/already running from another root/);
   });
 
-  it("releases a departed identity's registration on its removed event, so a rename plus reinstall can open panels again (#779 round 14 A5)", async () => {
+  it("releases a departed identity's registration on its removed event, so a rename plus reinstall can open panels again", async () => {
     const workspace = await scratch("dohc-plugin-panel-workspace-");
     const oldRoot = join(workspace, "plugins", "foo");
     await writePlugin(oldRoot);

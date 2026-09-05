@@ -13,10 +13,10 @@ type LaneMark = { committed: number; issued: number };
 // A lane of UI state that several reads compete to write, ordered by one issue
 // counter the lane shares with its siblings.
 //
-// The lane OWNS its state: React's setter never leaves this module. So a write
+// The lane owns its state: React's setter never leaves this module. So a write
 // cannot name a request it did not make, and a request cannot claim a lane it
 // says nothing about — the shape that let four responses write a lane they
-// never claimed (#636). Every write here takes the claim and the value in one
+// never claimed. Every write here takes the claim and the value in one
 // call, so neither half can be forgotten:
 //
 // `select` returns the lane's own value. It is a projection, not a writer: a
@@ -27,11 +27,11 @@ export type SnapshotLane<T> = {
   latest: () => T;
   // An answer. It writes the lane when it is newer than what the lane last
   // wrote — a request that is merely in flight has answered nothing, and one
-  // that FAILS never will, so superseding on ISSUE would throw away the only
+  // that fails never will, so superseding on ISSUE would throw away the only
   // answer there was.
   commit: (token: number, value: T) => void;
   // The user acted, so this value is newer than every request in flight. The
-  // committed mark jumps to the newest token ISSUED and the losing answers
+  // committed mark jumps to the newest token issued and the losing answers
   // lose by construction whenever they land. Dismissing a review is the case
   // that bites: it emits no replacement activity, so a restored card would sit
   // there until something unrelated refreshed.
@@ -39,14 +39,14 @@ export type SnapshotLane<T> = {
   // It moves `committed` and not `issued`: the user asked nothing. A failure
   // from the request they superseded is judged by `committed`, and stays quiet.
   set: (value: T) => void;
-  // The whole read, so BOTH ways it can settle face the same rule, and the
+  // The whole read, so both ways it can settle face the same rule, and the
   // request registers itself, so no caller can issue a read the lane does not
   // know about.
   //
   // A failure is an answer too, and asking it separately is how the rule leaks.
   // It may report, because a lane with no failure surface of its own has only
   // the banner to say a shown value is now old. It may report only when it is
-  // still the newest thing this lane asked — which covers BOTH orderings of a
+  // still the newest thing this lane asked — which covers both orderings of a
   // stale failure against a fresher request. The newer answer may already have
   // committed (then `committed` outranks it), or it may still be in flight
   // (then `issued` does). Both are the same fact: a failure whose question
@@ -54,7 +54,7 @@ export type SnapshotLane<T> = {
   // would claim the value on screen could not be read.
   //
   // A failure never advances either mark. A read that failed proves nothing,
-  // and an older read that still succeeds is the only answer anyone has (#507).
+  // and an older read that still succeeds is the only answer anyone has.
   settle: <R>(
     token: number,
     read: Promise<R>,

@@ -119,7 +119,7 @@ describe("reduceAgentNotifications coalescing", () => {
 
 describe("reduceAgentNotifications reference stability", () => {
   // The hook polls every ~1.5s for the app's life and feeds the result into
-  // setState; a no-op tick MUST return the SAME array so React bails out.
+  // setState; a no-op tick must return the same array so React bails out.
   it("returns the identical array on an idle (no-run) tick", () => {
     const prev: AgentNotification[] = [];
     expect(reduce(prev, input({ runId: null, status: "running" }))).toBe(prev);
@@ -144,14 +144,14 @@ describe("reduceAgentNotifications reference stability", () => {
     expect(next).toBe(cleared);
   });
 
-  it("allocates a NEW array when a real change occurs", () => {
+  it("allocates a new array when a real change occurs", () => {
     const prev: AgentNotification[] = [];
     const next = reduce(prev, input({ status: "completed", latestSummary: "done" }));
     expect(next).not.toBe(prev);
     expect(next).toHaveLength(1);
   });
 
-  it("allocates a NEW array when a run resumes and clears its notice", () => {
+  it("allocates a new array when a run resumes and clears its notice", () => {
     const blocked = reduce([], input({ status: "waiting-permission" }));
     const resumed = reduce(blocked, input({ status: "running" }));
     expect(resumed).not.toBe(blocked);
@@ -175,7 +175,7 @@ describe("reduceAgentNotifications auto-clear", () => {
     expect(nextPoll).toEqual([]);
   });
 
-  it("re-raises after a NEW run reaches the same state", () => {
+  it("re-raises after a new run reaches the same state", () => {
     const done = reduce([], input({ status: "completed", latestSummary: "done" }));
     const dismissed = new Set([done[0]!.id]);
     const cleared = dismissAgentNotification(done, done[0]!.id);
@@ -184,7 +184,7 @@ describe("reduceAgentNotifications auto-clear", () => {
     expect(newRun[0]!.runId).toBe("run-2");
   });
 
-  it("re-raises needs-input for a NEW permission on the same run after the first was dismissed", () => {
+  it("re-raises needs-input for a new permission on the same run after the first was dismissed", () => {
     // Permission A blocks the run.
     const blockedA = reduce(
       [],
@@ -201,7 +201,7 @@ describe("reduceAgentNotifications auto-clear", () => {
     // The run resumes — needs-input auto-clears.
     const resumed = reduce(afterDismiss, input({ status: "running" }), dismissed);
     expect(resumed).toEqual([]);
-    // The run hits a DIFFERENT permission — a fresh notice IS raised (not
+    // The run hits a different permission — a fresh notice IS raised (not
     // suppressed by the dismissed permission-A id).
     const blockedB = reduce(
       resumed,
@@ -217,7 +217,7 @@ describe("reduceAgentNotifications auto-clear", () => {
     expect(blockedB[0]!.body).toContain("rm b.md");
   });
 
-  it("still suppresses a re-poll of the SAME dismissed permission", () => {
+  it("still suppresses a re-poll of the same dismissed permission", () => {
     const blocked = reduce(
       [],
       input({ status: "waiting-permission", pendingPermissionTitle: "Run: rm a.md", pendingPermissionId: "perm-a" }),
@@ -311,10 +311,7 @@ describe("a login the agent's harness asks for", () => {
       }),
     );
 
-    // MUTATION (login-required does not outrank the run's own state): a
-    // running session raises nothing, and the failure that follows says the
-    // agent hit a problem instead of naming the sign-in it needs.
-    expect(raised).toHaveLength(1);
+    expect(raised, "login-required does not outrank the run's own state: a running session raises nothing, and the failure that follows says the agent hit a problem instead of naming the sign-in it needs.").toHaveLength(1);
     expect(raised[0]?.kind).toBe("login-required");
     expect(raised[0]?.title).toBe("Your agent needs you to sign in");
     expect(raised[0]?.body).toBe("The login expired. Run `fixture-harness login`.");

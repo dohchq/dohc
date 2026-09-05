@@ -32,7 +32,7 @@ describe("buildUnifiedDiffLines", () => {
     ]);
   });
 
-  // Regression (CodeRabbit arc gate): "a" vs "a\n" split into identical line
+  // Regression: "a" vs "a\n" split into identical line
   // arrays, so these exact-text changes used to render as "No text changes".
   it("names final-newline-only changes instead of claiming no changes", () => {
     expect(unified("a", "a\n")).toEqual([
@@ -81,7 +81,7 @@ describe("changed line counts", () => {
   });
 });
 
-// #516: the LCS compares WHOLE LINES per cell, so its cost follows body bytes,
+// The LCS compares WHOLE LINES per cell, so its cost follows body bytes,
 // which the cell limit never bounded. These pin the byte bound and the
 // allocation bound that replaced the unbounded work.
 describe("diff work bound", () => {
@@ -136,7 +136,7 @@ describe("diff work bound", () => {
     const before = longLines(499, OVER_BOUND_CHARS);
     const after = before.replace("000000000100", "000000000999");
     const lines = buildUnifiedDiffLines(computeTextDiff(before, after, 800));
-    // Line 101 of the file (index 100), on BOTH sides, not line 1.
+    // Line 101 of the file (index 100), on both sides, not line 1.
     expect(lines.find((line) => line.kind === "removed")?.oldLineNumber).toBe(101);
     expect(lines.find((line) => line.kind === "added")?.newLineNumber).toBe(101);
     const context = lines.find((line) => line.kind === "context");
@@ -144,7 +144,7 @@ describe("diff work bound", () => {
   });
 
   // The degraded diff describes the span between the common prefix and the
-  // common suffix as one block, and its COUNTS follow the same rule. The page
+  // common suffix as one block, and its counts follow the same rule. The page
   // header shows those counts, so the coarsening is user-visible.
   it("reports the degraded span in the counts, not the exact edit", () => {
     const before = longLines(499, OVER_BOUND_CHARS);
@@ -167,7 +167,7 @@ describe("diff work bound", () => {
     expect(diff.degraded).toBe(true);
     expect(diff.lines.length).toBeLessThanOrEqual(804);
     expect(diff.hiddenLines).toBeGreaterThan(400_000);
-    // The counts are the WHOLE change, never only what survived the bound.
+    // The counts are the whole change, never only what survived the bound.
     expect(diff.counts).toEqual({ added: 250_000, removed: 250_000 });
     const lines = buildUnifiedDiffLines(diff);
     expect(lines).toHaveLength(801);

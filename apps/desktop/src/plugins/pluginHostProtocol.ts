@@ -280,7 +280,7 @@ export const PLUGIN_PROCESS_LOG_LIMIT = 200;
 
 export interface PluginTransport {
   request<T = unknown>(method: string, params?: unknown): Promise<T>;
-  // Required, not optional (CodeRabbit #779 R14): every shipping transport
+  // Required, not optional: every shipping transport
   // implements this, and an optional method here is exactly the kind of
   // silently-no-op'd dead fallback path the repo's own rules say to remove.
   notify(method: string, params?: unknown): void;

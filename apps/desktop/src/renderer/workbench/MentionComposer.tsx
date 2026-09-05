@@ -55,7 +55,7 @@ export function MentionComposer(props: {
   const fileRequest = useRef(0);
   const currentFileLoader = useRef(props.loadFileHeadings);
   currentFileLoader.current = props.loadFileHeadings;
-  // When we complete a mention we must reposition the caret AFTER React commits
+  // When we complete a mention we must reposition the caret after React commits
   // the new value; this holds the pending caret target for the layout effect.
   const pendingCaret = useRef<number | null>(null);
 
@@ -172,7 +172,7 @@ export function MentionComposer(props: {
 
   const onKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      // IME guard FIRST: Enter during composition confirms the composed
+      // IME guard first: Enter during composition confirms the composed
       // characters — it must never accept a mention candidate or send, even
       // when the mention menu is open. Let the browser handle the keystroke.
       if (event.nativeEvent.isComposing) return;

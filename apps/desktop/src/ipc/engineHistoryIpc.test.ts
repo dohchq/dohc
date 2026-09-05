@@ -118,7 +118,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   });
 
   it("presents a binary->text transition honestly per side", () => {
-    // The binary preimage must NEVER surface as beforeText "" (a false
+    // The binary preimage must never surface as beforeText "" (a false
     // empty->text diff); it presents as bytes instead.
     const record = engineMomentDetailForIpc(
       detailWith({ before: binarySide(4), after: textSide("text again\n") }),
@@ -173,7 +173,7 @@ describe("engineMomentDetailForIpc per-side content kinds", () => {
   });
 });
 
-// The bridge schema is the LAST gate a hydrated body passes: main runs
+// The bridge schema is the last gate a hydrated body passes: main runs
 // `ReadEngineMomentResult.parse` on exactly what `engineMomentDetailForIpc`
 // produced (main.ts readEngineMoment handler), so these two calls are the
 // real pairing, not a stand-in.
@@ -343,7 +343,7 @@ describe("version texts the engine accepted cross the bridge", () => {
     // main.ts compareWorkspaceVersions parses exactly what
     // compareVersionFilesPage returned, so this is the compare channel's real
     // pairing. One over-budget row still ships whole: the page budget cuts
-    // AFTER the row that crossed it, never inside a row.
+    // after the row that crossed it, never inside a row.
     const currentText = "x".repeat(3 * 1024 * 1024);
     const incomingText = `${currentText}tail`;
     const page = await compareVersionFilesPage(
@@ -368,7 +368,7 @@ describe("version texts the engine accepted cross the bridge", () => {
     //
     // A SCHEMA claim only. A side this large does not reach main today: the
     // wire caps one string at 8 MiB and the conflict page refuses above its
-    // row cap (#537). The bridge still owes the storage contract, so that it
+    // row cap. The bridge still owes the storage contract, so that it
     // needs no edit when the hydration path lands.
     const engineMaxTextBytes = 10 * 1024 * 1024;
     expect(ENGINE_TEXT_MAX_CHARS).toBe(engineMaxTextBytes);

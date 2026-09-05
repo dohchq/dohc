@@ -23,7 +23,7 @@ export function Overlay(props: {
   const panelRef = useRef<HTMLDivElement>(null);
   // A ref, not a dependency, so Escape and Tab always call this render's
   // onClose even though the keydown listener itself is only ever attached
-  // once (CodeRabbit #779 R32).
+  // once.
   const onCloseRef = useRef(props.onClose);
   onCloseRef.current = props.onClose;
   const idRef = useRef(Symbol("overlay"));

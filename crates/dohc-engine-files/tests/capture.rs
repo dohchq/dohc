@@ -16,7 +16,7 @@ struct IdempotentSink {
     calls: Vec<String>,
     fail: BTreeSet<String>,
     not_owned: BTreeSet<String>,
-    /// Report THIS sha for a path instead of the plan's (models a re-reading
+    /// Report this sha for a path instead of the plan's (models a re-reading
     /// sink that captured newer bytes than the scan hashed).
     reread_sha: BTreeMap<String, String>,
 }
@@ -346,7 +346,7 @@ fn manifest_records_the_bytes_actually_captured_not_the_scan_hash() {
             .reconcile(&scanner, ws.path(), &CancellationToken::new())
             .expect("prepare"),
     );
-    // The sink re-reads and captures NEWER bytes than the scan hashed.
+    // The sink re-reads and captures newer bytes than the scan hashed.
     let mut sink = IdempotentSink {
         reread_sha: BTreeMap::from([("raced.md".to_owned(), "sha-of-newer-bytes".to_owned())]),
         ..IdempotentSink::default()

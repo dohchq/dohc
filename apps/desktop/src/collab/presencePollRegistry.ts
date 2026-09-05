@@ -1,17 +1,17 @@
 // MU-C5 — main-process ownership registry for in-flight presence long-polls.
 //
 // Each renderer poll opens a relay long-poll in MAIN; this registry tracks the
-// AbortController so presenceCancel can stop the EXACT fetch on unmount /
+// AbortController so presenceCancel can stop the exact fetch on unmount /
 // workspace switch, and bounds how many a renderer can open. The relay bearer
 // token never leaves main, so this is the only place a poll can be governed.
 //
 // Two robustness properties a buggy or hostile trusted renderer must not break:
 //   1. OWNERSHIP — a poll is owned by (senderId, pollId). A presenceCancel from
-//      a DIFFERENT window can't abort it, and a pollId COLLISION across windows
-//      keeps both cancellable: each handle only ever removes its OWN entry (by
+//      a different window can't abort it, and a pollId collision across windows
+//      keeps both cancellable: each handle only ever removes its own entry (by
 //      identity), so one window's cleanup never deletes another's controller.
 //   2. BOUNDEDNESS — at most one active poll per (senderId, scope, topic): a new
-//      poll for the same key SUPERSEDES (aborts) the prior, which is natural for
+//      poll for the same key supersedes (aborts) the prior, which is natural for
 //      presence (one long-poll per scope per window). A per-sender ceiling is a
 //      backstop against a renderer looping unique keys to exhaust main's
 //      controllers/timers/relay sockets.
@@ -27,16 +27,16 @@ interface PollEntry {
 
 interface SenderState {
   // Keyed by pollId for cancel, and by scope+topic for supersede. Both point at
-  // the SAME entry so either index removes it consistently.
+  // the same entry so either index removes it consistently.
   byPollId: Map<string, PollEntry>;
   byScopeTopic: Map<string, PollEntry>;
 }
 
 export interface PresencePollHandle {
   readonly signal: AbortSignal;
-  // Abort THIS poll (safety timeout / caller-driven stop).
+  // Abort this poll (safety timeout / caller-driven stop).
   abort(): void;
-  // Remove THIS poll from the registry — a no-op if it was already superseded,
+  // Remove this poll from the registry — a no-op if it was already superseded,
   // so the poll's `finally` never deletes a newer entry.
   release(): void;
 }
@@ -61,7 +61,7 @@ export function createPresencePollRegistry(
     entry.removed = true;
     const sender = senders.get(senderId);
     if (!sender) return;
-    // Only delete indices that still point at THIS entry — a superseding poll
+    // Only delete indices that still point at this entry — a superseding poll
     // may have overwritten them under the same pollId/scopeTopicKey.
     if (sender.byPollId.get(entry.pollId) === entry) sender.byPollId.delete(entry.pollId);
     if (sender.byScopeTopic.get(entry.scopeTopicKey) === entry) {
@@ -86,7 +86,7 @@ export function createPresencePollRegistry(
         evict(senderId, prior.byScopeTopic.get(scopeTopicKey));
         evict(senderId, prior.byPollId.get(pollId));
       }
-      // Re-fetch AFTER the evictions: emptying the sender's maps above removes
+      // Re-fetch after the evictions: emptying the sender's maps above removes
       // the sender entry, so create a fresh one rather than reuse a detached ref.
       let sender = senders.get(senderId);
       if (!sender) {
@@ -119,7 +119,7 @@ export function createPresencePollRegistry(
     },
 
     cancel(senderId, pollId): void {
-      // Only the OWNING sender can abort. A cancel from another window for the
+      // Only the owning sender can abort. A cancel from another window for the
       // same pollId finds nothing and is a no-op. The poll's own `finally`
       // (release) removes the entry, so cancel only signals the abort.
       senders.get(senderId)?.byPollId.get(pollId)?.controller.abort();

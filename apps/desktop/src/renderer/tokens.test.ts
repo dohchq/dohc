@@ -33,13 +33,13 @@ describe("WCAG AA contrast, both modes", () => {
     { fg: "agent", bg: "panel", min: 4.5 },
     { fg: "agent", bg: "panel2", min: 4.5 },
     // subtle is decorative (kbd hints, timestamps): 3.0 is the bar — on
-    // EVERY surface it actually sits on, not just bg (the sidebar, history
+    // every surface it actually sits on, not just bg (the sidebar, history
     // timeline, and status bar all render text-subtle on panel-2).
     { fg: "subtle", bg: "bg", min: 3.0 },
     { fg: "subtle", bg: "panel", min: 3.0 },
     { fg: "subtle", bg: "panel2", min: 3.0 },
     // The find-match mark is an OPAQUE chip that must pop on every surface a
-    // result row renders on: the side panel, the hover row (panel-2), AND the
+    // result row renders on: the side panel, the hover row (panel-2), and the
     // keyboard-selected row (line) — 3:1 is the graphical-object bar.
     { fg: "match", bg: "panel", min: 3.0 },
     { fg: "match", bg: "panel2", min: 3.0 },

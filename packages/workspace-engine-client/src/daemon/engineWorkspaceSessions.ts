@@ -153,17 +153,17 @@ export class EngineWorkspaceRebuildingError extends Error {
   }
 }
 
-// A retry limit was reached: the run stopped STARTING retries. The last
+// A retry limit was reached: the run stopped starting retries. The last
 // failure rides as the cause.
 //
-// `constraint` names the option the CALLER actually set, so an agent reading
+// `constraint` names the option the caller actually set, so an agent reading
 // the message can find the limit that fired instead of an option it never
-// passed (#564, codex).
-// TWO durations, because they are two different facts and one number cannot
-// carry both (#564, codex). `measuredMs` is the interval the LIMIT is measured
+// passed.
+// Two durations, because they are two different facts and one number cannot
+// carry both. `measuredMs` is the interval the LIMIT is measured
 // over — for a region budget that starts at the first failure, so a slow but
 // healthy attempt is not charged against a retry allowance. `totalWaitedMs` is
-// what the CALLER actually waited, first attempt included. They differ, and
+// what the caller actually waited, first attempt included. They differ, and
 // reporting the first as if it were the second sent an agent diagnosing a
 // capture chain held for 8s looking for a 6s hold.
 export class EngineWorkspaceRetryDeadlineError extends Error {
@@ -204,9 +204,9 @@ export class EngineWorkspaceRetryDeadlineError extends Error {
   }
 }
 
-// A bounded region was asked to START after `beginShutdown`. It is refused
+// A bounded region was asked to start after `beginShutdown`. It is refused
 // before the first daemon call, because the app is quitting and the work is
-// abandonable by construction (#564, codex).
+// abandonable by construction.
 export class EngineWorkspaceShuttingDownError extends Error {
   constructor() {
     super(
@@ -217,13 +217,13 @@ export class EngineWorkspaceShuttingDownError extends Error {
   }
 }
 
-// The refusals a document open must NOT answer with the writable plain editor.
+// The refusals a document open must not answer with the writable plain editor.
 // Each means the same thing to the surface — the engine did not open this
 // document, and the writable plain editor is not safe. The engine may still
 // own the document, or initial capture may not have installed its head yet,
-// so each keeps it read-only (#533/#564/#616).
+// so each keeps it read-only.
 //
-// `ydoc-session-busy` is the daemon SAYING SO, and it is not scoped to the
+// `ydoc-session-busy` is the daemon saying SO, and it is not scoped to the
 // timeout that motivated it. Whenever a lease is held, the daemon's Y.Doc is
 // the canonical copy and the file on disk is not, so a writable plain editor
 // over that file is a second writer whatever produced the lease: this client's
@@ -254,7 +254,7 @@ function requiresReconnect(error: unknown): boolean {
 
 // The daemon's own "retry, but wait first". It raises this for
 // DeadlineExceeded and Overloaded (dohc-engine-protocol error.rs
-// Retryability::AfterBackoff) on ANY method, including the `workspace.open`
+// Retryability::AfterBackoff) on any method, including the `workspace.open`
 // this file deadlines at 2 s — so the open ladder meets it routinely, and
 // must both wait and count it against the budget.
 function requiresBackoff(error: unknown): boolean {
@@ -283,7 +283,7 @@ function daemonMayBeRelaunching(error: unknown): boolean {
     // A `workspace.open` that refuses with the afterReconnect disposition is
     // the same "come back on a new session" answer as a dropped transport,
     // and the open ladder retries it either way — so it must reach the same
-    // shutdown/deadline gate (#564). Without this the ladder ran six full
+    // shutdown/deadline gate. Without this the ladder ran six full
     // opens on a spent budget, and `beginShutdown` did not stop it.
     requiresReconnect(error)
   );
@@ -314,7 +314,7 @@ export class EngineWorkspaceSessions {
   private readonly now: () => number;
   private readonly workspaceOpenDeadlineMs: number;
   private acceptingRuns = true;
-  // App quit (#564): retry waiting is over. Armed backoff sleeps resolve,
+  // App quit: retry waiting is over. Armed backoff sleeps resolve,
   // and a transport failure after this point is final. Operations themselves
   // still run — the quit teardown's closes go through run() too.
   private shuttingDown = false;
@@ -326,7 +326,7 @@ export class EngineWorkspaceSessions {
   private readonly retryBudgets = new AsyncLocalStorage<{
     budgetMs: number;
     // The clock starts at the FIRST FAILURE, not at region entry, because the
-    // budget bounds RECOVERY and a healthy attempt is not recovery (#564,
+    // budget bounds recovery and a healthy attempt is not recovery (#564,
     // codex P1). Anchored at entry, a legitimately slow open — a large
     // document's lineage resurrection, the slow case #514 fought — spent the
     // budget on work that was succeeding, and one transport blip after it was
@@ -338,33 +338,33 @@ export class EngineWorkspaceSessions {
     // derived from the transport contract it is built from
     // (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS).
     failedAtMs: number | null;
-    // Region entry. REPORTING ONLY — it bounds nothing, and must not, or the
+    // Region entry. Reporting only — it bounds nothing, and must not, or the
     // slow-healthy-attempt case comes straight back. It exists so the refusal
     // can state what the caller actually waited, which is the observed usage
     // AGENTS.md asks a rejection to name.
     startedAtMs: number;
-    // FAILED attempts across every run the region made, because the region
+    // Failed attempts across every run the region made, because the region
     // is what the budget spans: a per-run counter resets on each `run` and
     // would report "1" for a wait that covered six. It counts failures, and
     // the message says so — a run that failed and then recovered late is one
     // failed attempt out of two, and reporting "2 attempts" for one recovery
     // window would be a different (also true) number the reader cannot use.
     failedAttempts: number;
-    // What the region was recovering from. A run refused at its START has no
+    // What the region was recovering from. A run refused at its start has no
     // failure of its own to name, and a refusal that names none sends the
     // reader looking for the wrong thing.
     lastError: unknown;
     // THE REGION IS THE OPEN, AND NOTHING BEYOND IT.
     //
     // An async context is inherited by everything created inside it, and a
-    // document open INSTALLS things that outlive it: the settle debounce
+    // document open installs things that outlive it: the settle debounce
     // timer, the remote-update subscription, the save-state reporter, an
     // armed backoff. Node timers keep the context they were created in, so
     // those callbacks kept reading as work inside the abandonable open
     // region — for the whole life of the session. A settle for an edit the
-    // engine had already ACCEPTED would then be refused by a budget spent
+    // engine had already accepted would then be refused by a budget spent
     // during the open, or stopped by quit, which is the one thing this class
-    // must never do to an accepted write (#564, codex r22).
+    // must never do to an accepted write.
     //
     // The context cannot be un-inherited, so the REGION ends instead: every
     // reader asks `activeBudget()`, and that answers undefined once the task
@@ -431,8 +431,7 @@ export class EngineWorkspaceSessions {
           rebindStarted,
         );
         // The second door: the operation is daemon work this class does not
-        // issue itself, and the rebind above can take the whole window with it
-        // (#564, codex r17).
+        // issue itself, and the rebind above can take the whole window with it.
         this.assertRegionLive(workspace.workspaceId);
         try {
           return await operation(binding);
@@ -446,7 +445,7 @@ export class EngineWorkspaceSessions {
           ) {
             entry.binding = null;
           }
-          // The busy store, collected for EVERY method rather than for
+          // The busy store, collected for every method rather than for
           // `workspace.open` alone. The engine answers it on any call, and a
           // contract only three surfaces collected on left the rest reporting
           // a kebab-case wire message to the user for a condition that clears
@@ -454,17 +453,17 @@ export class EngineWorkspaceSessions {
           // retries nobody performs).
           //
           // Safe for every method, including the non-idempotent ones, and
-          // ONLY for this class: a busy store is raised by `BEGIN IMMEDIATE`
+          // only for this class: a busy store is raised by `BEGIN IMMEDIATE`
           // or by the commit, so the transaction did not commit and a second
           // attempt cannot apply anything twice.
           //
-          // Deliberately NOT the whole `afterBackoff` disposition, which also
-          // carries DEADLINE_EXCEEDED. A deadline interrupts BETWEEN durable
+          // Deliberately not the whole `afterBackoff` disposition, which also
+          // carries DEADLINE_EXCEEDED. A deadline interrupts between durable
           // units and leaves work already committed durable
           // (`dohc-engine-runtime` actor), so replaying it is a second write —
           // exactly what the `retryTransportErrors` opt-in above exists to
           // keep callers in charge of. The protocol calls that disposition
-          // retryable because retryable MUTATIONS carry idempotency keys, and
+          // retryable because retryable mutations carry idempotency keys, and
           // this wrapper cannot know whether the operation it was handed does.
           const retryAfterBackoff = isEngineStoreBusyRefusal(error);
           const retryable =
@@ -503,8 +502,8 @@ export class EngineWorkspaceSessions {
   }
 
   /**
-   * Bound every retry ladder inside `task` by ONE budget, measured from
-   * here (#564). A caller that holds a shared resource across several daemon
+   * Bound every retry ladder inside `task` by one budget, measured from
+   * here. A caller that holds a shared resource across several daemon
    * calls — the capture chain's document open, which reads the active
    * version before it opens the provider — cannot bound itself by giving
    * each call its own deadline: the calls add up. The budget is ambient so
@@ -522,14 +521,14 @@ export class EngineWorkspaceSessions {
         `withRetryBudget budgetMs must be a positive integer no greater than ${MAX_TIMER_DELAY_MS}, received ${String(budgetMs)}.`,
       );
     }
-    // Checked where the work BEGINS, not only where it retries. `shuttingDown`
+    // Checked where the work begins, not only where it retries. `shuttingDown`
     // was consulted on the failure path alone, so a task that never failed
     // never saw it: a document open still queued on the capture chain when
     // `will-quit` fired would enter here afterwards, succeed at its first
-    // workspace call, and proceed into a `ydoc.open` whose own bound (#616)
-    // outlasts the 3 s forced-exit timer (#564, codex).
+    // workspace call, and proceed into a `ydoc.open` whose own bound
+    // outlasts the 3 s forced-exit timer.
     // Nothing user-visible is lost: a bounded region is the abandonable kind
-    // by construction, and an opening document is read-only (#533).
+    // by construction, and an opening document is read-only.
     if (this.shuttingDown) throw new EngineWorkspaceShuttingDownError();
     const budget = {
       budgetMs,
@@ -550,7 +549,7 @@ export class EngineWorkspaceSessions {
   }
 
   // One failed daemon attempt, counted on the ambient budget so the refusal
-  // can report what the WAIT actually cost rather than one ladder's share.
+  // can report what the wait actually cost rather than one ladder's share.
   // The first failure also starts the budget's clock: see `failedAtMs`.
   private noteBudgetAttempt(cause?: unknown): void {
     const budget = this.activeBudget();
@@ -567,23 +566,17 @@ export class EngineWorkspaceSessions {
    * shutdown fired, and none blocks the region between the doors either —
    * whatever the caller awaited in between.
    *
-   * Three review rounds found the same hole in three different awaits — the
-   * gap between two runs (r15), the rebind ladder inside a run (r17), and the
-   * wait for a closing entry (r18). One defect wearing three hats: a check
-   * that answers for the instant it runs, placed where an await can follow it.
-   * A fourth caller would have been the fourth hat, so the check moved to the
-   * DOORS daemon work leaves through, and every path reaches one of them:
+   * A liveness check answers for the instant it runs, so it must sit where
+   * daemon work leaves, not before an await that can follow it. Every path
+   * reaches one of two doors:
    *
    * - `open`, at the top of its loop. Every `workspace.open` this class issues
    *   goes through there, and re-asking each iteration covers the churned
    *   client, the armed backoff, and the queued `entry.opening` with one line.
    * - `operation(binding)`, which is the caller's own daemon work.
    *
-   * TWO doors, not three. `run` used to ask a third time at its own entry
-   * (r15's gate), and once the doors existed that call could be deleted with
-   * every r15 test still red under its own mutation — the open door answers
-   * first, whether the caller waited on a closing entry or nothing at all. A
-   * check nothing can fail is not a gate.
+   * `run` does not ask a third time at its own entry: the open door answers
+   * first, whether the caller waited on a closing entry or nothing at all.
    *
    * Outside a region this does nothing: work that is not abandonable keeps
    * retrying at quit on purpose, because an accepted write must not be
@@ -626,7 +619,7 @@ export class EngineWorkspaceSessions {
   }
 
   /**
-   * What happens after ONE failed attempt, for every ladder that has them:
+   * What happens after one failed attempt, for every ladder that has them:
    * the operation retries, the open ladder, and the client-churn loop.
    *
    * The gates used to be applied by each ladder remembering to apply them,
@@ -635,15 +628,15 @@ export class EngineWorkspaceSessions {
    * `EngineWorkspaceRebindError`. Main maps only the deadline error to the
    * read-only retry surface, so that downgraded an engine-owned document to
    * the writable plain editor: the disk/Y.Doc race the budget exists to
-   * prevent (#564, codex). One method owns the sequence now — a fourth ladder
+   * prevent. One method owns the sequence now — a fourth ladder
    * either asks here or is visibly hand-rolling gates it should not.
    *
    * Throws `EngineWorkspaceRetryDeadlineError` when a deadline is spent,
-   * including on the LAST allowed attempt, which can start inside the budget
+   * including on the last allowed attempt, which can start inside the budget
    * and finish outside it. Returns "stop" when the ladder must give up with
    * its own terminal error, "retry" when it may start another attempt.
    *
-   * The CALLER decides whether a failure is retryable at all: a permission
+   * The caller decides whether a failure is retryable at all: a permission
    * refusal is not a timeout however long the caller waited.
    */
   private async settleAttempt(gate: {
@@ -667,13 +660,13 @@ export class EngineWorkspaceSessions {
     // back.
     //
     // Only a bounded region. `beginShutdown` is a global flag doing a scoped
-    // job, and the scope is the document OPEN — the one thing #564 asked to
+    // job, and the scope is the document open — the one thing #564 asked to
     // stop waiting on, and the one thing safe to abandon, because an opening
-    // document is read-only (#533) and holds no edit. Work outside a region
+    // document is read-only and holds no edit. Work outside a region
     // is the opposite obligation: an already-open document retrying a journal
     // write holds the user's only copy in its canonical Y.Doc, and abandoning
     // that retry discards the edit while `closeAllEngineYDocSessions` swallows
-    // the failure (#564, codex P1). An open that cannot finish is abandoned;
+    // the failure. An open that cannot finish is abandoned;
     // a write already accepted is not.
     //
     const abandonable = this.activeBudget() !== undefined;
@@ -682,17 +675,17 @@ export class EngineWorkspaceSessions {
     }
     checkDeadline();
     if (!gate.backoff) return "retry";
-    // Reaching here at quit means this run is OUTSIDE a bounded region: a
-    // write the engine already accepted, racing the forced exit. It KEEPS its
+    // Reaching here at quit means this run is outside a bounded region: a
+    // write the engine already accepted, racing the forced exit. It keeps its
     // backoff. Retrying at once looked like the way to win that race and was
-    // the opposite (#564, codex r17): the daemon it is racing is relaunching,
+    // the opposite: the daemon it is racing is relaunching,
     // so a burst of immediate attempts all fail inside that window, the close
     // fails, `closeAllEngineYDocSessions` swallows it, and the edit goes with
     // the exit. Pacing is what lets the second attempt find a daemon.
     //
-    // The cancel is registered for abandonable work ONLY, for the same
+    // The cancel is registered for abandonable work only, for the same
     // reason: `beginShutdown` resolving this sleep would put the burst back.
-    // Checked on BOTH sides of the wait: an attempt that ends just inside the
+    // Checked on both sides of the wait: an attempt that ends just inside the
     // deadline must not ride the backoff over the line and then start a fresh
     // open on a spent budget.
     await this.interruptibleSleep(
@@ -919,7 +912,7 @@ export class EngineWorkspaceSessions {
         if (isEngineWorkspaceOpenRefusedError(error)) throw error;
         lastError = error;
         this.noteBudgetAttempt(error);
-        // EVERY retry decision this ladder makes settles here, including the
+        // Every retry decision this ladder makes settles here, including the
         // ones for errors it re-opens immediately. Gating only the
         // "daemon may be relaunching" errors left a bare `continue` behind it,
         // and that is the door an `afterBackoff` refusal walked through: six
@@ -970,13 +963,13 @@ export class EngineWorkspaceSessions {
         if (entry.opening?.promise === promise) entry.opening = null;
       }
       if (this.source.currentClient() !== client) {
-        // NOT awaited, and that is the point. This is cleanup for a client
+        // Not awaited, and that is the point. This is cleanup for a client
         // generation nobody will use again: no caller reads its result, and
         // the `.catch` already says failure is acceptable. Awaiting it put a
-        // daemon request with no deadline BETWEEN two doors — a stale client
+        // daemon request with no deadline between two doors — a stale client
         // that is connected but unresponsive held the region here, past its
         // budget and past quit, with the gates one line away (#564, codex
-        // r19). The doors bound what STARTS; nothing may block the region
+        // r19). The doors bound what starts; nothing may block the region
         // between them either.
         void this.closeBinding(binding).catch(() => undefined);
         // A churned open is a failed daemon attempt the budget paid for. Left
@@ -1096,12 +1089,12 @@ export class EngineWorkspaceSessions {
   }
 
   // Refuses through the shared .dohc guard copy, so this surface says what
-  // the desktop and the MCP server say (#612). It used to answer "must not be
+  // the desktop and the MCP server say. It used to answer "must not be
   // a symlink" for a plain file, and print the absolute host path back at the
   // user.
   //
   // Presence-keyed, not errno-keyed: EEXIST is what a file squat raises, but a
-  // DANGLING symlink squat raises ENOENT, which the old isAlreadyExists
+  // dangling symlink squat raises ENOENT, which the old isAlreadyExists
   // allowlist rethrew as a bare errno. When something is at the path, the
   // checks below name it; when nothing is, the mkdir itself failed.
   private async ensureRealDirectory(

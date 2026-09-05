@@ -80,10 +80,7 @@ describe("forkElectronUtilityProcess", () => {
     // still unsettled here is parked on the child, not merely late.
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
-    // MUTATION (return the handle straight from fork): settled is already
-    // true here, every handle reports no pid, and the ownership record a
-    // wrapper plugin writes at spawn is silently never written.
-    expect(settled).toBe(false);
+    expect(settled, "return the handle straight from fork: settled is already true here, every handle reports no pid, and the ownership record a wrapper plugin writes at spawn is silently never written.").toBe(false);
 
     child.pid = 4242;
     child.emit("spawn");

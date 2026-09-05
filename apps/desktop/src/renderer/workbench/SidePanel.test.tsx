@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SidePanel } from "./SidePanel";
 
-// Stuck-capture guards (codex P2): the resize handle must mirror the tab-drag
+// Stuck-capture guards: the resize handle must mirror the tab-drag
 // guards — left button only, a buttons-up move ends the drag (missed release
 // outside the window), and losing pointer capture ends it too. Without these,
 // hovering the handle after a lost capture keeps resizing and persists bogus

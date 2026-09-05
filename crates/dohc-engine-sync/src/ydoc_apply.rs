@@ -227,7 +227,7 @@ pub(crate) fn redelivered_conflicts_opened(
     if envelope.op_kind != "ydoc.update" {
         return Ok(0);
     }
-    // NEVER reparse the payload here. A malformed `ydoc.update` is refused
+    // Never reparse the payload here. A malformed `ydoc.update` is refused
     // and ACKED; if the process then crashes before the relay cursor
     // commits, the next pull replays that coordinate as `Skipped` and asks
     // this helper to recount. Decoding the payload again returns
@@ -362,9 +362,9 @@ fn apply_deferred_base(
                 params![key.workspace_id, key.version_id, key.object_id],
             )
             .map_err(SyncError::persist)?;
-            // `seed_source_sha256` clears WITH the rows it described: the
+            // `seed_source_sha256` clears with the rows it described: the
             // winning base holds content the file does not, and the seed-only
-            // settle skip (#815) must never survive a lineage replacement on
+            // settle skip must never survive a lineage replacement on
             // the base claim's snapshot insert alone.
             tx.execute(
                 "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0, \
@@ -528,7 +528,7 @@ pub fn drain_deferred_ydoc_for_key_cached(
 /// [`YdocDrainCleanup`] through [`complete_deferred_ydoc_drain_cleanup`].
 /// A caller that fails between the drain and the cleanup leaves the rows in
 /// place, exactly like a crash before the cleanup transaction: the retry
-/// re-drains content-deduped and reads the facts back (#1009).
+/// re-drains content-deduped and reads the facts back.
 ///
 /// The pending projection refusal, if any, travels in the cleanup rather
 /// than in the result's `refusals`: it is persisted when the cleanup runs,
@@ -868,8 +868,7 @@ fn drain_deferred_ydoc(
             // history rows dedupe by coordinate), but an earlier failed
             // drain may have dropped facts it never surfaced. The decision
             // persisted on the deferred row carries them to this retry; the
-            // queue cleanup below consumes it, so they surface exactly once
-            // (#1004).
+            // queue cleanup below consumes it, so they surface exactly once.
             None => {
                 record_facts.extend(read_parked_record_facts(
                     store, key, &origin_id, origin_seq,
@@ -897,7 +896,7 @@ fn drain_deferred_ydoc(
         last_coordinate = Some((origin_id.clone(), origin_seq));
         drained_coordinates.push((origin_id, origin_seq));
     }
-    // Drained content must reach the VISIBLE head here, not only the CRDT
+    // Drained content must reach the visible head here, not only the CRDT
     // log: the drain runs outside `apply_envelope_with`, so a redelivery of
     // an already-acked coordinate skips its mutation closure — if the drain
     // did not project, the snapshot/materialization would stay stale until
@@ -958,13 +957,13 @@ fn drain_deferred_ydoc(
             Err(other) => return Err(other),
         }
     }
-    // The durable markers clear LAST — after the projection committed or a
+    // The durable markers clear last — after the projection committed or a
     // terminal disposition was persisted. A crash anywhere above leaves the
-    // rows in place, and the retry re-runs apply (content-deduped) AND the
+    // rows in place, and the retry re-runs apply (content-deduped) and the
     // projection; deleting first opened a window where the CRDT held the edit
     // but nothing would ever project it. A held cleanup extends the same
     // contract past the drain: the caller clears the rows only after its own
-    // fallible follow-up (close-time materialization) succeeded (#1009).
+    // fallible follow-up (close-time materialization) succeeded.
     let mut held_cleanup = None;
     if hold_cleanup {
         held_cleanup = Some(YdocDrainCleanup {
@@ -1012,7 +1011,7 @@ fn drain_deferred_ydoc(
 }
 
 /// The record-event decision an earlier drain committed with this parked
-/// coordinate's apply (#1004). `None` for a coordinate that never derived
+/// coordinate's apply. `None` for a coordinate that never derived
 /// facts — or one no longer parked, which cannot happen mid-drain.
 fn read_parked_record_facts(
     store: &EngineStore,
@@ -1123,7 +1122,7 @@ fn write_final_drained_projection(
             &payload.path,
             doc,
             content_kind,
-            // The REAL last drained coordinate keys the moment id: a synthetic
+            // The real last drained coordinate keys the moment id: a synthetic
             // pair can collide when two batches land in one millisecond.
             drain_origin,
             drain_seq,
@@ -1545,7 +1544,7 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
                     project_ydoc_with_store(tx, &complete.key, doc, marker.content_kind)?;
                 if projection.content != text {
                     if marker.content_kind == ContentKind::Scene {
-                        // The origin of an external scene edit RETIRES its
+                        // The origin of an external scene edit retires its
                         // lineage instead of emitting a Markdown rewrite (a
                         // scene has no fold), so the rewrite this pending
                         // state would wait for is never coming. Converge the
@@ -1567,13 +1566,13 @@ pub(crate) fn reconcile_imported_complete_resulting_head_in_tx(
 /// Fold a conflict resolution's chosen text into the object's canonical
 /// Y.Doc, inside the resolution's own transaction.
 ///
-/// The invariant, stated once: an OPEN sync conflict on a Y.Doc object
+/// The invariant, stated once: an open sync conflict on a Y.Doc object
 /// freezes the visible head (`project_and_write_in_tx` coalesces the
 /// conflict's incoming side instead of writing) and the settle (the daemon
-/// refuses with `ydoc-conflict-open`, the same shape as #338's refusal of
-/// the clobbering settle). RESOLUTION lifts the freeze by making the choice
+/// refuses with `ydoc-conflict-open`, the same shape as the refusal of
+/// the clobbering settle). Resolution lifts the freeze by making the choice
 /// durable here — one update that rewrites the lineage's projection to the
-/// chosen bytes, journaled when the workspace replicates — in the SAME
+/// chosen bytes, journaled when the workspace replicates — in the same
 /// transaction that closes the row, so the next inbound delta merges with
 /// the choice instead of silently reversing it.
 ///
@@ -1594,7 +1593,7 @@ pub fn fold_resolution_into_ydoc_in_tx(
             reason: "conflict resolution coordinates are invalid",
         })?;
     // Acked-but-parked remote updates for this object were never part of
-    // EITHER reviewed side, and the drain that lands them runs after the
+    // either reviewed side, and the drain that lands them runs after the
     // review gate would have closed. Refuse the resolution while they are
     // queued: a resync or session close drains them, the open conflict
     // coalesces to the freshest incoming state, and the user resolves what
@@ -1684,7 +1683,7 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         // rewrite is asserted to be the projector's inverse, and nothing
         // makes that true: a construct it does not model round-trips through
         // the projector's escaping (a deep `>` chain returns as `&gt;`), and
-        // the fold would then commit a lineage whose projection is NOT the
+        // the fold would then commit a lineage whose projection is not the
         // chosen text while stamping last_settled_sha with the chosen text's
         // hash in the same statement — the head file saying one thing, the
         // CRDT another, and the marker asserting they agree. That is the
@@ -1693,8 +1692,8 @@ pub(crate) fn fold_complete_ydoc_lineage_in_tx(
         // doc and the transaction are already in hand, so the check is one
         // projection, and it covers every construct the parser will ever
         // fail to model rather than the ones known today.
-        // SIZE FIRST (#660): check length before the projection below — an
-        // oversized doc trips a bare, limit-less `InvalidInput` there (#643).
+        // SIZE FIRST: check length before the projection below — an
+        // oversized doc trips a bare, limit-less `InvalidInput` there.
         if update.len() > dohc_engine_collab::limits::MAX_YDOC_UPDATE_BYTES {
             return Err(SyncError::BlobTooLarge {
                 constraint: "MAX_YDOC_UPDATE_BYTES (conflict resolution fold)",
@@ -2011,7 +2010,7 @@ fn map_projection_error(
 /// Oracle parity for applied `ydoc.update` ops (`projectYDocUpdate` →
 /// `writeTextFileInDb` → CRDT rows): every NON-DEFERRED apply materializes
 /// its projection — moment, snapshot, and durable materialization job — in
-/// the SAME admission transaction, so `versionedText.read`, search, and the
+/// the same admission transaction, so `versionedText.read`, search, and the
 /// disk pipeline advance with the relay cursor instead of trailing it until
 /// someone manually opens and settles the doc.
 #[allow(clippy::too_many_arguments)]
@@ -2151,7 +2150,7 @@ pub fn project_and_write_in_tx(
     enqueue_write(tx, &result, preimage, "ydoc").map_err(map_domain_hard_error)?;
     // The pulled projection IS the settled artifact (its job materializes
     // it): advance the marker exactly like a local settle would. Leaving the
-    // OLD locally-settled sha behind would make the next session's settle
+    // old locally-settled sha behind would make the next session's settle
     // expectation trail the remote head — permanent ConflictStaleTarget.
     tx.execute(
         "UPDATE ydoc_docs SET settle_seq = ?4, last_settled_sha = ?5, updated_at_ms = ?6          WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
@@ -2233,7 +2232,7 @@ fn apply_ydoc_envelope_inner(
         );
     }
     let search_policy = search_policy_for_store(store);
-    // Gate on the SAME floor the projection sink applies
+    // Gate on the same floor the projection sink applies
     // (`validate_plaintext_storable_path`) rather than R10's narrow
     // share-boundary classifier, which misses reserved 8.3 aliases (`dohc~1`
     // aliases `.dohc`) and dots-and-spaces segments. The path is persisted as a
@@ -2272,7 +2271,7 @@ fn apply_ydoc_envelope_inner(
         // Invalidate before any transaction so a committed crash stays safe.
         cache.remove(&key);
     }
-    // The blob is validated BEFORE any ack path — including the live-lease
+    // The blob is validated before any ack path — including the live-lease
     // defer. A defer acks the coordinate with the imported log as the durable
     // queue; if the referenced blob were missing or tampered, the peer cursor
     // would already be past a row the drain can never apply, and the bad
@@ -2305,8 +2304,8 @@ fn apply_ydoc_envelope_inner(
         });
     };
     if leases.is_live(&key) {
-        // FULL durable validation BEFORE admission: byte caps, abort-safe
-        // prevalidation, AND the replay-parity gate — replayed on top of the
+        // Full durable validation before admission: byte caps, abort-safe
+        // prevalidation, and the replay-parity gate — replayed on top of the
         // ALREADY-QUEUED deferred predecessors, because a later update can
         // only become invalid after they apply, and the drain will apply
         // them first. Anything the drain would reject becomes a refusal, not a
@@ -2401,7 +2400,7 @@ fn apply_ydoc_envelope_inner(
             };
         }
         // A deferred coordinate is ACKED — it must be drainable later, which
-        // the close/open drains only do for REPLICATED markers. A live lease
+        // the close/open drains only do for replicated markers. A live lease
         // over a local-only lineage is a transient local-state race. It stays
         // hard and unacked so the peer coordinate can be retried after the
         // session settles or closes.
@@ -2413,7 +2412,7 @@ fn apply_ydoc_envelope_inner(
         }
         let deferred_key = key.clone();
         return crate::apply_envelope_with(store, envelope, faults, move |tx, op| {
-            // Record WHICH coordinate is pending in the same transaction as
+            // Record which coordinate is pending in the same transaction as
             // the ack: drains replay exactly these rows, never the whole
             // imported history (which after compaction would re-append
             // non-dedupable updates and cost O(history) per open).
@@ -2443,13 +2442,13 @@ fn apply_ydoc_envelope_inner(
             })
         });
     }
-    // Base bootstrap: a fresh replica's FIRST op for a replicated doc is the
+    // Base bootstrap: a fresh replica's first op for a replicated doc is the
     // base full-state — apply_remote_update requires an existing marker, so
     // without this branch the pull wedges on NoMarker before the ack. The
     // claim is idempotent (an existing claimed base resumes), so a crash
     // between claim and ack replays safely; the coordinate then acks below.
     if payload.is_base_state {
-        // The claim runs INSIDE the admission transaction: a standalone claim
+        // The claim runs inside the admission transaction: a standalone claim
         // before apply_envelope_with would persist the marker/base for an
         // envelope the sequence/divergence checks then reject (out-of-order
         // or divergent redelivery), leaving state for an unacked coordinate.
@@ -2591,9 +2590,9 @@ fn apply_ydoc_envelope_inner(
                     ],
                 )
                 .map_err(SyncError::persist)?;
-                // `seed_source_sha256` clears WITH the rows it described:
+                // `seed_source_sha256` clears with the rows it described:
                 // the winning base holds content the file does not, and the
-                // seed-only settle skip (#815) must never survive a lineage
+                // seed-only settle skip must never survive a lineage
                 // replacement on the base claim's snapshot insert alone.
                 tx.execute(
                     "UPDATE ydoc_docs SET head_update_seq=0,head_snapshot_seq=0,
@@ -2705,16 +2704,16 @@ fn apply_ydoc_envelope_inner(
                 ],
             )
             .map_err(SyncError::persist)?;
-            // The FIRST base is not a CRDT merge: a local head that no shared
+            // The first base is not a CRDT merge: a local head that no shared
             // lineage ever merged (capture or an external editor wrote it, and
             // the receiver holds no durable Y.Doc rows to union with) must not
             // be silently replaced by the sender's projection. Keep the head,
             // land the lineage, and open the same reviewable sync conflict the
             // moment lane opens for a diverged file — one resolution settles
             // both machines. A head that already equals the base's projection
-            // needs no conflict, and a lineage WITH durable rows takes the
+            // needs no conflict, and a lineage with durable rows takes the
             // union path below (the projection carries the local content).
-            // Whether the head is REPRESENTED in this union, not whether the
+            // Whether the head is represented in this union, not whether the
             // lineage happens to hold rows. `lineage_has_state` was a proxy
             // for "the head was merged" and the two come apart exactly where
             // it matters: a local-only session that crashed leaves durable
@@ -2820,7 +2819,7 @@ fn apply_ydoc_envelope_inner(
                             recorded_at_ms: op.recorded_at_ms,
                         },
                     )?;
-                    // Immutable per-envelope record of what THIS coordinate
+                    // Immutable per-envelope record of what this coordinate
                     // opened: a later delta coalesces the conflict and
                     // rewrites its incoming anchor, so a crash-redelivery
                     // recount must not depend on the mutable conflict row.
@@ -2898,8 +2897,8 @@ fn apply_ydoc_envelope_inner(
         }
         return Ok(outcome);
     }
-    // The lease is NOT live: any coordinates parked by an earlier live
-    // phase drain FIRST, so the projection below reconstructs the COMPLETE
+    // The lease is not live: any coordinates parked by an earlier live
+    // phase drain first, so the projection below reconstructs the complete
     // applied lineage (a partial projection would materialize a file missing
     // parked content).
     let drain = if dohc_engine_collab::read_marker(store, &key)
@@ -3052,7 +3051,7 @@ fn apply_ydoc_envelope_inner(
             let update_kind = projected.content_kind;
             record_facts = projected.record_facts;
             // An out-of-order cross-origin update parks durably with missing
-            // dependencies; a projection taken NOW would omit the pending remote
+            // dependencies; a projection taken now would omit the pending remote
             // content and materialize an incomplete view. Skip — the envelope
             // that completes the dependency projects the full doc.
             let mutation = if projected.doc.has_pending_dependencies() {
@@ -3170,7 +3169,7 @@ fn apply_ydoc_envelope_inner(
             }
         }
     }
-    // This path drained BEFORE the primary apply, so the drained facts
+    // This path drained before the primary apply, so the drained facts
     // committed first and lead the emission order.
     Ok(merge_drained_first(
         merge_lineage_replacements(
@@ -3203,7 +3202,7 @@ fn collapse_lineage_replacements(
 /// commit order, so the pull pass emits every record event this apply
 /// caused. A skipped primary still carries the drain's facts: those rows
 /// are committed whatever the primary did. Use this where the drain ran
-/// AFTER the primary apply.
+/// after the primary apply.
 fn merge_drained(
     outcome: ApplyOutcome<YdocApplyResult>,
     drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -3211,7 +3210,7 @@ fn merge_drained(
     merge_drained_ordered(outcome, drained, false)
 }
 
-/// The same merge where the drain ran BEFORE the primary apply: the drained
+/// The same merge where the drain ran before the primary apply: the drained
 /// facts committed first, so they lead.
 fn merge_drained_first(
     outcome: ApplyOutcome<YdocApplyResult>,
@@ -3477,7 +3476,7 @@ fn validate_ydoc_identity(
 ) -> Result<ConflictFileState, SyncError> {
     let current = select_snapshot_by_path_in_tx(conn, &key.workspace_id, &key.version_id, path)
         .map_err(map_domain_hard_error)?;
-    // Identity pins (the oracle's fix-2): NEVER write through a path occupied
+    // Identity pins (the oracle's fix-2): never write through a path occupied
     // by a different object, and never project an object into a path it does
     // not own — a hostile op would otherwise mutate the wrong plaintext file.
     if current.binary_sha256.is_some() {
@@ -3530,7 +3529,7 @@ fn map_collab_hard_error(error: CollabError) -> SyncError {
 
 fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncError {
     match error {
-        // The one HARD exception living inside `InvalidInput`: an object-alias
+        // The one hard exception living inside `InvalidInput`: an object-alias
         // collision names corrupt state, not a caller mistake, so it must be
         // checked before the variant-wide arm below would catch it.
         hard @ DomainError::InvalidInput {
@@ -3545,9 +3544,9 @@ fn map_domain_payload_error(error: DomainError, reason: &'static str) -> SyncErr
             actual_bytes: observed_bytes,
             limit_bytes,
         },
-        // The acknowledged caller-mistake union (#656). A size refusal joins
+        // The acknowledged caller-mistake union. A size refusal joins
         // it for the same reason `InvalidText`/`InvalidPath` are here: only
-        // `InvalidInput` is ACKNOWLEDGED — the apply path answers it with
+        // `InvalidInput` is acknowledged — the apply path answers it with
         // `RefusedRetainingMutation` and `share_disposition` skips it. A
         // measured variant would instead abort the transaction, and the
         // relay would redeliver the same coordinate forever with every later
@@ -3662,7 +3661,7 @@ mod tests {
             .expect("seed remote");
         // The reserved metadata rides the replicated doc, so a client-authored
         // update can write it directly: planted source bytes, their matching
-        // digest, and the CURRENT canonical projection's digest. Both digest
+        // digest, and the current canonical projection's digest. Both digest
         // checks pass; only equivalence is missing.
         remote
             .frontmatter_set_preserving_markdown_source("id", RECORD_ID, PLANTED)

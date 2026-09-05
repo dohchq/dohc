@@ -521,7 +521,7 @@ export const engineContractCompileCheck = (() => {
       matchEnd: 5,
       objectId,
     };
-    // A concrete literal keeps this drift check real for the option FIELDS
+    // A concrete literal keeps this drift check real for the option fields
     // (workspaceId/versionId/query/policy/limit renames fail compilation);
     // only the two store interfaces — unconstructible without an
     // implementation — stay as casts.

@@ -3,7 +3,7 @@ import { resolvePeerDisplayName, type PresencePeer } from "./presenceChannel";
 
 // MU-C1 — calm presence UI. Small initials for who's here and a subtle typing
 // line. Deliberately quiet: no layout thrash, no noisy badges, and it renders
-// NOTHING when nobody else is around (solo stays solo). Presence changes are
+// nothing when nobody else is around (solo stays solo). Presence changes are
 // announced politely (aria-live="polite"), never as a spam of alerts.
 
 function initials(name: string): string {

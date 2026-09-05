@@ -88,7 +88,7 @@ function readmePath(directoryName: string): string {
 // Following a rename used to be a heuristic — id-only matching, guarded by
 // a window and a collision history, guessing that a same-id arrival was the
 // tab's own row moving. It now follows the fact instead: catalog.renamed
-// fires only where the pipeline has itself PROVEN a rename, and this tab
+// fires only where the pipeline has itself proven a rename, and this tab
 // retargets on that fact directly (see the component body below) rather
 // than inferring one from the list's own shape.
 function findTabPlugin(
@@ -446,7 +446,7 @@ function usePluginSizes(
       // The exact row this rail is about, never pluginId alone — two rows
       // can share an id (a broken manifest's directory-derived fallback
       // colliding with some other, unrelated plugin's real id), and dohc's
-      // own build and state storage answers only ever what THIS id
+      // own build and state storage answers only ever what this id
       // actually built and ran, which the pipeline refuses to report for a
       // directory it does not belong to.
       return bridge()
@@ -624,7 +624,7 @@ export function PluginDetailsPage(props: {
   pluginId: string;
   /** The exact row this tab opened for. A discovered row's id is only ever
    * a broken manifest's directory-derived fallback, which can coincide
-   * with some OTHER, unrelated plugin's real id — matching by id alone
+   * with some other, unrelated plugin's real id — matching by id alone
    * found whichever row sorted first, never the second-sorting one a user
    * actually clicked. */
   directoryName: string;
@@ -644,7 +644,7 @@ export function PluginDetailsPage(props: {
   ) => void;
 }) {
   const catalog = usePluginCatalog(props.workspaceId);
-  // The directoryName this tab is CURRENTLY following. Starts at
+  // The directoryName this tab is currently following. Starts at
   // props.directoryName, the tab's own opened identity, and moves only when
   // catalog.renamed proves this exact row moved — never guessed from the
   // list's own shape.
@@ -653,15 +653,15 @@ export function PluginDetailsPage(props: {
   // report to onDirectoryRenamed — reporting it directly here would call a
   // parent setter mid-render. Cleared alongside the tracking above on a
   // genuinely new tab, so a previous tab's own in-flight rename can never
-  // reach a DIFFERENT tab this instance goes on to show.
+  // reach a different tab this instance goes on to show.
   const pendingRenameRef = useRef<{ from: string; to: string } | null>(null);
   // The catalog.renamed object this tab has already applied (or ruled out).
-  // catalog.renamed is a fresh object per rename but is NOT cleared once
+  // catalog.renamed is a fresh object per rename but is not cleared once
   // consumed, so without this, a component instance reused for a brand new
   // tab (same pluginId and directoryName as a plugin renamed a while ago)
   // would re-apply a stale fact that has nothing to do with this tab.
   // Baselined to whatever fact already exists on identity change, below —
-  // only a rename that happens WHILE this tab is open is ever this tab's.
+  // only a rename that happens while this tab is open is ever this tab's.
   const lastHandledRenameRef = useRef<PluginRenamedFact | null>(null);
   // Whose identity trackedDirectoryNameRef/pendingRenameRef/
   // lastHandledRenameRef currently belong to — a tab is one virtual path

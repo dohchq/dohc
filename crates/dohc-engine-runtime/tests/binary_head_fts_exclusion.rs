@@ -2,7 +2,7 @@
 //! `snapshots`, where a binary head is a row like any other; it must (a) not
 //! crash on one and (b) not index it. The exclusion is explicit
 //! (`content_kind IS NOT 'binary'`) in the candidate CTE, backstopped by the
-//! INNER `JOIN blobs` that drops NULL-blob binary rows.
+//! inner `JOIN blobs` that drops NULL-blob binary rows.
 
 use dohc_engine_domain::{
     DomainError, VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
@@ -44,7 +44,7 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
     )
     .expect("write text");
 
-    // A binary head at a .md path the FILE policy WOULD index if it leaked.
+    // A binary head at a.md path the FILE policy would index if it leaked.
     let bytes = b"\x00binary payload uniquebinaryname\xff";
     let sha = hex_sha256(bytes);
     store
@@ -70,7 +70,7 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
         })
         .expect("write binary head");
 
-    // Rebuild the index over BOTH snapshots (a binary row is now present).
+    // Rebuild the index over both snapshots (a binary row is now present).
     store
         .write_with(&NoFaults, |tx| {
             ensure_search_index_for_version(tx, &root, WS, V, 4, &NoFaults)
@@ -87,7 +87,7 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
         "the text file must still index/search after a binary snapshot exists"
     );
 
-    // The binary head must NOT be searchable by its path (TS deletes its FTS row;
+    // The binary head must not be searchable by its path (TS deletes its FTS row;
     // the Rust rebuild excludes it explicitly via `content_kind IS NOT 'binary'`).
     let bin_hits = store
         .read_with(|conn| search_workspace(conn, &root, WS, V, "uniquebinaryname", Some(100), 9))

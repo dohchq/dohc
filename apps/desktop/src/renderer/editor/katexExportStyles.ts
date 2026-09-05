@@ -1,12 +1,12 @@
 // KaTeX core stylesheet for standalone document export (documentExport.ts).
 //
-// This is KaTeX 0.17.0's `dist/katex.min.css` with EVERY `@font-face` block
+// This is KaTeX 0.17.0's `dist/katex.min.css` with every `@font-face` block
 // removed: the export must be a single self-contained file with NO external
 // assets (fonts/scripts/stylesheets) so it opens offline and prints via
 // Electron's printToPDF. Dropping the font files means the KaTeX_* families
 // are unavailable, so each `font-family: KaTeX_*` here was given a
 // `'Times New Roman', serif` fallback: math renders with the full KaTeX
-// LAYOUT (fractions, super/subscripts, radicals, spacing) but in a serif
+// layout (fractions, super/subscripts, radicals, spacing) but in a serif
 // fallback face rather than the KaTeX glyphs. Degraded-but-readable by
 // design. Regenerate by re-running the strip+fallback transform against a
 // bumped katex dist css if the dependency is upgraded.

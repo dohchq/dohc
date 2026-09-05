@@ -71,7 +71,7 @@ export class RelayConflictError extends Error {
   }
 }
 
-// The relay log for THIS origin disagrees with the local journal (the relay
+// The relay log for this origin disagrees with the local journal (the relay
 // is ahead of local reality, or holds the same origin seq with different
 // content). That means the local engine.db was restored/cloned from an older
 // snapshot — pushing must fail closed rather than silently drop local ops.
@@ -176,7 +176,7 @@ export class SharedChannelReadOnlyError extends Error {
   }
 }
 
-// The file sibling of the class above (#646 PR2). A file share at `view`
+// The file sibling of the class above. A file share at `view`
 // carries the chat about its files to read, and refuses to add to it — in
 // main before any durable row, and again at the relay, which answers the
 // same `share_read_only` code a read-only channel gets.
@@ -214,7 +214,7 @@ export class ShareUnavailableError extends Error {
   }
 }
 
-// What a share view's identity call did (#646 PR3-1).
+// What a share view's identity call did.
 //
 // A share view replicates through its SHARE, not the owner relay lane, so it
 // needs a sync identity of its own before it can journal a local write or
@@ -238,7 +238,7 @@ export interface ShareViewChangedPath {
   contentKind: "text" | "binary";
 }
 
-// One op the pull refused. A share-view pull SKIPS an op it will not apply
+// One op the pull refused. A share-view pull skips an op it will not apply
 // rather than failing the page — one op a diverging relay serves must not
 // wedge the share — so this is how the skip stops being silent. `detail` is
 // the engine's refusal message: it names the constraint, and for a version
@@ -251,7 +251,7 @@ export interface ShareViewRefusal {
   detail: string;
 }
 
-// How many refusals ONE pull keeps in memory across its pages. The durable
+// How many refusals one pull keeps in memory across its pages. The durable
 // record is the truth (each page is handed to the caller's recorder before
 // its cursor commits); this aggregate is for logging and the immediate
 // result, and a hostile relay must not be able to grow it in proportion to
@@ -275,7 +275,7 @@ export interface PullShareViewResult {
   commitCursor: () => Promise<void>;
 }
 
-// #646 PR3. A proposal is the set of changes a recipient offered in ONE
+// A proposal is the set of changes a recipient offered in one
 // submit. It exists only from submit — there is no draft state at the relay —
 // and it leaves `open` exactly once.
 export type ShareProposalState =
@@ -286,9 +286,9 @@ export type ShareProposalState =
 
 export type ShareProposalDecision = "accept" | "decline";
 
-// What ONE submit offered. `proposalId` is null exactly when nothing was
+// What one submit offered. `proposalId` is null exactly when nothing was
 // offered: a share below edit level, or a scan that found no change. It is
-// NOT a failure — a failed submit throws.
+// not a failure — a failed submit throws.
 export interface SubmitShareProposalResult {
   submitted: number;
   proposalId: string | null;
@@ -330,7 +330,7 @@ export interface ShareProposalOp {
 }
 
 // A proposal waiting on the granter, with every op expanded for review. This
-// surface serves only what is still OPEN, so there is no state to carry.
+// surface serves only what is still open, so there is no state to carry.
 export interface ShareProposal {
   proposalId: string;
   shareId: string;
@@ -341,7 +341,7 @@ export interface ShareProposal {
   ops: ShareProposalOp[];
 }
 
-// A proposal as the granter's LISTING states it: who sent it, when, and how
+// A proposal as the granter's listing states it: who sent it, when, and how
 // many files it carries. No op rows — a timer polls that listing, and the
 // review draws files only once a granter opens one proposal.
 export interface ShareProposalSummary {
@@ -352,7 +352,7 @@ export interface ShareProposalSummary {
   ops: number;
 }
 
-// A proposal as its own SENDER sees it: the states behind "sent", "accepted"
+// A proposal as its own sender sees it: the states behind "sent", "accepted"
 // and "declined". The recipient gets a count, not the granter's review view.
 export interface SentShareProposal {
   proposalId: string;

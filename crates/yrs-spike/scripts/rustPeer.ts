@@ -77,7 +77,7 @@ export class RustPeer {
       } catch {
         // A malformed stdout line means the protocol is desynced — every
         // subsequent response would answer the wrong request. Reject the
-        // request that RECEIVED the bad line first (it is already off the
+        // request that received the bad line first (it is already off the
         // queue, and diagnostics must name its op), then kill the rest.
         const error = new Error(
           `rust harness emitted a non-JSON line answering op "${pending.op}": ${line.slice(0, 200)}`,
@@ -236,7 +236,7 @@ export class RustPeer {
 }
 
 /** A yrs-driven edit: the encoded delta plus whether the edit actually
- * CHANGED the doc (a clamped out-of-range delete is a legal no-op; its
+ * changed the doc (a clamped out-of-range delete is a legal no-op; its
  * "delta" still carries the full delete set, so bytes can't tell). */
 export interface EditResult {
   update: Uint8Array;

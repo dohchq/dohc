@@ -28,7 +28,7 @@ import { RELAY_ERRORS } from "./errorCodes";
 // idempotent re-fetch) instead of inventing a parallel snapshot format.
 //
 // The relay normally treats op payloads as opaque. Shares deliberately relax
-// that in ONE direction: the filter may READ well-known path/hash/version
+// that in one direction: the filter may read well-known path/hash/version
 // fields to decide inclusion, and may REDACT one field (version.create's
 // forkSnapshots). It still never interprets content, and any op kind or
 // payload shape it does not positively recognize is EXCLUDED.
@@ -52,16 +52,16 @@ export interface ShareSelector extends StoredShareSelector {
   access: ShareAccess;
 }
 
-// MU-C4 shared channels: a BIDIRECTIONAL chat-channel grant. Unlike the
+// MU-C4 shared channels: a bidirectional chat-channel grant. Unlike the
 // read-only path/version selector above, a chat-channel share scopes a whole
 // channel (its channel/thread/message/reaction ops, nothing else) and — when
-// access is "read-write" — lets the member APPEND channel-scoped chat ops via
+// access is "read-write" — lets the member append channel-scoped chat ops via
 // the member append route. "read-only" is the broadcast/announcements opt-in:
 // the member replays the channel but every inbound append is refused.
 export interface StoredChatChannelShareSelector {
   kind: "chat-channel";
   // The channel's cross-machine wire identity (chat_channel_wire_ids in the
-  // engine; `wireId` on chat.channel.create). NEVER a local channel id or
+  // engine; `wireId` on chat.channel.create). Never a local channel id or
   // slug — those differ per machine.
   channelWireId: string;
 }
@@ -90,33 +90,33 @@ export type ChatShareChannelKind = "channel" | "dm" | "agent";
 import type { ThreadFileBinding } from "./storage";
 export type { ThreadFileBinding };
 
-// #646 PR2: how the file-chat branch answers "which file is this thread
+// How the file-chat branch answers "which file is this thread
 // about, and where is that file now?" from the workspace OWNER's log. Both
 // lookups are tri-state and every non-string answer denies.
 export interface ShareFileChatResolver {
-  // The file bound by the EARLIEST chat.thread.create for this threadId.
+  // The file bound by the earliest chat.thread.create for this threadId.
   // undefined = no create in the log; null = an authoritative create exists
   // and binds the thread to no file (a channel thread, or a malformed one).
   threadFileBinding(threadId: string): ThreadFileBinding | null | undefined;
-  // The path of the LATEST moment.append for this object. undefined = the
+  // The path of the latest moment.append for this object. undefined = the
   // relay has never seen the object; null = its latest moment deleted it.
   objectCurrentPath(objectId: string): string | null | undefined;
-  // The object sitting at this path RIGHT NOW, or undefined when none does.
+  // The object sitting at this path right now, or undefined when none does.
   // The reverse of the lookup above, and the liveness proof a path binding
   // needs: a thread bound by path must not outlive the file it names.
   objectIdAtPath(path: string): string | undefined;
 }
 
 // MU-C4: how the chat branch resolves channel and thread ownership from the
-// workspace owner's append-only log. Both lookups use the EARLIEST matching
+// workspace owner's append-only log. Both lookups use the earliest matching
 // create op, mirroring the engine's insert-if-absent apply semantics: a later
 // forged create can never change a channel's kind or re-bind a thread.
 export interface ChatShareThreadResolver extends ShareFileChatResolver {
-  // The kind claimed by the EARLIEST chat.channel.create op for this wire id,
+  // The kind claimed by the earliest chat.channel.create op for this wire id,
   // undefined when no create exists yet, or null when an authoritative create
   // exists but is malformed/unshareable.
   channelKind(channelWireId: string): ChatShareChannelKind | null | undefined;
-  // The channelWireId claimed by the EARLIEST chat.thread.create op for this
+  // The channelWireId claimed by the earliest chat.thread.create op for this
   // threadId. undefined means no create exists yet; null means an authoritative
   // create exists but has no shareable channel binding (for example, a
   // file-linked thread). Keeping those states distinct prevents a later batch
@@ -231,7 +231,7 @@ export function validateFileShareAccess(value: unknown): FileShareAccessValidati
 
 // Grant-time gate #1 for secrets: selector paths must classify as engine
 // "tracked" — secret-classified paths (the .env family, however encoded) are
-// refused OUTRIGHT at grant time, and traversal/absolute/reserved paths are
+// refused outright at grant time, and traversal/absolute/reserved paths are
 // refused by the same classifier's underlying validation. Gate #2 is the
 // per-op defensive filter below; both are tested independently.
 export function validateShareSelector(input: {
@@ -334,13 +334,13 @@ export function parseStoredShareSelectorJson(selectorJson: string): StoredShareS
     if (candidate.kind !== undefined) return null;
     if (candidate.access !== undefined) return null;
     if (!Array.isArray(candidate.paths)) return null;
-    // The SAME rule every other selector reader applies. This was the last
+    // The same rule every other selector reader applies. This was the last
     // reader on its own check, and a laxer reader than the writer accepts
     // damage the writer would never have issued: a stored row the desktop
     // refuses must not load here either, or the two ends disagree about what
     // a share grants.
     if (!isShareablePathList(candidate.paths)) return null;
-    // The SAME version rule as create and as every recipient reader. A
+    // The same version rule as create and as every recipient reader. A
     // stored `""` is not a version this relay could have issued, and it is
     // not harmless: `pathVisibleThroughShare` reads any non-null version on a
     // no-paths selector as "the whole tracked workspace", so a row carrying
@@ -409,8 +409,8 @@ function visibleSharePath(selector: ShareSelector, path: string): string | null 
   return selected ? validated.normalized : null;
 }
 
-// The ONE version a path/version share exposes, and the rule both sides
-// state: a served op must name EXACTLY this version — the selector's
+// The one version a path/version share exposes, and the rule both sides
+// state: a served op must name exactly this version — the selector's
 // `versionId`, or `main` when the selector names none. A descendant, a fork,
 // or any other lineage is not admitted, on either side. The recipient runs the
 // same equality against the selector it recorded when it accepted the share
@@ -419,13 +419,13 @@ export function targetVersionId(selector: ShareSelector): string {
   return selector.versionId ?? MAIN_VERSION_ID;
 }
 
-// The presence-topic prefix for a chat THREAD (a thread is a sub-conversation
+// The presence-topic prefix for a chat thread (a thread is a sub-conversation
 // of a channel). The renderer sends `chat:thread:<threadId>` for a thread view;
 // the bare channel wire id remains the channel-level topic.
 export const CHAT_THREAD_TOPIC_PREFIX = "chat:thread:";
 
 // Parses the threadId out of a `chat:thread:<threadId>` presence topic. Returns
-// null for anything that is not EXACTLY that prefix followed by a non-empty
+// null for anything that is not exactly that prefix followed by a non-empty
 // threadId. Defensive: a NUL would be a presenceScopeKey separator, so a
 // threadId carrying one is rejected outright (the topic parser already refuses
 // control characters, but the gate must fail closed on its own). No other shape
@@ -439,17 +439,17 @@ export function parseChatThreadTopic(topic: string): string | null {
 }
 
 // MU-C1 presence gate: whether a share RECIPIENT may join the ephemeral
-// awareness scope for `topic`. Fail-closed and reuses the SAME visibility
+// awareness scope for `topic`. Fail-closed and reuses the same visibility
 // check the durable filter uses, so presence can never fan out to a scope the
 // share does not already expose. For a path/version selector a topic is a
 // workspace-relative path (doc co-presence on a shared file). For a MU-C4
-// chat-channel selector two topic shapes are allowed, both scoped to EXACTLY
+// chat-channel selector two topic shapes are allowed, both scoped to exactly
 // the granted channel:
 //   - the bare granted channel wire id (channel-level co-presence), and
-//   - `chat:thread:<threadId>` for a thread that BINDS to the granted channel,
+//   - `chat:thread:<threadId>` for a thread that binds to the granted channel,
 //     resolved via the same forge-resistant earliest-binding resolver the
 //     durable chat filter uses (`chat.threadChannelWireId`). A thread bound to
-//     ANOTHER channel, an unbound/unknown thread, a forged re-bind, or a
+//     another channel, an unbound/unknown thread, a forged re-bind, or a
 //     malformed `chat:thread:` topic is refused. Without a resolver a thread
 //     topic can never be authorized (fail closed).
 // Everything the share does not positively expose is refused — a recipient of
@@ -487,13 +487,13 @@ export function presenceTopicAllowedForShare(
     if (!chat) return false;
     const channelKind = chat.channelKind(selector.channelWireId);
     if (channelKind !== "channel" && channelKind !== "dm") return false;
-    // Thread-shape is decided FIRST, before any bare-wireId equality. A
-    // `chat:thread:<threadId>` topic is ALWAYS routed through the forge-resistant
+    // Thread-shape is decided first, before any bare-wireId equality. A
+    // `chat:thread:<threadId>` topic is always routed through the forge-resistant
     // resolver — never admitted by `topic === channelWireId`. Otherwise a crafted
     // grant whose channelWireId literally equals "chat:thread:<foreignThreadId>"
     // would match the bare branch and admit presence for a thread it must not.
-    // A thread topic is authorized ONLY when the thread binds (earliest binding)
-    // to THIS selector's granted channel; without a resolver it is refused
+    // A thread topic is authorized only when the thread binds (earliest binding)
+    // to this selector's granted channel; without a resolver it is refused
     // (fail closed).
     const threadId = parseChatThreadTopic(topic);
     if (threadId !== null) {
@@ -604,7 +604,7 @@ export function parseShareOpPayloadWithReferencedPaths(
   return { payload, referencedPaths };
 }
 
-// Rebuilds the SERVED payload from an explicit per-kind allowlist (the same
+// Rebuilds the served payload from an explicit per-kind allowlist (the same
 // posture as the moment.append/version.create branches): a stored payload
 // that grows an internal-only field (audit metadata, device ids, ...) must
 // never cross the share boundary un-redacted. Absent optional fields stay
@@ -621,10 +621,10 @@ function pickServed(
 }
 
 // The chat branch of the fail-closed share filter (MU-C4). Strict allowlist,
-// scoped to EXACTLY the granted channel's wire id:
+// scoped to exactly the granted channel's wire id:
 //   - chat.channel.create for the granted wireId (the join bootstrap);
 //   - chat.thread.create carrying the granted channelWireId, provided the
-//     log's earliest binding for that threadId (if any) is ALSO the granted
+//     log's earliest binding for that threadId (if any) is also the granted
 //     channel — a forged re-bind of a foreign thread is excluded;
 //   - chat.message.append / chat.reaction.set / chat.decision.set /
 //     chat.attachment.add whose thread resolves (earliest binding) to the
@@ -673,7 +673,7 @@ function filterChatOpForChannelShare(
     // the log). Any authoritative existing state — another channel OR a null
     // file-linked binding — must equal the grant or the re-bind is rejected.
     if (bound !== undefined && bound !== selector.channelWireId) return { allowed: false };
-    // linkedObjectId/linkedPathHint/linkedAtMs are deliberately NOT served: a
+    // linkedObjectId/linkedPathHint/linkedAtMs are deliberately not served: a
     // channel thread never carries a linked-file owner (enforced above).
     return {
       allowed: true,
@@ -702,9 +702,9 @@ function filterChatOpForChannelShare(
   return { allowed: false };
 }
 
-// #646 PR2: the EXACTLY five chat kinds a file share carries. The list is an
+// The exactly five chat kinds a file share carries. The list is an
 // allowlist and nothing falls through it. `chat.follow.set` and
-// `chat.feed.read.set` are the reader's OWN state and are deliberately absent
+// `chat.feed.read.set` are the reader's own state and are deliberately absent
 // (`crates/dohc-engine-sync/src/share.rs`, the same reason written for the
 // channel branch); `chat.channel.create` is a channel's bootstrap and a file
 // share has no channel.
@@ -764,7 +764,7 @@ function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding
   return null;
 }
 
-// A binding resolved to the file's path RIGHT NOW, or null when it cannot be
+// A binding resolved to the file's path right now, or null when it cannot be
 // resolved. Fail closed on every tri-state: an unknown object (undefined) and
 // a deleted one (null) both deny. Hiding the discussion about a deleted file
 // is the fail-closed answer and the simple one to state.
@@ -778,7 +778,7 @@ function threadCreateBinding(record: Record<string, unknown>): ThreadFileBinding
 // object is provably at that path (`server.ts`).
 //
 // A PATH binding is therefore only a row written before that conversion
-// existed. It is re-proved by asking which object sits at that path NOW, so
+// existed. It is re-proved by asking which object sits at that path now, so
 // such a row still cannot outlive its file — it just cannot follow one either,
 // which is why new accepts do not produce them.
 function resolvedThreadPath(
@@ -793,10 +793,10 @@ function resolvedThreadPath(
   return typeof path === "string" ? path : null;
 }
 
-// The FILE-chat branch of the fail-closed share filter (#646 PR2), for a
+// The FILE-chat branch of the fail-closed share filter, for a
 // path/version selector. A thread is visible through a file share when the
 // file it is about is visible through that file share — resolved from the
-// owner's log to the file's CURRENT path and tested by name, never taken from
+// owner's log to the file's current path and tested by name, never taken from
 // a client's word or from the display-only `linkedPathHint`.
 //
 // Across the boundary a thread's link travels as `linkedPath` and never as
@@ -815,7 +815,7 @@ function filterFileChatOpForPathShare(
 ): ShareOpDecision {
   // No resolver wired = no way to resolve a thread to a file = nothing served.
   if (!chat) return { allowed: false };
-  // Chat follows PATHS, and only paths (#646 PR2). A selector with no paths is
+  // Chat follows PATHS, and only paths. A selector with no paths is
   // a VERSION share: it grants one frozen version's files, and
   // `pathVisibleThroughShare` reads its empty path list as "every tracked
   // path" — which for chat would serve the live discussion about every file on
@@ -834,7 +834,7 @@ function filterFileChatOpForPathShare(
     path = resolvedThreadPath(chat, threadCreateBinding(record));
     // undefined = this op IS the first binding (the recipient append path, not
     // yet in the log). Any authoritative existing state must resolve to the
-    // SAME file, or this create is a re-bind trying to move a thread into (or
+    // same file, or this create is a re-bind trying to move a thread into (or
     // out of) the share — the forgery the earliest-wins rule exists to stop.
     if (bound !== undefined && boundPath !== path) return { allowed: false };
   } else if ((FILE_CHAT_THREAD_SCOPED_KINDS as readonly string[]).includes(opKind)) {
@@ -843,7 +843,7 @@ function filterFileChatOpForPathShare(
     return { allowed: false };
   }
   if (path === null) return { allowed: false };
-  // Gate #2 unchanged: the path must be inside the selector AND classified
+  // Gate #2 unchanged: the path must be inside the selector and classified
   // engine-tracked right now, so the chat lane inherits the secret-path floor.
   // The NORMALIZED spelling it proved is what gets served and stored.
   const servedPath = visibleSharePath(selector, path);
@@ -873,10 +873,10 @@ function filterFileChatOpForPathShare(
 // allowlist per selector kind. Path/version selector: moment.append (all
 // referenced paths visible, version matches), version.create for the shared
 // version (forkSnapshots redacted), the payload-free workspace.init bootstrap
-// op, and (#646 PR2) the five file-chat kinds whose thread resolves to a file
-// inside the selector. Chat-channel selector (MU-C4): ONLY the
+// op, and the five file-chat kinds whose thread resolves to a file
+// inside the selector. Chat-channel selector (MU-C4): only the
 // granted channel's chat ops (see filterChatOpForChannelShare) — file, secret,
-// version, and bootstrap ops stay excluded. EVERYTHING unrecognized is
+// version, and bootstrap ops stay excluded. Everything unrecognized is
 // excluded either way.
 export function filterOpForShare(
   selector: AnyShareSelector,
@@ -892,7 +892,7 @@ export function filterOpForShare(
     return filterChatOpForChannelShare(selector, opKind, payload, chat);
   }
 
-  // #646 PR2: chat follows the file share. Every chat kind routes here, so the
+  // Chat follows the file share. Every chat kind routes here, so the
   // branch's own allowlist is the only way one is served — a kind it does not
   // name is denied there, not silently carried by a later branch.
   if (opKind.startsWith("chat.")) {
@@ -912,14 +912,14 @@ export function filterOpForShare(
     const claimedVersionId = collectString(record.versionId);
     if (claimedVersionId !== targetVersionId(selector)) return { allowed: false };
     if (referencedPaths.length === 0) return { allowed: false };
-    // ALL referenced paths must be visible. A rename across the share boundary
+    // All referenced paths must be visible. A rename across the share boundary
     // is excluded rather than leaking the outside path. The accountless server
     // may reconstruct only its visible half as a create or delete; authenticated
     // recipients keep this raw filter behavior.
     if (!referencedPaths.every((path) => pathVisibleThroughShare(selector, path))) {
       return { allowed: false };
     }
-    // Build a MINIMAL served payload from the allowlist of fields the
+    // Build a minimal served payload from the allowlist of fields the
     // recipient's Rust share-view replay actually needs.
     // Everything else in the stored moment — author, metadata.summary,
     // metadata.correlationId, moment/object ids, lineage identity fields,
@@ -971,7 +971,7 @@ export function filterOpForShare(
     // forkSnapshots carry one row per file of the SOURCE version at fork
     // time — including files far outside the share. Redact to the selector;
     // rows whose shape is not understood are dropped, never passed through.
-    // Each kept row is rebuilt to the MINIMAL replay shape (path, blob sha,
+    // Each kept row is rebuilt to the minimal replay shape (path, blob sha,
     // content kind) so snapshot metadata and lineage (objectId,
     // latestMomentId, updatedAtMs, metadata) never leak, and the version
     // payload itself is reduced to its id + the redacted snapshots.
@@ -1003,7 +1003,7 @@ export function filterOpForShare(
 }
 
 // The single decision point for what a share recipient may WRITE.
-// `filterOpForShare` above answers the read question — "may this recipient SEE
+// `filterOpForShare` above answers the read question — "may this recipient see
 // this op?" — and the two are not the same question. A recipient may read every
 // file moment in the selector; it may write none of them, because a written
 // moment lands in the GRANTER's log and the granter's engine replays it
@@ -1032,9 +1032,9 @@ export function filterOpForShareAppend(
     : filterFileChatOpForPathShare(selector, opKind, payload, chat);
 }
 
-// #646 PR3a. One change a recipient proposes to one file.
+// One change a recipient proposes to one file.
 //
-// This is NOT a moment. A recipient never supplies a moment payload: the
+// This is not a moment. A recipient never supplies a moment payload: the
 // served moment drops `momentId`, `objectId` and every `before*` field
 // (see the read filter above), so a recipient could not state a lineage the
 // granter recognizes even if it tried. It states the NET CHANGE — "the file

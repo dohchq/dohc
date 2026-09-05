@@ -1,4 +1,4 @@
-// Pure workbench model (Phase E2): activity-bar view, side-panel visibility
+// Pure workbench model: activity-bar view, side-panel visibility
 // and width, open editor tabs, and the right-hand Chats panel. Pure like
 // window/windowState.ts so every transition and the persistence round-trip
 // are unit-tested without Electron. `dirty` is runtime-only (derived from the
@@ -79,7 +79,7 @@ const SITE_TAB_PREFIX = "dohc://site/";
 const PLUGIN_PANEL_TAB_PREFIX = "dohc://plugin-panel/";
 const PLUGIN_WEB_APP_TAB_PREFIX = "dohc://plugin-web/";
 // One details page per plugin, keyed by the plugin id (version-compare
-// precedent). Deliberately NOT a singleton: singletons own a process and
+// precedent). Deliberately not a singleton: singletons own a process and
 // refuse to split, and this page only reads.
 const PLUGIN_DETAILS_TAB_PREFIX = "dohc://plugin-details/";
 const VERSION_COMPARE_TAB_PREFIX = "dohc://versions/compare/";
@@ -158,7 +158,7 @@ export function pluginWebAppTabPath(
  * Both id and directory, the same shape pluginPanelTabPath already carries:
  * a row's own id is not unique on its own — a discovered, never-installed
  * row's id is only ever a broken manifest's directory-derived fallback,
- * which can coincide with some OTHER, unrelated plugin's real id. Keying
+ * which can coincide with some other, unrelated plugin's real id. Keying
  * the tab by id alone collapsed two different rows into one tab and made
  * the second-sorting one unreachable — its own click always reopened the
  * first one's tab instead.
@@ -367,11 +367,11 @@ export interface WorkbenchState {
   // section): the list caps here and scrolls internally; shorter lists shrink
   // to fit.
   openEditorsHeight: number;
-  // Explorer state (Phase E3), persisted with the rest: which folders are
+  // Explorer state, persisted with the rest: which folders are
   // expanded and which paths are pinned to the favorites section.
   expandedFolders: string[];
   pinned: string[];
-  // Recently opened files (Phase E5.0), most recent FIRST, capped — boosts
+  // Recently opened files, most recent first, capped — boosts
   // quick-open ranking. Persisted with the rest of the ui-state.
   recentFiles: string[];
   // Which view each collection tab shows, keyed by the collection's folder
@@ -404,7 +404,7 @@ export const DEFAULT_EDITOR_GROUP_ID = "primary";
 // Bounds the persisted explorer state the same way (oldest entries give way).
 export const MAX_EXPANDED_FOLDERS = 500;
 export const MAX_PINNED_PATHS = 100;
-// Recent-files list for quick-open ranking (Phase E5.0).
+// Recent-files list for quick-open ranking.
 export const MAX_RECENT_FILES = 20;
 // Bounds the persisted collection-view map (pinned precedent: a payload
 // bound, not a UX target — at the bound the oldest entry gives way).
@@ -875,7 +875,7 @@ export function closeEditorGroup(
 }
 
 // Selecting the already-active view toggles the panel (the old explicit
-// collapse button); any other view switches AND reveals the panel.
+// collapse button); any other view switches and reveals the panel.
 export function setView(
   state: WorkbenchState,
   view: ActivityViewId,
@@ -914,7 +914,7 @@ export function setOpenEditorsHeight(
     : { ...state, openEditorsHeight: clamped };
 }
 
-// Capped append: at the bound the OLDEST entry gives way (openTab precedent)
+// Capped append: at the bound the oldest entry gives way (openTab precedent)
 // — never a refusal the user would have to understand.
 function appendCapped(list: string[], path: string, cap: number): string[] {
   const next = [...list, path];
@@ -943,7 +943,7 @@ export function toggleFolderExpanded(
   return setFolderExpanded(state, path, !state.expandedFolders.includes(path));
 }
 
-// Records a file open for quick-open recency ranking: most recent FIRST,
+// Records a file open for quick-open recency ranking: most recent first,
 // deduped, capped at MAX_RECENT_FILES (oldest gives way). Re-opening the
 // already-most-recent file is a no-op (same reference).
 export function recordRecentFile(state: WorkbenchState, path: string): WorkbenchState {
@@ -1047,12 +1047,12 @@ export function remapWorkbenchPaths(
 //
 // Scoped to `restoredPaths` — the tabs that came from stored ui-state. Their
 // files all existed when the app started, so any listing that omits one is
-// reporting a real deletion, and the check can safely re-run on EVERY listing
+// reporting a real deletion, and the check can safely re-run on every listing
 // (a shared workspace lists twice on open: once at mount, once after the pull
 // lands). A tab opened this session is never in the set, so a listing that
 // raced its create can never close it.
 //
-// Tabs only: pinned paths, expanded folders and recent files include FOLDERS,
+// Tabs only: pinned paths, expanded folders and recent files include folders,
 // which no file listing carries. Virtual tabs (dohc://graph, chats, a moment
 // diff) have no file and always survive.
 export function pruneMissingRestoredTabs(
@@ -1080,7 +1080,7 @@ export function pruneMissingRestoredTabs(
 }
 
 // Persistence (.dohc/ui-state.json via the narrow get/set IPC pair).
-// serialize produces the zod-validated wire shape; parse is TOLERANT — a
+// serialize produces the zod-validated wire shape; parse is tolerant — a
 // missing, corrupt, or foreign-shaped value yields defaults, field by field,
 // never an error (windowState precedent).
 export function serializeUiState(state: WorkbenchState): WorkspaceUiState {
@@ -1111,8 +1111,8 @@ export function parseUiState(raw: unknown): WorkbenchState {
   const defaults = defaultWorkbenchState();
   if (typeof raw !== "object" || raw === null) return defaults;
   const value = raw as Record<string, unknown>;
-  // Adversarial boundary: read only OWN fields (a polluted prototype must not
-  // inject state) and collect tab paths with a loop that STOPS once the cap
+  // Adversarial boundary: read only own fields (a polluted prototype must not
+  // inject state) and collect tab paths with a loop that stops once the cap
   // is reached — never materialize/filter a huge foreign array first.
   const own = (key: string): unknown =>
     Object.hasOwn(value, key) ? value[key] : undefined;
@@ -1280,7 +1280,7 @@ export function parseUiState(raw: unknown): WorkbenchState {
 }
 
 // Bounded map collector for parseUiState, the collectPaths posture applied to
-// a record: OWN string entries only, both sides bounded, stop at the cap.
+// a record: own string entries only, both sides bounded, stop at the cap.
 function collectCollectionViews(raw: unknown): Record<string, string> {
   // Prototype-free: a collection folder named "__proto__" is an own key in
   // the file, and assigning it into a plain object would not keep it.

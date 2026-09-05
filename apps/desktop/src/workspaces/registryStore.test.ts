@@ -106,13 +106,13 @@ describe("automation failure acknowledgments", () => {
     expect(acks).toEqual({ "hello/triage": 3 });
     expect(
       unacknowledgedAutomationFailures([seen], acks),
-      "MUTATION: an acknowledged generation keeps warning forever",
+      "an acknowledged generation keeps warning forever",
     ).toEqual([]);
 
     // A newer failure has a higher generation: unacknowledged again.
     expect(
       unacknowledgedAutomationFailures([failure(4)], acks),
-      "MUTATION: one acknowledgment silencing every future failure",
+      "one acknowledgment silencing every future failure",
     ).toEqual([failure(4)]);
     // Another automation's failures are untouched by this acknowledgment.
     expect(
@@ -126,13 +126,13 @@ describe("automation failure acknowledgments", () => {
     store.acknowledgeAutomationFailure("ws-1", "hello/triage", 2);
     expect(
       store.find("ws-1")?.automationFailureAcks,
-      "MUTATION: a stale click un-seeing a newer acknowledgment",
+      "a stale click un-seeing a newer acknowledgment",
     ).toEqual({ "hello/triage": 5 });
 
     const reopened = createRegistryStore(registryPath);
     expect(
       reopened.find("ws-1")?.automationFailureAcks,
-      "MUTATION: an acknowledgment that dies with the process re-raises every dismissed notice",
+      "an acknowledgment that dies with the process re-raises every dismissed notice",
     ).toEqual({ "hello/triage": 5 });
   });
 });
@@ -151,7 +151,7 @@ describe("share skip records", () => {
   // or a later page fails and the pull is retried. The same skipped op must
   // not stack up in the record, or the count the banner shows drifts away
   // from what actually happened.
-  // The engine aggregates every blob ONE op refused into a single record,
+  // The engine aggregates every blob one op refused into a single record,
   // because this store's only duplicate test is the origin coordinate and every
   // blob in an op shares it (`record_refused_blobs`, `relay.rs`). One refusal
   // per blob would arrive here as several records with the same coordinate, and
@@ -180,17 +180,17 @@ describe("share skip records", () => {
     expect(afterRestart.more).toBe(0);
     expect(
       afterRestart.ops[0]?.detail,
-      "MUTATION: the record loses a refused file, or its count, or its measurements",
+      "the record loses a refused file, or its count, or its measurements",
     ).toContain("2 files in this operation were not applied");
     for (const path of ["docs/first.bin", "docs/second.bin"]) {
       expect(
         afterRestart.ops[0]?.detail,
-        `MUTATION: ${path} vanished from the durable record`,
+        `${path} vanished from the durable record`,
       ).toContain(path);
     }
   });
 
-  // Why the engine has to aggregate, stated as a fact about THIS function
+  // Why the engine has to aggregate, stated as a fact about this function
   // rather than a claim in a comment. Two records sharing one coordinate are
   // not two records here: the second is dropped and never counted, so `more`
   // does not rise to cover it either. Nothing downstream can recover what this
@@ -226,7 +226,7 @@ describe("share skip records", () => {
     const again = mergeShareSkippedOps(first, [op(4), op(9), op(11)]);
     expect(
       again.ops.map((entry) => entry.originSeq),
-      "MUTATION: appending blindly makes one retried page look like several failures",
+      "appending blindly makes one retried page look like several failures",
     ).toEqual([4, 9, 11]);
     expect(again.more).toBe(0);
   });
@@ -258,7 +258,7 @@ describe("share skip records", () => {
     const namespaced = afterAcknowledgingTheRelayOrigin(pagePosition);
     expect(
       hasUnacknowledgedShareSkips(namespaced),
-      "MUTATION: a page position shares a relay origin's coordinate, so acknowledging one hides the other",
+      "a page position shares a relay origin's coordinate, so acknowledging one hides the other",
     ).toBe(true);
     expect(namespaced.ops.map((entry) => entry.detail)).toEqual([
       "relay",
@@ -266,7 +266,7 @@ describe("share skip records", () => {
     ]);
 
     // What the collision costs, stated as its own case: with one coordinate
-    // the merge is RIGHT to read the second as a retry, and the warning stays
+    // the merge is right to read the second as a retry, and the warning stays
     // hidden. The separation has to come from the engine, which is where it
     // is proved — `a_relay_origin_named_like_a_page_position_stays_a_separate_refusal`.
     const colliding = afterAcknowledgingTheRelayOrigin({
@@ -290,7 +290,7 @@ describe("share skip records", () => {
     const retried = mergeShareSkippedOps(first, many);
     expect(
       retried.more,
-      "MUTATION: without a per-origin watermark every retry re-counts the ops the cap dropped",
+      "without a per-origin watermark every retry re-counts the ops the cap dropped",
     ).toBe(5);
     expect(retried.ops).toHaveLength(MAX_RETAINED_SKIPPED_OPS);
     // A genuinely new op past the cap still counts.
@@ -308,13 +308,13 @@ describe("share skip records", () => {
     expect(merged.ops).toHaveLength(MAX_RETAINED_SKIPPED_OPS);
     expect(
       merged.more,
-      "MUTATION: an unbounded list lets a misbehaving relay grow the registry file without limit",
+      "an unbounded list lets a misbehaving relay grow the registry file without limit",
     ).toBe(5);
     // And a later batch keeps counting rather than dropping the fact.
     expect(mergeShareSkippedOps(merged, [op(999)]).more).toBe(6);
   });
 
-  // A dismissal names the generation the user saw. So a write that ADDS
+  // A dismissal names the generation the user saw. So a write that adds
   // something must move it — otherwise a refusal recorded between the render
   // and the click is cleared unseen, and the cursor has already committed
   // past that op.
@@ -323,15 +323,15 @@ describe("share skip records", () => {
     expect(first.generation).toBe(1);
     expect(
       mergeShareSkippedOps(first, [op(4)]).generation,
-      "MUTATION: bumping on every write invalidates a dismissal a refetched page did not change",
+      "bumping on every write invalidates a dismissal a refetched page did not change",
     ).toBe(1);
     expect(
       mergeShareSkippedOps(first, [op(5)]).generation,
-      "MUTATION: a generation that never moves lets a stale click clear an unseen refusal",
+      "a generation that never moves lets a stale click clear an unseen refusal",
     ).toBe(2);
   });
 
-  // Dismissing must not DESTROY the record. The cursor has already committed
+  // Dismissing must not destroy the record. The cursor has already committed
   // past those ops, so this is the only evidence of what is missing — a
   // one-click delete would be an irreversible change with no reverse path.
   // Acknowledging hides the warning and keeps the coordinates.
@@ -344,12 +344,12 @@ describe("share skip records", () => {
     expect(hasUnacknowledgedShareSkips(acknowledged)).toBe(false);
     expect(
       acknowledged.ops.map((entry) => entry.originSeq),
-      "MUTATION: deleting the record destroys the only evidence of content the cursor has already passed",
+      "deleting the record destroys the only evidence of content the cursor has already passed",
     ).toEqual([4]);
   });
 
   // The race a destructive clear had to guard against does not exist here: a
-  // refusal recorded after the render has a HIGHER generation, so the click
+  // refusal recorded after the render has a higher generation, so the click
   // cannot acknowledge it and the warning comes back on its own.
   it("leaves a refusal recorded after the render unacknowledged", () => {
     const seen = mergeShareSkippedOps(undefined, [op(4)]);
@@ -359,7 +359,7 @@ describe("share skip records", () => {
 
     expect(
       hasUnacknowledgedShareSkips(acknowledged),
-      "MUTATION: acknowledging the whole record hides a refusal the user never saw",
+      "acknowledging the whole record hides a refusal the user never saw",
     ).toBe(true);
     // Seeing it and clicking again settles it, and still keeps both ops.
     const settled = acknowledgeShareSkips(acknowledged, afterRefresh.generation);
@@ -390,7 +390,7 @@ describe("share skip records", () => {
     const retried = mergeShareSkippedOps(first, many);
     expect(
       retried.more,
-      "MUTATION: forgetting a counted coordinate re-counts it on every retry",
+      "forgetting a counted coordinate re-counts it on every retry",
     ).toBe(first.more);
     expect(retried.inexact).toBeUndefined();
     expect(retried.generation).toBe(first.generation);
@@ -407,7 +407,7 @@ describe("share skip records", () => {
 
     expect(
       outOfOrder.ops.map((entry) => entry.originSeq),
-      "MUTATION: a high-water mark swallows an out-of-order coordinate it never counted",
+      "a high-water mark swallows an out-of-order coordinate it never counted",
     ).toEqual([100, 99]);
     expect(
       outOfOrder.generation,
@@ -417,7 +417,7 @@ describe("share skip records", () => {
 
   // Past the coordinate bound there is nowhere left to remember an op, so a
   // duplicate is indistinguishable from a new one. Counting it would make the
-  // total drift UPWARD while the copy claims a lower bound, so the count
+  // total drift upward while the copy claims a lower bound, so the count
   // stops and says it is incomplete.
   it("stops counting where it can no longer tell a duplicate from a new op", () => {
     const many = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES + 5 }, (_, index) =>
@@ -431,11 +431,11 @@ describe("share skip records", () => {
 
     expect(
       retried.more,
-      "MUTATION: counting an op it cannot dedupe makes the total drift UP while the copy says 'more than'",
+      "counting an op it cannot dedupe makes the total drift UP while the copy says 'more than'",
     ).toBe(first.more);
     expect(
       retried.generation,
-      "MUTATION: a moving generation resurrects an acknowledged warning with no new refusal behind it",
+      "a moving generation resurrects an acknowledged warning with no new refusal behind it",
     ).toBe(first.generation);
   });
 
@@ -453,16 +453,16 @@ describe("share skip records", () => {
     expect(beyond.inexact).toBe(true);
     expect(
       beyond.generation,
-      "MUTATION: a silent transition leaves an acknowledged warning hidden while content goes missing",
+      "a silent transition leaves an acknowledged warning hidden while content goes missing",
     ).toBe(exact.generation + 1);
-    // The SAME batch again is the retry, and stays quiet. A different one is
+    // The same batch again is the retry, and stays quiet. A different one is
     // more content skipped, and speaks up — see the two tests below.
     expect(mergeShareSkippedOps(beyond, [op(9000)]).generation).toBe(
       beyond.generation,
     );
   });
 
-  // Exactness and VISIBILITY are different questions. `inexact` flips once,
+  // Exactness and visibility are different questions. `inexact` flips once,
   // but every later batch the record cannot place is more content skipped
   // past a committed cursor — and after the user acknowledges the first one,
   // silence would hide all of it forever.
@@ -484,11 +484,11 @@ describe("share skip records", () => {
 
     expect(
       hasUnacknowledgedShareSkips(later),
-      "MUTATION: once inexact, later skipped content stays hidden behind the acknowledgement forever",
+      "once inexact, later skipped content stays hidden behind the acknowledgement forever",
     ).toBe(true);
   });
 
-  // The retry of the same page is the one batch that is NOT news: the record
+  // The retry of the same page is the one batch that is not news: the record
   // cannot dedupe its ops, but it can tell that it just saw this exact set.
   it("stays quiet when the same unplaceable batch arrives again", () => {
     const upToCap = Array.from({ length: MAX_TRACKED_SKIP_COORDINATES }, (_, index) =>
@@ -505,7 +505,7 @@ describe("share skip records", () => {
 
     expect(
       hasUnacknowledgedShareSkips(retried),
-      "MUTATION: treating a refetched page as news resurrects a warning the user dismissed",
+      "treating a refetched page as news resurrects a warning the user dismissed",
     ).toBe(false);
     expect(retried.generation).toBe(acknowledged.generation);
   });
@@ -531,7 +531,7 @@ describe("share skip records", () => {
 
     expect(
       hasUnacknowledgedShareSkips(collidingOther),
-      "MUTATION: a 32-bit digest names two different batches the same, and the second commits silently",
+      "a 32-bit digest names two different batches the same, and the second commits silently",
     ).toBe(true);
   });
 
@@ -552,7 +552,7 @@ describe("share skip records", () => {
 
     expect(
       hasUnacknowledgedShareSkips(mergeShareSkippedOps(acknowledged, huge)),
-      "MUTATION: keeping a truncated identity would call a different batch a repeat",
+      "keeping a truncated identity would call a different batch a repeat",
     ).toBe(true);
   });
 
@@ -575,16 +575,16 @@ describe("share skip records", () => {
 
     expect(
       retried.more,
-      "MUTATION: a prototype-inherited lookup recounts these coordinates on every retry",
+      "a prototype-inherited lookup recounts these coordinates on every retry",
     ).toBe(first.more);
     expect(
       retried.inexact,
-      "MUTATION: ...and reports the inflated total as exact",
+      "...and reports the inflated total as exact",
     ).toBeUndefined();
   });
 
   // Two shares can serve ops from different origins at the same sequence.
-  it("keys a skipped op by origin AND sequence", () => {
+  it("keys a skipped op by origin and sequence", () => {
     const merged = mergeShareSkippedOps(undefined, [
       op(4),
       { ...op(4), originId: "origin-other" },
@@ -668,7 +668,7 @@ describe("registry store", () => {
 
     expect(
       store.find(personal.workspaceId)?.remote,
-      "MUTATION: a failed write publishes the replacement to the live cache",
+      "a failed write publishes the replacement to the live cache",
     ).toEqual(original);
     expect(
       createRegistryStore(registryPath).find(personal.workspaceId)?.remote,
@@ -726,7 +726,7 @@ describe("registry store", () => {
 
     expect(
       hasUnacknowledgedShareSkips(store.list()[0]?.shareView?.skippedOps),
-      "MUTATION: mutating the cache before the write hides the warning in this process while disk still holds it",
+      "mutating the cache before the write hides the warning in this process while disk still holds it",
     ).toBe(true);
   });
 
@@ -808,11 +808,11 @@ describe("registry store", () => {
 
     expect.soft(
       store.find(personal.workspaceId)?.sharedChannels,
-      "MUTATION: a failed replacement changes the cached channel set before it reaches disk",
+      "a failed replacement changes the cached channel set before it reaches disk",
     ).toEqual([joined]);
     expect.soft(
       store.find(secondWorkspace.workspaceId)?.sharedChannels,
-      "MUTATION: a failed removal deletes the cached channel set before it reaches disk",
+      "a failed removal deletes the cached channel set before it reaches disk",
     ).toEqual([secondJoined]);
     const reopened = createRegistryStore(registryPath);
     expect.soft(
@@ -874,7 +874,7 @@ describe("registry store", () => {
     expect(() => store.setShareMounts("ws-1", [])).toThrow();
     expect(
       store.find("ws-1")?.shareMounts,
-      "MUTATION: a failed unmount write must not remove the mount from memory while disk still owns it",
+      "a failed unmount write must not remove the mount from memory while disk still owns it",
     ).toEqual([mount]);
   });
 
@@ -891,7 +891,7 @@ describe("registry store", () => {
     expect(store.find("ws-1")?.rootPath).toBe(personal.rootPath);
   });
 
-  it("persists a shared-view identity and its ended state (PR 18)", () => {
+  it("persists a shared-view identity and its ended state", () => {
     store.register(personal);
     store.setShareView("ws-1", {
       shareId: "share-1",
@@ -955,7 +955,7 @@ describe("registry store", () => {
 
     expect(
       store.find(personal.workspaceId)?.shareView,
-      "MUTATION: a failed write publishes the replacement to the live cache",
+      "a failed write publishes the replacement to the live cache",
     ).toEqual(original);
     expect(
       createRegistryStore(registryPath).find(personal.workspaceId)?.shareView,
@@ -1177,7 +1177,7 @@ describe("registry store", () => {
     );
   });
 
-  it("persists the share's origin relay so refresh can reject a foreign relay (PR 18 gate fix)", () => {
+  it("persists the share's origin relay so refresh can reject a foreign relay", () => {
     store.register(personal);
     store.setShareView("ws-1", {
       shareId: "share-1",

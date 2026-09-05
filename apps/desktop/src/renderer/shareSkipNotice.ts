@@ -2,7 +2,7 @@
 // surfaces say it — the workspace banner for a shared view, and the
 // shared-with-me row for a mount.
 //
-// The classes are NOT interchangeable, and treating them as one was a false
+// The classes are not interchangeable, and treating them as one was a false
 // cause: "outside what this share covers — ask the granter" is right when the
 // grant excluded the op, and wrong on both counts when the relay sent an
 // envelope the engine could not read. There the selector may well cover the

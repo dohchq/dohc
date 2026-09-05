@@ -7,7 +7,7 @@
 //!
 //! - **One writer per store.** [`EngineStore`] owns a single [`rusqlite`]
 //!   connection; it is neither `Sync` nor cloneable, so a second writer to the
-//!   same file is a type error, not a convention (`PORTING.md` §5, §9). The
+//!   same file is a type error, not a convention. The
 //!   low-level open primitive is crate-private; `dohc-engine-runtime`'s
 //!   file-id-keyed supervisor is the enforced single entry point.
 //! - **The open ritual lives in one place** ([`EngineStore::open`]):

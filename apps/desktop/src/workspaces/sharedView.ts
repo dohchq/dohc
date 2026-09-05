@@ -47,8 +47,8 @@ import {
   type UnjournalablePath,
 } from "./shareViewRecords";
 
-// The receive side of a relay share (PR 18): a shared view is a local
-// engine store fed EXCLUSIVELY by the share's filtered op log — no watcher,
+// The receive side of a relay share: a shared view is a local
+// engine store fed exclusively by the share's filtered op log — no watcher,
 // no capture, no push. This module owns the pull + disk materialization the
 // openSharedView/refreshSharedView IPC handlers drive.
 
@@ -83,7 +83,7 @@ export interface CaptureSharedViewLocalDivergenceOutcome {
 }
 
 // Capture failing mid-pass still leaves whatever it fixed before the throw —
-// the pending marker for the ONE unreadable path survives (capture's
+// the pending marker for the one unreadable path survives (capture's
 // pending branch fails closed rather than guessing, per #867), but the
 // repairs or edits capture already applied to every entry visited before it
 // are real and already durable. This carries those counts on the error so a
@@ -187,11 +187,11 @@ async function healTamperedProjectionPath(
   }
 }
 
-// Exported so a caller that must ask "what is at this path?" BEFORE it acts
+// Exported so a caller that must ask "what is at this path?" Before it acts
 // resolves it exactly the way materialization itself will — an ancestor
 // symlink can then never make a guard look at one entry while the write or
 // removal that follows touches another. ShareViewFiles' in-app rename and
-// delete primitives are those callers (#861).
+// delete primitives are those callers.
 export async function resolvedShareViewTarget(
   rootDir: string,
   relativePath: string,
@@ -206,7 +206,7 @@ export async function resolvedShareViewTarget(
   return resolvedAbsolute;
 }
 
-// EVERY store mutation inside captureSharedViewLocalDivergence must run through
+// Every store mutation inside captureSharedViewLocalDivergence must run through
 // this helper. There is no other correct way to mutate the store from here —
 // a branch added later that calls store.deleteTextFile / writeDiskContentToStore
 // / materializeSharedViewPaths directly, outside this helper, reintroduces the
@@ -243,14 +243,14 @@ async function materializeSharedViewPaths(
 ): Promise<void> {
   if (changedPaths.length === 0) return;
   const realRoot = await realpath(rootDir);
-  // REAL containment for the write, not just the lexical check above: a
+  // Real containment for the write, not just the lexical check above: a
   // symlink planted inside the materialized tree (a linked directory or a
   // link at the target path) must never redirect relay-controlled bytes
   // outside the root. The parent is realpath-verified after mkdir, and the
   // target itself is removed then recreated exclusively so a final-component
-  // link is deleted, never followed (gpt-5.6-sol P1).
+  // link is deleted, never followed.
   async function preparedTarget(target: string): Promise<string> {
-    // Containment BEFORE mkdir, not just after: a planted directory symlink
+    // Containment before mkdir, not just after: a planted directory symlink
     // on the write path would otherwise have recursive mkdir create real
     // directories outside the projection before the post-check throws. The
     // deepest existing ancestor must already be inside the root.
@@ -277,7 +277,7 @@ async function materializeSharedViewPaths(
     // the store that decides what the projection holds. The rule runs against
     // the MOUNT root, which is what `.dohc` means here.
     //
-    // "entry" for BOTH operations, because neither follows the leaf: a delete
+    // "entry" for both operations, because neither follows the leaf: a delete
     // is `rm`, and a write removes the target and recreates it with `wx`. So
     // the leaf is never a path this code reads or writes through, and a
     // tampered one is the thing being repaired. Following it here would refuse
@@ -316,7 +316,7 @@ async function materializeSharedViewPaths(
       await rm(resolvedTarget, { recursive: true, force: true });
       continue;
     }
-    // Read the content BEFORE touching the projection. `preparedTarget`
+    // Read the content before touching the projection. `preparedTarget`
     // removes the existing file, so a read that throws after it would leave a
     // hole where a good file was — and with the cursor uncommitted, every
     // later refresh would replay into the same hole.
@@ -1885,7 +1885,7 @@ async function refreshSharedViewOnce(input: {
   // must explicitly select its store implementation.
   store: CaptureVersionedTextStore;
   // The scope this refresh enforces, exactly as the share record holds it.
-  // Read BEFORE the pull and never repaired from the relay, so no pull ever
+  // Read before the pull and never repaired from the relay, so no pull ever
   // runs unscoped and no refresh can re-pin a wider selector.
   pinnedSelector: unknown;
   // Where a refused op is written down. Called before the cursor that skips

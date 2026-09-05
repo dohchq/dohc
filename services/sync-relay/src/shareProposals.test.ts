@@ -11,17 +11,17 @@ import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from ".
 import type { ProposedChange } from "./shareFilter";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
-// #646 PR3a — the proposal lane, driven through the REAL routes.
+// The proposal lane, driven through the real routes.
 //
 // Every case here is HTTP: the granter appends real moments and real blobs to
 // its own log, the recipient uploads and submits through its share, and the
 // granter accepts or declines through its workspace. The assertions are on
-// response bodies and on the granter's OWN log, because that log is the only
+// response bodies and on the granter's own log, because that log is the only
 // thing that can say whether a recipient's change reached the granter.
 //
 // The layout every case is built on:
-//   docs/in.md    -> object-in    INSIDE the selector ["docs"]
-//   notes/out.md  -> object-out   OUTSIDE it
+//   docs/in.md -> object-in inside the selector ["docs"]
+//   notes/out.md -> object-out outside it
 
 let roots: string[] = [];
 let storages: SyncRelayStorage[] = [];
@@ -99,7 +99,7 @@ interface OwnerOp {
   recordedAtMs: number;
 }
 
-// The granter's own log and blob store. Content is REAL: the base rewrite
+// The granter's own log and blob store. Content is real: the base rewrite
 // resolves a recipient's base by content hash, so a test with fake hashes
 // would prove nothing about the mechanism it exists to prove.
 class Granter {
@@ -233,7 +233,7 @@ function change(overrides: Partial<ProposedChange> = {}): ProposedChange {
   };
 }
 
-// The recipient's blob upload, through its OWN route. A change cannot be
+// The recipient's blob upload, through its own route. A change cannot be
 // accepted until the granter's workspace holds its content.
 async function uploadShareBlob(
   h: SyncRelayHandler,
@@ -264,7 +264,7 @@ async function submit(
   );
 }
 
-// The recipient's OWN push lane — file chat, which a comment or edit share
+// The recipient's own push lane — file chat, which a comment or edit share
 // admits. It is here because the accept lane must not disturb it: both write
 // into the same share's origin namespace.
 async function recipientChat(
@@ -316,8 +316,8 @@ async function reviewRows(h: SyncRelayHandler): Promise<Array<Record<string, unk
   return (await json(response)).proposals as Array<Record<string, unknown>>;
 }
 
-// ONE proposal, with its file rows. The listing above states counts, so a test
-// that asserts on what a review SHOWS opens the proposal the way the granter's
+// One proposal, with its file rows. The listing above states counts, so a test
+// that asserts on what a review shows opens the proposal the way the granter's
 // client does.
 async function reviewProposal(
   h: SyncRelayHandler,
@@ -336,13 +336,13 @@ async function onlyReview(h: SyncRelayHandler): Promise<Record<string, unknown>>
 }
 
 // The whole response, byte for byte. Anti-fingerprinting is a claim about
-// BYTES, so comparing status codes alone would not test it.
+// bytes, so comparing status codes alone would not test it.
 async function denialBytes(response: Response): Promise<string> {
   return `${response.status} ${await response.text()}`;
 }
 
 describe("the proposal route's level gate", () => {
-  it("accepts a submit at edit and refuses every other level with the SAME bytes", async () => {
+  it("accepts a submit at edit and refuses every other level with the same bytes", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
@@ -361,9 +361,9 @@ describe("the proposal route's level gate", () => {
     );
     expect(
       new Set(refusals).size,
-      "MUTATION: a level-specific refusal would tell a probing recipient the level",
+      "a level-specific refusal would tell a probing recipient the level",
     ).toBe(1);
-    expect(refusals[0], "MUTATION: the refusal must be the shared read-only code").toContain(
+    expect(refusals[0], "the refusal must be the shared read-only code").toContain(
       "share_read_only",
     );
     expect(refusals[0]).toContain("403");
@@ -393,7 +393,7 @@ describe("the proposal route's level gate", () => {
 
   it("holds the two write routes apart: the append route still refuses moments", async () => {
     // #646 PR3-0 closed the append gate, and PR3a must not reopen it by giving
-    // the append route a moment-shaped arm. The proposal route is the ONLY way
+    // the append route a moment-shaped arm. The proposal route is the only way
     // a file change crosses, and it never reaches the log without an accept.
     const storage = await testStorage();
     const h = handler(storage);
@@ -421,11 +421,11 @@ describe("the proposal route's level gate", () => {
     );
     expect(
       appended.status,
-      "MUTATION: the append route must never gain moment acceptance",
+      "the append route must never gain moment acceptance",
     ).toBe(403);
     expect(
       (await granter.sharedMoments(shareId)).length,
-      "MUTATION: a refused append must leave the granter's log untouched",
+      "a refused append must leave the granter's log untouched",
     ).toBe(0);
   });
 });
@@ -450,15 +450,15 @@ describe("what a proposal may name", () => {
       ],
     ] as const) {
       const refused = await submit(h, shareId, [op], { submitId: `s-${label}` });
-      expect(refused.status, `MUTATION: ${label} must be refused`).toBe(403);
+      expect(refused.status, `${label} must be refused`).toBe(403);
       expect(await refused.text()).toContain("share_op_rejected");
     }
-    expect((await reviewRows(h)).length, "MUTATION: nothing may be stored").toBe(0);
+    expect((await reviewRows(h)).length, "nothing may be stored").toBe(0);
   });
 
   it("refuses two changes to one file in one submit", async () => {
     // One net change per file is what makes the base rewrite sound: two
-    // changes for one file would be given the SAME rewritten base and would
+    // changes for one file would be given the same rewritten base and would
     // then conflict with each other at accept. The recipient consolidates, and
     // this is where that stops being a promise and starts being a rule.
     const storage = await testStorage();
@@ -474,7 +474,7 @@ describe("what a proposal may name", () => {
       change(),
       change({ afterPath: "docs/other.md", afterBlobSha256: sha256("recipient three") }),
     ]);
-    expect(sameBase.status, "MUTATION: two changes may not share one base file").toBe(403);
+    expect(sameBase.status, "two changes may not share one base file").toBe(403);
 
     const sameDestination = await submit(
       h,
@@ -485,7 +485,7 @@ describe("what a proposal may name", () => {
       ],
       { submitId: "s-2" },
     );
-    expect(sameDestination.status, "MUTATION: two changes may not land on one path").toBe(403);
+    expect(sameDestination.status, "two changes may not land on one path").toBe(403);
     expect((await reviewRows(h)).length).toBe(0);
   });
 
@@ -512,7 +512,7 @@ describe("what a proposal may name", () => {
     ];
     for (const [label, op] of malformed) {
       const refused = await submit(h, shareId, [op as ProposedChange], { submitId: `s-${label}` });
-      expect(refused.status, `MUTATION: ${label} must be refused`).toBe(403);
+      expect(refused.status, `${label} must be refused`).toBe(403);
     }
     expect((await reviewRows(h)).length).toBe(0);
   });
@@ -528,14 +528,14 @@ describe("what a proposal may name", () => {
     const refused = await submit(h, shareId, [change()]);
     expect(
       refused.status,
-      "MUTATION: a change whose blob is absent must be refused at submit",
+      "a change whose blob is absent must be refused at submit",
     ).toBe(422);
     expect(await refused.text()).toContain("blob_missing");
   });
 });
 
 describe("the base rewrite", () => {
-  it("gives a CURRENT change the granter's own head moment as its base", async () => {
+  it("gives a current change the granter's own head moment as its base", async () => {
     // The mechanism that makes accept free. A recipient's own moment ids mean
     // nothing here, so the relay states the base itself — and when the
     // recipient was current, that base IS the granter's head, which is what
@@ -556,7 +556,7 @@ describe("the base rewrite", () => {
 
     expect(
       (await granter.sharedMoments(shareId)).length,
-      "MUTATION: an open proposal must not be in the granter's log",
+      "an open proposal must not be in the granter's log",
     ).toBe(0);
 
     const accepted = await settle(h, proposalId, "accept");
@@ -567,11 +567,11 @@ describe("the base rewrite", () => {
     const moment = moments[0]!;
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: the base must be the granter's OWN head moment, or every accept opens a spurious conflict",
+      "the base must be the granter's OWN head moment, or every accept opens a spurious conflict",
     ).toBe(head.momentId);
     expect(
       moment.objectId,
-      "MUTATION: the moment must name the GRANTER's object, not a recipient id",
+      "the moment must name the GRANTER's object, not a recipient id",
     ).toBe("object-in");
     expect(moment.beforePresent).toBe("present");
     expect(moment.beforePath).toBe("docs/in.md");
@@ -589,7 +589,7 @@ describe("the base rewrite", () => {
     );
   });
 
-  it("gives a DRIFTED change the granter's own EARLIER moment as its base", async () => {
+  it("gives a DRIFTED change the granter's own earlier moment as its base", async () => {
     // The second correct outcome. The granter wrote again after the recipient
     // read the file, so the rewritten base is a real, older granter moment —
     // which is what makes the conflict the engine then opens a correct
@@ -614,14 +614,14 @@ describe("the base rewrite", () => {
     const opened = await onlyReview(h);
     expect(
       (opened.ops as Array<Record<string, unknown>>)[0]!.drifted,
-      "MUTATION: the review surface must say this file changed since they sent it",
+      "the review surface must say this file changed since they sent it",
     ).toBe(true);
 
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: a drifted change must name the moment it was BUILT ON, not the granter's head",
+      "a drifted change must name the moment it was BUILT ON, not the granter's head",
     ).toBe(readByRecipient.momentId);
     expect(moment.beforeLatestMomentId).not.toBe(head.momentId);
     expect(moment.beforeBlobSha256).toBe(readByRecipient.blobSha256);
@@ -652,7 +652,7 @@ describe("the base rewrite", () => {
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.beforePresent,
-      "MUTATION: an unknown base must state NO base, so the granter's engine opens a conflict",
+      "an unknown base must state NO base, so the granter's engine opens a conflict",
     ).toBe("null");
     expect(moment.beforeLatestMomentId).toBeUndefined();
     expect(moment.payloadBeforePath).toBeNull();
@@ -690,7 +690,7 @@ describe("the base rewrite", () => {
     const moved = moments.find((moment) => moment.payloadAfterPath === "docs/moved.md")!;
     expect(
       moved.operation,
-      "MUTATION: a change that lands somewhere else is a rename, or the old path keeps an alias",
+      "a change that lands somewhere else is a rename, or the old path keeps an alias",
     ).toBe("rename");
     expect(moved.payloadBeforePath).toBe("docs/in.md");
     expect(moved.objectId).toBe("object-in");
@@ -700,7 +700,7 @@ describe("the base rewrite", () => {
     expect(created.beforePresent).toBe("null");
     expect(
       created.objectId,
-      "MUTATION: a file the granter never had needs an object id the relay mints",
+      "a file the granter never had needs an object id the relay mints",
     ).toMatch(/^id-/u);
     expect(created.objectId).not.toBe("object-in");
   });
@@ -734,7 +734,7 @@ describe("the base rewrite", () => {
     expect(moment.payloadAfterPath).toBe("docs/in.md");
     expect(
       moment.payloadAfterBlobSha256,
-      "MUTATION: the domain's own delete carries the removed content on both sides",
+      "the domain's own delete carries the removed content on both sides",
     ).toBe(head.blobSha256);
     expect(moment.beforeLatestMomentId).toBe(head.momentId);
   });
@@ -744,7 +744,7 @@ describe("the origin an accept writes", () => {
   it("leaves the recipient's own push lane working after an accept", async () => {
     // The wedge this exists to prevent. A recipient numbers its own push
     // stream densely from its own journal, so if an accept inserted the
-    // granter's new moments into that SAME stream, the numbers the recipient
+    // granter's new moments into that same stream, the numbers the recipient
     // will use next are already taken — and `appendLogBatch` refuses a re-used
     // sequence carrying different content. One accept would silence the
     // recipient's chat for the life of the share, with no way back.
@@ -765,11 +765,11 @@ describe("the origin an accept writes", () => {
       200,
     );
 
-    // The recipient's NEXT op, at the next number its own journal hands it.
+    // The recipient's next op, at the next number its own journal hands it.
     const after = await recipientChat(h, shareId, 1, "two");
     expect(
       after.status,
-      "MUTATION: an accept that wrote the recipient's origin takes seq 1 and wedges this push forever",
+      "an accept that wrote the recipient's origin takes seq 1 and wedges this push forever",
     ).toBe(200);
 
     const log = await granter.log();
@@ -777,7 +777,7 @@ describe("the origin an accept writes", () => {
     expect(log.filter((op) => op.originId === recipientOrigin).length).toBe(2);
     expect(
       log.filter((op) => op.originId === recipientOrigin && op.opKind === "moment.append").length,
-      "MUTATION: accepted moments must not ride the recipient's own origin",
+      "accepted moments must not ride the recipient's own origin",
     ).toBe(0);
   });
 
@@ -807,7 +807,7 @@ describe("the origin an accept writes", () => {
     const rows = (await granter.log()).filter(
       (op) => op.originId === `share:${shareId}:proposal:${proposalId}`,
     );
-    expect(rows.length, "MUTATION: an accept writes its proposal's OWN origin").toBe(2);
+    expect(rows.length, "an accept writes its proposal's OWN origin").toBe(2);
     expect(rows.map((row) => row.originSeq)).toEqual([0, 1]);
   });
 
@@ -827,7 +827,7 @@ describe("the origin an accept writes", () => {
     });
     expect(
       claimed.status,
-      "MUTATION: a client may not push under the origin prefix accept owns",
+      "a client may not push under the origin prefix accept owns",
     ).toBe(400);
   });
 });
@@ -869,7 +869,7 @@ describe("what the granter does under an open proposal", () => {
     const reviewedOp = (reviewed.ops as Array<Record<string, unknown>>)[0]!;
     expect(
       reviewedOp.afterPath,
-      "MUTATION: the review names a path the accept will not write to",
+      "the review names a path the accept will not write to",
     ).toBe("docs/moved.md");
     expect(reviewedOp.drifted).toBe(false);
 
@@ -877,18 +877,18 @@ describe("what the granter does under an open proposal", () => {
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.payloadAfterPath,
-      "MUTATION: landing at the path the recipient read undoes the granter's rename",
+      "landing at the path the recipient read undoes the granter's rename",
     ).toBe("docs/moved.md");
     expect(
       moment.operation,
-      "MUTATION: a content-only change is a write, not a rename back",
+      "a content-only change is a write, not a rename back",
     ).toBe("write");
     expect(moment.payloadAfterBlobSha256).toBe(sha256("recipient two"));
     expect(moment.objectId).toBe("object-in");
     // And nothing is left at the path the recipient read.
     expect(
       storage.objectIdAtPath(WORKSPACE, "docs/in.md"),
-      "MUTATION: the stale path must not come back as a second copy of the file",
+      "the stale path must not come back as a second copy of the file",
     ).toBeUndefined();
     expect(storage.objectIdAtPath(WORKSPACE, "docs/moved.md")).toBe("object-in");
   });
@@ -922,7 +922,7 @@ describe("what the granter does under an open proposal", () => {
     const reviewed = await onlyReview(h);
     expect(
       (reviewed.ops as Array<Record<string, unknown>>)[0]!.afterPath,
-      "MUTATION: the review must name the path the write will use",
+      "the review must name the path the write will use",
     ).toBe("docs/by-recipient.md");
 
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
@@ -931,17 +931,17 @@ describe("what the granter does under an open proposal", () => {
     const moment = moments[0]!;
     expect(
       moment.objectId,
-      "MUTATION: a base re-resolved by PATH finds nothing here, mints a NEW object, and the granter ends up with the file twice",
+      "a base re-resolved by PATH finds nothing here, mints a new object, and the granter ends up with the file twice",
     ).toBe("object-in");
     expect(
       moment.payloadAfterPath,
-      "MUTATION: a move the recipient asked for must not be dropped in favour of the granter's path",
+      "a move the recipient asked for must not be dropped in favour of the granter's path",
     ).toBe("docs/by-recipient.md");
     expect(moment.operation).toBe("rename");
     expect(moment.payloadBeforePath).toBe("docs/moved.md");
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: the base must be a REAL moment of the granter's own object, never a stranger and never absent",
+      "the base must be a REAL moment of the granter's own object, never a stranger and never absent",
     ).toBe(renamed.momentId);
     expect(moment.beforePresent).toBe("present");
     expect(read.momentId).not.toBe(renamed.momentId);
@@ -971,9 +971,9 @@ describe("what the granter does under an open proposal", () => {
     expect(submitted.status, await submitted.clone().text()).toBe(200);
     const proposalId = (await json(submitted)).proposalId as string;
 
-    // The granter moves it AND edits it. Both halves matter: the move is what
+    // The granter moves it and edits it. Both halves matter: the move is what
     // the delete has to follow, and the edit is what keeps the recipient's
-    // base pinned to the OLDER moment — so the base's path and the file's
+    // base pinned to the older moment — so the base's path and the file's
     // current path are two different strings, and only one of them is right.
     await granter.write("object-in", "docs/moved.md", "granter two", {
       operation: "rename",
@@ -986,7 +986,7 @@ describe("what the granter does under an open proposal", () => {
     expect(moment.operation).toBe("delete");
     expect(
       moment.path,
-      "MUTATION: a delete naming the base's path names a file the granter moved away from",
+      "a delete naming the base's path names a file the granter moved away from",
     ).toBe("docs/moved.md");
     expect(moment.payloadAfterPath).toBe("docs/moved.md");
     expect(moment.objectId).toBe("object-in");
@@ -1017,11 +1017,11 @@ describe("what the granter does under an open proposal", () => {
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.objectId,
-      "MUTATION: a base re-resolved by PATH mints a NEW object here, and the deleted file returns as a create nobody can conflict with",
+      "a base re-resolved by PATH mints a new object here, and the deleted file returns as a create nobody can conflict with",
     ).toBe("object-in");
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: the change must name the moment it was built on, which is no longer the head",
+      "the change must name the moment it was built on, which is no longer the head",
     ).toBe(read.momentId);
     expect(moment.beforeLatestMomentId).not.toBe(deleted.momentId);
     // Stated base, older than the head: the engine's own rule then opens a
@@ -1043,11 +1043,11 @@ describe("what the granter does under an open proposal", () => {
     const refused = await submit(h, shareId, [change({ basedOnPath: "docs/never.md" })]);
     expect(
       refused.status,
-      "MUTATION: an unresolvable base must be refused at submit, not minted as a create at accept",
+      "an unresolvable base must be refused at submit, not minted as a create at accept",
     ).toBe(400);
     const body = await refused.text();
     expect(body, "the refusal names the file it is about").toContain("docs/never.md");
-    expect((await reviewRows(h)).length, "MUTATION: the whole submit is refused, atomically").toBe(
+    expect((await reviewRows(h)).length, "the whole submit is refused, atomically").toBe(
       0,
     );
   });
@@ -1077,7 +1077,7 @@ describe("what the granter does under an open proposal", () => {
     ]);
     expect(
       refused.status,
-      "MUTATION: a delete plus a create for one path is two changes to one file",
+      "a delete plus a create for one path is two changes to one file",
     ).toBe(403);
     expect((await reviewRows(h)).length).toBe(0);
   });
@@ -1085,7 +1085,7 @@ describe("what the granter does under an open proposal", () => {
 
 describe("the version a share exposes", () => {
   it("never takes a base from a version this share does not expose", async () => {
-    // A share exposes exactly ONE version. The same content can sit under the
+    // A share exposes exactly one version. The same content can sit under the
     // same object in another one, and a base taken from there names a moment
     // the shared version never held — so the granter's engine would compare
     // its head against a stranger and either conflict for the wrong reason or
@@ -1095,7 +1095,7 @@ describe("the version a share exposes", () => {
     await claimWorkspace(h);
     const granter = new Granter(h);
     const main = await granter.write("object-in", "docs/in.md", "granter one");
-    // The same content again, LATER, in another version: an unscoped base
+    // The same content again, later, in another version: an unscoped base
     // lookup takes the latest match, so this is the moment it would choose.
     const side = await granter.write("object-in", "docs/in.md", "granter one", {
       versionId: "version-2",
@@ -1115,19 +1115,19 @@ describe("the version a share exposes", () => {
     const row = await onlyReview(h);
     expect(
       (row.ops as Array<Record<string, unknown>>)[0]!.drifted,
-      "MUTATION: drift read across versions calls a current file drifted",
+      "drift read across versions calls a current file drifted",
     ).toBe(false);
 
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: an unscoped base lookup takes the LATEST match, which is the side version's moment",
+      "an unscoped base lookup takes the LATEST match, which is the side version's moment",
     ).toBe(main.momentId);
     expect(moment.versionId).toBe("main");
   });
 
-  it("resolves the base to the object THIS version has at that path", async () => {
+  it("resolves the base to the object this version has at that path", async () => {
     // Two different objects hold the same path in two versions. Resolving the
     // path across all versions at once picks whichever moved last, so a main
     // share would build its change on a side version's file — and every
@@ -1137,7 +1137,7 @@ describe("the version a share exposes", () => {
     const h = handler(storage);
     await claimWorkspace(h);
     const granter = new Granter(h);
-    // The side version's object is recorded FIRST, so it is the row an
+    // The side version's object is recorded first, so it is the row an
     // unscoped "who is at this path" lookup reaches before the main one.
     await granter.write("object-side", "docs/in.md", "side content", {
       versionId: "version-2",
@@ -1155,11 +1155,11 @@ describe("the version a share exposes", () => {
     const moment = (await granter.sharedMoments(shareId))[0]!;
     expect(
       moment.objectId,
-      "MUTATION: an unscoped path lookup takes the side version's object, and the change lands on an unrelated file",
+      "an unscoped path lookup takes the side version's object, and the change lands on an unrelated file",
     ).toBe("object-main");
     expect(
       moment.beforeLatestMomentId,
-      "MUTATION: and its base then resolves to nothing, so a current change states no base at all",
+      "and its base then resolves to nothing, so a current change states no base at all",
     ).toBe(main.momentId);
     expect(moment.payloadAfterPath).toBe("docs/in.md");
   });
@@ -1182,7 +1182,7 @@ describe("accept, decline, and withdraw", () => {
     expect((await json(declined)).state).toBe("declined");
     expect(
       (await granter.sharedMoments(shareId)).length,
-      "MUTATION: decline must never move the changes",
+      "decline must never move the changes",
     ).toBe(0);
     // And the recipient can see what happened to them.
     const mine = await h(request(RECIPIENT, `/sync/shares/${shareId}/proposals`));
@@ -1204,7 +1204,7 @@ describe("accept, decline, and withdraw", () => {
 
     expect((await settle(h, proposalId, "accept")).status).toBe(200);
     const twice = await settle(h, proposalId, "accept");
-    expect(twice.status, "MUTATION: a second accept must not release the changes again").toBe(409);
+    expect(twice.status, "a second accept must not release the changes again").toBe(409);
     expect((await settle(h, proposalId, "decline")).status).toBe(409);
     const withdrawn = await h(
       request(RECIPIENT, `/sync/shares/${shareId}/proposals/${proposalId}/withdraw`, {
@@ -1214,7 +1214,7 @@ describe("accept, decline, and withdraw", () => {
     expect(withdrawn.status).toBe(409);
     expect(
       (await granter.sharedMoments(shareId)).length,
-      "MUTATION: the changes must be in the log exactly once",
+      "the changes must be in the log exactly once",
     ).toBe(1);
   });
 
@@ -1237,7 +1237,7 @@ describe("accept, decline, and withdraw", () => {
     expect(withdrawn.status, await withdrawn.clone().text()).toBe(200);
     expect(
       (await reviewRows(h)).length,
-      "MUTATION: withdrawn changes must leave the granter's review surface",
+      "withdrawn changes must leave the granter's review surface",
     ).toBe(0);
     expect((await settle(h, proposalId, "accept")).status).toBe(409);
   });
@@ -1259,7 +1259,7 @@ describe("accept, decline, and withdraw", () => {
     const proposalId = (await json(submitted)).proposalId as string;
 
     narrowToComment(storage, shareId);
-    // The recipient can still SEE what it has out.
+    // The recipient can still see what it has out.
     const listed = await h(request(RECIPIENT, `/sync/shares/${shareId}/proposals`));
     expect(listed.status, await listed.clone().text()).toBe(200);
     expect((await json(listed)).proposals).toHaveLength(1);
@@ -1271,7 +1271,7 @@ describe("accept, decline, and withdraw", () => {
     );
     expect(
       withdrawn.status,
-      "MUTATION: a withdraw gated on the level loses the reverse path to a downgrade",
+      "a withdraw gated on the level loses the reverse path to a downgrade",
     ).toBe(200);
     expect((await reviewRows(h)).length).toBe(0);
   });
@@ -1299,7 +1299,7 @@ describe("accept, decline, and withdraw", () => {
     );
     expect(
       await denialBytes(stolen),
-      "MUTATION: another share's proposal is the same generic 404 as one that never existed",
+      "another share's proposal is the same generic 404 as one that never existed",
     ).toBe(await denialBytes(await h(
       request(OTHER, `/sync/shares/${theirs}/proposals/id-absent/withdraw`, { method: "POST" }),
     )));
@@ -1318,7 +1318,7 @@ describe("accept, decline, and withdraw", () => {
 
     const first = await json(await submit(h, shareId, ops, { submitId: "retried" }));
     const second = await json(await submit(h, shareId, ops, { submitId: "retried" }));
-    expect(second.proposalId, "MUTATION: a lost response must not become a second proposal").toBe(
+    expect(second.proposalId, "a lost response must not become a second proposal").toBe(
       first.proposalId,
     );
     expect(second.created).toBe(false);
@@ -1349,7 +1349,7 @@ describe("what an open proposal survives", () => {
     });
     expect(
       swept.removedSha256s,
-      "MUTATION: an open proposal's content must survive the sweep",
+      "an open proposal's content must survive the sweep",
     ).not.toContain(sha256("recipient two"));
 
     // And the proof that it still works: the accept lands the content.
@@ -1377,7 +1377,7 @@ describe("what an open proposal survives", () => {
     });
     expect(
       swept.removedSha256s,
-      "MUTATION: declined content is never going into the log, so it must be reclaimable",
+      "declined content is never going into the log, so it must be reclaimable",
     ).toContain(sha256("recipient two"));
   });
 
@@ -1403,11 +1403,11 @@ describe("what an open proposal survives", () => {
     ).toBe(200);
     expect(
       (await reviewRows(h)).length,
-      "MUTATION: an ended share leaves nothing waiting for the granter to answer",
+      "an ended share leaves nothing waiting for the granter to answer",
     ).toBe(0);
     expect(
       (await settle(h, proposalId, "accept")).status,
-      "MUTATION: a settled proposal cannot be accepted afterwards",
+      "a settled proposal cannot be accepted afterwards",
     ).toBe(409);
     expect((await granter.sharedMoments(shareId)).length).toBe(0);
 
@@ -1417,7 +1417,7 @@ describe("what an open proposal survives", () => {
     });
     expect(
       swept.removedSha256s,
-      "MUTATION: content held for a proposal nobody can answer is held forever",
+      "content held for a proposal nobody can answer is held forever",
     ).toContain(sha256("recipient two"));
 
     // The recipient, meanwhile, can do nothing more.
@@ -1448,7 +1448,7 @@ describe("who may do what", () => {
     ] as const) {
       expect(
         response.status,
-        `MUTATION: a recipient must never ${label} — ownership decides, not the share`,
+        `a recipient must never ${label} — ownership decides, not the share`,
       ).toBe(404);
     }
     expect((await granter.sharedMoments(shareId)).length).toBe(0);
@@ -1470,7 +1470,7 @@ describe("who may do what", () => {
     expect(listed.status).toBe(200);
     expect(
       ((await json(listed)).proposals as unknown[]).length,
-      "MUTATION: an overlapping share must not surface another recipient's changes",
+      "an overlapping share must not surface another recipient's changes",
     ).toBe(0);
 
     const stolen = await h(
@@ -1478,7 +1478,7 @@ describe("who may do what", () => {
         method: "POST",
       }),
     );
-    expect(stolen.status, "MUTATION: a proposal of another share is the generic 404").toBe(404);
+    expect(stolen.status, "a proposal of another share is the generic 404").toBe(404);
   });
 
   it("refuses a submit on a share already revoked or already narrowed", async () => {
@@ -1494,18 +1494,18 @@ describe("who may do what", () => {
       (await h(request(GRANTER, `/sync/shares/${revoked}/revoke`, { method: "POST" }))).status,
     ).toBe(200);
     const afterRevoke = await submit(h, revoked, [change({ basedOnBlobSha256: head.blobSha256 })]);
-    expect(afterRevoke.status, "MUTATION: a revoked share accepts no submit").toBe(404);
+    expect(afterRevoke.status, "a revoked share accepts no submit").toBe(404);
 
     const downgraded = await createShare(h, "edit");
     narrowToComment(storage, downgraded);
     const afterDowngrade = await submit(h, downgraded, [
       change({ basedOnBlobSha256: head.blobSha256 }),
     ]);
-    expect(afterDowngrade.status, "MUTATION: a narrowed level accepts no submit").toBe(403);
+    expect(afterDowngrade.status, "a narrowed level accepts no submit").toBe(403);
     expect((await reviewRows(h)).length).toBe(0);
   });
 
-  it("loses a submit to a revoke or a downgrade that lands at the LAST instant", async () => {
+  it("loses a submit to a revoke or a downgrade that lands at the last instant", async () => {
     // The TOCTOU window the entry checks cannot cover: the grant changes after
     // every route-level check and immediately before the transactional insert.
     // Only the guard running inside the insert's own BEGIN IMMEDIATE can still
@@ -1538,11 +1538,11 @@ describe("who may do what", () => {
       const raced2 = await submit(h, shareId, [change({ basedOnBlobSha256: head.blobSha256 })]);
       expect(
         raced2.status,
-        `MUTATION: a ${label} landing inside the write lock must roll the submit back`,
+        `a ${label} landing inside the write lock must roll the submit back`,
       ).toBe(expected);
       expect(
         storage.listShareProposalsForShare(shareId).length,
-        `MUTATION: a lost ${label} race must store nothing`,
+        `a lost ${label} race must store nothing`,
       ).toBe(0);
     }
   });
@@ -1574,7 +1574,7 @@ describe("the recipient's blob route", () => {
         await denialBytes(await uploadShareBlob(h, shareId, "recipient two")),
       ),
     );
-    expect(new Set(refusals).size, "MUTATION: the level must not be readable from the bytes").toBe(
+    expect(new Set(refusals).size, "the level must not be readable from the bytes").toBe(
       1,
     );
     expect(refusals[0]).toContain("share_read_only");
@@ -1600,7 +1600,7 @@ describe("the recipient's blob route", () => {
         body: new TextEncoder().encode("another thing"),
       }),
     );
-    expect(mismatched.status, "MUTATION: a blob must be what its name says it is").toBe(400);
+    expect(mismatched.status, "a blob must be what its name says it is").toBe(400);
   });
 
   it("reclaims an upload no change ever claimed", async () => {
@@ -1619,7 +1619,7 @@ describe("the recipient's blob route", () => {
     });
     expect(
       swept.removedSha256s,
-      "MUTATION: an upload nothing claims must not be held against the granter forever",
+      "an upload nothing claims must not be held against the granter forever",
     ).toContain(sha256("never submitted"));
   });
 
@@ -1652,7 +1652,7 @@ describe("the recipient's blob route", () => {
 
   });
 
-  // The per-proposal route is a NEW surface too, and it owes the listing's gate
+  // The per-proposal route is a new surface too, and it owes the listing's gate
   // and the listing's exact denial bytes. A route that denies differently can
   // be compared against the other to learn what a workspace holds.
   it("gates the single-proposal route exactly as the listing is gated", async () => {
@@ -1682,18 +1682,18 @@ describe("the recipient's blob route", () => {
     ]).then((responses) => Promise.all(responses.map(denialBytes)));
     expect(
       new Set(denied).size,
-      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+      "a per-failure answer turns this route into a probe for what a workspace holds",
     ).toBe(1);
     expect(
       await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
-      "MUTATION: a per-proposal route denying differently from the listing leaks which proposals exist",
+      "a per-proposal route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
     // Settled is history on this route, exactly as on the op route.
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await one(proposalId, GRANTER)),
-      "MUTATION: serving a settled proposal keeps a closed review readable",
+      "serving a settled proposal keeps a closed review readable",
     ).toBe(denied[0]);
   });
 
@@ -1714,7 +1714,7 @@ describe("the recipient's blob route", () => {
     expect(rows.length).toBe(1);
     expect(
       rows[0]!.ops,
-      "MUTATION: an ops ARRAY here restores the per-tick work this listing exists to avoid",
+      "an ops ARRAY here restores the per-tick work this listing exists to avoid",
     ).toBe(1);
     expect(Object.keys(rows[0]!).sort()).toEqual([
       "createdAtMs",
@@ -1725,7 +1725,7 @@ describe("the recipient's blob route", () => {
     ]);
   });
 
-  // A per-op route is a NEW surface on the granter's workspace, so it owes the
+  // A per-op route is a new surface on the granter's workspace, so it owes the
   // same gate the listing owes and the same generic 404 — one answer for every
   // way a lookup can fail, so nothing on it can be used to probe what exists.
   it("gates the single-op route exactly as the listing is gated", async () => {
@@ -1744,7 +1744,7 @@ describe("the recipient's blob route", () => {
     // The owner reads it.
     expect((await op(proposalId, GRANTER)).status).toBe(200);
 
-    // Every other way in is the SAME bytes, so none of them tells the caller
+    // Every other way in is the same bytes, so none of them tells the caller
     // whether the thing they asked about exists.
     const denied = await Promise.all([
       // The share's own recipient, who owns none of this workspace.
@@ -1758,7 +1758,7 @@ describe("the recipient's blob route", () => {
     ]).then((responses) => Promise.all(responses.map(denialBytes)));
     expect(
       new Set(denied).size,
-      "MUTATION: a per-failure answer turns this route into a probe for what a workspace holds",
+      "a per-failure answer turns this route into a probe for what a workspace holds",
     ).toBe(1);
     expect(denied[0]).toContain("404");
 
@@ -1767,7 +1767,7 @@ describe("the recipient's blob route", () => {
     // against the other.
     expect(
       await denialBytes(await h(request(OTHER, `/sync/${WORKSPACE}/proposals`))),
-      "MUTATION: a per-op route denying differently from the listing leaks which proposals exist",
+      "a per-op route denying differently from the listing leaks which proposals exist",
     ).toBe(denied[0]);
 
     // A settled proposal is history. The review asks one question, and it
@@ -1775,7 +1775,7 @@ describe("the recipient's blob route", () => {
     expect((await settle(h, proposalId, "decline")).status).toBe(200);
     expect(
       await denialBytes(await op(proposalId, GRANTER)),
-      "MUTATION: serving a settled proposal's ops keeps a closed review readable",
+      "serving a settled proposal's ops keeps a closed review readable",
     ).toBe(denied[0]);
   });
 
@@ -1807,7 +1807,7 @@ describe("the recipient's blob route", () => {
     expect(accepted.status, await accepted.clone().text()).toBe(200);
     expect(
       (await json(accepted)).ops,
-      "MUTATION: a bound one below the stated number refuses a submit it must carry",
+      "a bound one below the stated number refuses a submit it must carry",
     ).toBe(MAX_SHARE_PROPOSAL_OPS);
   });
 

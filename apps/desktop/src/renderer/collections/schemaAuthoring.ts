@@ -55,7 +55,7 @@ export function addField(
   return { ...schema, fields: [...schema.fields, field] };
 }
 
-// Field RENAME is deliberately absent: a schema-only rename disconnects
+// Field rename is deliberately absent: a schema-only rename disconnects
 // every record's frontmatter key from the field. It ships together with the
 // record-key rewrite, not before.
 

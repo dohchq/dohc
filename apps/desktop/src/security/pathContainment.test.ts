@@ -30,15 +30,11 @@ describe("isInside", () => {
     expect(isInside(root, join(root, "..", "..", "elsewhere", "x"))).toBe(false);
   });
 
-  // MUTATION (..-segment): weaken the whole-segment test back to a bare
-  // "..-prefix" test and this pin goes red — the historical bug rejected
-  // real contained names.
   it("counts a child under a '..'-prefixed NAME as inside — '..' must be a whole segment", () => {
     expect(isInside(root, join(root, "..cache"))).toBe(true);
     expect(isInside(root, join(root, "..cache", "server.mjs"))).toBe(true);
   });
 
-  // MUTATION (case-fold): restore case folding and this pin goes red.
   it("rejects a case-distinct POSIX sibling", () => {
     expect(isInside("/work/WS", "/work/ws/file")).toBe(false);
     expect(isInside("/work/WS", "/work/WS/file")).toBe(true);
@@ -50,7 +46,6 @@ describe("isInside", () => {
       expect(isInside("C:\\ws", "D:\\evil\\x")).toBe(false);
     });
 
-    // MUTATION (case-fold): restore case folding and this pin goes red.
     it("rejects a case-distinct Windows sibling", () => {
       expect(isInside("C:\\work\\WS", "C:\\work\\ws\\file")).toBe(false);
       expect(isInside("C:\\work\\WS", "C:\\work\\WS\\file")).toBe(true);

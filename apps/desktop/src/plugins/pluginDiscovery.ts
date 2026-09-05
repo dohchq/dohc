@@ -42,7 +42,7 @@ export interface InstalledPluginRecord {
   /**
    * Set only on a record that just lost discovery's duplicate-id tie-break:
    * the manifest id another directory kept instead. A caller that needs to
-   * know whether ITS OWN directory got displaced by this one reads this
+   * know whether its own directory got displaced by this one reads this
    * field, never `diagnostics` — that array is bounded and re-worded for
    * display, so it is not a stable place to detect a specific collision
    * from code: display text and machine-checked state must never be the

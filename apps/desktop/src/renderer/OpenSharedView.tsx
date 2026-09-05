@@ -6,7 +6,7 @@ import type { Workspace } from "./DesktopWorkspaceShell";
 import { IconButton, PrimaryButton } from "./ui/controls";
 
 // "Open a share" (PR 18 + share mounts): the receive side of an external
-// share grant. Paste the code someone sent you and either ADD it to the
+// share grant. Paste the code someone sent you and either add it to the
 // current workspace (a read-only shared-with-me/<label>/ folder that
 // live-follows the share — the default when opened from inside a workspace)
 // or open it as a separate read-only view in an empty folder. Mirrors

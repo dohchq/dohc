@@ -14,7 +14,7 @@ import {
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
-// PR 0M-5: engine history reads (active-version timeline + one-moment
+// Engine history reads (active-version timeline + one-moment
 // payloads), engine-routed restore (forward history, expected-event
 // registration, disk materialization, undo), the stable-object-id seam for
 // the linked-chat rail, and engine-coordinated renames.
@@ -44,7 +44,7 @@ async function readText(root: string, path: string): Promise<string> {
 // Every test here runs on the daemon path: `rustEngineSessions` selects the
 // Rust engine, and the loopback behind it holds real state and real sha256, so
 // the history these tests read back is recorded state rather than a canned
-// responder. Passing `requests` is what lets a test PROVE the path it took.
+// responder. Passing `requests` is what lets a test prove the path it took.
 function capture(
   root: string,
   loopback: VersionedLoopbackEngine,
@@ -138,7 +138,7 @@ describe("engine restore", () => {
     expect(result.path).toBe("doc.md");
     expect(await readText(root, "doc.md")).toBe("original\n");
 
-    // Forward history: the restore is a NEW moment on top, nothing rewritten.
+    // Forward history: the restore is a new moment on top, nothing rewritten.
     const after = await engine.listMoments();
     expect(after.moments.length).toBe(page.moments.length + 1);
     expect(after.moments[0].id).toBe(result.restoredMomentId);

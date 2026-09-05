@@ -1,4 +1,4 @@
-// Measurement harness behind the conflict-pane preview window (#536), the
+// Measurement harness behind the conflict-pane preview window, the
 // sibling of unifiedDiff.measure.test.ts.
 //
 // It is not part of the normal suite: it walks the whole repository and one of
@@ -7,7 +7,7 @@
 //
 //   DOHC_MEASURE_CONFLICT=1 pnpm --filter @dohc/desktop exec vitest run conflictPane.measure
 //
-// WHAT IT MEASURES, and what it cannot. A conflict side goes into one `<pre>`
+// What IT measures, and what it cannot. A conflict side goes into one `<pre>`
 // with `whitespace-pre-wrap break-words`, so the browser lays out every
 // character before it knows the scroll height. That layout is Chromium's and
 // Node cannot time it. So the window is derived the other way round: from the
@@ -69,7 +69,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
   it("reports the size of representative healthy documents", () => {
     const lines: number[] = [];
     const chars: number[] = [];
-    // BYTES is the unit CONFLICT_COMBINED_EDIT_MAX_BYTES is enforced in, so it
+    // Bytes is the unit CONFLICT_COMBINED_EDIT_MAX_BYTES is enforced in, so it
     // is the one the healthy maximum has to be recorded in. Characters stay
     // beside it because the preview windows are counted in those.
     const bytes: number[] = [];
@@ -78,7 +78,7 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
     let overLineWindow = 0;
     // Files holding one line wider than the whole character window. This
     // corpus has none — its longest line is about 19,000 characters — so the
-    // mid-line cut, and the "Show more" stall that lived in it (#536 review),
+    // mid-line cut, and the "Show more" stall that lived in it,
     // were structurally invisible here. The unit tests carry that shape
     // instead; a corpus of hand-written source cannot.
     let overLongestLine = 0;
@@ -140,9 +140,9 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
 });
 
 
-// The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES (#566).
+// The benchmark behind CONFLICT_COMBINED_EDIT_MAX_BYTES.
 //
-// That limit REJECTS otherwise valid combined text, so AGENTS.md wants its
+// That limit rejects otherwise valid combined text, so AGENTS.md wants its
 // evidence in a focused benchmark rather than a comment. The rows above cannot
 // supply it: they measure corpus sizes and preview slicing in Node, and this
 // cost is Chromium's.
@@ -156,12 +156,12 @@ describe.skipIf(!measuring)("conflict preview window measurement", () => {
 //   -> commit -> controlled value reconciled
 //
 // and React skips the value write when the browser's own incremental edit has
-// already produced the value it wanted. So this bundles React and the REAL
+// already produced the value it wanted. So this bundles React and the real
 // `applyCombinedChange`, types with `keyboard.insertText` so the native event
 // fires, and times from that event until the DOM settles. The measured cost
 // fell by about sixty times, and the bound moved because of it.
 //
-// The bound is raised inside the bundle for the ACCEPTED ladder, so the cost
+// The bound is raised inside the bundle for the accepted ladder, so the cost
 // curve can be read past the value the product ships — otherwise the guard
 // refuses the very rows a recalibration would need.
 //
@@ -177,7 +177,7 @@ describe.skipIf(!measuring)("combine textarea keystroke latency", () => {
   const resolveFrom = (specifier: string) =>
     bundleRequire.resolve(specifier, { paths: [`${posixRoot}apps/desktop`] });
 
-  // A real React controlled textarea calling the SHIPPED decision. The only
+  // A real React controlled textarea calling the shipped decision. The only
   // benchmark-local code is the JSX shell around it.
   // Written with createElement rather than JSX: the entry is three elements,
   // and avoiding JSX avoids depending on which jsx runtime the bundler picks.
@@ -220,7 +220,7 @@ createRoot(document.getElementById("root")).render(createElement(Bench));
       const output = await build({
         logLevel: "error",
         configFile: false,
-        // ANCHORED, because a bare "react" alias prefix-matches
+        // Anchored, because a bare "react" alias prefix-matches
         // "react/jsx-dev-runtime" and rolldown then looks for it underneath
         // react's index.js.
         resolve: {

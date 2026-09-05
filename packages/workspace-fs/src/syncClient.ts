@@ -180,7 +180,7 @@ export function createLocalSyncClient({
           approvalRequests: [],
         };
       } catch (error) {
-        // Fallback for a server that still THROWS an approval error instead of
+        // Fallback for a server that still throws an approval error instead of
         // returning a per-op failure (older deployments).
         if (isApprovalError(error)) {
           return {

@@ -16,7 +16,7 @@ import {
   type WorkspaceWatchHandle,
 } from "./workspaceWatcher";
 
-// Retirement Phase C (WS-H1): the legacy .dohc/history read/write surface is
+// The legacy.dohc/history read/write surface is
 // gone from this layer — the engine capture is a workspace's only history.
 // Legacy history left on disk by pre-flip versions is a read-only relic.
 
@@ -32,7 +32,7 @@ interface WatchedWorkspace {
   engine: CloudSyncEngine | null;
   // Per-workspace engine-capture singleton; null while the workspace is
   // explicitly opted out (or the capture build failed). Torn down in stopAll
-  // AFTER the watcher stops so the final settled batch is captured before
+  // after the watcher stops so the final settled batch is captured before
   // shutdown completes.
   capture: WorkspaceEngineCapture | null;
   // True once captureFor resolved and produced NO capture: this workspace
@@ -40,16 +40,16 @@ interface WatchedWorkspace {
   // Drives the persistent "History is off for this workspace" notice.
   historyRecordingOff: boolean;
   // Why the open-time settings read could not be trusted, straight from that
-  // read. Null when the file read normally. The notice states THIS cause
+  // read. Null when the file read normally. The notice states this cause
   // instead of blaming the Settings toggle, and the renderer never answers
   // the question from a read of its own.
   settingsWarning: string | null;
-  // True when building the recorder THREW (#505). The workspace records
+  // True when building the recorder THREW. The workspace records
   // nothing either way, but the cause is a failure, not the user's Settings
   // choice — the notice states which, so a real failure never wears the
   // opt-out's copy.
   historyRecordingUnavailable: boolean;
-  // True when this workspace is a shared view (#540): no recorder by design.
+  // True when this workspace is a shared view: no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
   // has to guess it.
   historyShareView: boolean;
@@ -80,10 +80,10 @@ export interface WorkspaceActivityOptions {
   // (registry remote identity) and whether a cloud session exists right now.
   cloudStateFor?: (workspaceId: string) => { enabled: boolean; connected: boolean;
   };
-  // Builds a sync engine for a workspace when it is enabled AND connected;
+  // Builds a sync engine for a workspace when it is enabled and connected;
   // null keeps the workspace local-only. Called on open and on enableCloud.
   // The options (joinBootstrap) ride through from enableCloud so a freshly
-  // JOINED workspace's engine can be built pull-first (0P-C gate fix).
+  // joined workspace's engine can be built pull-first (0P-C gate fix).
   engineFor?: (
     workspace: ActivityWorkspace,
     capture: WorkspaceEngineCapture | null,
@@ -107,17 +107,17 @@ export interface WorkspaceActivityOptions {
 }
 
 // What the open-time settings read decided: the recorder, and — when the file
-// could not be trusted — why. Both come from ONE read, so the notice can never
+// could not be trusted — why. Both come from one read, so the notice can never
 // state a cause the capture decision did not have.
 export interface WorkspaceCaptureDecision {
   capture: WorkspaceEngineCapture | null;
   warning?: string;
-  // True for a shared view (#540): it is fed by the share's pull and never
+  // True for a shared view: it is fed by the share's pull and never
   // gets a recorder of its own. A capability, not an opt-out and not a
   // failure — without this cause the null capture wears the opt-out's copy,
   // blaming a Settings toggle nobody touched.
   //
-  // REQUIRED, like the contract field it feeds: an omitted boolean would
+  // Required, like the contract field it feeds: an omitted boolean would
   // read as "not a shared view", and the sole producer of `true` could be
   // deleted without a compile error. A decision that cannot say must not
   // compile.
@@ -183,7 +183,7 @@ export function createWorkspaceActivity(
       cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
-    // Additive surface: the status bar shows HOW MANY files conflict, the
+    // Additive surface: the status bar shows how many files conflict, the
     // notice center shows when history capture is failing, and — post flag
     // flip — when a workspace records no history at all (engine opt-out;
     // the legacy recorder is retired).
@@ -236,7 +236,7 @@ export function createWorkspaceActivity(
         agentRun: null,
       };
       state.entry = entry;
-      // Resolve the engine capture BEFORE the watcher starts: the watcher
+      // Resolve the engine capture before the watcher starts: the watcher
       // records each settled batch into the engine (or nowhere, for an
       // opted-out workspace), so the mode must be known from the first
       // batch. A capture failure leaves the workspace with no recorder —
@@ -250,11 +250,11 @@ export function createWorkspaceActivity(
               // batches within one open).
               activeAgentRun: () => entry.agentRun,
               onCaptureOutcome: (failure) => {
-                // Transition-only: the FIRST failure raises the notice, the
+                // Transition-only: the first failure raises the notice, the
                 // first success after a failure clears it, and repeated
                 // failures (a persistently broken store retries every batch)
                 // never re-notify. The refusal classification transitions the
-                // same way (#874): a persistently refused store re-reports
+                // same way: a persistently refused store re-reports
                 // the same code on every pass.
                 if (entry.historyCaptureFailure === failure) return;
                 entry.historyCaptureFailure = failure;
@@ -275,8 +275,8 @@ export function createWorkspaceActivity(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
             error,
           );
-          // The build FAILED — the user chose nothing. Carry that apart from
-          // the opt-out (#505) so the notice states the true cause. The error
+          // The build failed — the user chose nothing. Carry that apart from
+          // the opt-out so the notice states the true cause. The error
           // itself stays in the log: it is developer-facing, and the notice
           // owes the user a state and a next step, not a stack.
           entry.historyRecordingUnavailable = true;
@@ -291,7 +291,7 @@ export function createWorkspaceActivity(
         return statusFor(workspace, state);
       }
       entry.handle = startWorkspaceWatch(workspace, {
-        // Non-null from the FIRST batch for engine workspaces; null records
+        // Non-null from the first batch for engine workspaces; null records
         // nothing (opt-out).
         engineCapture: () => entry.capture,
         onSettledBatch: (events) => options.onWatcherBatch?.(workspace, events),
@@ -334,7 +334,7 @@ export function createWorkspaceActivity(
 
   // Enable-sync path: build the engine now (registry remote was just set) and
   // wait for first contact so the caller can surface immediate failures.
-  // joinBootstrap builds a pull-first engine for a freshly JOINED workspace:
+  // joinBootstrap builds a pull-first engine for a freshly joined workspace:
   // its start() is the first pull, and no push can happen before that pull
   // succeeds (0P-C gate fix) — so a start() failure here means "nothing
   // arrived yet" and the join handler can roll the whole join back cleanly.
@@ -362,7 +362,7 @@ export function createWorkspaceActivity(
     notify({ workspaceId: workspace.workspaceId });
   }
 
-  // Failed-join rollback (0P-C gate fix): stop and forget ONE workspace —
+  // Failed-join rollback (0P-C gate fix): stop and forget one workspace —
   // watcher, engine, and capture — so the join handler can remove its
   // folder/registry state without tearing down every other workspace.
   async function close(
@@ -461,7 +461,7 @@ export function createWorkspaceActivity(
   }
 
   // Nudges the (debounced) sync engine outside the watcher path. Resolving a
-  // conflict journals a replication op but may change NOTHING on disk
+  // conflict journals a replication op but may change nothing on disk
   // ("keep mine" keeps the local file byte-identical), so without this the
   // other machine's mirrored conflict would stay open until some unrelated
   // edit happened to trigger a push. No-op when the workspace has no engine.
@@ -469,7 +469,7 @@ export function createWorkspaceActivity(
     state.entry?.engine?.queueSync();
   }
 
-  // Sets (or clears) the active agent run for an OPEN workspace. The engine
+  // Sets (or clears) the active agent run for an open workspace. The engine
   // capture reads this slot when a batch settles, so writes made during the
   // run are attributed to the agent. Throws if the workspace isn't open — a
   // run can only attach to a live watcher.
@@ -578,9 +578,9 @@ export function createWorkspaceActivity(
     return state.entry?.workspace.rootPath ?? null;
   }
 
-  // Resolves once every watcher has flushed AND its in-flight records are
+  // Resolves once every watcher has flushed and its in-flight records are
   // written — the quit path awaits this so the last save is never dropped.
-  // The engine capture stops AFTER its watcher: the watcher's final flush
+  // The engine capture stops after its watcher: the watcher's final flush
   // enqueues the last batch, then capture.stop() awaits the capture chain so
   // the last engine record is durably written too.
   async function stop(state: WorkspaceActivityState): Promise<void> {

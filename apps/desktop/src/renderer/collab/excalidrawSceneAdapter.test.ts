@@ -338,7 +338,7 @@ describe("Excalidraw scene adapter", () => {
     });
 
     expect(result.changed).toBe(false);
-    // The superseded revision was NOT re-added beside the winner.
+    // The superseded revision was not re-added beside the winner.
     expect([...declareSceneRoots(doc).revisions.keys()]).toEqual([
       revisionKey("shape", 2, 7),
     ]);
@@ -379,7 +379,7 @@ describe("Excalidraw scene adapter", () => {
     expect(stale.changed).toBe(false);
     expect(foldScene(doc).appState.gridSize).toBe(20);
 
-    // A real local change to a NEW value still lands.
+    // A real local change to a new value still lands.
     const edited = binding.apply({
       elements: [],
       appState: { gridSize: 30 },
@@ -393,7 +393,7 @@ describe("Excalidraw scene adapter", () => {
     const doc = new Y.Doc();
     const binding = new ExcalidrawSceneBinding(doc);
     // A remote render sets gridSize 10; its own immediate callback confirms
-    // the value and must CONSUME the echo on that equality path.
+    // the value and must consume the echo on that equality path.
     binding.apply({
       elements: [],
       appState: { gridSize: 10 },

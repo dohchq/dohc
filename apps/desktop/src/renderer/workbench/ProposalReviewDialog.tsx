@@ -12,7 +12,7 @@ import {
   computeTextDiff,
 } from "./unifiedDiff";
 
-// The granter's review of one recipient's submitted changes (#646 PR3a).
+// The granter's review of one recipient's submitted changes.
 // Modelled on ConflictReviewDialog: a notice opens it, it reads its own
 // window under a liveness token, and it decides one thing.
 //
@@ -65,7 +65,7 @@ type ContentState =
   | { status: "error"; message: string }
   | { status: "ready"; currentText: string | null; incomingText: string | null };
 
-// ONE file of the review, closed until the granter opens it.
+// One file of the review, closed until the granter opens it.
 //
 // Opening is what fetches the content. A review of a repository-sized folder
 // lists thousands of these, and fetching every file's two sides to show that
@@ -93,7 +93,7 @@ function ProposalFileSection(props: {
     setOpen(nowOpen);
     // Fetched once per row. Closing and reopening shows what was already read
     // rather than asking again.
-    // Read once per row. A row that FAILED is read again, so a granter can
+    // Read once per row. A row that failed is read again, so a granter can
     // retry a file the relay could not serve without reopening the review.
     if (!nowOpen || (content !== null && content.status !== "error")) return;
     const token = ++liveToken.current;
@@ -216,7 +216,7 @@ export function ProposalReviewDialog(props: {
     setSettleError(null);
     void (async () => {
       try {
-        // ONE read, and NO content: the files, their paths, sizes and drift.
+        // One read, and NO content: the files, their paths, sizes and drift.
         // A file's two sides are read when its row is opened.
         const changes = await bridge().readShareProposalChanges({
           workspaceId,
@@ -320,7 +320,7 @@ export function ProposalReviewDialog(props: {
           >
             Finish later
           </button>
-          {/* Decline is the SAFE EXIT, so nothing about reading the changes
+          {/* Decline is the safe exit, so nothing about reading the changes
               can take it away. It moves nothing into this workspace, and a
               granter who cannot see a proposal must still be able to refuse
               it — otherwise the only way out is ending the share, which

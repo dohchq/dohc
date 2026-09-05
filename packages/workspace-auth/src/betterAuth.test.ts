@@ -28,7 +28,7 @@ async function postgresReachable(): Promise<boolean> {
 
 const pgAvailable = await postgresReachable();
 
-// Self-skipping is right for local dev, and WRONG anywhere this suite is the
+// Self-skipping is right for local dev, and wrong anywhere this suite is the
 // thing standing between a change and the collab surface's authorization
 // behaviour. In CI a Postgres that failed to start would otherwise skip every
 // test here and report green -- a hollow pass. DOHC_REQUIRE_POSTGRES turns an
@@ -161,7 +161,7 @@ describeWithPostgres("device authorization flow (desktop login)", () => {
     expect(approve).toMatchObject({ success: true });
 
     // 4. Desktop polls and receives a session token. The server throttles
-    //    polls to one per `interval` measured from the LAST accepted poll's
+    //    polls to one per `interval` measured from the last accepted poll's
     //    server-side timestamp, so a single fixed sleep can still land in
     //    the window (observed flake). Loop until slow_down clears, waiting
     //    interval + margin each time; any other error is a real failure.
@@ -269,7 +269,7 @@ describeWithPostgres("browser cookie sessions (web client)", () => {
     const cookie = await sessionCookieFor(email);
 
     // getSession reads the session cookie the same way it reads a Bearer
-    // token, so the SAME resolver serves the browser web client.
+    // token, so the same resolver serves the browser web client.
     const resolve = createSessionActorResolver(auth);
     const actor = await resolve(
       new Request("http://localhost:1786/workspaces/ws-cookie/files", { headers: { cookie } }),

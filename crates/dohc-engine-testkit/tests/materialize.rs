@@ -2,7 +2,7 @@
 //! (`dohc-engine-files::materialize`, `TEST_ORACLE.md` §3.3 points 12-16 and
 //! §3.10 the bounded-retry contract). Each test drives the five-step pipeline,
 //! injects a crash (or an external write / transient lock / superseding
-//! generation), then proves the recovery contract by REOPENING the store and
+//! generation), then proves the recovery contract by reopening the store and
 //! replaying — durability is never trusted from the in-process outcome flag.
 
 use dohc_engine_files::{
@@ -133,9 +133,6 @@ fn materializes_a_new_file_and_marks_complete() {
 
 #[test]
 fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory() {
-    // MUTATION PROOF: remove the ordinary write's
-    // `prepare_target_parent_symlink_free` call and this writes outside; walk
-    // only the FIRST component below root and the depth-2 alias slips through.
     let sc = Scratch::new("ordinary-write-ancestor");
     let outside = Scratch::new("ordinary-write-outside");
     std::fs::create_dir(sc.target("real")).expect("real parent");
@@ -167,7 +164,7 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     );
     stage_job(&mut store, unrelated, &sibling);
 
-    // The blocked job stays pending WITHOUT stalling the batch: the unrelated
+    // The blocked job stays pending without stalling the batch: the unrelated
     // job in the same run must still materialize.
     let results = run_pending_jobs(
         &store,
@@ -306,8 +303,6 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
 
 #[test]
 fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory() {
-    // MUTATION PROOF: remove the ordinary delete's
-    // `ensure_target_symlink_free` call and this deletes outside.
     let sc = Scratch::new("ordinary-delete-ancestor");
     let outside = Scratch::new("ordinary-delete-outside");
     let old = b"outside must survive";
@@ -784,7 +779,7 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
 #[test]
 fn superseded_lower_generation_job_is_skipped() {
     // A newer generation is materialized at the path first; a later-arriving job
-    // carrying an OLDER generation must not regress the path to older content.
+    // carrying an older generation must not regress the path to older content.
     let sc = Scratch::new("superseded");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let newer = b"generation-2-content";
@@ -852,7 +847,7 @@ impl AtomicReplacer for FlakyReplacer {
             })
             .is_ok_and(|prev| prev > 0)
         {
-            // The real transient shape per platform (#595): a Windows
+            // The real transient shape per platform: a Windows
             // AV/indexer handle surfaces ERROR_SHARING_VIOLATION; POSIX has
             // no sharing violations, so its retryable class is EACCES-shaped.
             // A fake injecting the ambiguous PermissionDenied kind on Windows
@@ -888,8 +883,6 @@ impl AtomicReplacer for NonTransientFailingReplacer {
 
 #[test]
 fn secret_non_transient_replace_error_removes_plaintext_temp() {
-    // MUTATION: propagate the secret replace error before temp cleanup -> a
-    // `.dohc-write-*.tmp` sibling containing SECRET=plaintext survives.
     let sc = Scratch::new("secret-temp-cleanup");
     let mut store = EngineStore::open(&sc.db(), 1).expect("open");
     let staged = b"encrypted-placeholder";
@@ -1011,7 +1004,7 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
         &NoFaults,
     )
     .unwrap_err();
-    // The terminal error says what the code says (#595): on Windows the
+    // The terminal error says what the code says: on Windows the
     // injected failure is a real sharing violation, so exhaustion keeps the
     // retryable file-locked contract; on POSIX the persistent EACCES is
     // terminal io — there is no lock to poll.

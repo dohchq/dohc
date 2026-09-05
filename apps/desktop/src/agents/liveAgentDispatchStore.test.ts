@@ -173,9 +173,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("deadlines every scan-side dispatch read", async () => {
-    // MUTATION: use the ChatsLiveAdapter convenience methods without request
-    // options -> these calls have no deadline and a connected daemon can wedge
-    // the serialized workspace scan.
     const client = mockClient(dispatchResult);
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,
@@ -209,9 +206,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("deadlines and transport-retries eligible-trigger recording", async () => {
-    // MUTATION: omit either the request deadline or retryTransportErrors ->
-    // the first lost transport response rejects instead of completing on the
-    // rebound workspace session.
     let attempts = 0;
     const client = mockClient((request) => {
       if (request.method === "workspace.open") {
@@ -406,8 +400,6 @@ describe("live agent dispatch store", () => {
         .filter(({ method }) => method === "chats.dispatch.getRunRecord")
         .at(-1)?.deadlineMs,
     ).toBe(654);
-    // MUTATION: restore the convenience completeRun/failRun calls -> these
-    // terminal attempts (including their read-after-write) lose their deadlines.
     expect(
       client.requests
         .filter(
@@ -416,6 +408,7 @@ describe("live agent dispatch store", () => {
             method === "chats.dispatch.fail",
         )
         .map(({ deadlineMs }) => deadlineMs),
+        "restore the convenience completeRun/failRun calls -> these terminal attempts (including their read-after-write) lose their deadlines.",
     ).toEqual([
       TERMINAL_DISPATCH_DEADLINE_MS,
       TERMINAL_DISPATCH_DEADLINE_MS,
@@ -462,8 +455,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("reuses one pre-minted run id until an ambiguous claim resolves", async () => {
-    // MUTATION: mint inside each attempt or clear the unresolved id on rejection
-    // -> the three claim requests carry different ids and strand the committed run.
     let claimAttempts = 0;
     const client = mockClient((request) => {
       if (request.method === "workspace.open") {
@@ -539,8 +530,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("verifies an ambiguously committed interrupted-run requeue", async () => {
-    // MUTATION: remove transport retries or the pending-state verification ->
-    // a committed requeue whose first response is lost is reported as false.
     let requeueAttempts = 0;
     const client = mockClient((request) => {
       if (request.method === "workspace.open") {
@@ -610,8 +599,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("workspace_sessions_join_one_in_progress_rebind_after_concurrent_reconnects", async () => {
-    // MUTATION: clear entry.opening in either reconnect catch -> both stale
-    // operations issue workspace.open and leak one of the resulting handles.
     let openCount = 0;
     let staleOperationCount = 0;
     let releaseStaleOperations!: () => void;
@@ -693,8 +680,6 @@ describe("live agent dispatch store", () => {
   });
 
   it("workspace_sessions_deadline_every_workspace_open", async () => {
-    // MUTATION: omit the workspace.open deadline -> a non-responsive daemon
-    // can wedge every bounded dispatch operation before that operation starts.
     const client = mockClient(dispatchResult);
     const sessions = new EngineWorkspaceSessions({
       currentClient: () => client,

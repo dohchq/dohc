@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// #562: conflict and compare IPC results are page-shaped. These pin the two
+// Conflict and compare IPC results are page-shaped. These pin the two
 // surfaces' ends of that contract: the loaded window paints, "Show more
-// files" fetches the NEXT page with the continuation, and the count copy
+// files" fetches the next page with the continuation, and the count copy
 // never states a number that could be under the truth.
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,7 +31,7 @@ function syncConflict(id: string): WorkspaceVersionConflict {
   return { ...conflict(id), origin: "sync" };
 }
 
-// #691: findBy/waitFor deadlines are wall-clock, so a loaded machine can spend
+// findBy/waitFor deadlines are wall-clock, so a loaded machine can spend
 // them before the event loop returns to the render. Every async path here is a
 // mocked bridge call, so drive it to its end instead of waiting on a clock:
 // this drains the pending answers and React's work, and every assertion after
@@ -69,7 +69,7 @@ describe("conflictCountCopy", () => {
   it("states the exact count only when the listing is complete", () => {
     expect(conflictCountCopy(1, false)).toBe("One file has two copies.");
     expect(conflictCountCopy(3, false)).toBe("3 files have two copies.");
-    // A continuation means MORE conflicts exist past the window, so an exact
+    // A continuation means more conflicts exist past the window, so an exact
     // "3 files" would be under the truth.
     expect(conflictCountCopy(1, true)).toBe("More than one file has two copies.");
     expect(conflictCountCopy(3, true)).toBe("More than 3 files have two copies.");
@@ -201,13 +201,11 @@ describe("ConflictReviewDialog paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    // MUTATION: drop the window-generation guard -> c-3 (a row of the
-    // replaced window) appends to the remaining page.
-    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    expect(screen.getAllByTestId("version-conflict"), "drop the window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.").toHaveLength(1);
   });
 
   it("a replaced window does not inherit the abandoned page's Loading state", async () => {
-    // Show more hangs; a resolution replaces the window WITH a continuation.
+    // Show more hangs; a resolution replaces the window with a continuation.
     // The new window's button must be usable immediately — not "Loading…"
     // until a request that may never settle does.
     bridgeMock.listWorkspaceVersionConflicts.mockImplementation(
@@ -218,8 +216,8 @@ describe("ConflictReviewDialog paging", () => {
             nextAfterConflictId: "c-2",
           };
         }
-        // Every continuation fetch hangs: the stale one AND any new one —
-        // only the pending FLAG is under test here.
+        // Every continuation fetch hangs: the stale one and any new one —
+        // only the pending flag is under test here.
         return new Promise(() => {});
       },
     );
@@ -242,13 +240,10 @@ describe("ConflictReviewDialog paging", () => {
     await settle();
     screen.getByText("More than one file has two copies.", { exact: false });
 
-    // MUTATION: clear loadingMore only in the abandoned request's finally ->
-    // the button reads "Loading…", disabled, forever (the request never
-    // settles) and this assertion fails.
     const showMore = screen.getByTestId(
       "conflict-list-show-more",
     ) as HTMLButtonElement;
-    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.textContent, "clear loadingMore only in the abandoned request's finally -> the button reads 'Loading…', disabled, forever (the request never settles) and this assertion fails.").toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 
@@ -274,13 +269,10 @@ describe("ConflictReviewDialog paging", () => {
     screen.getByRole("alert");
     // The window is unchanged and the button remains for a retry.
     expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
-    // MUTATION: clear loadingMore only in the success path -> the button
-    // reads "Loading…", disabled, forever after a failed page and this
-    // assertion fails.
     const showMore = screen.getByTestId(
       "conflict-list-show-more",
     ) as HTMLButtonElement;
-    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.textContent, "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.").toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 });
@@ -308,7 +300,7 @@ describe("VersionMergeDialog conflict paging", () => {
   }
 
   it("the merge's own count decides the stage, not the open-conflict rows", async () => {
-    // The rows are the first page of ALL open conflicts — the contract
+    // The rows are the first page of all open conflicts — the contract
     // (MergeWorkspaceVersionResult) says a sync conflict can ride along. A
     // merge that itself conflicted nothing must stay clean.
     bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
@@ -370,7 +362,7 @@ describe("VersionMergeDialog conflict paging", () => {
   });
 
   it("drops a page answered after a resolution replaced the window", async () => {
-    // Same replacement rule as the review dialog, pinned HERE because this
+    // Same replacement rule as the review dialog, pinned here because this
     // dialog has its own generation guard: a Show more in flight when a
     // resolution replaces the window must not resurrect the replaced
     // window's rows.
@@ -414,9 +406,7 @@ describe("VersionMergeDialog conflict paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    // MUTATION: drop this dialog's window-generation guard -> c-3 (a row of
-    // the replaced window) appends to the remaining page.
-    expect(screen.getAllByTestId("version-conflict")).toHaveLength(1);
+    expect(screen.getAllByTestId("version-conflict"), "drop this dialog's window-generation guard -> c-3 (a row of the replaced window) appends to the remaining page.").toHaveLength(1);
   });
 });
 
@@ -483,11 +473,10 @@ describe("VersionComparePage paging", () => {
     resolveFirst({ files: [compareRow("first.md")], nextAfterPath: null });
     await settle();
 
-    // MUTATION: omit the response guard's cleanup invalidation. The first
-    // comparison replaces the second version's heading and file here.
     screen.getByText("Second compared with Main");
     expect(
       screen.getByTestId("version-compare-file").dataset.comparePath,
+      "omit the response guard's cleanup invalidation. The first comparison replaces the second version's heading and file here.",
     ).toBe("second.md");
   });
 
@@ -527,7 +516,7 @@ describe("VersionComparePage paging", () => {
   });
 
   it("drops a page answered after a refresh replaced the comparison", async () => {
-    // A refreshed comparison can hand out the SAME cursor again, so only the
+    // A refreshed comparison can hand out the same cursor again, so only the
     // window generation can tell the stale answer from a current one.
     let resolveStalePage:
       | ((page: {
@@ -553,10 +542,8 @@ describe("VersionComparePage paging", () => {
     screen.getByTestId("version-compare-file");
 
     // The replaced window must not inherit the abandoned page's pending
-    // flag: the stale request is STILL unsettled here, and the button must
-    // already be usable. MUTATION: clear loadingMore only in the stale
-    // request's finally -> this reads "Loading…", disabled, until a request
-    // that may never settle does.
+    // flag: the stale request is still unsettled here, and the button must
+    // already be usable.
     const showMore = screen.getByTestId(
       "version-compare-show-more",
     ) as HTMLButtonElement;
@@ -567,10 +554,7 @@ describe("VersionComparePage paging", () => {
     // Let the stale answer's whole continuation run before asserting — a
     // waitFor here would pass on the first paint and never see the append.
     await settle();
-    // MUTATION: drop the window-generation guard -> the old generation's page
-    // appends to the refreshed window (the cursor matches, so a cursor check
-    // alone cannot reject it).
-    expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
+    expect(screen.getAllByTestId("version-compare-file"), "drop the window-generation guard -> the old generation's page appends to the refreshed window (the cursor matches, so a cursor check alone cannot reject it).").toHaveLength(1);
     expect(screen.getByTestId("version-compare-show-more")).toBeTruthy();
   });
 
@@ -589,13 +573,10 @@ describe("VersionComparePage paging", () => {
     await settle();
     screen.getByRole("alert");
     expect(screen.getAllByTestId("version-compare-file")).toHaveLength(1);
-    // MUTATION: clear loadingMore only in the success path -> the button
-    // reads "Loading…", disabled, forever after a failed page and this
-    // assertion fails.
     const showMore = screen.getByTestId(
       "version-compare-show-more",
     ) as HTMLButtonElement;
-    expect(showMore.textContent).toBe("Show more files");
+    expect(showMore.textContent, "clear loadingMore only in the success path -> the button reads 'Loading…', disabled, forever after a failed page and this assertion fails.").toBe("Show more files");
     expect(showMore.disabled).toBe(false);
   });
 });

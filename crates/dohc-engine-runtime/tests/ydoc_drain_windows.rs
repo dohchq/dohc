@@ -1,12 +1,12 @@
 //! The open and close paths drain the deferred Y.Doc queue, then run a
 //! fallible step. The queue rows carry the record facts the drain persisted
-//! on them (#1004), so an error in that window must leave the rows in place:
+//! on them, so an error in that window must leave the rows in place:
 //! a retry re-drains content-deduped and can still surface the facts.
-//! Consuming them first drops the events with no path left to emit (#1009).
+//! Consuming them first drops the events with no path left to emit.
 //!
 //! Record facts derive only for bound collection records; these plaintext
 //! tests pin the QUEUE-ROW ordering. The rows-to-events pipeline itself is
-//! pinned by the `a_parked_update_drained_on_*` rpc tests (#1002).
+//! pinned by the `a_parked_update_drained_on_*` rpc tests.
 
 use dohc_engine_collab::DocKey;
 use dohc_engine_runtime::{
@@ -139,14 +139,11 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
     key
 }
 
-/// #1009 (open window): the post-lease open runs its conflict freeze BEFORE
+/// #1009 (open window): the post-lease open runs its conflict freeze before
 /// its deferred drain. A refused open has no event route, so draining first
 /// would consume the parked rows with nothing left for the reopen after
 /// resolution to drain and emit.
 ///
-/// MUTATION: move the open-conflict check in `ydoc_open_state_on_store` back
-/// below the drain — the refused open then consumes the row and the first
-/// assertion after the refusal fails.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");
@@ -239,9 +236,6 @@ async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry
 /// the parked queue rows so the retried close can drain again
 /// (content-deduped, no duplicated history) and surface their facts.
 ///
-/// MUTATION: run the drain's queue-row cleanup before `materialize_ydoc_drain`
-/// in `ydoc_close_session_on_store` — the failed close then consumes the rows
-/// and the assertions after it fail.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");

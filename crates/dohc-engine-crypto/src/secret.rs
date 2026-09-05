@@ -1,7 +1,7 @@
 //! [`SecretPlaintext`]: the redaction-safe carrier for decrypted secret bytes.
 //!
 //! This is the one type that ever holds cleartext in memory. It is engineered
-//! so cleartext CANNOT leave by accident:
+//! so cleartext cannot leave by accident:
 //!
 //! - No `Display`, no `serde::Serialize`, no `ToString` — it cannot be
 //!   formatted into a string or a wire/journal payload.
@@ -11,7 +11,7 @@
 //! - It zeroizes its buffer on drop (`zeroize`), best-effort scrubbing the
 //!   cleartext from memory as soon as the value falls out of scope.
 //!
-//! The only ways OUT are the explicit `as_bytes` / `into_utf8` accessors a
+//! The only ways out are the explicit `as_bytes` / `into_utf8` accessors a
 //! caller must deliberately reach for — never an implicit format/serialize.
 
 use crate::error::CryptoError;
@@ -49,9 +49,9 @@ impl SecretPlaintext {
     }
 
     /// Validate the bytes as UTF-8 and hand back an owned `String`. Secret files
-    /// round-trip through UTF-8 (`normalizeSecretText`, `secretFileStore.ts`),
+    /// round-trip through UTF-8 (`normalizeSecretText`),
     /// so a non-UTF-8 payload is rejected rather than lossily decoded. The
-    /// returned `String` is NOT zeroizing — a caller that needs the text as a
+    /// returned `String` is not zeroizing — a caller that needs the text as a
     /// string owns that exposure deliberately.
     pub fn into_utf8(self) -> Result<String, CryptoError> {
         // Validate IN PLACE (no copy): only the Ok path allocates the

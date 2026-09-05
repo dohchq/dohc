@@ -11,11 +11,11 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 
-// #646 PR3. The proposal routes that do NOT go through the engine.
+// The proposal routes that do not go through the engine.
 //
 // Submitting is the engine's job — it reads this replica's own journal, so it
 // has to be the process that holds the store. Reviewing, settling, listing and
-// withdrawing read and write ONLY relay state, so they are plain authenticated
+// withdrawing read and write only relay state, so they are plain authenticated
 // relay calls, in the same shape and with the same auth as `shareViewInfo.ts`.
 
 // The relay answered with something that is not a proposal this client can
@@ -179,7 +179,7 @@ function parseOp(value: unknown, at: string): ShareProposalOp {
   };
 }
 
-// The proposal a granter OPENED, with its file rows. Every proposal reachable
+// The proposal a granter opened, with its file rows. Every proposal reachable
 // here is open — the relay refuses a settled one — so it states no state and no
 // settled time, and this parser asks for neither: a validator for a field that
 // is always the same value refuses responses over a constant it never reads.
@@ -266,7 +266,7 @@ export async function listShareProposals(input: {
 }
 
 /**
- * ONE proposal, with its file rows, for the review a granter opened.
+ * One proposal, with its file rows, for the review a granter opened.
  *
  * Same owner gate as the listing, and the same generic 404 for a proposal of
  * another workspace, one that never existed, and one already settled.
@@ -297,7 +297,7 @@ export async function readShareProposal(input: {
 }
 
 /**
- * ONE op of one open proposal, for the review that opened one file.
+ * One op of one open proposal, for the review that opened one file.
  *
  * The review lists metadata and loads a file's content only when the granter
  * opens that file, so this asks for that one file rather than re-serving every

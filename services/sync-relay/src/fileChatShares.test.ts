@@ -25,17 +25,17 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   DatabaseSync: new (path: string) => InspectionDatabase;
 };
 
-// #646 PR2 — chat follows the file share, driven through the REAL routes.
+// Chat follows the file share, driven through the real routes.
 //
 // Everything here goes through HTTP: the granter appends real moments and real
 // chat ops to its own log, the recipient reads and writes through its share,
 // and the assertions are on response bodies. A test that faked the resolving
-// would prove nothing — the resolvers ARE the boundary, and the log is the
+// would prove nothing — the resolvers are the boundary, and the log is the
 // only thing that knows where a file is now.
 //
 // The file layout every case is built on:
-//   docs/in.md    -> object-in    INSIDE the selector ["docs"]
-//   notes/out.md  -> object-out   OUTSIDE it
+//   docs/in.md -> object-in inside the selector ["docs"]
+//   notes/out.md -> object-out outside it
 // and two threads, one on each.
 
 let roots: string[] = [];
@@ -145,7 +145,7 @@ class OwnerLog {
     });
   }
 
-  // A rename carries BOTH ends and keeps the object id, which is exactly why
+  // A rename carries both ends and keeps the object id, which is exactly why
   // the relay can follow a file without a new op kind.
   rename(objectId: string, before: string, after: string): OwnerOp {
     return this.moment(objectId, after, {
@@ -251,7 +251,7 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
   return log;
 }
 
-describe("chat over a file share (#646 PR2)", () => {
+describe("chat over a file share", () => {
   it("serves the in-selector thread as a path and leaks no sentinel from the outside one", async () => {
     const { storage } = await testStorage();
     const h = handler(storage);
@@ -289,7 +289,7 @@ describe("chat over a file share (#646 PR2)", () => {
     });
   });
 
-  it("stops serving a file's threads the moment it is renamed OUT of the selector", async () => {
+  it("stops serving a file's threads the moment it is renamed out of the selector", async () => {
     const { storage } = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
@@ -301,7 +301,7 @@ describe("chat over a file share (#646 PR2)", () => {
     const after = await readShareLog(h, shareId);
     expect(
       chatOps(after),
-      "MUTATION: a file renamed out of the selector must stop serving its threads",
+      "a file renamed out of the selector must stop serving its threads",
     ).toHaveLength(0);
   });
 
@@ -340,7 +340,7 @@ describe("chat over a file share (#646 PR2)", () => {
 
     expect(
       chatOps(await readShareLog(h, shareId)),
-      "MUTATION: a delete must deny, not fall through to the last known path",
+      "a delete must deny, not fall through to the last known path",
     ).toHaveLength(0);
   });
 
@@ -392,7 +392,7 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(push.status, await push.clone().text()).toBe(200);
     expect(await json(push)).toMatchObject({ ok: true, accepted: 2, inserted: 2 });
 
-    // A LATER batch on the same thread, resolved from the log rather than from
+    // A later batch on the same thread, resolved from the log rather than from
     // the batch: without the path binding this is where a recipient's own
     // thread would go dead.
     const second = await h(
@@ -422,7 +422,7 @@ describe("chat over a file share (#646 PR2)", () => {
     );
     expect(
       second.status,
-      "MUTATION: a recipient's own thread must still resolve in a later batch",
+      "a recipient's own thread must still resolve in a later batch",
     ).toBe(200);
 
     const served = chatOps(await readShareLog(h, shareId));
@@ -430,7 +430,7 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(served.map((op) => op.payload.messageId).filter(Boolean)).toContain("m-recipient-2");
   });
 
-  it("rejects the WHOLE batch when one op names a thread outside the selector", async () => {
+  it("rejects the whole batch when one op names a thread outside the selector", async () => {
     const { storage } = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
@@ -621,7 +621,7 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(revoked).toBe(true);
     expect(
       push.status,
-      "MUTATION: without the in-transaction active-grant check this append lands",
+      "without the in-transaction active-grant check this append lands",
     ).toBe(404);
     const ownerLog = storage.fetchLogPage({
       workspaceId: WORKSPACE,
@@ -690,7 +690,7 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(tampered).toBe(true);
     expect(
       push.status,
-      "MUTATION: without the guard's level re-check this append lands after the downgrade",
+      "without the guard's level re-check this append lands after the downgrade",
     ).toBe(403);
     expect((await json(push)).code).toBe("share_read_only");
     const served = chatOps(await readShareLog(h, shareId));
@@ -725,7 +725,7 @@ describe("chat over a file share (#646 PR2)", () => {
 
     expect(
       chatOps(JSON.parse(body).ops),
-      "MUTATION: a version share must carry no conversation about any file",
+      "a version share must carry no conversation about any file",
     ).toHaveLength(0);
     for (const sentinel of ["thread-in", "About the shared file", "docs/in.md"]) {
       expect(body, sentinel).not.toContain(sentinel);
@@ -787,7 +787,7 @@ describe("chat over a file share (#646 PR2)", () => {
     const served = chatOps(await readShareLog(h, shareId));
     expect(
       served,
-      "MUTATION: a path-bound thread must follow the file out, not serve its create-time path forever",
+      "a path-bound thread must follow the file out, not serve its create-time path forever",
     ).toHaveLength(0);
 
     // And the lane closes in the other direction too: a further message on
@@ -860,11 +860,11 @@ describe("chat over a file share (#646 PR2)", () => {
   // The asymmetry review probed for. A GRANTER's thread is bound by object, so
   // it follows its file anywhere inside the share. A RECIPIENT's thread named
   // its file by path, so an in-share rename used to kill it while the
-  // granter's survived — two threads on ONE file behaving differently.
+  // granter's survived — two threads on one file behaving differently.
   //
   // The accept door converts the binding, so both are object-bound now and
   // both follow the file.
-  it("keeps BOTH threads on a file when it is renamed WITHIN the share", async () => {
+  it("keeps both threads on a file when it is renamed within the share", async () => {
     const { storage } = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
@@ -901,7 +901,7 @@ describe("chat over a file share (#646 PR2)", () => {
       .map((op) => op.payload.linkedPath);
     expect(before).toEqual(["docs/in.md", "docs/in.md"]);
 
-    // A rename that stays INSIDE the shared folder.
+    // A rename that stays inside the shared folder.
     await log.append(log.rename("object-in", "docs/in.md", "docs/renamed.md"));
 
     const after = chatOps(await readShareLog(h, shareId))
@@ -909,7 +909,7 @@ describe("chat over a file share (#646 PR2)", () => {
       .map((op) => op.payload.linkedPath);
     expect(
       after,
-      "MUTATION: a recipient's thread must follow its file inside the share, exactly as the granter's does",
+      "a recipient's thread must follow its file inside the share, exactly as the granter's does",
     ).toEqual(["docs/renamed.md", "docs/renamed.md"]);
 
     // And a further message on the recipient's thread still lands.
@@ -977,12 +977,12 @@ describe("chat over a file share (#646 PR2)", () => {
     const binding = storage.findThreadCreateFileBinding(WORKSPACE, "thread-recipient");
     expect(
       binding,
-      "MUTATION: persisting the path leaves the thread unable to follow its file",
+      "persisting the path leaves the thread unable to follow its file",
     ).toEqual({ kind: "object", objectId: "object-in" });
   });
 
 
-  // A selector can name BOTH dimensions. The paths-only rule must key on
+  // A selector can name both dimensions. The paths-only rule must key on
   // "names no paths", not on "names a version" — otherwise a share of
   // docs/ pinned to a version would silently carry no conversation.
   it("carries chat on the paths a selector names, even when it also pins a version", async () => {
@@ -1009,7 +1009,7 @@ describe("chat over a file share (#646 PR2)", () => {
     const served = chatOps(await readShareLog(h, shareId));
     expect(
       served.map((op) => op.opKind),
-      "MUTATION: a paths+version share must carry its paths' chat, not fall into the version-share deny",
+      "a paths+version share must carry its paths' chat, not fall into the version-share deny",
     ).toEqual(["chat.thread.create", "chat.message.append"]);
 
     // And it accepts, which the version-only share does not.
@@ -1026,7 +1026,7 @@ describe("chat over a file share (#646 PR2)", () => {
   // The accept door's own refusal. The filter admits a create by proving an
   // object sits at the path, and the door then reads that object to bind the
   // thread — so the only way to reach the refusal is for the object to leave
-  // BETWEEN the two reads. That is a real race (a delete landing mid-request),
+  // between the two reads. That is a real race (a delete landing mid-request),
   // and the batch is refused whole rather than stored as a thread bound to
   // nothing.
   it("refuses the batch when the file leaves between the filter and the accept", async () => {
@@ -1069,7 +1069,7 @@ describe("chat over a file share (#646 PR2)", () => {
     expect(reads).toBeGreaterThan(1);
     expect(
       push.status,
-      "MUTATION: without the refusal the thread stores bound to nothing",
+      "without the refusal the thread stores bound to nothing",
     ).toBe(403);
     expect((await json(push)).code).toBe("share_op_rejected");
     expect(storage.findThreadCreateFileBinding(WORKSPACE, "thread-raced")).toBeUndefined();
@@ -1077,7 +1077,7 @@ describe("chat over a file share (#646 PR2)", () => {
 
   it("makes no blob reachable through a chat op", async () => {
     // Chat decisions carry `blobSha256s: []`, and the share-blob route reads
-    // exactly that to decide reachability. The outside file has a REAL blob on
+    // exactly that to decide reachability. The outside file has a real blob on
     // the relay and a thread of its own; a chat branch that exposed a hash
     // would make that blob fetchable through a share that covers neither.
     const { storage } = await testStorage();
@@ -1098,7 +1098,7 @@ describe("chat over a file share (#646 PR2)", () => {
   });
 });
 
-describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
+describe("sync_relay_object_paths seeding", () => {
   it("seeds itself from the existing log, so chat does not depend on deployment history", async () => {
     // Every moment already in a relay's log predates this table. Without the
     // one-time scan, objectCurrentPath answers "never seen" for every file
@@ -1121,7 +1121,7 @@ describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
     storages.push(reopened);
     expect(
       reopened.objectCurrentPath(WORKSPACE, "object-in"),
-      "MUTATION: without the seed, every file shared before this deploy denies its chat forever",
+      "without the seed, every file shared before this deploy denies its chat forever",
     ).toBe("docs/in.md");
     expect(reopened.objectCurrentPath(WORKSPACE, "object-out")).toBe("notes/out.md");
     expect(reopened.objectCurrentPath(WORKSPACE, "object-never-seen")).toBeUndefined();
@@ -1133,7 +1133,7 @@ describe("sync_relay_object_paths seeding (#646 PR2, addendum A)", () => {
     expect(chatOps(await readShareLog(reopenedHandler, shareId))).toHaveLength(2);
   });
 
-  it("lets the LATEST moment win, and never lets an older one move a path back", async () => {
+  it("lets the latest moment win, and never lets an older one move a path back", async () => {
     const { storage } = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
@@ -1213,7 +1213,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
         versionId,
         sha256: snapshotSha,
       }),
-      "MUTATION: without the seed, an existing version.create snapshot blob stays undiscoverable",
+      "without the seed, an existing version.create snapshot blob stays undiscoverable",
     ).toHaveLength(1);
 
     reopened.close();
@@ -1248,10 +1248,10 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
   });
 });
 
-// #646 PR3-0 — the append route accepts chat only.
+// The append route accepts chat only.
 //
-// A file share at `comment` or `edit` accepts appends (PR2), and the route used
-// to filter them with `filterOpForShare` — the READ filter. That filter admits
+// A file share at `comment` or `edit` accepts appends, and the route used
+// to filter them with `filterOpForShare` — the read filter. That filter admits
 // every in-selector `moment.append`, plus `workspace.init` and a matching
 // `version.create`. So a modified client could push a delete, a rename, or a
 // revert into the GRANTER's log, and the owner lane replayed it.
@@ -1259,7 +1259,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
 // Every case here drives the real POST route and then reads the GRANTER's own
 // log back through the owner route. The status alone proves nothing: a refusal
 // that still inserted is the defect, so the log is the assertion.
-describe("the append gate accepts chat only (#646 PR3-0)", () => {
+describe("the append gate accepts chat only", () => {
   const LEVELS = ["comment", "edit"] as const;
 
   async function ownerLog(h: SyncRelayHandler): Promise<unknown[]> {
@@ -1335,7 +1335,7 @@ describe("the append gate accepts chat only (#646 PR3-0)", () => {
       expect((await json(push)).code).toBe("share_op_rejected");
       expect(
         await ownerLog(h),
-        "MUTATION: a recipient's delete must never reach the granter's log",
+        "a recipient's delete must never reach the granter's log",
       ).toEqual(before);
       // And the file is still where it was: the delete did not apply.
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
@@ -1354,7 +1354,7 @@ describe("the append gate accepts chat only (#646 PR3-0)", () => {
       expect((await json(push)).code).toBe("share_op_rejected");
       expect(
         await ownerLog(h),
-        "MUTATION: a recipient's rename must never reach the granter's log",
+        "a recipient's rename must never reach the granter's log",
       ).toEqual(before);
       expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
     });
@@ -1372,7 +1372,7 @@ describe("the append gate accepts chat only (#646 PR3-0)", () => {
       expect((await json(push)).code).toBe("share_op_rejected");
       expect(
         await ownerLog(h),
-        "MUTATION: the payload-free bootstrap op is a READ op and must not append",
+        "the payload-free bootstrap op is a read op and must not append",
       ).toEqual(before);
     });
 
@@ -1395,7 +1395,7 @@ describe("the append gate accepts chat only (#646 PR3-0)", () => {
       expect((await json(push)).code).toBe("share_op_rejected");
       expect(
         await ownerLog(h),
-        "MUTATION: a recipient must not create a version in the granter's workspace",
+        "a recipient must not create a version in the granter's workspace",
       ).toEqual(before);
     });
 
@@ -1465,7 +1465,7 @@ describe("the append gate accepts chat only (#646 PR3-0)", () => {
     // Equal is not enough: two identical SUCCESSES are also equal. Both must be
     // the refusal, and then be the same refusal.
     for (const refusal of refusals) {
-      expect(refusal, "MUTATION: identical is only meaningful if both refuse").toContain("403");
+      expect(refusal, "identical is only meaningful if both refuse").toContain("403");
       expect(refusal).toContain("share_op_rejected");
     }
     expect(refusals[0]).toBe(refusals[1]);
