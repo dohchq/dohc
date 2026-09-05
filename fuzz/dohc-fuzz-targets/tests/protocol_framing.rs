@@ -21,7 +21,7 @@
 use dohc_engine_protocol::frame::{Frame, FrameDecoder};
 use dohc_engine_protocol::limits::WireLimits;
 use dohc_engine_protocol::wire::{
-    Envelope, Hello, PROTOCOL_VERSION, decode_control, encode_control,
+    Cancel, Envelope, Hello, PROTOCOL_VERSION, decode_control, encode_control,
 };
 use proptest::prelude::*;
 
@@ -198,11 +198,7 @@ fn seed_hello_frame_round_trips() {
 #[test]
 fn every_prefix_of_a_valid_stream_is_incomplete_not_an_error() {
     let limits = WireLimits::default();
-    let envelope: Envelope = serde_json::from_value(serde_json::json!({
-        "type": "cancel",
-        "id": 5
-    }))
-    .expect("valid envelope");
+    let envelope = Envelope::Cancel(Cancel { id: 5 });
     let mut buffer = encode_control(&envelope, &limits).expect("encodes");
     buffer.extend(
         dohc_engine_protocol::frame::encode_blob_chunk_frame(3, true, b"blob-bytes", &limits)

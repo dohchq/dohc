@@ -14117,15 +14117,16 @@ mod tests {
         assert_eq!(answer.response.result, json!({ "ok": true }));
     }
 
-    /// The daemon's method set is closed. An arm added to `dispatch` without
-    /// a row here fails, and so does re-registering a retired method
-    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`).
+    /// Every listed method is registered, and the three retired ones
+    /// (`share.view.push`, `ydoc.apply`, `chats.dispatch.reclaimRunning`) are
+    /// not. A new arm added without a row here is not caught; that needs the
+    /// dispatch table as data.
     ///
     /// Without a workspace handle a registered method fails on the missing
     /// handle or on its params; an unregistered one fails `MethodNotFound`.
     /// That difference is what makes the list checkable from outside.
     #[tokio::test]
-    async fn the_dispatch_table_is_exactly_this_method_list() {
+    async fn listed_methods_are_registered_and_retired_methods_are_rejected() {
         const METHODS: &[&str] = &[
             "automations.claimNext",
             "automations.failures",
