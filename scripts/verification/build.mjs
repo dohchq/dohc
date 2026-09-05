@@ -51,7 +51,13 @@ export function sourceFingerprint(kind, root = repoRoot) {
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version,
     rustflags: process.env.RUSTFLAGS ?? "", encodedRustflags: process.env.CARGO_ENCODED_RUSTFLAGS ?? "" }));
-  const environment = Object.entries(process.env).filter(([key]) => /^(VITE_|CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$)|RUST(?:UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$)|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
+  const environmentKeys = new Set();
+  const environment = Object.keys(process.env).sort().flatMap((name) => {
+    const key = process.platform === "win32" ? name.toUpperCase() : name;
+    if (environmentKeys.has(key)) return [];
+    environmentKeys.add(key);
+    return [[key, process.env[name]]];
+  }).filter(([key]) => /^(VITE_|CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$)|RUST(?:UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$)|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
   hash.update(JSON.stringify(environment));
   if (kind === "engine") {
     hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
@@ -152,6 +158,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   try { writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx" }); }
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
+  await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "install.log") });
   const receipt = readJson(receiptPath) ?? { version: 1 };
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
     if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -9,6 +9,66 @@ import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile
 import { changedFiles, postgres, selectedGates } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
+import { createPrepareFixture } from "./prepare-fixture.mjs";
+
+test("standalone preparation installs frozen dependencies before building, sealing, or reuse", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-prepare-install-"));
+  try {
+    const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const first = invoke();
+    assert.equal(first.error, undefined);
+    assert.equal(first.status, 0, first.stderr);
+    assert.match(first.stdout, /"desktopPrepared":true/);
+    assert.equal(readFileSync(join(root, "apps/desktop/dist/built.txt"), "utf8"), "new-lock");
+    const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.deepEqual(calls().map(({ command, args }) => [command, args[0]]), [["pnpm", "install"], ["cargo", "build"], ["pnpm", "--filter"]]);
+    writeFileSync(join(root, "node_modules/installed.txt"), "stale-again");
+    const reused = invoke();
+    assert.equal(reused.status, 0, reused.stderr);
+    assert.match(reused.stdout, /reuse desktop/);
+    assert.equal(readFileSync(join(root, "node_modules/installed.txt"), "utf8"), "new-lock");
+    assert.equal(calls().length, 4);
+    assert.deepEqual(calls().at(-1), { command: "pnpm", args: ["install", "--frozen-lockfile"] });
+    rmSync(join(root, ".dohc-dev/verification/build.json"));
+    const failed = invoke({ failInstall: true });
+    assert.notEqual(failed.status, 0);
+    assert.match(failed.stderr, /frozen install rejected/);
+    assert.equal(calls().length, 5);
+    assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
+    assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("source fingerprints follow the host's environment key casing", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-env-key-"));
+  try {
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import {sourceFingerprint} from ${JSON.stringify(new URL("./build.mjs", import.meta.url).href)};
+      const root=process.argv[1];
+      const upper='CARGO_PROFILE_DEV_OPT_LEVEL';
+      const mixed='Cargo_Profile_Dev_Opt_Level';
+      delete process.env[upper]; delete process.env[mixed];
+      process.env[mixed]='0';
+      const before=sourceFingerprint('desktop',root);
+      process.env[mixed]='1';
+      const after=sourceFingerprint('desktop',root);
+      if(process.platform==='win32') {
+        assert.equal(process.env[upper],'1');
+        assert.notEqual(before,after);
+        delete process.env[mixed]; process.env[upper]='1';
+        assert.equal(sourceFingerprint('desktop',root),after);
+      } else {
+        assert.equal(before,after);
+        process.env[upper]='1';
+        assert.notEqual(sourceFingerprint('desktop',root),after);
+      }
+    `, root], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
 test("source identity changes for dirty, untracked, deleted, and ignored build configuration", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-provenance-"));

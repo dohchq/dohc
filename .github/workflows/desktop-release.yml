@@ -10,6 +10,7 @@ on:
       - "packages/**"
       - "services/**"
       - "scripts/desktop-release-scripts.test.mjs"
+      - "scripts/verification/**"
       - "scripts/merge-update-manifests.mjs"
       - "scripts/mock-update-server.mjs"
       - "scripts/release-smoke.mjs"

@@ -12,6 +12,7 @@ Codex runs the same setup through `.codex/environments/environment.toml` when cr
 
 Run `pnpm doctor` to inspect readiness without changing the checkout.
 Run `pnpm qa:prepare` to build the native engine and desktop.
+Preparation reconciles the installed dependencies with the frozen lockfile before reusing or building artifacts.
 Preparation records source and artifact hashes under `.dohc-dev/verification`.
 The desktop harness rejects missing or mismatched builds, including stale staged engines.
 
@@ -44,14 +45,15 @@ Record the operator's result with the session evidence. The automated picker sea
 
 ## Verify a pull request
 
-Fetch the target branch. Run `pnpm verify:plan --base origin/main` to see the applicable workflow gates.
-Commit the changes. Run `pnpm verify:pr --base origin/main` against that clean commit.
+Fetch the PR's target branch. Use its fetched ref as `<target-ref>` below, such as `origin/main`.
+Run `pnpm verify:plan --base <target-ref>` to see the applicable workflow gates.
+Commit the changes. Run `pnpm verify:pr --base <target-ref>` against that clean commit.
 The runner rejects changes to the source or commit during verification.
 The JavaScript gate uses a dedicated Postgres container and requires the normally optional integration suites.
 The Rust gate uses the repository build budget and checks its summary verdict.
 The runner removes its Postgres container by the recorded container ID.
 
-To schedule jobs separately, use `pnpm verify:pr --base origin/main --job js` and `--job rust`.
+To schedule jobs separately, use `pnpm verify:pr --base <target-ref> --job js` and `--job rust`.
 Each report states its scope. Both selected jobs must pass on the same commit before claiming a complete PR gate.
 An explicit `--job` runs that job even when the filters omit it.
 Use it when a build or test step reads a changed file outside the filters.

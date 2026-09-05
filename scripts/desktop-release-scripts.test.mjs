@@ -337,6 +337,11 @@ test("desktop release workflow keeps unsigned package smoke reliable in CI", asy
     "desktop release simulation must run on PRs that touch desktop code",
   );
   assert.match(
+    pullRequestSection,
+    /^ {4}paths:\n(?: {6}- .*\n)* {6}- "scripts\/verification\/\*\*"/m,
+    "release engine builds import the shared verification runner",
+  );
+  assert.match(
     workflow,
     /if \[\[ "\$\{GITHUB_EVENT_NAME\}" == "pull_request" \]\]; then\s+echo "dry_run=true"/,
     "pull requests must be forced into dry-run mode",
