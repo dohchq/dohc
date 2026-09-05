@@ -646,9 +646,13 @@ export function usePluginCatalog(
       // fallback colliding with another plugin's real id), so a "removed"
       // event that matches more than one row, or arrives before the first
       // list has landed, cannot name which row left. applyStatusEvents leaves
-      // both untouched and the authoritative list decides. Read loadRef, not
-      // a setLoad updater's "current": the updater's ordering against the
-      // code after this setLoad call is not guaranteed.
+      // both untouched and the authoritative list decides. That reload runs
+      // with a fresh revisionAtStart so its own event merge excludes this
+      // removal: the list it fetches may already hold the unrelated survivor
+      // alone under the shared id, and replaying the removal onto it would
+      // delete that survivor. Read loadRef, not a setLoad updater's
+      // "current": the updater's ordering against the code after this
+      // setLoad call is not guaranteed.
       const priorLoad = loadRef.current;
       const ambiguousRemoval =
         event.kind === "removed" &&

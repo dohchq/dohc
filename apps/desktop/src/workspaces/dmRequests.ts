@@ -130,7 +130,9 @@ function hasOtherLiveHolder(
 // either a pending or declined request, or held live by another workspace.
 // Leave ends the row but revokes nothing, so classifyDmRequests re-lists the
 // grant as "received"; and once another workspace holds the share live, the
-// request lanes no longer name it. Both halves are needed. holdersByShareId
+// request lanes no longer name it. Both halves are needed. An owner-revoked
+// row passes both checks (its grant left the received listing, and nobody
+// holds it live), so its history stays readable on purpose. holdersByShareId
 // is derived fresh after classify resolves, because classify re-derives its
 // own copy mid-call to catch a grant accepted elsewhere while it awaits. The
 // wire id is checked too: a re-grant mints a new shareId for the same
