@@ -1500,10 +1500,6 @@ impl EngineService {
                 )
                 .await?
             }
-            "search.query" => {
-                self.search_query(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "search.queryPage" => {
                 self.search_query_page(&ctx, request.workspace, request.params)
                     .await?
@@ -9358,48 +9354,6 @@ impl EngineService {
         Ok(answer)
     }
 
-    async fn search_query(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: SearchParams = parse(params)?;
-        let open = self.open(handle.as_ref())?;
-        let cancellation = OperationCancellation::new(ctx);
-        let results = open
-            .actor
-            .search(
-                open.root,
-                open.workspace_id,
-                params.version_id,
-                params.query,
-                params.limit,
-                params.now_ms.unwrap_or(now_ms()?),
-                cancellation.token(),
-            )
-            .await
-            .map_err(map_runtime)?;
-        Ok(Value::Array(
-            results
-                .into_iter()
-                .map(|result| {
-                    json!({
-                        "surface": match result.surface { SearchSurface::File => "file", SearchSurface::Chat => "chat" },
-                        "path": result.path,
-                        "title": result.title,
-                        "line": result.line,
-                        "preview": result.preview,
-                        "matchStart": result.match_start,
-                        "matchEnd": result.match_end,
-                        "threadId": result.thread_id,
-                        "objectId": result.object_id
-                    })
-                })
-                .collect(),
-        ))
-    }
-
     async fn search_query_page(
         &self,
         ctx: &RequestContext,
@@ -10797,15 +10751,6 @@ struct LocalResolveDto {
     metadata_summary: Option<String>,
     metadata_correlation_id: Option<String>,
     author_json: Option<String>,
-    now_ms: Option<i64>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SearchParams {
-    version_id: String,
-    query: String,
-    limit: Option<i64>,
     now_ms: Option<i64>,
 }
 
@@ -14187,7 +14132,6 @@ mod tests {
             "moments.get",
             "moments.list",
             "search.ensureIndex",
-            "search.query",
             "search.queryChatMessagesGranular",
             "search.queryPage",
             "secrets.apply",

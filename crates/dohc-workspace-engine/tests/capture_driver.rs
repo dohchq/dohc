@@ -1202,7 +1202,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
 
     for (id, method) in [
         (5, "history.page"),
-        (6, "search.query"),
+        (6, "search.queryPage"),
         (7, "versions.list"),
         (50, "collections.list"),
         (51, "collections.get"),

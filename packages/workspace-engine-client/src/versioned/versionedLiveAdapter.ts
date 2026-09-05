@@ -39,8 +39,6 @@ import {
   type ConflictRecord,
   type ConflictResolveParams,
   type ConflictResolveResult,
-  type SearchQueryParams,
-  type SearchResult,
   type WatcherStatusResult,
   type WorkspaceMethod,
   type WorkspaceMethodParamsMap,
@@ -1001,10 +999,6 @@ export class VersionedLiveAdapter {
   }): Promise<void> {
     this.assertWorkspace(input.workspaceId);
     await this.request(VERSIONED_METHOD.searchEnsureIndex, input);
-  }
-
-  async querySearch(input: SearchQueryParams): Promise<SearchResult[]> {
-    return this.workspaceRequest(WORKSPACE_METHOD.searchQuery, input);
   }
 
   /**

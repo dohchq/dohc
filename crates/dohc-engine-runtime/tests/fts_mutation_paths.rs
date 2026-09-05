@@ -42,17 +42,23 @@ async fn search(
     now_ms: i64,
 ) -> Vec<SearchResult> {
     actor
-        .search(
+        .search_page(
             root.to_path_buf(),
             workspace_id.to_owned(),
             VERSION.to_owned(),
             query.to_owned(),
             Some(100),
             now_ms,
+            None,
+            None,
             CancellationToken::new(),
         )
         .await
         .expect("search")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
 }
 
 #[tokio::test]

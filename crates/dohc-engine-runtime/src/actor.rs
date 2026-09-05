@@ -28,9 +28,8 @@ use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
 use crate::search::index::update_file_search_index_for_capture;
 use crate::search::{
-    GranularChatMessageSearchBatch, SearchPageBatch, SearchResult, SearchResultKey,
-    delete_file_search_index, ensure_search_index_for_version,
-    query_chat_messages_granular_bounded, search_workspace, search_workspace_page,
+    GranularChatMessageSearchBatch, SearchPageBatch, SearchResultKey, delete_file_search_index,
+    ensure_search_index_for_version, query_chat_messages_granular_bounded, search_workspace_page,
     upsert_file_search_index,
 };
 use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
@@ -1822,16 +1821,6 @@ enum Command {
         leases: LeaseRegistry,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
-    },
-    Search {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<SearchResult>, RuntimeError>>,
     },
     SearchPage {
         root_dir: PathBuf,
@@ -4619,34 +4608,6 @@ impl ActorHandle {
                 envelope,
                 faults,
                 leases,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn search(
-        &self,
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-    ) -> Result<Vec<SearchResult>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Search {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
                 token,
                 reply,
             })
@@ -10352,35 +10313,6 @@ fn worker_main(
             } => {
                 let outcome = dohc_engine_domain::list_automation_failures(&store, &workspace_id)
                     .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::Search {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            search_workspace(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                &query,
-                                limit,
-                                now_ms,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
                 let _ = reply.send(outcome);
             }
             Command::SearchPage {

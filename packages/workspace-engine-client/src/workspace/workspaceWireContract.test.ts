@@ -98,9 +98,6 @@ describe("workspace wire schemas", () => {
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, []),
     ).toThrow("must be a JSON object");
-    expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.searchQuery, null),
-    ).toThrow("Expected array");
   });
 
   it("rejects nested excess fields", () => {
@@ -114,19 +111,24 @@ describe("workspace wire schemas", () => {
 
   it("rejects unsafe integers", () => {
     expect(() =>
-      decodeWorkspaceResult(WORKSPACE_METHOD.searchQuery, [
-        {
-          surface: "file",
-          path: "note.md",
-          title: "Note",
-          line: Number.MAX_SAFE_INTEGER + 1,
-          preview: "body",
-          matchStart: 0,
-          matchEnd: 4,
-          threadId: null,
-          objectId: null,
-        },
-      ]),
+      decodeWorkspaceResult(WORKSPACE_METHOD.searchQueryPage, {
+        results: [
+          {
+            surface: "file",
+            path: "note.md",
+            title: "Note",
+            line: Number.MAX_SAFE_INTEGER + 1,
+            preview: "body",
+            matchStart: 0,
+            matchEnd: 4,
+            threadId: null,
+            objectId: null,
+          },
+        ],
+        nextCursor: null,
+        versionId: "main",
+        restartRequired: false,
+      }),
     ).toThrow(WorkspaceProtocolShapeError);
   });
 

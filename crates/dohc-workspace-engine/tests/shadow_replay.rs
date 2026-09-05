@@ -162,14 +162,14 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
             RequestContext::unbounded(),
             request(
                 6,
-                "search.query",
+                "search.queryPage",
                 Some(handle.clone()),
-                json!({ "versionId": "main", "query": "shadow", "nowMs": 102 }),
+                json!({ "query": "shadow", "nowMs": 102 }),
             ),
         )
         .await
         .expect("search");
-    assert_eq!(search.result[0]["path"], "notes/hello.md");
+    assert_eq!(search.result["results"][0]["path"], "notes/hello.md");
 
     let closed = transport
         .call(
