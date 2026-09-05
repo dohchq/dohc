@@ -190,3 +190,67 @@ fn seed_hello_frame_round_trips() {
     let envelope = decode_control(&payload, &WireLimits::default()).expect("valid envelope");
     assert!(matches!(envelope, Envelope::Hello(_)));
 }
+
+/// A prefix of a valid multi-frame stream is incomplete, never an error: the
+/// decoder must wait for the rest, not refuse a partial read. The proptest
+/// above only proves a prefix is never *complete*; this proves it is never
+/// *refused*, over a control frame followed by a blob chunk.
+#[test]
+fn every_prefix_of_a_valid_stream_is_incomplete_not_an_error() {
+    let limits = WireLimits::default();
+    let envelope: Envelope = serde_json::from_value(serde_json::json!({
+        "type": "cancel",
+        "id": 5
+    }))
+    .expect("valid envelope");
+    let mut buffer = encode_control(&envelope, &limits).expect("encodes");
+    buffer.extend(
+        dohc_engine_protocol::frame::encode_blob_chunk_frame(3, true, b"blob-bytes", &limits)
+            .expect("encodes"),
+    );
+    for cut in 0..buffer.len() {
+        let mut decoder = FrameDecoder::new(limits.clone());
+        decoder.push(&buffer[..cut]);
+        loop {
+            match decoder.next_frame() {
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(error) => panic!("prefix of a valid stream errored at cut {cut}: {error}"),
+            }
+        }
+    }
+    let mut decoder = FrameDecoder::new(limits);
+    decoder.push(&buffer);
+    assert!(matches!(decoder.next_frame(), Ok(Some(Frame::Control(_)))));
+    assert!(matches!(
+        decoder.next_frame(),
+        Ok(Some(Frame::BlobChunk { fin: true, .. }))
+    ));
+    assert!(matches!(decoder.next_frame(), Ok(None)));
+}
+
+/// Structurally valid JSON that is not a valid envelope, and pathologically
+/// deep JSON, both decode to a typed error rather than a panic or a stack
+/// overflow.
+#[test]
+fn hostile_envelope_payloads_yield_typed_errors() {
+    let limits = WireLimits::default();
+    for payload in [
+        &b"{}"[..],
+        br#"{"type":"nope"}"#,
+        br#"{"type":"cancel"}"#,
+        br#"{"type":"cancel","id":"not-a-number"}"#,
+        br#"[1,2,3]"#,
+        br#"null"#,
+    ] {
+        assert!(
+            decode_control(payload, &limits).is_err(),
+            "{payload:?} must be refused"
+        );
+    }
+    let mut deep = String::new();
+    deep.push_str(&"[".repeat(4000));
+    deep.push_str(&"]".repeat(4000));
+    assert!(decode_control(deep.as_bytes(), &limits).is_err());
+    assert!(decode_control(br#"{"type":"cancel","id":5}"#, &limits).is_ok());
+}
