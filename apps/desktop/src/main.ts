@@ -622,9 +622,9 @@ import {
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
+import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
 import {
   EngineRelayClient,
-  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
@@ -4991,6 +4991,7 @@ async function openCliWorkspace(
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
+  if (!daemon) throw new Error("The workspace engine is not running.");
   // The CLI's collection writes ride the same seam plugin SDK edits take,
   // resolved per write under the physical workspace's authority, so a
   // retired-and-reattached workspace refuses instead of falling through to
@@ -5008,38 +5009,31 @@ async function openCliWorkspace(
     dispatchStore: agentDispatchStoreHandleFor(workspace).store,
     readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
-    ...(daemon
-      ? {
-          daemonReads: {
-            async queryChatMessagesGranular(input: {
-              query: string;
-              limit: number;
-            }) {
-              return decodeGranularChatMessageSearchResponse(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  WORKSPACE_METHOD.searchQueryChatMessagesGranular,
-                  input,
-                ),
-              );
-            },
-            async listUnreadFileThreads(input: {
-              pageLimit: number;
-              afterThreadId?: string;
-            }) {
-              return decodeUnreadFileThreads(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  CHATS_METHOD.readStateListUnreadFileThreads,
-                  input,
-                ),
-              );
-            },
-          },
-        }
-      : {}),
+    daemonReads: {
+      async queryChatMessagesGranular(input: { query: string; limit: number }) {
+        return decodeGranularChatMessageSearchResponse(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            WORKSPACE_METHOD.searchQueryChatMessagesGranular,
+            input,
+          ),
+        );
+      },
+      async listUnreadFileThreads(input: {
+        pageLimit: number;
+        afterThreadId?: string;
+      }) {
+        return decodeUnreadFileThreads(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            CHATS_METHOD.readStateListUnreadFileThreads,
+            input,
+          ),
+        );
+      },
+    },
     // Engine-backed collection reads and writes for the CLI/MCP verbs.
     // withEngineAdapter derives the attachment (and share-view session mode)
     // from the registered workspace itself — the renderer collection routes'
@@ -7893,7 +7887,7 @@ function registerIpcHandlers(
     let probe: RelayWorkspaceBootstrapResult;
     let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
     try {
-      probe = await probeWorkspaceRelay(relayTransportRoutes, {
+      probe = await probeRelayWorkspace({
         workspaceId: parsed.workspaceId,
         relay,
       });

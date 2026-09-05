@@ -1469,10 +1469,6 @@ impl EngineService {
                 self.ydoc_settle(&ctx, request.workspace, request.params)
                     .await?
             }
-            "ydoc.applyExternalMarkdownEdit" => {
-                self.ydoc_apply_external_markdown_edit(&ctx, request.workspace, request.params)
-                    .await?
-            }
             "ydoc.close" => {
                 self.ydoc_close(&ctx, request.workspace, request.params)
                     .await?
@@ -2019,7 +2015,7 @@ impl EngineService {
             .is_some_and(|object| object.contains_key("captureAuthor"));
         let params: WorkspaceOpenParams = parse(params)?;
         let capture_author_json = if capture_author_supplied {
-            Some(validated_author(params.capture_author.as_ref(), None)?)
+            Some(validated_author(params.capture_author.as_ref())?)
         } else {
             None
         };
@@ -3150,9 +3146,9 @@ impl EngineService {
         if text.len() > MAX_DESKTOP_CAPTURE_TEXT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.write (queued)")
@@ -3220,9 +3216,9 @@ impl EngineService {
         if bytes.len() > MAX_INBAND_CONTENT_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedBinary.write (queued)")
@@ -3299,9 +3295,9 @@ impl EngineService {
         }
         let sha256 = params.sha256.to_ascii_lowercase();
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let bytes = match params.bytes_base64 {
             Some(encoded) => {
@@ -3407,9 +3403,9 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let from_path = params.from_path.clone();
         let to_path = params.to_path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rename (queued)")
@@ -3476,9 +3472,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.delete (queued)")
@@ -3536,8 +3532,8 @@ impl EngineService {
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = validate_addressable_plaintext_path(&params.path)
             .map_err(|error| map_runtime(RuntimeError::Domain(error)))?;
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versionedText.rollback (queued)")
@@ -3632,9 +3628,9 @@ impl EngineService {
         let open = self.open(request.workspace.as_ref())?;
         validate_workspace_param(params.workspace_id.as_deref(), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(params.origin.as_deref(), params.metadata_origin.as_deref())?;
+        let origin = validated_origin(params.origin.as_deref())?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
-        let author_json = validated_author(params.author.as_ref(), params.author_json.as_deref())?;
+        let author_json = validated_author(params.author.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let session_serial = self
             .mutation_session_guard(&open, &cancellation, "versions.merge (queued)")
@@ -4511,7 +4507,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: CaptureSetAuthorParams = parse(params)?;
-        let author_json = validated_author(params.author.as_ref(), None)?;
+        let author_json = validated_author(params.author.as_ref())?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
         let _apply = tokio::select! {
@@ -5334,7 +5330,7 @@ impl EngineService {
         if text.len() > dohc_engine_domain::MAX_SECRET_FILE_BYTES {
             return Err(wire(ErrorCode::InvalidParams, "content-exceeds-inband-cap"));
         }
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         // Prove the version reference and secret-floor routing keylessly before
@@ -5389,7 +5385,7 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let path = params.path.clone();
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let cancellation = OperationCancellation::new(ctx);
         let moment = open
@@ -5623,7 +5619,7 @@ impl EngineService {
         }
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -5707,7 +5703,7 @@ impl EngineService {
         let params: SecretsRestoreParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
-        let origin = validated_origin(Some(&params.origin), None)?;
+        let origin = validated_origin(Some(&params.origin))?;
         validate_metadata_fields(params.summary.as_deref(), params.correlation_id.as_deref())?;
         let path = params.path.clone();
         let cancellation = OperationCancellation::new(ctx);
@@ -8710,30 +8706,6 @@ impl EngineService {
         .map_err(|_| wire(ErrorCode::Internal, "response encode failed"))
     }
 
-    async fn ydoc_apply_external_markdown_edit(
-        &self,
-        ctx: &RequestContext,
-        handle: Option<WorkspaceHandle>,
-        params: Value,
-    ) -> Result<Value, WireError> {
-        let params: YdocApplyExternalMarkdownEditParams = parse(params)?;
-        let cancellation = OperationCancellation::new(ctx);
-        let open = self.open(handle.as_ref())?;
-        let _serial = tokio::select! {
-            biased;
-            () = cancellation.token.cancelled() => {
-                return Err(cancellation.interruption("ydoc.applyExternalMarkdownEdit (queued)"));
-            }
-            serial = open.session_ops.lock() => serial,
-        };
-        let _ = self.ydoc_session(handle.as_ref(), &params.session_id)?;
-        let _ = params.markdown;
-        Err(wire(
-            ErrorCode::InvalidParams,
-            "external-edit-unsupported-live",
-        ))
-    }
-
     async fn ydoc_close(
         &self,
         ctx: &RequestContext,
@@ -9216,7 +9188,7 @@ impl EngineService {
             local.metadata_summary.as_deref(),
             local.metadata_correlation_id.as_deref(),
         )?;
-        let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
+        let metadata_origin = validated_origin(Some(&local.metadata_origin))?;
         // The answer is built after the mutation commits. Withholding (below)
         // takes out every body, never the strings beside them, so an answer
         // whose withheld form still passes the frame cannot be sent at all —
@@ -10136,15 +10108,11 @@ struct VersionedTextWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10167,15 +10135,11 @@ struct VersionedBinaryWriteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10199,15 +10163,11 @@ struct VersionedBinaryWriteBlobParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     moment_id: Option<String>,
     #[serde(default)]
@@ -10227,15 +10187,11 @@ struct VersionedTextRenameParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10252,15 +10208,11 @@ struct VersionedTextDeleteParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10278,11 +10230,7 @@ struct VersionedTextRollbackParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
 }
@@ -10308,15 +10256,11 @@ struct VersionedTextMergeParams {
     #[serde(default)]
     origin: Option<String>,
     #[serde(default)]
-    metadata_origin: Option<String>,
-    #[serde(default)]
     summary: Option<String>,
     #[serde(default)]
     correlation_id: Option<String>,
     #[serde(default)]
     author: Option<Value>,
-    #[serde(default)]
-    author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
@@ -10653,25 +10597,6 @@ struct YdocSettleResult {
     /// is pending a retry. Nothing may report the document as saved on this.
     materialized: bool,
     projection: YdocProjectionProvenance,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct YdocApplyExternalMarkdownEditParams {
-    session_id: String,
-    markdown: String,
-}
-
-#[allow(dead_code, reason = "C1 refuses this method before producing a result")]
-#[derive(Serialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase"
-)]
-enum YdocApplyExternalMarkdownEditResult {
-    Merged { markdown: String },
-    Conflict { conflict_path: String },
 }
 
 #[derive(Deserialize)]
@@ -12941,37 +12866,18 @@ fn validate_metadata_fields(
     Ok(())
 }
 
-fn validated_origin(
-    origin: Option<&str>,
-    legacy_origin: Option<&str>,
-) -> Result<String, WireError> {
-    let value = origin
-        .or(legacy_origin)
-        .ok_or_else(|| wire(ErrorCode::InvalidParams, "invalid-metadata"))?;
-    match value {
-        "api" | "local-file" | "restore" | "sync" | "unknown" => Ok(value.to_owned()),
-        // Compatibility for pre-RPC-D callers. The new `origin` field remains
-        // the closed five-set; legacy `metadataOrigin: agent` represented an
-        // API write before author attribution became a separate field.
-        "agent" if origin.is_none() => Ok("api".to_owned()),
+fn validated_origin(origin: Option<&str>) -> Result<String, WireError> {
+    match origin {
+        Some(value @ ("api" | "local-file" | "restore" | "sync" | "unknown")) => {
+            Ok(value.to_owned())
+        }
         _ => Err(wire(ErrorCode::InvalidParams, "invalid-metadata")),
     }
 }
 
-fn validated_author(
-    author: Option<&Value>,
-    legacy_author_json: Option<&str>,
-) -> Result<Option<String>, WireError> {
-    if author.is_some() && legacy_author_json.is_some() {
-        return Err(wire(ErrorCode::InvalidParams, "invalid-metadata"));
-    }
-    let value = match author {
-        Some(value) => value.clone(),
-        None => match legacy_author_json {
-            Some(raw) => serde_json::from_str(raw)
-                .map_err(|_| wire(ErrorCode::InvalidParams, "invalid-metadata"))?,
-            None => return Ok(None),
-        },
+fn validated_author(author: Option<&Value>) -> Result<Option<String>, WireError> {
+    let Some(value) = author else {
+        return Ok(None);
     };
     let object = value
         .as_object()
@@ -14179,7 +14085,6 @@ mod tests {
             "watcher.status",
             "workspace.close",
             "workspace.open",
-            "ydoc.applyExternalMarkdownEdit",
             "ydoc.close",
             "ydoc.evict",
             "ydoc.open",

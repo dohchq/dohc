@@ -28,8 +28,8 @@ pub mod policy;
 pub mod query;
 
 pub use index::{
-    delete_file_search_index, ensure_search_index_for_version, floor_of,
-    upsert_chat_message_search_index, upsert_file_search_index, upsert_thread_header_search_index,
+    delete_file_search_index, ensure_search_index_for_version, upsert_chat_message_search_index,
+    upsert_file_search_index, upsert_thread_header_search_index,
 };
 pub use policy::{
     DiagnosticReason, EffectivePolicy, Export, FilesPolicyRule, POLICY_FILE_MAX_BYTES, PathFloor,

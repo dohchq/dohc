@@ -489,8 +489,6 @@ export class YdocLoopbackEngine implements EngineTransport {
         return { result: this.recordUpdate(request) };
       case YDOC_METHOD.settle:
         return { result: this.settle(request.params) };
-      case YDOC_METHOD.applyExternalMarkdownEdit:
-        return { result: this.applyExternalMarkdownEdit(request.params) };
       case YDOC_METHOD.close:
         return { result: this.close(request.params) };
       case YDOC_METHOD.evict:
@@ -701,44 +699,6 @@ export class YdocLoopbackEngine implements EngineTransport {
         destructive: false,
       },
     };
-  }
-
-  private applyExternalMarkdownEdit(value: JsonValue): JsonValue {
-    const params = asObject(value, "ydoc.applyExternalMarkdownEdit params");
-    const session = this.requireSession(
-      requiredString(
-        params,
-        "sessionId",
-        "ydoc.applyExternalMarkdownEdit params",
-      ),
-    );
-    const markdown = requiredString(
-      params,
-      "markdown",
-      "ydoc.applyExternalMarkdownEdit params",
-    );
-    const before = Y.encodeStateVector(session.doc);
-    session.doc.transact(() => {
-      if (session.contentKind === "plaintext") {
-        const text = session.doc.getText("plainText");
-        text.delete(0, text.length);
-        text.insert(0, markdown);
-      } else {
-        const body = session.doc.getXmlFragment("body");
-        body.delete(0, body.length);
-        if (markdown.length > 0) {
-          const paragraph = new Y.XmlElement("paragraph");
-          paragraph.insert(0, [new Y.XmlText(markdown)]);
-          body.insert(0, [paragraph]);
-        }
-      }
-    });
-    this.journalSessionState(session);
-    this.emitRemoteUpdate(
-      session.sessionId,
-      Y.encodeStateAsUpdate(session.doc, before),
-    );
-    return { kind: "merged", markdown };
   }
 
   private close(value: JsonValue): JsonValue {

@@ -83,7 +83,7 @@ async fn clone_marked_shadow_replay_composes_real_domains_end_to_end() {
                     "path": "notes/hello.md",
                     "text": "hello shadow replay",
                     "momentId": "moment-1",
-                    "metadataOrigin": "api",
+                    "origin": "api",
                     "nowMs": 100
                 }),
             ),

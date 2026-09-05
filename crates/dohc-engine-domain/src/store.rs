@@ -3183,20 +3183,7 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3 \
-                              OR ((j.job_id GLOB 'rollback-restore_*' \
-                                   OR j.job_id GLOB \
-                                      'binary-rename-0-write-mat_rollback-restore_*') \
-                                  AND instr(j.job_id, char(31)) = 0 \
-                                  AND NOT EXISTS ( \
-                                      SELECT 1 FROM moments rollback_spoof \
-                                      WHERE rollback_spoof.moment_id = CASE \
-                                            WHEN j.job_id GLOB \
-                                                'binary-rename-0-write-mat_*' \
-                                            THEN substr(j.job_id, \
-                                                length( \
-                                                    'binary-rename-0-write-mat_') + 1) \
-                                            ELSE j.job_id END)))) \
+                                    length(?3)) = ?3)) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
                         j.content_sha256, bb.byte_length \
@@ -3207,33 +3194,7 @@ pub fn capture_manifest_seed(
                      AND (substr(j.job_id, 1, length(?3)) = ?3 \
                          OR substr(j.job_id, \
                                length('binary-rename-1-delete-mat_') + 1, \
-                               length(?3)) = ?3 \
-                         OR (j.job_id GLOB \
-                                'binary-rename-1-delete-mat_rollback-restore_*' \
-                             AND instr(j.job_id, char(31)) = 0 \
-                             AND EXISTS ( \
-                                 SELECT 1 \
-                                 FROM materialization_jobs restore \
-                                 JOIN path_aliases restore_alias \
-                                   ON restore_alias.workspace_id = ?1 \
-                                  AND restore_alias.version_id = ?2 \
-                                  AND restore_alias.path = restore.target_path \
-                                 JOIN snapshots restore_snapshot \
-                                   ON restore_snapshot.workspace_id = restore_alias.workspace_id \
-                                  AND restore_snapshot.version_id = restore_alias.version_id \
-                                  AND restore_snapshot.object_id = restore_alias.object_id \
-                                  WHERE restore.job_id = \
-                                      'binary-rename-0-write-mat_' || \
-                                     substr(j.job_id, \
-                                         length('binary-rename-1-delete-mat_') + 1) \
-                                    AND restore.operation = 'write' \
-                                    AND (restore.workspace_id = ?1 \
-                                         OR restore.workspace_id = '') \
-                                    AND restore.content_sha256 = j.content_sha256 \
-                                   AND CASE COALESCE(restore_snapshot.content_kind, 'text') \
-                                       WHEN 'binary' THEN restore_snapshot.binary_sha256 \
-                                       ELSE restore_snapshot.blob_sha256 END = \
-                                       restore.content_sha256))) \
+                               length(?3)) = ?3) \
                     AND NOT EXISTS ( \
                         SELECT 1 FROM path_aliases a \
                         WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
@@ -5068,7 +5029,7 @@ pub fn rollback_compensating_moment_id(
 }
 
 /// Recover the workspace, version, and mutation moment bound into a rollback
-/// materialization identity. Legacy identities intentionally return `None`.
+/// materialization identity.
 #[doc(hidden)]
 pub fn decode_binary_rollback_job_identity(job_id: &str) -> Option<(&str, &str, &str)> {
     let encoded = job_id.strip_prefix("rollback-restore_\u{1f}")?;

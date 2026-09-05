@@ -52,8 +52,6 @@ describe("workspace headings", () => {
       .toBe(headings[2]);
     expect(findWorkspaceHeading(headings, { anchor: "foo", occurrence: 1 }))
       .toBe(headings[2]);
-    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 }))
-      .toBe(headings[2]);
   });
 
   it("uniquifies a literal suffixed base that follows an existing duplicate", () => {
@@ -64,18 +62,6 @@ describe("workspace headings", () => {
       { anchor: "foo-1", occurrence: 1 },
       { anchor: "foo-1-1", occurrence: 0 },
     ]);
-  });
-
-  it("prefers a genuine suffixed-base occurrence over the legacy fallback", () => {
-    const headings = extractWorkspaceHeadings([
-      "# Foo",
-      "# Foo-1",
-      "# Foo",
-      "# Foo-1",
-    ].join("\n"));
-
-    expect(findWorkspaceHeading(headings, { anchor: "foo-1", occurrence: 1 }))
-      .toBe(headings[3]);
   });
 
   it("ignores headings in fenced and indented code", () => {
@@ -146,12 +132,6 @@ describe("workspace headings", () => {
     expect(
       findWorkspaceHeading(headings, {
         anchor: "caf%C3%A9-plan",
-        occurrence: 1,
-      })?.line,
-    ).toBe(3);
-    expect(
-      findWorkspaceHeading(headings, {
-        anchor: "caf%C3%A9-plan-1",
         occurrence: 1,
       })?.line,
     ).toBe(3);

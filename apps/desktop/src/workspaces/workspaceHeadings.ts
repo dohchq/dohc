@@ -124,18 +124,7 @@ export function resolveWorkspaceHeadingAnchorTarget<
       headingAnchorBase(heading.text) === anchor &&
       heading.occurrence === occurrence,
   );
-  if (literalBase) return literalBase;
-
-  if (occurrence <= 0) return null;
-  const legacySuffix = `-${occurrence}`;
-  if (!anchor.endsWith(legacySuffix)) return null;
-  const legacyBase = anchor.slice(0, -legacySuffix.length);
-  if (!legacyBase) return null;
-  return headings.find(
-    (heading) =>
-      headingAnchorBase(heading.text) === legacyBase &&
-      heading.occurrence === occurrence,
-  ) ?? null;
+  return literalBase ?? null;
 }
 
 function lineRecords(markdown: string): Array<{ text: string; line: number; offset: number; end: number }> {

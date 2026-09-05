@@ -163,10 +163,8 @@ interface SerdeParamShape {
 const MUTATION_OPTIONAL_STRINGS = [
   "workspaceId",
   "origin",
-  "metadataOrigin",
   "summary",
   "correlationId",
-  "authorJson",
   "requestId",
 ] as const;
 const WRITE_OPTIONAL_STRINGS = [
@@ -206,13 +204,7 @@ const VERSIONED_PARAM_SHAPES = {
   },
   [VERSIONED_METHOD.textRollback]: {
     requiredStrings: ["versionId", "path", "mutationMomentId"],
-    optionalStrings: [
-      "workspaceId",
-      "origin",
-      "metadataOrigin",
-      "authorJson",
-      "requestId",
-    ],
+    optionalStrings: ["workspaceId", "origin", "requestId"],
     optionalJson: ["author"],
   },
   [VERSIONED_METHOD.textList]: {
@@ -669,10 +661,8 @@ function parseWriteFields(params: JsonObject, request: Request): ParsedWriteFiel
   const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
-  serdeOptionalParamString(params, "metadataOrigin");
   serdeOptionalParamString(params, "summary");
   serdeOptionalParamString(params, "correlationId");
-  serdeOptionalParamString(params, "authorJson");
   return {
     objectId: serdeOptionalParamString(params, "objectId"),
     momentId: serdeOptionalParamString(params, "momentId"),
@@ -724,10 +714,8 @@ function parseTextRenameFields(
   const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
-  serdeOptionalParamString(params, "metadataOrigin");
   serdeOptionalParamString(params, "summary");
   serdeOptionalParamString(params, "correlationId");
-  serdeOptionalParamString(params, "authorJson");
   return {
     versionId: serdeRequiredParamString(params, "versionId"),
     fromPath: serdeRequiredParamString(params, "fromPath"),
@@ -744,10 +732,8 @@ function parseTextDeleteFields(
   const idempotencyKey = requestIdempotencyKey(request);
   serdeOptionalParamString(params, "workspaceId");
   serdeOptionalParamString(params, "origin");
-  serdeOptionalParamString(params, "metadataOrigin");
   serdeOptionalParamString(params, "summary");
   serdeOptionalParamString(params, "correlationId");
-  serdeOptionalParamString(params, "authorJson");
   return {
     versionId: serdeRequiredParamString(params, "versionId"),
     path: serdeRequiredParamString(params, "path"),
@@ -783,15 +769,10 @@ function parseSecretDeleteFields(params: JsonObject, request: Request): ParsedSe
   };
 }
 
-// `secrets.restore` only. SecretsRestoreParams takes `origin` as a required field
-// with deny_unknown_fields, so there is no legacy `metadataOrigin` fallback to
-// honour — accepting one lets the fake through a request the daemon refuses while
-// deserializing.
+// `secrets.restore` only: SecretsRestoreParams takes `origin` as a required,
+// non-nullable field, so JSON `null` is refused here where `requiredOrigin`
+// reads it as absent.
 function restoreOrigin(object: JsonObject): VersionedOrigin {
-  // `deny_unknown_fields` makes the mere PRESENCE of metadataOrigin fatal, even
-  // alongside a valid `origin` — serde refuses before any field is read. So this
-  // rejects the field rather than merely declining to fall back to it.
-  if (object.metadataOrigin !== undefined) throw new Error("invalid-metadata");
   const origin = optionalString(object, "origin");
   if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
     throw new Error("invalid-metadata");
@@ -801,16 +782,10 @@ function restoreOrigin(object: JsonObject): VersionedOrigin {
 
 function requiredOrigin(object: JsonObject): VersionedOrigin {
   const origin = serdeOptionalString(object, "origin");
-  const legacyOrigin = serdeOptionalString(object, "metadataOrigin");
-  if (origin !== undefined) {
-    if (!ACCEPTED_ORIGINS.has(origin)) throw new Error("invalid-metadata");
-    return origin as VersionedOrigin;
-  }
-  if (legacyOrigin === "agent") return "api";
-  if (!legacyOrigin || !ACCEPTED_ORIGINS.has(legacyOrigin)) {
+  if (origin === undefined || !ACCEPTED_ORIGINS.has(origin)) {
     throw new Error("invalid-metadata");
   }
-  return legacyOrigin as VersionedOrigin;
+  return origin as VersionedOrigin;
 }
 
 function copyFile(file: LoopbackFile): LoopbackFile {
@@ -2551,10 +2526,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // to ignore params.origin entirely and hardcode "restore" below, which made it
     // accept requests production rejects while a comment here claimed the ordering
     // was matched.
-    // `origin` strictly, not via requiredOrigin: that helper falls back to the
-    // legacy `metadataOrigin`, while SecretsRestoreParams requires `origin` and
-    // denies unknown fields, so the fallback accepts a request the daemon rejects
-    // at deserialization.
     const origin = restoreOrigin(params);
     const metadata = this.secretMomentMetadata(params);
     validateSecretMomentId(beforeMomentId);
@@ -2953,13 +2924,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (params.author !== undefined && params.author !== null) {
       return stableJsonStringify(params.author);
     }
-    const legacy = params.authorJson;
-    if (typeof legacy !== "string") return null;
-    try {
-      return stableJsonStringify(JSON.parse(legacy) as JsonValue);
-    } catch {
-      return legacy;
-    }
+    return null;
   }
 
   private generatedWriteId(prefix: "object" | "moment", requestId: string, path: string): string {
@@ -3054,25 +3019,11 @@ export class VersionedLoopbackEngine implements EngineTransport {
   // Returns the normalized author to store. `agentRunId` is OPTIONAL in the
   // contract and never nullable, so it is omitted rather than nulled.
   private validatedAuthorValue(params: JsonObject): JsonValue | undefined {
-    const raw = params.author;
-    const legacy = params.authorJson;
+    const value = params.author;
     const refuse = (): never => {
       throw new Error("invalid-metadata");
     };
-    if (legacy !== undefined && legacy !== null && typeof legacy !== "string") refuse();
-    if (raw !== undefined && raw !== null && typeof legacy === "string") refuse();
-    let value: JsonValue;
-    if (raw !== undefined && raw !== null) {
-      value = raw;
-    } else if (typeof legacy === "string") {
-      try {
-        value = JSON.parse(legacy) as JsonValue;
-      } catch {
-        return refuse();
-      }
-    } else {
-      return undefined;
-    }
+    if (value === undefined || value === null) return undefined;
     if (typeof value !== "object" || value === null || Array.isArray(value)) refuse();
     const object = value as JsonObject;
     const nonEmpty = (key: string): boolean =>

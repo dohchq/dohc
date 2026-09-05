@@ -396,22 +396,6 @@ describe("loopback moment metadata", () => {
     expect(page.moments as unknown[]).toHaveLength(0);
   });
 
-  it("Refuses author and authorJson together, as the daemon does", async () => {
-    const engine = new VersionedLoopbackEngine();
-    const versionId = await openWorkspace(engine);
-    await expect(
-      send(engine, VERSIONED_METHOD.textWrite, {
-        workspaceId: WORKSPACE,
-        versionId,
-        path: "notes.md",
-        text: "hello",
-        origin: "local-file",
-        author: { kind: "agent", agentId: "a", onBehalfOf: "u" },
-        authorJson: JSON.stringify({ kind: "agent", agentId: "a", onBehalfOf: "u" }),
-      }),
-    ).rejects.toThrow(/invalid-metadata/);
-  });
-
   it("omits agentRunId when the caller does not supply it", async () => {
     // Contract field is `agentRunId?: string` — optional, never nullable.
     const engine = new VersionedLoopbackEngine();
@@ -1213,8 +1197,6 @@ describe("loopback moment metadata", () => {
       ["momentId", 1],
       ["requestId", 1],
       ["nowMs", "now"],
-      ["metadataOrigin", 1],
-      ["authorJson", 1],
     ];
 
     for (const handler of handlers) {
@@ -1294,11 +1276,9 @@ describe("loopback moment metadata", () => {
 
     const nullableFields = {
       workspaceId: null,
-      metadataOrigin: null,
       summary: null,
       correlationId: null,
       author: null,
-      authorJson: null,
       requestId: null,
       nowMs: null,
     };
@@ -2536,27 +2516,6 @@ describe("loopback moment metadata", () => {
         },
       },
       {
-        name: "secretWrite legacy origin alias",
-        method: VERSIONED_METHOD.secretsWrite,
-        params: {
-          versionId: "main",
-          path: ".env",
-          text: "API_KEY=value\n",
-          metadataOrigin: "local-file",
-          momentId: "secret-write-legacy-origin",
-        },
-      },
-      {
-        name: "secretDelete legacy origin alias",
-        method: VERSIONED_METHOD.secretsDelete,
-        params: {
-          versionId: "main",
-          path: ".env",
-          metadataOrigin: "local-file",
-          momentId: "secret-delete-legacy-origin",
-        },
-      },
-      {
         name: "versionsEnsureMain",
         method: VERSIONED_METHOD.versionsEnsureMain,
         params: { stray: true },
@@ -2786,80 +2745,6 @@ describe("loopback moment metadata", () => {
       const listed = await send(engine, VERSIONED_METHOD.versionsList, {});
       expect(listed.versions).toEqual([]);
     }
-  });
-
-  it("refuses a restore that only supplies the legacy metadataOrigin", async () => {
-    // SecretsRestoreParams requires `origin` and denies unknown fields, so the
-    // text-write compatibility fallback to `metadataOrigin` accepts a request the
-    // daemon rejects while deserializing. And the recorded moment used to hardcode
-    // "restore", which silently discarded any other accepted origin.
-    const engine = new VersionedLoopbackEngine();
-    const versionId = await openWorkspace(engine);
-    await send(engine, VERSIONED_METHOD.secretsWrite, {
-      workspaceId: WORKSPACE,
-      versionId,
-      path: ".env",
-      text: "API_KEY=legacy\n",
-      origin: "local-file",
-      momentId: "moment-legacy-origin",
-    });
-    await expect(
-      send(engine, VERSIONED_METHOD.secretsRestore, {
-        workspaceId: WORKSPACE,
-        path: ".env",
-        beforeMomentId: "moment-legacy-origin",
-        momentId: "moment-legacy-refused",
-        metadataOrigin: "restore",
-      }),
-    ).rejects.toThrow(/invalid parameters/);
-
-    // And an accepted origin other than "restore" is preserved on the moment.
-    await send(engine, VERSIONED_METHOD.secretsWrite, {
-      workspaceId: WORKSPACE,
-      versionId,
-      path: ".env",
-      text: "API_KEY=second\n",
-      origin: "local-file",
-      momentId: "moment-legacy-second",
-    });
-    await send(engine, VERSIONED_METHOD.secretsRestore, {
-      workspaceId: WORKSPACE,
-      path: ".env",
-      beforeMomentId: "moment-legacy-origin",
-      momentId: "moment-origin-preserved",
-      origin: "api",
-    });
-    const moment = await send(engine, VERSIONED_METHOD.secretsMomentsGet, {
-      workspaceId: WORKSPACE,
-      momentId: "moment-origin-preserved",
-    });
-    expect((moment.metadata as Record<string, unknown>).origin).toBe("api");
-  });
-
-  it("refuses a restore carrying metadataOrigin even alongside a valid origin", async () => {
-    // `deny_unknown_fields` on SecretsRestoreParams makes the PRESENCE of
-    // metadataOrigin fatal — serde refuses before reading any field — so a request
-    // with both is rejected, not silently accepted on the valid one.
-    const engine = new VersionedLoopbackEngine();
-    const versionId = await openWorkspace(engine);
-    await send(engine, VERSIONED_METHOD.secretsWrite, {
-      workspaceId: WORKSPACE,
-      versionId,
-      path: ".env",
-      text: "API_KEY=both\n",
-      origin: "local-file",
-      momentId: "moment-both-origins",
-    });
-    await expect(
-      send(engine, VERSIONED_METHOD.secretsRestore, {
-        workspaceId: WORKSPACE,
-        path: ".env",
-        beforeMomentId: "moment-both-origins",
-        momentId: "moment-both-refused",
-        origin: "restore",
-        metadataOrigin: "restore",
-      }),
-    ).rejects.toThrow(/invalid parameters/);
   });
 
   it("refuses over-cap restore metadata before it looks for the moment", async () => {

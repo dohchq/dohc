@@ -2619,21 +2619,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     assert_eq!(busy.code, ErrorCode::InvalidParams);
     assert_eq!(busy.message, "ydoc-session-busy");
 
-    let external = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                4,
-                "ydoc.applyExternalMarkdownEdit",
-                Some(handle.clone()),
-                json!({ "sessionId": session_id, "markdown": "external" }),
-            ),
-        )
-        .await
-        .expect_err("live external edit is a C1 refusal");
-    assert_eq!(external.code, ErrorCode::InvalidParams);
-    assert_eq!(external.message, "external-edit-unsupported-live");
-
     let before_moments = moment_count_for_object(&transport, &handle, 5, object_id).await;
     let recorded = call(
         &transport,
@@ -3124,7 +3109,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
                     "path": "notes/claimed.md",
                     "text": "the other owner's content",
                     "momentId": "moment-other-owner",
-                    "metadataOrigin": "agent"
+                    "origin": "api"
                 }),
             ),
         )
@@ -3756,7 +3741,7 @@ async fn opening_an_absent_path_whose_derived_object_lives_elsewhere_refuses() {
             "path": "notes/new.md",
             "text": "moved content",
             "momentId": "moment-planted",
-            "metadataOrigin": "agent"
+            "origin": "api"
         }),
     )
     .await;

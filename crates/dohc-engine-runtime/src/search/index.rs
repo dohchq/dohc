@@ -10,8 +10,7 @@
 //! crash mid-rebuild leaves that row unwritten, so reopen repairs.
 
 use crate::search::policy::{
-    PathFloor, SearchPolicySnapshot, classify_engine_file_path, path_is_search_indexed,
-    read_engine_search_policy,
+    SearchPolicySnapshot, path_is_search_indexed, read_engine_search_policy,
 };
 use crate::search::{SearchError, THREAD_HEADER_MESSAGE_ID};
 use dohc_engine_domain::chats::{
@@ -565,13 +564,6 @@ fn rebuild_within_savepoint(
         ],
     )?;
     Ok(true)
-}
-
-/// Whether a path would be indexed as a file at all, ignoring policy rules —
-/// used by callers that need the bare floor (`classifyEngineFilePath` !=
-/// `secret`/`ignored`). Exposed for parity checks and diagnostics.
-pub fn floor_of(path: &str) -> PathFloor {
-    classify_engine_file_path(path)
 }
 
 /// The display title for an untitled-or-titled thread, derived exactly as the

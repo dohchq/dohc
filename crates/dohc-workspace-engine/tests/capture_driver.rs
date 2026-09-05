@@ -833,7 +833,7 @@ async fn rpc_written_content_without_a_disk_file_is_never_retired_by_capture() {
                     "path": "rpc-only.md",
                     "text": "written by RPC",
                     "momentId": "moment-rpc",
-                    "metadataOrigin": "api",
+                    "origin": "api",
                 }),
             ),
         )
@@ -1347,7 +1347,7 @@ async fn fresh_import_opens_early_fences_partial_reads_and_preserves_foreign_hea
                         "path": path,
                         "text": text,
                         "momentId": moment,
-                        "metadataOrigin": "api"
+                        "origin": "api"
                     }),
                 ),
             )

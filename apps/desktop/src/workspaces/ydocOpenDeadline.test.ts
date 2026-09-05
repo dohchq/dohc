@@ -90,7 +90,6 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
       lineage: "existing" as const,
       applyLocalUpdate: async () => undefined,
       settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
-      applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
       close: async () => undefined,
       evict: async () => undefined,
     }),
@@ -443,7 +442,6 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
-          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => {
             throw closeError;
           },
@@ -533,8 +531,6 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
             close: async () => {
               closes += 1;
               // The refusal release: the budget stopped waiting for it.
@@ -646,7 +642,6 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
-          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
             settleOnRefusal?: boolean;
@@ -733,8 +728,6 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -809,8 +802,6 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -877,7 +868,6 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
-          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
             settleOnRefusal?: boolean;
@@ -947,8 +937,6 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
-            applyExternalMarkdownEdit: async () =>
-              ({ kind: "merged" }) as never,
             close: async () => {
               if (!captured) throw new Error("unsettled-close");
             },

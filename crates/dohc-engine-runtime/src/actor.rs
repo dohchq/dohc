@@ -41,12 +41,12 @@ use dohc_engine_collab::{
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
     AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationFailure, AutomationSettle,
-    BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext,
-    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire,
-    CaptureRetireResult, CaptureSecret, CaptureSecretRetire, ChangeAttribution,
-    ChannelThreadSummary, ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition,
-    ChatChannel, ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage,
-    ChatFeedReadState, ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
+    BinaryHead, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary,
+    CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult,
+    CaptureSecret, CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary,
+    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
+    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
+    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
     ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
     CollectionAdoptionCandidate, CollectionDetails, CollectionListPage,
     CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
@@ -59,11 +59,11 @@ use dohc_engine_domain::{
     ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
     SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
     SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, SnapshotView, StartChannelThread,
-    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
-    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
-    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
-    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
+    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, StartChannelThread, TextConflict,
+    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
+    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
+    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
+    binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -1472,11 +1472,6 @@ enum Command {
         workspace_id: String,
         reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
     },
-    ListSnapshots {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<SnapshotView>, RuntimeError>>,
-    },
     ListSnapshotMetadata {
         workspace_id: String,
         version_id: String,
@@ -1505,12 +1500,6 @@ enum Command {
         version_id: String,
         path: String,
         reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
-    },
-    ReadBinaryMeta {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<BinaryHeadMeta>, RuntimeError>>,
     },
     ReadBinaryBlob {
         workspace_id: String,
@@ -1626,11 +1615,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
     },
-    ListSecretFiles {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
-    },
     SecretFileLen {
         workspace_id: String,
         version_id: String,
@@ -1643,13 +1627,6 @@ enum Command {
         after_path: Option<String>,
         limit: usize,
         reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
-    },
-    MaterializeSecret {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: Box<SecretDataKey>,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
     },
     ActiveVersionId {
         workspace_id: String,
@@ -2653,29 +2630,6 @@ impl ActorHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn reconcile_collections_blocking(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<Vec<String>, RuntimeError> {
-        self.reconcile_collections_blocking_with_guard(
-            workspace_id,
-            version_id,
-            root_dir,
-            leases,
-            self_writes,
-            now_ms,
-            faults,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn reconcile_collections_blocking_guarded(
         &self,
         workspace_id: String,
@@ -2758,14 +2712,6 @@ impl ActorHandle {
 
     /// Retire a captured secret path on the actor's writer, blocking the
     /// caller. Keyless: a delete never decrypts.
-    pub fn capture_secret_retire_blocking(
-        &self,
-        input: CaptureSecretRetire,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        self.capture_secret_retire_blocking_with_guard(input, faults, None)
-    }
-
     pub fn capture_secret_retire_blocking_guarded(
         &self,
         input: CaptureSecretRetire,
@@ -2860,24 +2806,6 @@ impl ActorHandle {
 
     /// Retire a captured path and immediately apply any durable disk cleanup
     /// that the mutation creates.
-    pub fn capture_retire_materialized_blocking(
-        &self,
-        input: CaptureRetire,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<CaptureRetireResult, RuntimeError> {
-        self.capture_retire_materialized_blocking_with_guard(
-            input,
-            root_dir,
-            self_writes,
-            leases,
-            faults,
-            None,
-        )
-    }
-
     pub fn capture_retire_materialized_blocking_guarded(
         &self,
         input: CaptureRetire,
@@ -3352,23 +3280,6 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    pub async fn list_snapshots(
-        &self,
-        workspace_id: String,
-        version_id: String,
-    ) -> Result<Vec<SnapshotView>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSnapshots {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
     /// One page of snapshot METADATA (no body hydration) — the listing read
     /// behind `versionedText.list`.
     pub async fn list_snapshot_metadata(
@@ -3451,26 +3362,6 @@ impl ActorHandle {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
             .send(Command::ReadBinary {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// The binary head's metadata (no bytes) — sized in SQL.
-    pub async fn read_binary_meta(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        path: String,
-    ) -> Result<Option<BinaryHeadMeta>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryMeta {
                 workspace_id,
                 version_id,
                 path,
@@ -3820,23 +3711,6 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    pub async fn list_secret_files(
-        &self,
-        workspace_id: String,
-        version_id: String,
-    ) -> Result<Vec<SecretFileStat>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretFiles {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
     /// One secret tip's recorded byte length — keyless, no decrypt.
     pub async fn secret_file_len(
         &self,
@@ -3872,30 +3746,6 @@ impl ActorHandle {
                 version_id,
                 after_path,
                 limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
-    }
-
-    /// Decrypt one secret tip to UTF-8 plaintext. The KEY comes from the
-    /// caller (the daemon loads it from the workspace root), matching the
-    /// capture-secret pattern — the actor never holds key custody itself.
-    pub async fn materialize_secret(
-        &self,
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: SecretDataKey,
-    ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeSecret {
-                workspace_id,
-                version_id,
-                path,
-                key: Box::new(key),
                 reply,
             })
             .await
@@ -6754,8 +6604,10 @@ struct MaterializationReplayScope<'a> {
     self_writes: Option<&'a dyn SelfWriteRecorder>,
 }
 
-const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_";
+const ROLLBACK_RESTORE_PREFIX: &str = "rollback-restore_\u{1f}";
 
+/// The rollback identity a materialization job belongs to, if it is one
+/// `binary_rollback_job_identity` minted (bare or wrapped in a rename pair).
 fn rollback_restore_identity(job_id: &str) -> Option<&str> {
     if job_id.starts_with(ROLLBACK_RESTORE_PREFIX) {
         return Some(job_id);
@@ -6764,24 +6616,6 @@ fn rollback_restore_identity(job_id: &str) -> Option<&str> {
         .strip_prefix("binary-rename-0-write-mat_")
         .or_else(|| job_id.strip_prefix("binary-rename-1-delete-mat_"))
         .filter(|id| id.starts_with(ROLLBACK_RESTORE_PREFIX))
-}
-
-fn legacy_rollback_restore_is_corroborated(
-    store: &EngineStore,
-    rollback_id: &str,
-) -> Result<bool, RuntimeError> {
-    store
-        .read_with(|conn| {
-            conn.query_row(
-                "SELECT 1 FROM moments WHERE moment_id = ?1 LIMIT 1",
-                [rollback_id],
-                |_| Ok(()),
-            )
-            .optional()
-            .map(|ordinary_moment| ordinary_moment.is_none())
-            .map_err(StorageError::corrupt_public)
-        })
-        .map_err(RuntimeError::from)
 }
 
 fn rollback_write_matches_active_snapshot(
@@ -6872,21 +6706,14 @@ fn rollback_job_matches_active(
     let Some(rollback_id) = rollback_restore_identity(&job.job_id) else {
         return Ok(None);
     };
-    let version_id = match decode_binary_rollback_job_identity(rollback_id) {
-        Some((workspace_id, version_id, _)) => {
-            if workspace_id != replay_workspace_id {
-                return Ok(Some(false));
-            }
-            Some(version_id)
-        }
-        None if rollback_id.contains('\u{1f}') => return Ok(Some(false)),
-        None => {
-            if !legacy_rollback_restore_is_corroborated(store, rollback_id)? {
-                return Ok(None);
-            }
-            None
-        }
+    let Some((workspace_id, version_id, _)) = decode_binary_rollback_job_identity(rollback_id)
+    else {
+        return Ok(Some(false));
     };
+    if workspace_id != replay_workspace_id {
+        return Ok(Some(false));
+    }
+    let version_id = Some(version_id);
     if job.job_id.starts_with("binary-rename-1-delete-mat_") {
         let write_id = binary_rename_write_job_id(rollback_id);
         let Some(write_job) = store.load_materialization_job(&write_id)? else {
@@ -8222,16 +8049,6 @@ fn worker_main(
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
-            Command::ListSnapshots {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_snapshots(&workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::ListSnapshotMetadata {
                 workspace_id,
                 version_id,
@@ -8335,17 +8152,6 @@ fn worker_main(
             } => {
                 let outcome = VersionedTextStore::new(&mut store)
                     .read_binary(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryMeta {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_meta(&workspace_id, &version_id, &path)
                     .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
@@ -8620,15 +8426,6 @@ fn worker_main(
                 };
                 let _ = reply.send(outcome);
             }
-            Command::ListSecretFiles {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = list_secret_files_keyless(&store, &workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::SecretFileLen {
                 workspace_id,
                 version_id,
@@ -8654,26 +8451,6 @@ fn worker_main(
                     limit,
                 )
                 .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeSecret {
-                workspace_id,
-                version_id,
-                path,
-                key,
-                reply,
-            } => {
-                let outcome = SecretFileStore::new(&mut store, &key)
-                    .materialize_secret_file(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from)
-                    .and_then(|plaintext| match plaintext {
-                        None => Ok(None),
-                        Some(plaintext) => plaintext.into_utf8().map(Some).map_err(|_| {
-                            RuntimeError::from(dohc_engine_domain::DomainError::StateCorrupt {
-                                reason: "secret plaintext is not utf-8",
-                            })
-                        }),
-                    });
                 let _ = reply.send(outcome);
             }
             Command::ActiveVersionId {
@@ -13350,34 +13127,6 @@ fn versioned_text_rollback_on_store(
             });
         }
     };
-    // Fall back only when the new namespace is absent, preserving legacy replay
-    // without mistaking an unrelated legacy collision for this rollback.
-    let (job, rename_write_job, rename_delete_job) =
-        if job.is_none() && rename_write_job.is_none() && rename_delete_job.is_none() {
-            let legacy_job_id = format!("{ROLLBACK_RESTORE_PREFIX}{}", input.mutation_moment_id);
-            let legacy_write_job_id = binary_rename_write_job_id(&legacy_job_id);
-            let legacy_delete_job_id = binary_rename_delete_job_id(&legacy_job_id);
-            match (
-                store.load_materialization_job(&legacy_job_id),
-                store.load_materialization_job(&legacy_write_job_id),
-                store.load_materialization_job(&legacy_delete_job_id),
-            ) {
-                (Ok(job), Ok(write_job), Ok(delete_job)) => (job, write_job, delete_job),
-                _ => {
-                    eprintln!(
-                        "engine: rollback committed but loading its legacy restore job(s) failed"
-                    );
-                    return Ok(RollbackExecutionResult {
-                        deduped,
-                        materialize_enqueued: true,
-                        materialized: false,
-                        materialize_outcome: PostCommitMaterializeOutcome::Error,
-                    });
-                }
-            }
-        } else {
-            (job, rename_write_job, rename_delete_job)
-        };
     let has_jobs = job.is_some() || rename_write_job.is_some() || rename_delete_job.is_some();
 
     let active_version =
