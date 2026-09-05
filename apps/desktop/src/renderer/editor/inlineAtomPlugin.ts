@@ -22,7 +22,7 @@ export const inlineAtomKey = new PluginKey('dohc-inline-atom')
 
 // Minimal structural shapes so the range logic is testable without a
 // real ProseMirror/jsdom instance.
-export type PMMarkLike = { type: { name: string; spec?: { code?: boolean } } }
+type PMMarkLike = { type: { name: string; spec?: { code?: boolean } } }
 export type PMNodeLike = {
   isText?: boolean
   text?: string | null
@@ -39,7 +39,7 @@ export type PMDocLike = {
   ) => void
 }
 
-export type AtomRange = {
+type AtomRange = {
   from: number
   to: number
   kind: 'value'

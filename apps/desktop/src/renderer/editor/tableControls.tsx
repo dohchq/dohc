@@ -70,7 +70,7 @@ import {
 } from "@tiptap/pm/tables";
 import { Decoration, DecorationSet, type EditorView } from "@tiptap/pm/view";
 
-export const tableControlsKey = new PluginKey("dohc-table-controls");
+const tableControlsKey = new PluginKey("dohc-table-controls");
 let nextTableControlsInstanceId = 0;
 
 // Grips sit 13px out with an 8px pill; 18px covers that chrome (and the

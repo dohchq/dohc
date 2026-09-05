@@ -58,7 +58,7 @@ export interface WorkspaceSearchApi {
   clear: () => void;
 }
 
-export type WorkspaceSearchErrorReporter = (
+type WorkspaceSearchErrorReporter = (
   error: unknown,
   retry: () => void,
 ) => void;

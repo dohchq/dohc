@@ -37,11 +37,11 @@ export type DragSource = {
  *  folder that will CONTAIN the moved item — '' means workspace
  *  root. Computed by the caller based on what the user dropped on
  *  (a folder row, a file row's parent, or the root container). */
-export type DropTarget = {
+type DropTarget = {
   parentDir: string
 }
 
-export type DropAction =
+type DropAction =
   | { kind: 'move-file'; fromPath: string; toPath: string }
   | { kind: 'move-folder'; fromPath: string; toPath: string }
   | { kind: 'noop'; reason: string }

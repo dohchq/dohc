@@ -6,7 +6,7 @@ import type { EngineMomentDetailRecord } from "../../ipc/bridgeContract";
 /// the page on one record-level kind throws the other side away: a text->binary
 /// change would hide the text the file used to hold, which is the only readable
 /// thing that moment has.
-export interface MomentDiffSides {
+interface MomentDiffSides {
   /// The before side's lines, or undefined when it holds bytes / is protected.
   before: string | undefined;
   /// The after side's lines, on the same terms.

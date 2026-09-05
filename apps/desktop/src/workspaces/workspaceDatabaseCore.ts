@@ -42,9 +42,9 @@ function nodeSqlite(): SqliteModule {
 }
 
 export const DATABASE_MAX_ROWS = 1000;
-export const DATABASE_MAX_TABLES = 200;
+const DATABASE_MAX_TABLES = 200;
 export const DATABASE_MAX_CELL_CHARS = 4096;
-export const DATABASE_PAGE_MAX_BYTES = 8 * 1024 * 1024;
+const DATABASE_PAGE_MAX_BYTES = 8 * 1024 * 1024;
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;

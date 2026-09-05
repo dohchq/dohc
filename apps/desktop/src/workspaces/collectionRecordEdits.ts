@@ -10,7 +10,6 @@ import * as Y from "yjs";
 import { withStaleSensitiveWorkspaceOperation } from "./workspaceAssets";
 import type { WorkspaceEngineCapture } from "./workspaceEngineCapture";
 import { createFile } from "./workspaceFiles";
-import { workspaceRelativePathsEqual } from "./workspaceRelativePathIdentity";
 
 // The ONE main-side collection write seam. Every agent surface (plugin SDK,
 // MCP/CLI) sets record fields and creates records through these two
@@ -327,7 +326,7 @@ async function findAdoptedRecordId(
         ...(cursor ? { cursor } : {}),
       });
       const record = page.records.find((candidate) =>
-        workspaceRelativePathsEqual(candidate.path, recordPath),
+        candidate.path === recordPath,
       );
       if (record) return record.id;
       if (page.nextCursor === null) return null;

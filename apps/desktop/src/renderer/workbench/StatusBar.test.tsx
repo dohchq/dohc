@@ -16,7 +16,6 @@ let pushUpdate: ((state: UpdateStateEvent) => void) | null = null;
 const unsubscribe = vi.fn();
 const installUpdate = vi.fn(async (): Promise<UpdateActionResult> => ({
   accepted: true,
-  completed: false,
   state: {
     status: "ready" as const,
     message: "Update 1.2.3 is ready — restart dohc to apply it.",
@@ -677,7 +676,6 @@ describe("notice center", () => {
     });
     pendingInstall.resolve({
       accepted: true,
-      completed: false,
       state: {
         status: "ready",
         message: "Update 1.2.4 is ready — restart dohc to apply it.",
@@ -699,7 +697,6 @@ describe("notice center", () => {
   it("shows restart failures in the update notice and toast", async () => {
     installUpdate.mockResolvedValueOnce({
       accepted: false,
-      completed: false,
       state: {
         status: "ready",
         message: "Update 1.2.3 is ready — restart dohc to apply it.",
@@ -738,7 +735,6 @@ describe("notice center", () => {
   it("shows a restart failure after the ready toast was dismissed", async () => {
     installUpdate.mockResolvedValueOnce({
       accepted: false,
-      completed: false,
       state: {
         status: "ready",
         message: "Update 1.2.3 is ready — restart dohc to apply it.",
@@ -786,7 +782,6 @@ describe("notice center", () => {
     const onOpenSettings = vi.fn();
     installUpdate.mockResolvedValueOnce({
       accepted: false,
-      completed: false,
       state: {
         status: "error",
         message: "dohc could not install the update. Try again.",

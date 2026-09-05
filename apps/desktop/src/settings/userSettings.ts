@@ -17,11 +17,10 @@ const PreferredNameForIpc = z
     message: "Names cannot contain control characters.",
   }) satisfies z.ZodType<PreferredName>;
 
-export const THEME_MODES = ["system", "light", "dark"] as const;
+const THEME_MODES = ["system", "light", "dark"] as const;
 export type ThemeMode = (typeof THEME_MODES)[number];
 
-export const DENSITY_MODES = ["comfortable", "compact"] as const;
-export type DensityMode = (typeof DENSITY_MODES)[number];
+const DENSITY_MODES = ["comfortable", "compact"] as const;
 
 // Window zoom, stored as a Chromium zoom level like VS Code's
 // window.zoomLevel: each step scales the window by 20% (factor 1.2^level).
@@ -112,7 +111,6 @@ export const DEFAULT_USER_SETTINGS: DesktopUserSettings = {
 };
 
 export const SETTINGS_READ_SOURCES = ["stored", "default", "recovered"] as const;
-export type SettingsReadSource = (typeof SETTINGS_READ_SOURCES)[number];
 
 export const DesktopUserSettingsResult = z.object({
   settings: DesktopUserSettings,
@@ -120,47 +118,6 @@ export const DesktopUserSettingsResult = z.object({
   warning: z.string().min(1).max(500).optional(),
 }).strict();
 export type DesktopUserSettingsResult = z.infer<typeof DesktopUserSettingsResult>;
-
-export type DesktopUserSettingsPatch =
-  Partial<Omit<DesktopUserSettings, "profile" | "appearance" | "editor" | "notifications" | "runner">> & {
-    profile?: Partial<DesktopUserSettings["profile"]>;
-    appearance?: Partial<DesktopUserSettings["appearance"]>;
-    editor?: Partial<DesktopUserSettings["editor"]>;
-    notifications?: Partial<DesktopUserSettings["notifications"]>;
-    runner?: Partial<DesktopUserSettings["runner"]>;
-  };
-
-export function parseDesktopUserSettings(raw: unknown): DesktopUserSettings {
-  const parsed = DesktopUserSettings.safeParse(raw);
-  return parsed.success ? parsed.data : DEFAULT_USER_SETTINGS;
-}
-
-export function desktopUserSettingsResult(
-  raw: unknown,
-  source: SettingsReadSource,
-  warning?: string,
-): DesktopUserSettingsResult {
-  return {
-    settings: parseDesktopUserSettings(raw),
-    source,
-    ...(warning ? { warning } : {}),
-  };
-}
-
-export function mergeDesktopUserSettings(
-  current: DesktopUserSettings,
-  patch: DesktopUserSettingsPatch,
-): DesktopUserSettings {
-  return DesktopUserSettings.parse({
-    ...current,
-    ...patch,
-    profile: { ...current.profile, ...patch.profile },
-    appearance: { ...current.appearance, ...patch.appearance },
-    editor: { ...current.editor, ...patch.editor },
-    notifications: { ...current.notifications, ...patch.notifications },
-    runner: { ...current.runner, ...patch.runner },
-  });
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -184,10 +141,6 @@ export function settingsDeepEqual(left: unknown, right: unknown): boolean {
     );
   }
   return false;
-}
-
-export function userSettingsModified(settings: DesktopUserSettings): boolean {
-  return !settingsDeepEqual(settings, DEFAULT_USER_SETTINGS);
 }
 
 export function effectiveThemeMode(

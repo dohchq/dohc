@@ -13,7 +13,7 @@ interface ProjectionRoot {
   visiblePath: string;
 }
 
-export interface AccountlessPathProjection {
+interface AccountlessPathProjection {
   selector: ShareSelector;
   projectPath(path: string): string | null;
   projectPayload(payload: unknown): unknown | null;

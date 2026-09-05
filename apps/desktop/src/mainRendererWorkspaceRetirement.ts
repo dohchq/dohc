@@ -40,7 +40,7 @@ interface WorkspaceRetirementPorts {
   };
 }
 
-export interface DesktopRendererWorkspaceRetirementDependencies<
+interface DesktopRendererWorkspaceRetirementDependencies<
   Sender extends RendererWorkspaceSender,
 > extends SenderRetirementPorts<Sender>,
     WorkspaceRetirementPorts {

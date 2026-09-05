@@ -13,7 +13,7 @@ export type FloatingMenuPosition = {
   bottom?: number;
 };
 
-export type FloatingMenuPositionInput = {
+type FloatingMenuPositionInput = {
   cursorRect: { left: number; top: number; bottom: number };
   viewportWidth?: number;
   viewportHeight?: number;

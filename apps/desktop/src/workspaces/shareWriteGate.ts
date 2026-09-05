@@ -16,9 +16,9 @@ import { shareViewGranterEmail, shareViewIsPresent } from "./shareViewMarker";
 //   `requireShareViewProposalScope` decides whether the recipient may send
 //   what it wrote.
 //
-// It lives here rather than inside main's IPC closure for the reason
-// `shareChatGate.ts` states: a hand-copied re-implementation in a test proves
-// only that the copy behaves.
+// It lives here rather than inside main's IPC closure so tests drive the real
+// rule: a hand-copied re-implementation in a test proves only that the copy
+// behaves.
 export interface ShareViewWriteScope {
   // The level the PINNED grant names, or null when the grant cannot be read.
   access: ShareAccess | null;
@@ -39,7 +39,7 @@ export const SHARE_VIEW_EMPTY_FOLDER_REFUSAL =
  *
  * An ENDED share is a frozen local copy: the submit route is gone, so a write
  * admitted here would land durably and never reach the granter. That is the
- * same rule `assertShareChatWritable` applies to the same state.
+ * same rule main's chat write gate applies to the same state.
  */
 export function shareViewTakesLocalWrites(scope: ShareViewWriteScope): boolean {
   if (scope.ended) return false;

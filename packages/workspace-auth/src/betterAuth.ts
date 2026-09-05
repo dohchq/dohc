@@ -10,7 +10,7 @@ import type { Pool } from "pg";
 // browser approves, and the desktop polls).
 //
 // This package owns only the auth surface and has no application callbacks.
-export interface WorkspaceAuthOptions {
+interface WorkspaceAuthOptions {
   pool: Pool;
   baseURL: string;
   secret: string;

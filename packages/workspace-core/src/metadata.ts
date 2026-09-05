@@ -28,7 +28,7 @@ export function createWorkspaceManifest(input: {
   };
 }
 
-export type ManifestCheck =
+type ManifestCheck =
   | { status: "valid"; manifest: WorkspaceManifest }
   | { status: "absent" }
   | { status: "invalid"; reason: string }

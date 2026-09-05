@@ -5,7 +5,7 @@ export class DohcCliError extends Error {
   }
 }
 
-export function cliErrorMessage(error: unknown): string {
+function cliErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message.trim()) {
     return error.message.replace(/[\r\n]+/g, " ").trim();
   }

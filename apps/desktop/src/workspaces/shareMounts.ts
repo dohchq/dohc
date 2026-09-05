@@ -53,7 +53,7 @@ const UNOWNED_SHARE_PROJECTION_PATH =
 // A mount label must be exactly one safe path segment. The registry file is
 // data, not a write path into the tree — labels are re-validated on every
 // use so an edited registry cannot smuggle traversal into materialization.
-export function validShareMountId(shareId: unknown): shareId is string {
+function validShareMountId(shareId: unknown): shareId is string {
   return (
     typeof shareId === "string" &&
     shareId.length > 0 &&

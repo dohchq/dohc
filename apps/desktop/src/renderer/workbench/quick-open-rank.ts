@@ -61,7 +61,7 @@ export interface QuickOpenContext {
   pinned: readonly string[];
 }
 
-export interface PreparedQuickOpenPath {
+interface PreparedQuickOpenPath {
   path: string;
   lowercasePath: string;
   lowercaseBasename: string;

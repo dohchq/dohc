@@ -56,7 +56,7 @@ type HeadingFlashMeta =
   | { kind: "show"; pos: number; end?: number; token: number }
   | { kind: "clear"; token: number };
 
-export const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
+const headingFlashPluginKey = new PluginKey<HeadingFlashState>(
   "dohc-heading-target-flash",
 );
 
@@ -258,7 +258,7 @@ export function resolveOutlineHeadingTarget(
   return resolveWorkspaceHeadingAnchorTarget(anchored, target)?.heading ?? null;
 }
 
-export type OutlinePanelProps = {
+type OutlinePanelProps = {
   editor: Editor | null;
   /** The `.dohc-tiptap-editor` container — used only to find the
    *  scrollable ancestor for active-heading tracking. */

@@ -15,7 +15,7 @@ import { serializeCollectionSchema } from "./schemaAuthoring";
 // rejected because serializeCollectionSchema writes only modeled properties
 // and would silently drop whatever the parser flagged.
 
-export type SchemaWriteResult =
+type SchemaWriteResult =
   | { status: "written" }
   | { status: "conflict" }
   | { status: "error"; detail: string | null };

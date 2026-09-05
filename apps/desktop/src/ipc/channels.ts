@@ -56,7 +56,7 @@ export const EXPLORER_MENU_COMMANDS = [
   "unmount-share",
 ] as const;
 
-export type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
+type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
 
 // THE preload boundary check for the explorer-menu invoke result: only an
 // exact primitive string from the closed tuple passes (String objects,
@@ -90,7 +90,7 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
 ] as const;
 
-export type WorkbenchMenuCommandId = (typeof WORKBENCH_MENU_COMMANDS)[number];
+type WorkbenchMenuCommandId = (typeof WORKBENCH_MENU_COMMANDS)[number];
 
 export function isWorkbenchMenuCommand(
   value: unknown,
@@ -159,7 +159,7 @@ export const UPDATE_STATUSES = [
   "error",
 ] as const;
 
-export type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
+type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
 
 export const SHARE_HANDOFF_STATUSES = [
   "idle",
@@ -173,7 +173,7 @@ export const SHARE_HANDOFF_STATUSES = [
   "done",
 ] as const;
 
-export type ShareHandoffStatusEvent =
+type ShareHandoffStatusEvent =
   | { status: "idle" }
   | {
       status: Exclude<
@@ -259,7 +259,7 @@ export function parseShareHandoffStatus(
 }
 
 export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
-export type UpdateChannelId = (typeof UPDATE_CHANNELS)[number];
+type UpdateChannelId = (typeof UPDATE_CHANNELS)[number];
 
 function isUpdateChannel(value: unknown): value is UpdateChannelId {
   return (
@@ -359,7 +359,7 @@ export function parseUpdateStateEvent(
 // side producer) and bridgeContract's zod schema derives from the same
 // limits — channels.test.ts pins them so the three can never drift.
 export const SEARCH_EVENT_MAX_ENTRIES = 50;
-export const SEARCH_EVENT_MAX_PREVIEW_CHARS = 250;
+const SEARCH_EVENT_MAX_PREVIEW_CHARS = 250;
 export const SEARCH_EVENT_MAX_ID_CHARS = 64;
 const SEARCH_EVENT_MAX_PATH_CHARS = 4096;
 
@@ -379,7 +379,7 @@ export interface SearchResultsEventEntry {
 // A search that is fail-closed by a broken policy file (or otherwise paused)
 // carries a short human-readable notice so the panel can explain the empty
 // result instead of silently showing nothing.
-export const SEARCH_EVENT_MAX_NOTICE_CHARS = 500;
+const SEARCH_EVENT_MAX_NOTICE_CHARS = 500;
 
 export interface SearchResultsEvent {
   searchId: string;
@@ -675,7 +675,7 @@ export function parseEngineYDocSaveStateEvent(
   return { sessionId, state: state as EngineYDocSaveStateName, seq };
 }
 
-export interface WorkspaceActivatedEvent {
+interface WorkspaceActivatedEvent {
   workspaceId: string;
   rootPath: string;
   kind: "personal" | "shared" | "cloud-only";
@@ -967,4 +967,3 @@ export const CHANNELS = {
   getDesktopMarks: "desktop:test:get-desktop-marks",
 } as const;
 
-export type ChannelName = (typeof CHANNELS)[keyof typeof CHANNELS];

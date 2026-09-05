@@ -2,6 +2,7 @@
 // the real parsers, workspace lookup, policy checks, and operations; tests can
 // register and invoke these same callbacks without booting Electron's entire
 // app lifecycle.
+import { SharedFileReadOnlyError } from "@dohc/workspace-contracts/relay";
 import {
   ChatChannelShareGrantRow,
   ChatChannelShareReceivedRow,
@@ -13,6 +14,15 @@ import {
 
 interface WorkspacePayload {
   workspaceId: string;
+}
+
+// The chat write gate runs before every durable row. A local workspace is
+// writable by definition. Every received file share stays read-only for
+// generic desktop chat, whatever its cached relay capability: there is no
+// durable per-row relay receipt yet, so no grant level admits a write.
+export function assertChatWritable(scope: { kind: "workspace" | "share" }): void {
+  if (scope.kind !== "share") return;
+  throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
 }
 
 interface WorkspaceContext {
@@ -341,7 +351,7 @@ export class RelaySessionError extends Error {
 // as "there are no shares", or it clobbers whatever rows the renderer has
 // cached. A session failure is "signed-out": the caller has no account-scoped
 // rows, and cached ones must clear.
-export type RelayChatShareLanes =
+type RelayChatShareLanes =
   | {
       state: "answered";
       granted: ChatChannelShareGrantRow[];

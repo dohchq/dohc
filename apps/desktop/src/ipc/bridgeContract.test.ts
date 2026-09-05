@@ -2419,7 +2419,6 @@ describe("update IPC contract", () => {
     expect(
       UpdateActionResult.parse({
         accepted: true,
-        completed: false,
         state: readyState,
       }).accepted,
     ).toBe(true);
