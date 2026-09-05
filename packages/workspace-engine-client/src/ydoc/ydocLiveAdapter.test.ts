@@ -1,4 +1,6 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
+import { yDocToMarkdown } from "@dohc/ydoc-projection";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import {
@@ -4522,6 +4524,59 @@ describe("the ydoc.open deadline (#616)", () => {
 });
 
 describe("no-edit settle skip (#815)", () => {
+  it("the first richdoc seed carries its exact captured Markdown across the wire", async () => {
+    const source = "# Shared\n\nStarting together.\n";
+    const canonical = "# Shared\n\nStarting together.";
+    const engine = new YdocLoopbackEngine();
+    engine.seedFile({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "shared.md",
+      content: source,
+      contentKind: "richdoc",
+    });
+    const adapter = new YdocLiveAdapter(engine);
+    const session = await adapter.openSession({
+      workspace: WORKSPACE,
+      versionId: VERSION,
+      path: "shared.md",
+      contentKind: "richdoc",
+    });
+    const records = engine.requests.filter(
+      (request) => request.method === YDOC_METHOD.recordUpdate,
+    );
+    expect(records).toHaveLength(1);
+    const seed = records[0]!.params as { seed: boolean; updateBase64: string };
+    expect(seed.seed).toBe(true);
+    const receiver = new Y.Doc();
+    Y.applyUpdate(receiver, Buffer.from(seed.updateBase64, "base64"));
+    try {
+      expect(yDocToMarkdown(receiver)).toBe(canonical);
+      const meta = receiver.getMap("meta");
+      expect(meta.get("dohcMarkdownSource")).toBe(source);
+      expect(meta.get("dohcMarkdownSourceSha256")).toBe(
+        createHash("sha256").update(source).digest("hex"),
+      );
+      expect(meta.get("dohcMarkdownSourceProjectionSha256")).toBe(
+        createHash("sha256").update(canonical).digest("hex"),
+      );
+
+      const paragraph = receiver.getXmlFragment("body").get(1) as Y.XmlElement;
+      const text = paragraph.get(0) as Y.XmlText;
+      text.insert(text.length, " Both desktops see this edit.");
+      expect(yDocToMarkdown(receiver)).toBe(
+        `${canonical} Both desktops see this edit.`,
+      );
+      expect(meta.get("dohcMarkdownSourceProjectionSha256")).not.toBe(
+        createHash("sha256").update(yDocToMarkdown(receiver)).digest("hex"),
+      );
+    } finally {
+      receiver.destroy();
+      await session.close();
+      adapter.dispose();
+    }
+  });
+
   it("declares the seed on exactly the update built from seedContent", async () => {
     const engine = seedPlaintextEngine("seeded body");
     const adapter = new YdocLiveAdapter(engine);
