@@ -1112,14 +1112,37 @@ if (readers) {
     swapTimer = setTimeout(() => { render(key); view.classList.remove('is-swapping'); }, 160);
   };
 
+  // It walks the tree on its own until the visitor touches it. One pick
+  // per file, in tree order, then it wraps.
+  const hint = document.querySelector('[data-readers-hint]');
+  const tour = picks.filter((pick, index) => picks.findIndex((p) => p.dataset.readerPick === pick.dataset.readerPick) === index);
+  let step = 0;
+  let tourTimer = 0;
+  let manual = false;
+
+  const takeOver = () => {
+    if (manual) return;
+    manual = true;
+    clearTimeout(tourTimer);
+    if (hint) hint.textContent = 'Pick any file in the tree.';
+  };
+
+  const advance = () => {
+    step = (step + 1) % tour.length;
+    const pick = tour[step];
+    show(pick.dataset.readerPick, pick);
+    tourTimer = setTimeout(advance, 2600);
+  };
+
   picks.forEach((pick, index) => {
-    pick.addEventListener('click', () => show(pick.dataset.readerPick, pick));
-    pick.addEventListener('pointerenter', (event) => { if (event.pointerType === 'mouse') show(pick.dataset.readerPick, pick); });
+    pick.addEventListener('click', () => { takeOver(); show(pick.dataset.readerPick, pick); });
+    pick.addEventListener('pointerenter', (event) => { if (event.pointerType === 'mouse') { takeOver(); show(pick.dataset.readerPick, pick); } });
     pick.addEventListener('keydown', (event) => {
-      const step = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
-      if (!step) return;
+      const dir = event.key === 'ArrowDown' ? 1 : event.key === 'ArrowUp' ? -1 : 0;
+      if (!dir) return;
       event.preventDefault();
-      const next = picks[(index + step + picks.length) % picks.length];
+      takeOver();
+      const next = picks[(index + dir + picks.length) % picks.length];
       next.focus();
       show(next.dataset.readerPick, next);
     });
@@ -1127,6 +1150,23 @@ if (readers) {
 
   render(current);
   show(current, picks[0]);
+
+  if (reduced) {
+    takeOver();
+  } else {
+    let started = false;
+    const start = () => { if (!started && !manual) { started = true; tourTimer = setTimeout(advance, 1800); } };
+    if ('IntersectionObserver' in window) {
+      const io = new IntersectionObserver((entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) { io.disconnect(); start(); }
+      }, { rootMargin: '-80px 0px' });
+      io.observe(readers);
+      const near = () => { const r = readers.getBoundingClientRect(); return r.top < innerHeight - 80 && r.bottom > 80; };
+      const poll = setInterval(() => { if (started || manual) clearInterval(poll); else if (near()) { clearInterval(poll); start(); } }, 500);
+    } else {
+      start();
+    }
+  }
 }
 
 const year = document.getElementById('year');

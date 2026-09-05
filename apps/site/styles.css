@@ -1006,11 +1006,11 @@ body {
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background-color 0.12s ease-out;
 }
 
 .reader-file:hover { background: var(--panel-2); }
 .reader-file[aria-selected='true'] { background: var(--app-blue-soft); }
+.reader-file { transition: background-color 0.22s ease-out; }
 .reader-file:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .reader-tree .in1 { padding-left: 28px; }
 .reader-tree .in2 { padding-left: 46px; }
@@ -1908,7 +1908,7 @@ p { text-wrap: pretty; }
 @media (prefers-reduced-motion: reduce) {
   html { scroll-behavior: auto; }
   .sync-wire i { animation: none; }
-  .device-editor, .device-state, .device-foot, .sync-hint, .sync-link-label, .reader-view { transition: none; }
+  .device-editor, .device-state, .device-foot, .sync-hint, .sync-link-label, .reader-view, .reader-file { transition: none; }
   .reveal-enabled .reveal { opacity: 1; transform: none; transition: none; }
   .hand-underline path { animation: none; stroke-dashoffset: 0; }
   .btn, .download-card, .principle-edge, .principle-node, .principle-node-dot { transition: none; }
