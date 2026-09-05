@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const uiAuditBuildProvenanceName = "ui-audit-build.json";
@@ -66,8 +66,10 @@ export function writeUiAuditBuildProvenance(desktopRoot, commit, bundles, builtA
     builtAt,
     bundles,
   };
+  const directory = join(desktopRoot, ".dohc-dev");
+  mkdirSync(directory, { recursive: true });
   writeFileSync(
-    join(desktopRoot, "dist", uiAuditBuildProvenanceName),
+    join(directory, uiAuditBuildProvenanceName),
     `${JSON.stringify(provenance, null, 2)}\n`,
     "utf8",
   );
@@ -75,7 +77,7 @@ export function writeUiAuditBuildProvenance(desktopRoot, commit, bundles, builtA
 }
 
 export function readUiAuditBuildProvenance(desktopRoot, expectedCommit, expectedBundles) {
-  const path = join(desktopRoot, "dist", uiAuditBuildProvenanceName);
+  const path = join(desktopRoot, ".dohc-dev", uiAuditBuildProvenanceName);
   let provenance;
   try {
     provenance = JSON.parse(readFileSync(path, "utf8"));

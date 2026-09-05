@@ -24,19 +24,21 @@ export function selectedGates(files, workflow) {
 
 async function postgres(output) {
   const name = `dohc-verify-${randomUUID()}`;
-  const result = await run("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log") });
+  const result = await run("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
   const id = result.stdout.trim();
   if (!/^[a-f0-9]{64}$/.test(id)) throw new Error(`Docker returned no container ID. Inspect container ${name}.`);
-  const stop = () => run("docker", ["rm", "--force", id], { log: join(output, "postgres-stop.log") });
+  const stop = () => run("docker", ["rm", "--force", id], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 });
   try {
     const deadline = Date.now() + 60_000;
     while (true) {
-      const health = await run("docker", ["inspect", "--format", "{{.State.Health.Status}}", id]);
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error("Verification Postgres did not become healthy.");
+      const health = await run("docker", ["inspect", "--format", "{{.State.Health.Status}}", id], { timeoutMs: Math.min(10_000, remaining) });
       if (health.stdout.trim() === "healthy") break;
       if (Date.now() > deadline || health.stdout.trim() === "unhealthy") throw new Error("Verification Postgres did not become healthy.");
       await new Promise((done) => setTimeout(done, 1000));
     }
-    const port = (await run("docker", ["port", id, "5432/tcp"])).stdout.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1];
+    const port = (await run("docker", ["port", id, "5432/tcp"], { timeoutMs: 10_000 })).stdout.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1];
     if (!port) throw new Error("Docker did not report a loopback Postgres port.");
     return { id, url: `postgres://dohc:dohc@127.0.0.1:${port}/dohc`, stop };
   } catch (error) { await stop(); throw error; }

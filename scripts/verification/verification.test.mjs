@@ -15,6 +15,7 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     git(["init"]);
     mkdirSync(join(root, "apps/desktop"), { recursive: true });
     const source = join(root, "apps/desktop/main.ts");
+    writeFileSync(join(root, ".gitignore"), ".env.local\n");
     writeFileSync(source, "original"); git(["add", "."]);
     const original = sourceFingerprint("desktop", root);
     writeFileSync(source, "changed"); assert.notEqual(sourceFingerprint("desktop", root), original);
@@ -24,6 +25,7 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     rmSync(added); rmSync(source); assert.notEqual(sourceFingerprint("desktop", root), original);
     writeFileSync(source, "original");
     writeFileSync(join(root, ".env.local"), "VITE_FIXTURE=one");
+    git(["check-ignore", ".env.local"]);
     const configured = sourceFingerprint("desktop", root);
     writeFileSync(join(root, ".env.local"), "VITE_FIXTURE=two");
     assert.notEqual(sourceFingerprint("desktop", root), configured);
@@ -80,5 +82,19 @@ test("failed commands retain their output and reject instead of reporting succes
   try {
     await assert.rejects(run(process.execPath, ["-e", "console.error('failure-evidence');process.exit(7)"], { log }), /failed \(7\)/);
     assert.match(readFileSync(log, "utf8"), /failure-evidence/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a stalled command times out, stops its process, and retains its output", { timeout: 10_000 }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-command-timeout-"));
+  const log = join(root, "timeout.log");
+  let child;
+  t.after(() => { if (child?.exitCode === null && child.signalCode === null) child.kill(); });
+  try {
+    await assert.rejects(run(process.execPath, ["-e", "console.log('waiting-for-service');setInterval(() => {}, 1000)"], {
+      log, timeoutMs: 1000, onSpawn: (process) => { child = process; },
+    }), /timed out after 1000ms/);
+    assert.ok(child.exitCode !== null || child.signalCode !== null, "the timed-out process must have exited");
+    assert.match(readFileSync(log, "utf8"), /waiting-for-service/);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

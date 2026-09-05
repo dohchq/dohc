@@ -7,7 +7,7 @@ import {
   currentUiAuditBundles,
   writeUiAuditBuildProvenance,
 } from "./ui-audit-build-provenance.mjs";
-import { prepare } from "../../../scripts/verification/build.mjs";
+import { enginePath, prepare } from "../../../scripts/verification/build.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(scriptDir, "..");
@@ -55,5 +55,5 @@ run(
     "--grep",
     "@ui-audit",
   ],
-  { ...process.env, DOHC_TEST_ENGINE_BINARY: stagedEngine },
+  { ...process.env, DOHC_TEST_ENGINE_BINARY: enginePath },
 );

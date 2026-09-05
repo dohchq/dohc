@@ -16,7 +16,8 @@ export function git(args, cwd = repoRoot) {
   return execFileSync("git", args, { cwd, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }).trim();
 }
 
-export function run(command, args, { cwd = repoRoot, env = process.env, log, onSpawn, quietStdout = false } = {}) {
+export function run(command, args, { cwd = repoRoot, env = process.env, log, onSpawn, quietStdout = false, timeoutMs } = {}) {
+  if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) throw new Error("Command timeout must be a positive number of milliseconds.");
   return new Promise((resolveRun, reject) => {
     if (log) mkdirSync(dirname(log), { recursive: true });
     const output = log ? createWriteStream(log) : null;
@@ -36,6 +37,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       output?.write(chunk);
     });
     let interrupted = false;
+    let timedOut = false;
     let outputError;
     let escalation;
     const interrupt = () => {
@@ -55,9 +57,11 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     };
     process.once("SIGINT", interrupt);
     process.once("SIGTERM", interrupt);
+    const deadline = timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; interrupt(); }, timeoutMs);
     output?.once("error", (error) => { outputError = error; interrupt(); });
     const cleanup = () => {
       clearTimeout(escalation);
+      clearTimeout(deadline);
       process.off("SIGINT", interrupt);
       process.off("SIGTERM", interrupt);
     };
@@ -66,7 +70,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
       cleanup();
       if (output && !output.destroyed) await new Promise((done) => output.end(done));
       if (outputError) reject(outputError);
-      else if (code !== 0 || interrupted) reject(new Error(`${command} failed (${interrupted ? "interrupted" : signal ?? code}).${log ? ` Log: ${log}` : `\n${stderr.slice(-4000)}`}`));
+      else if (code !== 0 || interrupted || timedOut) reject(new Error(`${command} failed (${timedOut ? `timed out after ${timeoutMs}ms` : interrupted ? "interrupted" : signal ?? code}).${log ? ` Log: ${log}` : `\n${stderr.slice(-4000)}`}`));
       else resolveRun({ pid: child.pid, code, stdout, stderr });
     });
   });

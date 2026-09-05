@@ -298,12 +298,14 @@ test("binds every main and preload artifact to the build stamp", async (t) => {
     writeFile(join(desktopRoot, "target/debug/dohc-workspace-engine"), "engine"),
   ]);
   const bundles = currentUiAuditBundles(desktopRoot, "linux");
+  const distBefore = sha256Tree(join(desktopRoot, "dist"));
   writeUiAuditBuildProvenance(
     desktopRoot,
     COMMIT,
     bundles,
     "2026-08-30T03:59:00.000Z",
   );
+  assert.equal(sha256Tree(join(desktopRoot, "dist")), distBefore);
   assert.deepEqual(
     readUiAuditBuildProvenance(desktopRoot, COMMIT, bundles).bundles,
     bundles,
