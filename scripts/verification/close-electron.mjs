@@ -81,8 +81,10 @@ async function captureBeforeClose(action, timeoutMs) {
 
 export async function closeDebugApplication(app, child, directory, { artifactTimeoutMs = 5000, closeTimeoutMs = 5000 } = {}) {
   try {
-    for (const page of app.windows()) {
-      await captureBeforeClose(() => page.screenshot({ path: join(directory, "last-screen.png"), timeout: artifactTimeoutMs }), artifactTimeoutMs);
+    const pages = app.windows();
+    for (const [index, page] of pages.entries()) {
+      const name = pages.length === 1 ? "last-screen.png" : `last-screen-${index + 1}.png`;
+      await captureBeforeClose(() => page.screenshot({ path: join(directory, name), timeout: artifactTimeoutMs }), artifactTimeoutMs);
     }
     await captureBeforeClose(() => app.context().tracing.stop({ path: join(directory, "trace.zip") }), artifactTimeoutMs);
   } finally {

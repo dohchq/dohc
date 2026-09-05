@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, expect, test } from "vitest";
 import { closeDebugApplication, closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 
@@ -85,4 +88,31 @@ test("debug shutdown still closes its process when window enumeration fails", as
   };
   await expect(closeDebugApplication(app, child, "unused-output")).rejects.toBe(failure);
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+});
+
+test.each([
+  { contents: ["first window"], names: ["last-screen.png"] },
+  { contents: ["first window", "second window"], names: ["last-screen-1.png", "last-screen-2.png"] },
+])("debug shutdown retains each screenshot: $names", async ({ contents, names }) => {
+  const directory = await mkdtemp(join(tmpdir(), "dohc-debug-screenshots-"));
+  try {
+    const child = await liveProcess();
+    const paths: string[] = [];
+    const app = {
+      windows: () => contents.map((content) => ({
+        screenshot: async ({ path }: { path: string }) => {
+          paths.push(path);
+          await writeFile(path, content);
+        },
+      })),
+      context: () => ({ tracing: { stop: async () => {} } }),
+      close: async () => { child.kill(); await once(child, "exit"); },
+    };
+    await closeDebugApplication(app, child, directory);
+    expect(paths).toEqual(names.map((name) => join(directory, name)));
+    expect((await readdir(directory)).sort()).toEqual(names);
+    expect(await Promise.all(names.map((name) => readFile(join(directory, name), "utf8")))).toEqual(contents);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
