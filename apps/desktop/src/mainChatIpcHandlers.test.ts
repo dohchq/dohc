@@ -6,6 +6,7 @@ import {
   MAX_CHAT_CHANNEL_SHARE_ROWS,
 } from "./ipc/bridgeContract";
 import {
+  assertChatWritable,
   chatShareSessionKey,
   chatViewerAuthorId,
   handleRelayUnauthorized,
@@ -1429,12 +1430,6 @@ describe("chat scope write gate", () => {
       ended: false,
       ...over,
     };
-  }
-
-  // main's rule: every received share is read-only for generic chat.
-  function assertChatWritable(scope: ChatScope): void {
-    if (scope.kind !== "share") return;
-    throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
   }
 
   function harnessFor(scope: ChatScope) {

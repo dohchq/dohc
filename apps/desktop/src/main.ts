@@ -513,6 +513,7 @@ import {
   createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
   createMarkChatThreadReadIpcHandler,
+  assertChatWritable,
   chatShareSessionKey,
   createSetChatReactionIpcHandler,
   handleRelayUnauthorized,
@@ -10673,15 +10674,6 @@ function registerIpcHandlers(
         ended: workspace.shareView?.ended === true,
       };
     });
-  }
-
-  // The chat write gate runs before every durable row. A local workspace is
-  // writable by definition. Every received file share stays read-only for
-  // generic desktop chat, whatever its cached relay capability: there is no
-  // durable per-row relay receipt yet, so no grant level admits a write.
-  function assertChatWritable(scope: ChatScope): void {
-    if (scope.kind !== "share") return;
-    throw new SharedFileReadOnlyError("Chats are read-only in this shared view.");
   }
 
   // Give a received share the sync identity used by its Edit proposal lane.

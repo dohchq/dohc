@@ -30,7 +30,6 @@ export type ImportDataInput = {
 type SQLiteDatabase = {
   exec(sql: string): void
   prepare(sql: string): {
-    all(...params: unknown[]): Array<Record<string, unknown>>
     run(...params: unknown[]): unknown
   }
   close(): void
@@ -53,8 +52,8 @@ function sqliteModule() {
   return sqliteModulePromise
 }
 
-function error(code: string, message: string, extra: Record<string, unknown> = {}) {
-  return { ok: false as const, code, message, ...extra }
+function error(code: string, message: string) {
+  return { ok: false as const, code, message }
 }
 
 function quoteIdent(name: string): string {

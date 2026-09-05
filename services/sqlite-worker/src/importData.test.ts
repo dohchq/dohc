@@ -1,12 +1,10 @@
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { describe, expect, it } from 'vitest'
 import { createSqliteEngine } from './sqliteEngine'
-
-const require = createRequire(import.meta.url)
 
 function sha256(value: string) {
   return createHash('sha256').update(value).digest('hex')
@@ -14,12 +12,6 @@ function sha256(value: string) {
 
 // Open the materialized bytes as a real SQLite file and read a table back.
 async function readTable(bytesBase64: string, table: string) {
-  const { DatabaseSync } = require('node:sqlite') as {
-    DatabaseSync: new (path: string) => {
-      prepare(sql: string): { all(): Array<Record<string, unknown>> }
-      close(): void
-    }
-  }
   const dir = await mkdtemp(join(tmpdir(), 'dohc-import-test-'))
   const file = join(dir, 'database.sqlite')
   await writeFile(file, Buffer.from(bytesBase64, 'base64'))
