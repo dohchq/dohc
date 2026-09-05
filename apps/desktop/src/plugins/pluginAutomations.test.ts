@@ -350,7 +350,7 @@ describe("PluginAutomations", () => {
   });
 
   // (b) Startup ordering: claimNext is workspace-wide but `registered`
-  // fills per plugin. A claim whose INSTALLED plugin has not registered yet
+  // fills per plugin. A claim whose installed plugin has not registered yet
   // must not settle failed, and the drain must stop rather than run younger
   // claims past it.
   it("holds a claim that arrives before the plugin pipeline's first discovery pass", async () => {

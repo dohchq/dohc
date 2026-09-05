@@ -102,7 +102,7 @@ test("flagged workspace captures live edits and reconciles closed-period edits i
     );
     expect(liveMoment?.text).toBe("# Engine live\n\nCaptured while running.\n");
 
-    // PR 0M-5 ended the dual-write: the engine is the SOLE recorder for the
+    // PR 0M-5 ended the dual-write: the engine is the sole recorder for the
     // flagged workspace — no legacy .dohc/history change set may appear.
     // (This assertion previously required legacy records to keep appearing;
     // the flip is the deliberate 0M-5 behavior change.)
@@ -188,7 +188,7 @@ test("explicitly opted-out workspace never grows an engine store", async () => {
 // all — the shape every pre-flip workspace has) opens ON THE ENGINE, and the
 // startup reconciliation pass captures the existing tree as the engine's
 // initial state. Legacy .dohc/history stays on disk as a read-only relic —
-// engine history starts from adoption; the legacy records are NOT migrated
+// engine history starts from adoption; the legacy records are not migrated
 // (User Decision 6: replacement, not migration).
 test("cold adoption: a workspace with existing files and legacy history opens flagged and reconciles into the engine", async () => {
   const temp = await createTempWorkspace();

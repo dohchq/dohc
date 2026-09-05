@@ -230,10 +230,7 @@ describe("PluginChildProcessBroker", () => {
       cwd: { workspaceRoot: true },
     });
 
-    // MUTATION (realpath → resolve): the child would run in the link's path,
-    // so every containment check downstream compares two different names for
-    // one directory.
-    expect(fixture.forks[0]?.options.cwd).toBe(
+    expect(fixture.forks[0]?.options.cwd, "realpath → resolve: the child would run in the link's path, so every containment check downstream compares two different names for one directory.").toBe(
       await realpath(join(fixture.root, "workspace")),
     );
     expect(fixture.forks[0]?.options.cwd).not.toBe(
@@ -247,9 +244,6 @@ describe("PluginChildProcessBroker", () => {
 
     for (const cwd of [
       { workspaceRoot: false },
-      // MUTATION (`=== true` → `Boolean(...)`): a truthy value is not the
-      // request form, and resolving it to the workspace root anyway would
-      // make "exactly" a word the code does not keep.
       { workspaceRoot: 1 },
       { workspaceRoot: "workspace" },
       { workspaceRoot: {} },
@@ -267,9 +261,6 @@ describe("PluginChildProcessBroker", () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
 
-    // MUTATION (fold the path check back into the shape guard): the request
-    // form was right and only the path was wrong, so an author's agent reading
-    // "object form must be" would rewrite the wrong half.
     for (const path of [1, "", "sites\0", "/absolute"]) {
       await expect(
         spawnChild(fixture, brokerContext, {
@@ -293,9 +284,7 @@ describe("PluginChildProcessBroker", () => {
       cwd: { workspaceRoot: true, path: "apps/marketing" },
     });
 
-    // MUTATION (ignore `path`): every site in a subdirectory would build and
-    // serve from the workspace root instead of its own directory.
-    expect(fixture.forks[0]?.options.cwd).toBe(
+    expect(fixture.forks[0]?.options.cwd, "ignore `path`: every site in a subdirectory would build and serve from the workspace root instead of its own directory.").toBe(
       await realpath(join(fixture.root, "workspace", "apps", "marketing")),
     );
   });
@@ -327,8 +316,6 @@ describe("PluginChildProcessBroker", () => {
     }
     const brokerContext = context("plugin-a", "spawn-a");
 
-    // MUTATION (drop the post-realpath check): a link inside the workspace
-    // would run the child anywhere on the machine.
     await expect(
       spawnChild(fixture, brokerContext, {
         modulePath: "server.mjs",
@@ -424,7 +411,7 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks).toEqual([]);
   });
 
-  it("cannot reach a build staged beside the plugin's live root (#779 round 7 A1)", async () => {
+  it("cannot reach a build staged beside the plugin's live root", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
     const stagedBuild = "plugin-a.staging-run7";
@@ -444,7 +431,7 @@ describe("PluginChildProcessBroker", () => {
 
     // Why the build has to stage out there: containment is rooted at the live
     // root and has no dot-directory filter, so the same unapproved bundle
-    // staged INSIDE the live root — the round 6 layout — is spawnable.
+    // staged inside the live root — the round 6 layout — is spawnable.
     await mkdir(join(fixture.root, "plugins", "plugin-a", ".staging-run6"));
     await writeFile(
       join(fixture.root, "plugins", "plugin-a", ".staging-run6", "bundle.mjs"),
@@ -456,7 +443,7 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks).toHaveLength(1);
   });
 
-  it("accepts a dot-prefixed directory whose name starts with two dots (#779 round 10 B5)", async () => {
+  it("accepts a dot-prefixed directory whose name starts with two dots", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
     const cacheDirectory = join(fixture.root, "plugins", "plugin-a", "..cache");
@@ -477,7 +464,7 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.forks).toHaveLength(1);
   });
 
-  it("finishes a child that exited before the broker held its handle (#779 round 10 B4)", async () => {
+  it("finishes a child that exited before the broker held its handle", async () => {
     const root = await createTestScratch("dohc-plugin-child-broker-");
     roots.push(root);
     const pluginRoot = join(root, "plugins", "plugin-a");
@@ -759,7 +746,7 @@ describe("PluginChildProcessBroker", () => {
     expect(fixture.children.map((child) => child.killCalls)).toEqual([1, 1]);
   });
 
-  it("forgets a fulfilled spawn teardown instead of retaining it across restarts (#779 round 13 A4)", async () => {
+  it("forgets a fulfilled spawn teardown instead of retaining it across restarts", async () => {
     const fixture = await createFixture();
     const teardowns = () => (fixture.broker as unknown as {
       spawnTeardowns: Map<string, Promise<void>>;
@@ -775,7 +762,7 @@ describe("PluginChildProcessBroker", () => {
     expect(teardowns().size).toBe(0);
   });
 
-  it("still joins a second teardown started while the first drains (#779 round 13 A4)", async () => {
+  it("still joins a second teardown started while the first drains", async () => {
     const fixture = await createFixture();
     await spawnChild(fixture, context("plugin-a", "spawn-a"));
 
@@ -849,7 +836,7 @@ describe("PluginChildProcessBroker", () => {
     }
   });
 
-  it("evicts old exited-child records once a spawn's retained count passes the cap (CodeRabbit #779 R9)", async () => {
+  it("evicts old exited-child records once a spawn's retained count passes the cap", async () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
     const total = 205;
@@ -881,7 +868,7 @@ describe("PluginChildProcessBroker", () => {
     ).resolves.toEqual([]);
   });
 
-  it("signals a POSIX child's own pid directly, never a negated process-group id (CodeRabbit #779 R10)", async () => {
+  it("signals a POSIX child's own pid directly, never a negated process-group id", async () => {
     const fixture = await createFixture({ platform: "linux" });
     const brokerContext = context("plugin-a", "spawn-a");
     const childId = await spawnChild(fixture, brokerContext);
@@ -1179,8 +1166,6 @@ describe("PluginChildProcessBroker command children", () => {
         { childId: spawned.childId, data: "ping\n" },
       );
 
-      // MUTATION (the write never reaches stdin): the answer never arrives
-      // and this times out.
       await until(
         () =>
           events.find(
@@ -1197,8 +1182,6 @@ describe("PluginChildProcessBroker command children", () => {
         { childId: spawned.childId },
       );
 
-      // MUTATION (endInput does not end the pipe): the child never sees end
-      // of file, never exits, and this wait times out.
       await expect(
         fixture.broker.invoke(brokerContext, PLUGIN_CHILD_PROCESS_METHODS.wait, {
           childId: spawned.childId,
@@ -1255,13 +1238,11 @@ describe("PluginChildProcessBroker command children", () => {
       await fixture.broker.disposeSpawn("plugin-a", "spawn-a");
 
       try {
-        // MUTATION (the tree kill becomes a plain kill of the spawned child):
-        // the grandchild outlives the teardown and is still alive here.
         await until(
           () => (isAlive(grandchildPid) ? undefined : true),
           "the grandchild to die with its parent",
         );
-        expect(isAlive(grandchildPid)).toBe(false);
+        expect(isAlive(grandchildPid), "the tree kill becomes a plain kill of the spawned child: the grandchild outlives the teardown and is still alive here.").toBe(false);
       } finally {
         // A detached survivor would outlive the whole test run.
         if (isAlive(grandchildPid)) process.kill(grandchildPid, "SIGKILL");
@@ -1316,13 +1297,12 @@ describe("PluginChildProcessBroker command children", () => {
         { childId: spawned.childId },
       )) as PluginChildProcessOutput[];
 
-      // MUTATION (`shell: true`): the child receives split and expanded
-      // tokens, and this exact array never comes back.
       expect(
         logs
           .filter(({ stream }) => stream === "stdout")
           .map(({ text }) => text)
           .join(""),
+          "`shell: true`: the child receives split and expanded tokens, and this exact array never comes back.",
       ).toBe(JSON.stringify(args));
     },
     20_000,
@@ -1341,8 +1321,6 @@ describe("PluginChildProcessBroker command children", () => {
     ).rejects.toThrow(
       'command "./node_modules/.bin/tool --flag" must be an absolute path to an executable, or a name with no path separator',
     );
-    // MUTATION (args accepts a string): a caller could pass one command line
-    // and depend on something splitting it.
     await expect(
       spawnCommandChild(fixture, brokerContext, {
         command: "tool",
@@ -1356,9 +1334,6 @@ describe("PluginChildProcessBroker command children", () => {
     const fixture = await createFixture();
     const brokerContext = context("plugin-a", "spawn-a");
 
-    // MUTATION (containment skipped for commands): a command child would run
-    // in another plugin's directory, and "the same cwd rules" would be a
-    // sentence the code does not keep.
     await expect(
       spawnCommandChild(fixture, brokerContext, {
         command: "tool",
@@ -1393,8 +1368,6 @@ describe("PluginChildProcessBroker command children", () => {
 
     for (const cwd of [
       { workspaceRoot: false },
-      // MUTATION (`=== true` → `Boolean(...)`): the command path would take a
-      // truthy value as the escape and run outside the plugin's root.
       { workspaceRoot: 1 },
       { workspaceRoot: "workspace" },
       { workspaceRoot: true, extra: 1 },

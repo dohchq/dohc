@@ -1,7 +1,7 @@
 export const MAX_RELAY_URL_LENGTH = 2048;
 
 // Canonical relay identity, or null when the value is not an acceptable
-// relay URL (0P-C gate fix). Beyond scheme/length checks this REJECTS
+// relay URL (0P-C gate fix). Beyond scheme/length checks this rejects
 // credentials, query strings, and fragments outright: buildSyncCode would
 // otherwise expose secrets in a copyable/screenshot-readable code,
 // parseSyncCode would accept them from pasted input, and relayUrlsMatch is

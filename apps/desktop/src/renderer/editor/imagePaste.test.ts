@@ -177,7 +177,7 @@ describe("sanitizeAttachmentFolderName", () => {
 
   // The whole point of falling back rather than passing the name through: the
   // main process runs every asset write through validateUserWritePath. A name it
-  // REJECTS would make writeWorkspaceAsset throw for every image, and
+  // rejects would make writeWorkspaceAsset throw for every image, and
   // placeImageFiles would quietly skip them all — a setting that silently breaks
   // pasting. So anything the writer would reject degrades to "assets" here, and
   // the paste still lands.
@@ -1231,7 +1231,7 @@ describe("handlePaneImageDragOver", () => {
 });
 
 describe("handlePaneImageDrop", () => {
-  it("embeds an image dropped on the pane OUTSIDE the ProseMirror content", async () => {
+  it("embeds an image dropped on the pane outside the ProseMirror content", async () => {
     // posAtCoords === null: the drop landed on the page top-matter, so there is
     // no content position under the cursor — it appends at the end of the doc.
     const { view, dispatched } = makeMockView(8, null);
@@ -1256,7 +1256,7 @@ describe("handlePaneImageDrop", () => {
     expect(dispatched[0]!.pos).toBe(8); // end of the document
   });
 
-  it("does NOT double-write a drop ProseMirror already handled", () => {
+  it("does not double-write a drop ProseMirror already handled", () => {
     const { view, dispatched } = makeMockView();
     const writeAsset = vi.fn();
     // ProseMirror's handleDrop preventDefaults the drops it takes; the pane
@@ -1314,7 +1314,7 @@ describe("pickAndInsertImages", () => {
 
     expect(pickImages).toHaveBeenCalledTimes(1);
     expect(writeAsset).toHaveBeenCalledTimes(1);
-    // The picker's bytes travel the SAME write path paste/drop use, so the
+    // The picker's bytes travel the same write path paste/drop use, so the
     // attachment-location logic applies unchanged.
     expect(writeAsset.mock.calls[0]![0]).toMatch(
       /^notes\/assets\/diagram-[0-9a-z]+\.png$/,
@@ -1463,9 +1463,9 @@ describe("pickAndInsertImages", () => {
   });
 });
 
-// The attachment setting is workspace state that changes UNDER a mounted editor
+// The attachment setting is workspace state that changes under a mounted editor
 // (the user edits it in the settings dialog; it differs per workspace). The
-// paste context therefore holds a READER, not a value — these tests pin that,
+// paste context therefore holds a reader, not a value — these tests pin that,
 // because a cached copy is exactly how the old code wrote images to the previous
 // workspace's / the pre-edit location.
 describe("attachment settings are read at use time", () => {
@@ -1500,11 +1500,11 @@ describe("attachment settings are read at use time", () => {
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(1));
     expect(writeAsset.mock.calls[0]![0]).toMatch(/^notes\/assets\//);
 
-    // The user changes the setting; the editor is NOT remounted.
+    // The user changes the setting; the editor is not remounted.
     location = "same-folder";
     paste();
     await vi.waitFor(() => expect(writeAsset).toHaveBeenCalledTimes(2));
-    // The second paste honors the NEW location, not the one read at mount.
+    // The second paste honors the new location, not the one read at mount.
     expect(writeAsset.mock.calls[1]![0]).toMatch(/^notes\/a-[0-9a-z]+\.png$/);
     expect(readAttachments).toHaveBeenCalledTimes(2);
   });

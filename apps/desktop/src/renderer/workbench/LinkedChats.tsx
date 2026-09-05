@@ -18,9 +18,9 @@ import {
 
 // Linked Chats surface (PR 0M-5, workspace-engine alpha) — the Chats
 // panel's "This file" tab. Per-file Chats
-// stored in the engine and linked to the file's STABLE object id, so a chat
+// stored in the engine and linked to the file's stable object id, so a chat
 // follows its file through renames. Product vocabulary: these are Chats.
-// Message rendering + composer are the SHARED chatMessages pieces (PR 13)
+// Message rendering + composer are the shared chatMessages pieces
 // so this surface and the workspace Chats view can never drift.
 
 // Re-exported: EngineHistory (and its tests) import the authorship rule from
@@ -94,7 +94,7 @@ export function LinkedChatsPanel(props: {
   onInitialThreadConsumed?: () => void;
   onOpenPath?: (path: string, headingAnchor?: string) => void;
   // Reports a landed read so the Chats navigator can refetch its badges. The
-  // file-linked threads it lists are read HERE, not in the Chats view.
+  // file-linked threads it lists are read here, not in the Chats view.
   onThreadRead?: () => void;
   onError: (message: string) => void;
 }) {
@@ -195,7 +195,7 @@ export function LinkedChatsPanel(props: {
         setReactions(reactionResult.reactions);
         setViewerAuthorId(reactionResult.viewerAuthorId);
         // Everything on screen is read. Reporting waits for the write to
-        // LAND: the navigator refetches on that signal, and refetching earlier
+        // land: the navigator refetches on that signal, and refetching earlier
         // would read the same count back.
         void bridge()
           .markChatThreadRead({
@@ -238,7 +238,7 @@ export function LinkedChatsPanel(props: {
     [props, workspaceId],
   );
 
-  // A search-result chat open is consumed ONCE by object identity: the Shell
+  // A search-result chat open is consumed once by object identity: the Shell
   // mints a fresh record per click, so clicking the same result again still
   // re-opens, while re-renders (openThread's identity changes every render
   // because it closes over props) and back-navigation inside the panel never
@@ -309,7 +309,7 @@ export function LinkedChatsPanel(props: {
       // Reset unconditionally: switching threads/files bumps liveToken
       // without resetting `sending`, so a token-gated reset could leave this
       // panel instance's composer disabled forever. The token guard on the
-      // `sending` READ (line above the IPC call) already prevents concurrent
+      // `sending` Read (line above the IPC call) already prevents concurrent
       // sends, so an unconditional reset is race-free.
       setSending(false);
     }
@@ -340,8 +340,8 @@ export function LinkedChatsPanel(props: {
   );
 
   // Stable for ChatMessageList's memo — an inline literal would defeat it on
-  // every composer keystroke. A reaction is a WRITE, so a share that refuses
-  // writes offers no PICKER — but the reactions already on a message are part
+  // every composer keystroke. A reaction is a write, so a share that refuses
+  // writes offers no picker — but the reactions already on a message are part
   // of the conversation and stay readable. `readOnly` is the affordance built
   // for exactly this; omitting the whole prop would have hidden other
   // people's reactions too.

@@ -12,7 +12,7 @@ export class UnauthorizedError extends Error {
   }
 }
 
-// The production ResolveActor: identity comes ONLY from a validated Better
+// The production ResolveActor: identity comes only from a validated Better
 // Auth session (Bearer token from the desktop's device-flow login, or a
 // browser cookie) — never from client-supplied ids. Workspace MEMBERSHIP is
 // enforced downstream by the backend's authz (assertWorkspaceMember), which

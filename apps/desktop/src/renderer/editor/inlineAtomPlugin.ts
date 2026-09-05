@@ -47,7 +47,7 @@ type AtomRange = {
 
 /** A node is "code" (verbatim) if it is a code block or carries an
  *  inline-code mark. Tiptap's inline-code mark is `inlineCode`
- *  (NOT `code`); CommonMark presets may use `code`; some define
+ *  (not `code`); CommonMark presets may use `code`; some define
  *  `spec.code`. Check all three so atoms are never decorated inside
  *  code. */
 function isCodeMark(m: PMMarkLike): boolean {
@@ -66,7 +66,7 @@ function isCodeBlock(node: PMNodeLike | null): boolean {
   )
 }
 
-/** PURE: walk text nodes, skip code, return atom decoration ranges in
+/** Pure: walk text nodes, skip code, return atom decoration ranges in
  *  absolute doc coordinates. Offsets map 1:1 because ProseMirror text
  *  node size === JS string length (UTF-16 units), same as the parser. */
 export function computeAtomRanges(doc: PMDocLike): AtomRange[] {

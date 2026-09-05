@@ -329,7 +329,7 @@ import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
 import { listFileChatsForIpc } from "./ipc/fileChatsIpc";
 // The relay presence transport is a dependency-free module (no DOM/React): main
 // reuses it so the presence wire contract (routes, publish/leave/poll) lives in
-// ONE place. Main is the ONLY holder of the relay bearer token — the renderer's
+// one place. Main is the only holder of the relay bearer token — the renderer's
 // presence transport calls the presence IPC handlers below, never the relay.
 import {
   createRelayPresenceTransport,
@@ -629,8 +629,8 @@ import {
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
 } from "./workspaces/engineRelayClient";
-// #646 PR3a. The proposal routes that do not go through the engine: reviewing,
-// settling, listing and withdrawing read and write ONLY relay state.
+// The proposal routes that do not go through the engine: reviewing,
+// settling, listing and withdrawing read and write only relay state.
 import {
   listMyShareProposals,
   listShareProposals,
@@ -871,7 +871,7 @@ function requireWorkspace(workspaceId: string) {
 }
 
 // PR 18 read-only shared views: a shared view is a read-only local workspace.
-// `sharedViewOf` is the ONE authoritative predicate; every mutation surface
+// `sharedViewOf` is the one authoritative predicate; every mutation surface
 // (file writes, agent runs, and the MCP config)
 // routes through it so a shared view can never be changed, only read. The
 // renderer also hides its edit affordances; this main-process layer is the
@@ -890,7 +890,7 @@ function sharedViewOf(workspaceId: string): {
   // PRESENCE, not truthiness. A stored `shareView: null` is a share view
   // whose marker lost its value, not a workspace that never had one, and
   // `?? null` read the two as the same thing — which made someone else's
-  // files writable here (#646). Only an ABSENT field is an ordinary
+  // files writable here. Only an absent field is an ordinary
   // workspace; anything else stays refused, readable marker or not.
   if (!shareViewIsPresent(entry.shareView)) return null;
   const marker: Record<string, unknown> = isRecordValue(entry.shareView)
@@ -913,8 +913,8 @@ function assertWritableWorkspace(workspace: { workspaceId: string }): void {
   if (refusal) throw new Error(refusal);
 }
 
-// Agents may READ a shared view (the copyable MCP config serves a read-only
-// profile), but a MANAGED agent run writes into the workspace, so it is
+// Agents may read a shared view (the copyable MCP config serves a read-only
+// profile), but a managed agent run writes into the workspace, so it is
 // refused with honest copy.
 function assertAgentRunnableWorkspace(workspaceId: string): void {
   if (sharedViewOf(workspaceId)) {
@@ -930,7 +930,7 @@ let applicationMenuCanInstallUpdate: boolean | null = null;
 // is), it resolves to the launched script's own directory (dist/main) rather
 // than the package root, with no upward package.json search — it silently
 // pointed pnpm resolution at dist/main/resources and broke every plugin
-// install (#777's e2e caught this). import.meta.dirname is the currently
+// install (the e2e caught this). import.meta.dirname is the currently
 // executing module's own directory (dist/main at runtime, exactly like
 // the plugin runtime factory's sibling plugin-host.js resolution below), so two
 // levels up reaches apps/desktop deterministically regardless of how
@@ -1161,7 +1161,7 @@ function createPluginWorkspaceRuntimeParts(
       );
       return createPluginUtilityTransport(child, callbacks);
     },
-    // Shares invokeWorkspacePluginSdk with #777's panel SDK route
+    // Shares invokeWorkspacePluginSdk with the panel SDK route
     // (invokePluginPanelSdk below) so both paths get the same isWritable /
     // writeAvailable / MomentAuthor handling instead of a second copy. Only
     // this, the plugin's own request path (not the panel path), supplies
@@ -1459,7 +1459,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
 }
 
 // Native dialogs cannot be driven by Playwright, so every dialog-backed IPC
-// gets ONE seam of the same shape: a DOHC_TEST_* env var holding a JSON array
+// gets one seam of the same shape: a DOHC_TEST_* env var holding a JSON array
 // of absolute paths, honored only in an unpackaged test build. Shared so the
 // import and image-picker seams cannot drift apart in their validation.
 function testAbsolutePaths(envName: string, maxEntries: number): string[] | null {
@@ -1526,7 +1526,7 @@ function cloudLogin(): CloudLogin {
 
 // Live file-watch → history pipeline. Pushes a renderer notification whenever
 // a settled batch is recorded so the file tree, timeline, and sync status
-// refresh without polling. A scoped push reaches only windows whose ACTIVE
+// refresh without polling. A scoped push reaches only windows whose active
 // workspace matches — the pluginStatusChanged rule — so a window on
 // workspace B never refetches its world for workspace A's activity. Only a
 // genuinely cross-workspace event (logout, registry change, daemon
@@ -1553,10 +1553,10 @@ function notifyRenderer(scope?: WorkspaceActivityScope): void {
 // proving the session dead) re-scopes every renderer cache tied to the
 // signed-in account. The generic activity ping deliberately reaches only
 // cheap local refreshes, so account-scoped caches get their own signal. It
-// carries the NEW session's key so a same-account token rotation invalidates
+// carries the new session's key so a same-account token rotation invalidates
 // nothing.
 // The phase completes the two-moment contract: "changing" is transition
-// start (views PRESERVE same-session state and ask for nothing — the
+// start (views preserve same-session state and ask for nothing — the
 // credential cache is mid-transition), "ready" is adoption end (views run
 // their one revalidation against the settled session).
 function notifyCloudSessionChanged(phase: "changing" | "ready"): void {
@@ -1604,14 +1604,14 @@ function prioritizePreferredWorkspace(
 
 // The windows that RUN the workspace renderer. Not every BrowserWindow does:
 // the PDF export creates a hidden, preload-less one, and asking IT about
-// set-aside drafts would answer nothing (#579 review, r12). Tracked at
+// set-aside drafts would answer nothing. Tracked at
 // creation instead of guessed from getAllWindows().
 const workspaceWindows = createWorkspaceWindowRegistry<BrowserWindow>(
   (window) => window.isDestroyed(),
 );
 // The last zoom level any path applied (mutation, settings save, or the
 // persisted read). The bootstrap seeds it from the cached settings read
-// BEFORE the first window exists, so every window — including the first of
+// before the first window exists, so every window — including the first of
 // a launch — starts at the right scale before any show(). Null only until
 // that seed lands, which precedes every window creation.
 let knownZoomLevel: number | null = null;
@@ -1620,7 +1620,7 @@ function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
   workspaceWindows.track(window);
   window.on("closed", () => workspaceWindows.forget(window));
   // The persisted zoom level is a window property main owns, set
-  // SYNCHRONOUSLY at creation — before any show() on either creation path —
+  // synchronously at creation — before any show() on either creation path —
   // so no visible frame paints at 100% and then jumps. The async read below
   // is the reconcile backstop (a settings save can land mid-launch);
   // best-effort — a fresh install has only the default.
@@ -1638,7 +1638,7 @@ function trackWorkspaceWindow(window: BrowserWindow): BrowserWindow {
       );
       if (application === null) return;
       if ("applyEverywhere" in application) {
-        // One path for hosts AND guests: a guest attached before the read
+        // One path for hosts and guests: a guest attached before the read
         // resolved must not stay at 100% until the next zoom change.
         applyZoomLevelToWindows(application.applyEverywhere);
       } else if (!window.isDestroyed()) {
@@ -1698,7 +1698,7 @@ function applyZoomLevelToWindows(zoomLevel: number): void {
   for (const window of workspaceWindows.allLive()) {
     window.webContents.setZoomLevel(zoomLevel);
   }
-  // Embedded plugin content follows the window zoom (#875): the person who
+  // Embedded plugin content follows the window zoom: the person who
   // zoomed because text was too small is usually working IN the panel. Only
   // embedded guests — the same app opened by URL keeps the browser's zoom.
   pluginSurfaces.applyWebAppZoom(zoomLevel);
@@ -1823,8 +1823,8 @@ function clearCachedCredentials(): void {
   // #742 P1 SECURITY (rounds 4–5): every credential-cache clear is a session
   // transition (login adoption, logout, or a current-session 401 — all three
   // call this one function). Clearing here, not at each call site
-  // individually, is what makes sure a NEW account's first failed poll can
-  // never be served the PREVIOUS account's cached request rows, sender
+  // individually, is what makes sure a new account's first failed poll can
+  // never be served the previous account's cached request rows, sender
   // emails included, regardless of which of the three paths ended the
   // session.
   for (const workspaceId of workspaceAuthorities.workspaceIds()) {
@@ -1875,7 +1875,7 @@ async function loadAndCacheCurrentCredentials(): Promise<CloudSessionCredentials
 }
 
 // Trailing-slash-insensitive server-URL compare: the registry's recorded
-// serverUrl must match the server that ISSUED the cached token, or the workspace
+// serverUrl must match the server that issued the cached token, or the workspace
 // stays local-only. Otherwise machine B's token could be POSTed to server A
 // (account takeover) and a re-pointed registry could mass-delete.
 function normalizeServerUrl(url: string): string {
@@ -1900,7 +1900,7 @@ async function remoteForWorkspace(workspace: RegistryEntry) {
   return { credentials, credentialGeneration };
 }
 
-// Relay-share HTTP (PR 18): grant-side calls go to the SYNC RELAY (not the
+// Relay-share HTTP: grant-side calls go to the SYNC RELAY (not the
 // legacy workspace-api). The token is the same signed-in session bearer and
 // only ever goes to the relay this machine signed in with.
 function relayShareErrorCopy(
@@ -1976,7 +1976,7 @@ async function relayShareJsonWithCredentials<T>(
     { ...init, headers },
   );
   if (response.status === 401) {
-    // The relay proved a session invalid — but only the session THIS request
+    // The relay proved a session invalid — but only the session this request
     // used. handleRelayUnauthorized acts if and only if that is still the
     // current one, and then completely: memory, broadcast, persistent store.
     const sessionWasCurrent = await handleRelayUnauthorized({
@@ -2035,15 +2035,15 @@ async function relayShareJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 // MU-C4 shared channels: one best-effort refresh pass over every shared
-// channel this workspace has JOINED — push the member's local channel ops,
+// channel this workspace has joined — push the member's local channel ops,
 // pull everyone else's. Never throws (transient failures log and retry on
-// the next pass); a revoked share is marked ENDED in the registry so it
+// the next pass); a revoked share is marked ended in the registry so it
 // stops syncing while the local copy stays readable. Runs from the Chats
 // IPC surface (fresh on open, prompt push after a send) and from the
 // workspace's relay sync engine cadence.
 //
-// Concurrency (CodeRabbit Stability): those triggers can fire together for
-// the SAME workspace, and overlapping passes would race the per-share
+// Concurrency: those triggers can fire together for
+// the same workspace, and overlapping passes would race the per-share
 // cursor/peer state in engine.db — so passes are serialized per workspace
 // (queued, never dropped). Every relay request inside a pass is also bounded
 // by a timeout so a hung relay can't block the awaited listChatChannels path.
@@ -2612,7 +2612,7 @@ const RELAY_SHARE_DISCUSSION_ACTIVITY_POLL_SAFETY_MS = 35_000;
 const presencePollRegistry = createPresencePollRegistry();
 const relayShareDiscussionActivityPolls = createPresencePollRegistry();
 const presenceMutationOwner = new PresenceMutationOwner<WebContents>();
-// A stable ownership key so one window holds at most ONE poll per (scope, topic):
+// A stable ownership key so one window holds at most one poll per (scope, topic):
 // a new poll for the same key supersedes (aborts) the prior long-poll.
 function presenceScopeTopicKey(scope: PresenceScopeInput, topic: string): string {
   return JSON.stringify(
@@ -2724,7 +2724,7 @@ function syncRendererWorkspaceSharedChannels(
 }
 
 // A pass triggered by a write must cover the share that was written, whatever
-// the rotation would have reached (#718). The trigger knows the chat target,
+// the rotation would have reached. The trigger knows the chat target,
 // not the share, so resolve it here through the same registry lookup the write
 // gate uses. An unresolved target simply syncs without a priority.
 async function syncSharedChannelsForChatTarget(
@@ -2836,7 +2836,7 @@ async function runSharedChannelSyncPass(
             : binding!.canonicalRootPath,
         }
       : null;
-    // The registry, unfiltered: the pass needs a row's PLACE even after the row
+    // The registry, unfiltered: the pass needs a row's place even after the row
     // stops being syncable, or a revoked cursor sends the rotation back to the
     // front. Only `channels` below is filtered down to the work set.
     const registryOrder = entry?.sharedChannels ?? [];
@@ -2960,13 +2960,13 @@ async function runSharedChannelSyncPass(
 // The command comes from resolveDohcMcpCommand: a packaged install's own
 // shipped cli-bin launcher by absolute path, the workspace bin `dohc-mcp` in
 // dev, with DOHC_MCP_COMMAND as the explicit override.
-// The MCP profile a workspace hands out (#646): `null` for a workspace this
+// The MCP profile a workspace hands out: `null` for a workspace this
 // machine owns, and the share's level for a share view.
 //
 // The two questions compose, and in this order. PRESENCE decides whether a
 // share profile applies at all — a marker whose value was lost is still a
 // share view, and reading it as an ordinary workspace would hand out the full
-// write-capable server. READABILITY only decides how much the profile opens,
+// write-capable server. Readability only decides how much the profile opens,
 // so a present marker with no readable grant falls to `view`, which registers
 // no write tools at all.
 function mcpShareAccessOf(shareView: unknown): ShareAccess | null {
@@ -2999,7 +2999,7 @@ function mcpConfigFor(
   }
   const home = stateDir();
   const args = ["--workspace", rootPath, "--home", home];
-  // A share view hands out the MCP profile for its level (#646): the launched
+  // A share view hands out the MCP profile for its level: the launched
   // server registers only the write tools that level grants. `null` is a local
   // workspace, which gets every tool.
   if (shareAccess) args.push("--share-access", shareAccess);
@@ -3140,8 +3140,8 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
   },
   engineFor: engineForWorkspace,
   // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
-  // arc-gate QA harness so the harness asserts against the REAL gate). The
-  // gate also owns the shared-view rule (#540): main only states whether the
+  // arc-gate QA harness so the harness asserts against the real gate). The
+  // gate also owns the shared-view rule: main only states whether the
   // workspace is one, and the decision carries the cause so the null capture
   // never wears the Settings opt-out's copy.
   captureFor: async (workspace, hooks) =>
@@ -3381,7 +3381,7 @@ const agentIntegration = createAgentIntegration({
     });
   },
 });
-// "Try it in a version" (PR 0N-2): one gesture composing EXISTING operations
+// "Try it in a version" (PR 0N-2): one gesture composing existing operations
 // — fork-and-switch on the engine capture chain, then a dohc-tracked run —
 // and a review state when the run ends. Resolution of the capture mirrors
 // requireEngineCapture (workspace identity from the registry, engine flag
@@ -3614,7 +3614,7 @@ function agentDispatchStoreHandleFor(workspace: {
 // This used to call the legacy TypeScript store factory, which opened another
 // node:sqlite connection to the engine.db the daemon owns -- exactly the second
 // writable connection workspaceEngineCapture.ts warns can deadlock. It also
-// hydrated every file's CONTENT via a full-text listing just to read two string
+// hydrated every file's content via a full-text listing just to read two string
 // fields off each row.
 //
 // listTextFileMetadata is the right call: it pages (limit 500 + afterPath) so
@@ -3698,7 +3698,7 @@ function localUserDisplayName(): string {
 }
 
 // The opaque per-install reactor id used when signed out (no cloud user id). A
-// stable uuid persisted in stateDir — NEVER the email — so a signed-out
+// stable uuid persisted in stateDir — never the email — so a signed-out
 // reaction cell is stable across restarts without leaking PII into the CRDT.
 // Memoized after the first read; the sync fs touch happens at most once.
 let cachedLocalReactorId: string | null = null;
@@ -3709,8 +3709,8 @@ function localReactorFallbackId(): string {
   return id;
 }
 
-// The local user's STABLE, OPAQUE reactor identity (WS-MU-C2). This value
-// becomes a replicated CRDT author key, so it must NEVER be the raw email — a
+// The local user's stable, OPAQUE reactor identity (WS-MU-C2). This value
+// becomes a replicated CRDT author key, so it must never be the raw email — a
 // raw email would replicate to every peer (PII/GDPR exposure) and persist in
 // the immutable CRDT history. Prefer the Better Auth user id (an opaque uuid)
 // when signed in; that is forward-compatible with MU-C0, which verifies
@@ -3975,11 +3975,11 @@ interface WorkspaceActivityOpenOptions {
   afterActivityOpen?: () => Promise<void>;
   whileEngineStoreLockHeld?: () => Promise<void>;
   // Runs after reopen recovery has settled (resumed and completed a partial
-  // move, or found nothing pending) but BEFORE activity.open starts the
+  // move, or found nothing pending) but before activity.open starts the
   // daemon-owned capture. The rebuild's own reopen uses this to release the
   // request-scoped gate before capture.start()'s startup probe binds a
   // session — otherwise that probe races the still-raised gate and
-  // self-refuses in the background (#882 round 19).
+  // self-refuses in the background.
   afterReopenRecoverySettled?: () => void;
 }
 
@@ -4234,10 +4234,10 @@ const chatDispatchService = createChatDispatchService({
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
   queueSync: syncWorkspaceForDispatch,
-  // An opted-out workspace must record NOTHING: without this gate the
+  // An opted-out workspace must record nothing: without this gate the
   // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
   // workspace.open creates .dohc/engine/engine.db. Open sessions answer from
-  // their capture snapshot (the flag applies at the NEXT open).
+  // their capture snapshot (the flag applies at the next open).
   scanEligible: (workspace) =>
     withWorkspaceAttachmentAsync(workspace, () =>
       dispatchScanEligible(workspace, activity),
@@ -4253,7 +4253,7 @@ const chatDispatchService = createChatDispatchService({
         };
       },
     );
-    // The helper owns both orders (#583): cause read before the release,
+    // The helper owns both orders: cause read before the release,
     // recovery derived from what the release actually did.
     await releaseAndRefuseWithoutCapture({
       capture: activity.engineCaptureFor(workspace.workspaceId),
@@ -5188,8 +5188,8 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
         console.error("[desktop] CLI dispatch scan:", error);
       });
     },
-    // No renderer poll runs the sync pass on the CLI's or MCP's behalf (#731):
-    // AWAIT (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same
+    // No renderer poll runs the sync pass on the CLI's or MCP's behalf:
+    // Await (bounded — see cliServer.ts's CHAT_READ_SYNC_BUDGET_MS) the same
     // pass syncDms already names a target for, so the read's own channel is
     // covered past the pass's row bound. Never throws — offline, it returns
     // fast and the local rows answer.
@@ -5286,7 +5286,7 @@ async function prepareAfterRendererCrash(sender: WebContents): Promise<void> {
   await rendererWorkspaceSessions.retireAfterCrash(sender);
 }
 
-// Close every live engine Y.Doc session (app quit) BEFORE the engine stores are
+// Close every live engine Y.Doc session (app quit) before the engine stores are
 // stopped, so no session settles onto a closed store.
 async function closeAllEngineYDocSessions(): Promise<void> {
   await engineYDocSessionIpc.shutdown();
@@ -5441,7 +5441,7 @@ async function refreshDispatchTray(): Promise<boolean> {
   return enabled;
 }
 
-// Quit must wait for the final settle-window flush AND its history record to
+// Quit must wait for the final settle-window flush and its history record to
 // be durably written — otherwise a save right before quit is silently lost.
 // Bounded so a wedged disk can't make the app unquittable.
 let quitting = false;
@@ -5449,7 +5449,7 @@ let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
 // Settles with the daemon handshake (false = startup failed and the app is
-// quitting). The whenReady continuation creates the window WHILE the daemon
+// quitting). The whenReady continuation creates the window while the daemon
 // starts, so a fast renderer can ask for the engine before the handshake
 // settles; boot-time paths that need engine sessions await this first instead
 // of throwing the broken-invariant error at it.
@@ -6338,18 +6338,18 @@ app.on("will-quit", (event) => {
   if (quitting) return;
   quitting = true;
   event.preventDefault();
-  // FIRST, synchronously (#564): a document open mid transport-retry holds
+  // First, synchronously: a document open mid transport-retry holds
   // the capture chain, and workspaceAuthorityStop below queues behind it. This resolves
   // its armed backoff and makes the next failure final, so the chain frees in
   // at most one attempt instead of spending the whole 3 s budget. Nothing is
-  // abandoned that a user could see: an opening document is read-only (#533),
+  // abandoned that a user could see: an opening document is read-only,
   // so no edit exists yet on the path being given up.
   //
   // That claim only holds because the sessions scope this to a BOUNDED region
   // — the document open. An already-open document retrying a write the engine
   // accepted keeps retrying, without backoff, for whatever the quit timer
   // leaves it: its update exists only in the canonical in-memory Y.Doc, so
-  // abandoning that retry would discard the edit (codex P1).
+  // abandoning that retry would discard the edit.
   rustEngineWorkspaceSessions?.beginShutdown();
   const searchStop = workspaceSearchOwner.dispose().catch(() => undefined);
   // Here, not at before-quit: every window has closed, so every beforeunload
@@ -6612,11 +6612,11 @@ const sitePreviewSenderWorkspaceAuthority = {
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
 // identical to today's behavior.
-// Quit-ask guard (#567): shared by the before-quit interceptor and the IPC
+// Quit-ask guard: shared by the before-quit interceptor and the IPC
 // handlers the renderer answers through. The state machine lives in
 // quitGuard.ts so the busy-renderer promise is a tested fact: a silent ACK
 // window opens a MAIN-side dialog that names the loss — it never quits by
-// itself (#579 review, r11).
+// itself.
 const quitGuard = createQuitGuard({
   askRenderer: () => {
     // The WORKSPACE window, never an arbitrary live one: the PDF export's
@@ -6640,9 +6640,9 @@ const quitGuard = createQuitGuard({
   },
   quit: () => app.quit(),
   // The user chose "quit anyway" over a renderer that never answered. Destroy
-  // the workspace windows FIRST: a destroyed window runs no beforeunload, so
-  // a renderer that wakes cannot veto the decision and open a second warning
-  // (#579 review, r15). app.quit() still follows, so the will-quit teardown —
+  // the workspace windows first: a destroyed window runs no beforeunload, so
+  // a renderer that wakes cannot veto the decision and open a second warning.
+  // App.quit() still follows, so the will-quit teardown —
   // engine sessions, stores, WAL locks — runs exactly as for any other quit.
   forceQuit: () => {
     for (const window of workspaceWindows.allLive()) window.destroy();
@@ -6650,14 +6650,14 @@ const quitGuard = createQuitGuard({
   },
 });
 
-// Recovery re-check at the quit boundary (#579 review, r12). The renderer's
+// Recovery re-check at the quit boundary. The renderer's
 // own check happens before it asks for the install, and a reopen can set an
 // edit aside in the gap between the two — separate processes, and a queued
-// render lands inside it. So main asks again HERE, and only then approves the
+// render lands inside it. So main asks again here, and only then approves the
 // quit that quitAndInstall starts.
 //
-// A renderer that misses the ACK window may be BUSY, not dead, and no
-// deadline tells those apart (#579 review, r16). Silence therefore asks the
+// A renderer that misses the ACK window may be busy, not dead, and no
+// deadline tells those apart. Silence therefore asks the
 // USER rather than refusing the install the user just asked for — the same
 // escalation the quit ask uses, with the loss named.
 const recoveryChecker = createRecoveryChecker({
@@ -6727,7 +6727,7 @@ function registerIpcHandlers(
     return DefaultWorkspaceRootResult.parse(root);
   });
 
-  // Validates, canonicalizes, AND confirms the root traces to a main-process
+  // Validates, canonicalizes, and confirms the root traces to a main-process
   // suggestion or dialog pick — a renderer cannot scope fs ops to a path it
   // invented. All downstream ops use the normalized root.
   function usableRoot(rootPath: string): string {
@@ -6750,7 +6750,7 @@ function registerIpcHandlers(
       kind: input.kind,
     });
     desktopMarks.measureSince("workspace-create", "workspace-create-start");
-    // Parse BEFORE register: a summary that fails the contract must never be
+    // Parse before register: a summary that fails the contract must never be
     // persisted into the registry, or every later registry read would throw
     // and the app would launch to a permanent blank window.
     const summary = WorkspaceSummary.parse(created);
@@ -6805,7 +6805,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.moveWorkspacePath, workspaceFileMutations.movePath);
   ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
 
-  // Collections (Phase 2 views): read-only engine index queries. list answers
+  // Collections: read-only engine index queries. list answers
   // "no collections" when the daemon has no sessions, so unflagged workspaces
   // stay quiet; get/query name the missing capability instead, because their
   // caller is an open collection tab that must show a cause.
@@ -6874,7 +6874,7 @@ function registerIpcHandlers(
       input.workspaceId,
       inactiveMessage,
     );
-    // Gather + bound BEFORE asking where to save: an over-limit export
+    // Gather + bound before asking where to save: an over-limit export
     // refuses without ever showing a dialog.
     const { entries, baseName } = await exactRendererWorkspaceReferences.withReference(
       event.sender,
@@ -6924,7 +6924,7 @@ function registerIpcHandlers(
     const input = ExportDocumentFilePayload.parse(payload);
     const inactiveMessage =
       "Export stopped because this window changed workspaces.";
-    // workspaceId authorizes the CALLER (a real, currently-open workspace) —
+    // workspaceId authorizes the caller (a real, currently-open workspace) —
     // the save target itself is intentionally outside any workspace, same as
     // exportWorkspaceZip above.
     const workspaceReference = await exactRendererWorkspaceReferences.capture(
@@ -6991,10 +6991,10 @@ function registerIpcHandlers(
     );
   });
 
-  // Native explorer context menu over the CLOSED EXPLORER_MENU_COMMANDS set:
+  // Native explorer context menu over the closed EXPLORER_MENU_COMMANDS set:
   // main owns every label and the item structure (the renderer only names
-  // what was right-clicked), and the chosen id resolves the SAME invoke —
-  // null on dismiss. "Reveal in file manager" is performed HERE (containment
+  // what was right-clicked), and the chosen id resolves the same invoke —
+  // null on dismiss. "Reveal in file manager" is performed here (containment
   // first) so no broader open-path IPC needs to exist for it.
   ipcMain.handle(CHANNELS.showExplorerMenu, async (event, payload) => {
     assertTrustedSender(event);
@@ -7328,11 +7328,11 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.writeWorkspaceText, workspaceFileMutations.writeText);
   ipcMain.handle(CHANNELS.writeWorkspaceAsset, workspaceFileMutations.writeAsset);
 
-  // `/image`: a native open dialog that STARTS AT THE WORKSPACE ROOT (a
+  // `/image`: a native open dialog that starts AT THE WORKSPACE ROOT (a
   // renderer <input type="file"> cannot set a starting directory), then reads
   // the picks here and hands the renderer their bytes — one round trip into
   // the same write+insert path paste and drop already use. The picked files
-  // are deliberately allowed to live ANYWHERE on disk: this is a user-directed
+  // are deliberately allowed to live anywhere on disk: this is a user-directed
   // pick, and the bytes are copied INTO the workspace by writeWorkspaceAsset,
   // which re-validates containment. The renderer never sees an absolute path.
   ipcMain.handle(CHANNELS.pickImageFiles, async (event, payload) => {
@@ -7384,7 +7384,7 @@ function registerIpcHandlers(
         for (const path of picked.slice(0, MAX_PICKED_IMAGES)) {
           try {
             const info = await stat(path);
-            // Oversize picks are refused the same QUIET way paste refuses them:
+            // Oversize picks are refused the same quiet way paste refuses them:
             // skipped with a warning, never a thrown dialog in the user's face.
             if (
               !info.isFile() ||
@@ -7633,7 +7633,7 @@ function registerIpcHandlers(
     );
   });
 
-  // The ONLY path from renderer to the OS browser (window.open is a pure
+  // The only path from renderer to the OS browser (window.open is a pure
   // deny): http(s) URLs only, used by cloud login's verification step.
   ipcMain.handle(CHANNELS.openExternalUrl, async (event, payload) => {
     assertTrustedSender(event);
@@ -7690,9 +7690,9 @@ function registerIpcHandlers(
     assertTrustedSender(event);
     const result = await cloudLogin().poll();
     if (result.status === "complete") {
-      // The INCOMING session's identity, computed BEFORE anything is
+      // The incoming session's identity, computed before anything is
       // cleared: the immediate broadcast says where the session is going, so
-      // a same-account rotation carries the SAME key and mounted views keep
+      // a same-account rotation carries the same key and mounted views keep
       // their rows instead of reading a signed-out interim as a switch.
       const incomingKey = chatShareSessionKey(await cloudLogin().credentials());
       // A completed login can rotate the bearer token without changing the
@@ -7776,7 +7776,7 @@ function registerIpcHandlers(
   // owner can retry, and another account gets the relay's fixed 404. The
   // handler then records the verified binding and starts the merge engine.
   //
-  // The relay's POST /sync/workspaces is the SOLE claim authority: workspace-api
+  // The relay's POST /sync/workspaces is the sole claim authority: workspace-api
   // is now auth-only and 404s every non-auth route, so there is no separate
   // preclaim to make — the relay owns ownership end to end (create / idempotent
   // same-owner / foreign-refused).
@@ -7852,9 +7852,9 @@ function registerIpcHandlers(
     );
   });
 
-  // Join a synced workspace on THIS machine (0P-C): sync code from the
+  // Join a synced workspace on this machine (0P-C): sync code from the
   // machine that already has it + a locally picked empty folder. Everything
-  // is validated BEFORE any local state is created, so a mistyped code can
+  // is validated before any local state is created, so a mistyped code can
   // never mint an empty workspace; the first pull brings files, history,
   // and chats through the same engine sync path every later pull uses.
   ipcMain.handle(CHANNELS.cloudJoinWorkspace, async (event, payload) => {
@@ -7891,7 +7891,7 @@ function registerIpcHandlers(
       );
     }
 
-    // Pre-flight against the relay BEFORE creating anything locally.
+    // Pre-flight against the relay before creating anything locally.
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
     let probe: RelayWorkspaceBootstrapResult;
     let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
@@ -7938,7 +7938,7 @@ function registerIpcHandlers(
       });
       summary = WorkspaceSummary.parse(created);
       // Bootstrap the relay coordinate through a capture-free daemon session
-      // BEFORE registration exposes the workspace or activity.open can build
+      // before registration exposes the workspace or activity.open can build
       // capture and start its watcher. An unset relay is claimed; otherwise
       // the pristine daemon adopts the relay's existing epoch and stream with
       // its own new origin. The bootstrap session closes before the captured
@@ -7982,7 +7982,7 @@ function registerIpcHandlers(
       });
     } catch (error) {
       // Failed-first-pull contract (0P-C gate fix, documented choice): roll
-      // the ENTIRE join back — engine/watcher/capture, registry entry, and
+      // the entire join back — engine/watcher/capture, registry entry, and
       // the folder contents this attempt created — instead of leaving a
       // half-joined workspace whose next launch would push before ever
       // having pulled. Everything removed still lives on the relay; the
@@ -8025,7 +8025,7 @@ function registerIpcHandlers(
     return CloudJoinWorkspaceResult.parse({ workspace: summary });
   });
 
-  // ---- Relay shares (PR 18) ----
+  // ---- Relay shares ----
 
   // Grant side: create a share on the SYNC RELAY for a synced workspace.
   // Selector validation (secret refusal, traversal, caps) is server-side —
@@ -8990,7 +8990,7 @@ function registerIpcHandlers(
   });
 
   // --- Shared channels (MU-C4) --------------------------------------------
-  // A chat-channel grant shares a WHOLE channel (threads/messages/reactions)
+  // A chat-channel grant shares a whole channel (threads/messages/reactions)
   // with another account, read-write by default. The relay owns every
   // security decision (membership, authorship, channel scoping, revocation);
   // these handlers only address grants and move the member-side sync.
@@ -9022,7 +9022,7 @@ function registerIpcHandlers(
         });
         operation.assertCurrent();
         if (!wireId) throw new Error("This channel can't be shared yet.");
-        // "general" is every workspace's personal default channel — the SAME wire
+        // "general" is every workspace's personal default channel — the same wire
         // id everywhere by design, so sharing it would merge strangers' personal
         // chats. Refuse with a way forward.
         if (wireId === GENERAL_CHANNEL_WIRE_ID) {
@@ -9067,7 +9067,7 @@ function registerIpcHandlers(
     );
   });
 
-  // What THIS machine joined, for the channels the caller named. The grant
+  // What this machine joined, for the channels the caller named. The grant
   // side lives on the relay; this side does not, so asking it costs no network
   // — and a caller that needs only this must not wait on a relay that may
   // never answer.
@@ -9240,7 +9240,7 @@ function registerIpcHandlers(
         // the relay side reports signed-out or unreachable instead of posing as
         // an empty listing.
         //
-        // ONE credentials snapshot serves both the fetch and the session key, so
+        // One credentials snapshot serves both the fetch and the session key, so
         // the key always names the session the request actually used — a login
         // or switch landing mid-flight cannot drift them apart.
         await warmCredentialCache();
@@ -9312,7 +9312,7 @@ function registerIpcHandlers(
           shareIdsClaimedElsewhere,
         });
         assertCurrentShareSession();
-        // The caller's channels PLUS the invitations this answer is about to hand
+        // The caller's channels plus the invitations this answer is about to hand
         // it. The sharing surface shows both, and for each invitation it decides
         // whether this workspace has already joined that channel — a question it
         // cannot ask in advance, because this call is what tells it the invitation
@@ -9364,10 +9364,10 @@ function registerIpcHandlers(
             "Reconnect dohc Cloud with a sync relay URL, then try again.",
           );
         }
-        // Capture the credentials BEFORE the awaits below (CodeRabbit Data
+        // Capture the credentials before the awaits below (CodeRabbit Data
         // Integrity): cachedCredentials can change during fetch/pull (logout,
         // relay switch) — re-reading it afterwards can crash on null or pin the
-        // joined channel to the WRONG relay. The join is atomic against the
+        // joined channel to the wrong relay. The join is atomic against the
         // credentials it started with.
         const joinedRelayUrl = joinCredentials.relayUrl;
         const joinedRecipientUserId = joinCredentials.userId;
@@ -9413,7 +9413,7 @@ function registerIpcHandlers(
   // Member-initiated leave: purely local — the channel stops syncing and its
   // rows stay readable. Keep an ended tombstone so participant provenance and
   // the read-only write gate survive after live grant data is gone. Shared by
-  // leaveSharedChannel and leaveDm (#742) — a DM's accepted row IS a
+  // leaveSharedChannel and leaveDm — a DM's accepted row IS a
   // JoinedSharedChannel row in the same registry, so ending it is the same
   // operation regardless of which surface asked.
   function endWorkspaceJoinedChannel(
@@ -9445,7 +9445,7 @@ function registerIpcHandlers(
 
   // Record that the user has seen a share's skipped ops.
   //
-  // It does NOT delete them. The cursor has already committed past those ops,
+  // It does not delete them. The cursor has already committed past those ops,
   // so this record is the only remaining evidence of what is missing —
   // deleting it behind a one-click control would be an irreversible change
   // with no reverse path and no warning. Acknowledging hides the warning,
@@ -9512,7 +9512,7 @@ function registerIpcHandlers(
     );
   });
 
-  // Record that the user has seen an automation's failures. It does NOT
+  // Record that the user has seen an automation's failures. It does not
   // delete the claim rows — they are the remaining evidence of what failed.
   // Acknowledging hides the notice; a failure recorded after the render has
   // a higher generation, so it comes back on its own. The generation is
@@ -9549,7 +9549,7 @@ function registerIpcHandlers(
     );
   });
 
-  // ---- Share changes (#646 PR3a) ----
+  // ---- Share changes ----
   //
   // Two lanes, and a workspace is only ever in one of them. The GRANTER lane
   // reads and settles the changes a recipient sent for a workspace this
@@ -9656,12 +9656,12 @@ function registerIpcHandlers(
   }
 
   // The RECIPIENT lane's scope. The pinned grant and the share id come from
-  // `shareProposals.ts`, and the CALLER states which rule applies: sending
+  // `shareProposals.ts`, and the caller states which rule applies: sending
   // needs the edit level, while listing and withdrawing what was already sent
   // need only membership — a reverse path a downgrade removes is not one.
   //
   // What is left here is the session, which must be signed in and on the
-  // share's ORIGIN relay. The refresh SKIPS a session on another relay because
+  // share's ORIGIN relay. The refresh skips a session on another relay because
   // it runs on a cadence; this refuses, because a person pressed a button and
   // is owed an answer.
   interface ShareProposalRecipientScope {
@@ -9745,7 +9745,7 @@ function registerIpcHandlers(
   }
 
   // The after content of one proposed change. Owner-scoped: the blob was
-  // uploaded into THIS workspace's storage, so the granter reads it back
+  // uploaded into this workspace's storage, so the granter reads it back
   // through the blob route its own sync already uses.
   //
   // Tolerant, exactly as the current side is. A change this surface cannot
@@ -9914,7 +9914,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.submitShareChanges, async (event, payload) => {
     assertTrustedSender(event);
     const input = SubmitShareChangesPayload.parse(payload);
-    // SENDING needs the edit level.
+    // Sending needs the edit level.
     return withShareProposalRecipientOperation(
       event.sender,
       input.workspaceId,
@@ -9958,7 +9958,7 @@ function registerIpcHandlers(
               shareId: scope.shareId,
               grantedSelector: scope.grant,
               // PR3a mints a fresh key per submit. It makes the relay's idempotency
-              // hold for a retry INSIDE one submit (blobs, then the POST), not for
+              // hold for a retry inside one submit (blobs, then the POST), not for
               // a second press: a second press sends whatever is pending then,
               // which is a second set of changes and a second proposal.
               submitId: randomUUID(),
@@ -10001,7 +10001,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.withdrawShareChanges, async (event, payload) => {
     assertTrustedSender(event);
     const input = WithdrawShareChangesPayload.parse(payload);
-    // TAKING BACK needs membership only, for the same reason.
+    // Taking back needs membership only, for the same reason.
     return withShareProposalRecipientOperation(
       event.sender,
       input.workspaceId,
@@ -10028,7 +10028,7 @@ function registerIpcHandlers(
 
   // Receive side: open a pasted share code as a READ-ONLY shared view.
   // Mirrors the join flow's ordering guarantees: everything is validated
-  // BEFORE local state exists, the token only ever goes to the signed-in
+  // before local state exists, the token only ever goes to the signed-in
   // relay, and a failed first pull rolls the whole thing back.
   ipcMain.handle(CHANNELS.openSharedView, async (event, payload) => {
     assertTrustedSender(event);
@@ -10049,7 +10049,7 @@ function registerIpcHandlers(
       );
     }
     const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
-    // Pre-flight against the relay BEFORE creating anything locally; also
+    // Pre-flight against the relay before creating anything locally; also
     // learns who shared it for the honest read-only copy.
     let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
     try {
@@ -10112,7 +10112,7 @@ function registerIpcHandlers(
         // Pin the selector the relay just stated, so later pulls enforce it
         // instead of trusting the relay's selection each time.
         grantedSelector: info.selector,
-        // Persist the origin relay so a later refresh signed into a DIFFERENT
+        // Persist the origin relay so a later refresh signed into a different
         // relay is skipped instead of misreading a 404 as "share ended".
         relayUrl: credentials.relayUrl,
       });
@@ -10121,7 +10121,7 @@ function registerIpcHandlers(
       // sync identity, and the pull is what gives it the share cursor that
       // makes local writes journal.
       //
-      // SOFT, like the refresh site. Opening a share is a read, and a failure
+      // Soft, like the refresh site. Opening a share is a read, and a failure
       // here costs the recipient the ability to send changes, not the ability
       // to open what they were given. The next refresh records it.
       await workspaceAuthorities
@@ -10183,8 +10183,8 @@ function registerIpcHandlers(
         "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
       );
     }
-    // A share view is opened HERE, not wherever a status read happens to land
-    // first (#646 PR3). It needs the activity entry: that entry is what states
+    // A share view is opened here, not wherever a status read happens to land
+    // first. It needs the activity entry: that entry is what states
     // `historyShareView` to the status bar and the notice center, so the null
     // capture below is explained by a decision this open made.
     //
@@ -10330,7 +10330,7 @@ function registerIpcHandlers(
   });
 
   // ---- Share mounts ----
-  // The receive side materialized INSIDE a host workspace: the share's
+  // The receive side materialized inside a host workspace: the share's
   // filtered files arrive under shared-with-me/<label>/ as ordinary
   // read-only files (agent-readable through normal tools). The mount's pull
   // state lives in its own nested .dohc (invisible to the host tree), and
@@ -10589,7 +10589,7 @@ function registerIpcHandlers(
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      // #541: the feature's "not enabled" copy holds only for the real
+      // The feature's "not enabled" copy holds only for the real
       // opt-out — after a failed capture build the refusal names the failure.
       throw new Error(
         engineOffRefusal(activity.getStatus(workspace.workspaceId), feature, "restart"),
@@ -10598,7 +10598,7 @@ function registerIpcHandlers(
     return { workspace, capture };
   }
 
-  // #646 PR2: chat follows the share. `requireEngineCapture` is the ONE
+  // Chat follows the share. `requireEngineCapture` is the one
   // barrier between a share view and chat today, and it throws for every
   // share view because a share view has no capture — by design: a capture
   // records local file writes, which is exactly what a share view must never
@@ -10795,7 +10795,7 @@ function registerIpcHandlers(
     const result = await capture.mergeVersionIntoMain(input.versionId);
     notifyRenderer({ workspaceId: input.workspaceId });
     // The merge reports a count; the rows are open conflicts in the engine,
-    // read back one page at a time like every other conflict reader (#562).
+    // read back one page at a time like every other conflict reader.
     const page =
       result.conflictCount > 0
         ? await capture.listOpenConflictsPage()
@@ -10885,7 +10885,7 @@ function registerIpcHandlers(
   // requireWorkspace and rejects when the engine capture is not attached.
   // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
   // unit-tested); main only injects the display-name rule below.
-  // PR 0N-1: the SAME display-name rule the chat rail uses. AgentIntegration
+  // The same display-name rule the chat rail uses. AgentIntegration
   // stamps onBehalfOf "local" for the desktop's own user, which displays as
   // the cloud email (or "You" when signed out); any other onBehalfOf is
   // already a user-facing label and displays as-is.
@@ -10940,7 +10940,7 @@ function registerIpcHandlers(
   async function resolveChatFileReferences(
     workspace: ReturnType<typeof requireWorkspace>,
     // The path resolver, not a capture: a share view has no capture and its
-    // files still resolve (#646 PR2). Everything below only ever asked the
+    // files still resolve. Everything below only ever asked the
     // capture this one question.
     fileObjectIdForPath: (path: string) => Promise<string | null>,
     references: readonly ChatFileReferenceInput[] | undefined,
@@ -11280,7 +11280,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listFileChats, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListFileChatsPayload.parse(payload);
-    // #646 PR2: reachable from a share view at EVERY level. The file it names
+    // Reachable from a share view at every level. The file it names
     // is one the share already served, and an out-of-selector thread was
     // never served by the relay nor applied by the engine boundary — there is
     // no superset here to filter.
@@ -11491,7 +11491,7 @@ function registerIpcHandlers(
     const scope = await requireChatScope(input.workspaceId);
     assertChatWritable(scope);
     const { workspace, store } = scope;
-    // The chat links to the file's STABLE engine object id (never the path),
+    // The chat links to the file's stable engine object id (never the path),
     // so the link survives renames; the path rides along as a display hint.
     const fileObjectId = await chatFileObjectId(scope, input.path);
     if (!fileObjectId) {
@@ -11511,7 +11511,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listChatMessages, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatMessagesPayload.parse(payload);
-    // Reachable from a share view at every level (#646 PR2), for a thread on
+    // Reachable from a share view at every level, for a thread on
     // a file the share already served.
     const { workspace, store } = await requireChatScope(input.workspaceId);
     const messages = await store.listMessages({
@@ -11543,7 +11543,7 @@ function registerIpcHandlers(
     assertChatWritable(scope);
     const { workspace, store } = scope;
     // MU-C4 (CodeRabbit security): a READ-ONLY shared-channel grant rejects
-    // writes at the main boundary, BEFORE any durable local row — the
+    // writes at the main boundary, before any durable local row — the
     // renderer disabling its composer is honesty, not authorization.
     await assertSharedChannelWritable({
       workspaceId: workspace.workspaceId,
@@ -11565,7 +11565,7 @@ function registerIpcHandlers(
         ),
       revalidateAuthorUserId: (authorUserId) =>
         revalidateChatWrite(workspace, target, authorUserId, store),
-      // Author is derived HERE: renderer-sent messages are always the local
+      // Author is derived here: renderer-sent messages are always the local
       // human user. Agent authorship arrives through agent tooling, never
       // through this channel.
       write: ({ authorUserId, attachments }) =>
@@ -11768,7 +11768,7 @@ function registerIpcHandlers(
           "Chats",
         );
         operation.assertCurrent();
-        // MU-C4: refresh joined shared channels BEFORE reading, so opening
+        // MU-C4: refresh joined shared channels before reading, so opening
         // Chats shows other members' latest messages. Offline, local rows
         // still answer.
         const rowsUncovered =
@@ -11798,7 +11798,7 @@ function registerIpcHandlers(
         );
         operation.assertCurrent();
         const wireIds = new Map(wireIdEntries);
-        // The "Files" grouping: file-linked Chats with their CURRENT path (the
+        // The "Files" grouping: file-linked Chats with their current path (the
         // stable object id resolved through the active version), falling back
         // to the captured hint when the engine no longer owns the file.
         const threads = await store.listThreads({
@@ -12069,7 +12069,7 @@ function registerIpcHandlers(
     // MU-C4: refresh before reading, the way listChatChannels does. A channel
     // view has no poll of its own, and the pass is bounded, so an untargeted
     // sync could leave the channel the user just opened waiting for the
-    // rotation. Naming it puts it in THIS pass (#718).
+    // rotation. Naming it puts it in this pass.
     await syncSharedChannelsForChatTarget(workspace.workspaceId, {
       channelId: input.channelId,
     });
@@ -12157,7 +12157,7 @@ function registerIpcHandlers(
     createMarkChatThreadReadIpcHandler({
       assertTrustedSender,
       parsePayload: (payload) => MarkChatThreadReadPayload.parse(payload),
-      // #646 PR2: reachable from a share view at EVERY level, view included.
+      // Reachable from a share view at every level, view included.
       requireContext: requireChatScope,
       run: async ({ workspace, store }, input) => {
         const state = await store.markThreadRead({
@@ -12192,7 +12192,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.listChatReactions, async (event, payload) => {
     assertTrustedSender(event);
     const input = ListChatReactionsPayload.parse(payload);
-    // #646 PR2: reachable from a share view at EVERY level. The panel loads
+    // Reachable from a share view at every level. The panel loads
     // messages and reactions together, so a capture gate here refuses the
     // whole thread open, not just its reactions.
     const { workspace, store } = await requireChatScope(input.workspaceId);
@@ -12382,7 +12382,7 @@ function registerIpcHandlers(
                 }>;
               }>(syncCredentials, "/sync/shares");
               assertCurrentDmSyncSession();
-              // Re-derived on EVERY call, not a snapshot taken once:
+              // Re-derived on every call, not a snapshot taken once:
               // classifyDmRequests calls this twice around its async peek.
               return classifyDmRequests({
                 received: listing.received ?? [],
@@ -12443,7 +12443,7 @@ function registerIpcHandlers(
         const requestShareIds = new Set(
           [...pending, ...declined].map((row) => row.shareId),
         );
-        // Fresh, AFTER classify resolves — not reused from before it, which
+        // Fresh, after classify resolves — not reused from before it, which
         // could be stale by the time the withhold decision needs it.
         const holdersByShareId = liveSharedChannelHoldersByShareId(
           listWorkspaces(),
@@ -12601,7 +12601,7 @@ function registerIpcHandlers(
     return undefined;
   });
 
-  // The DM surface's reverse path for placement (#742): ends the SAME row
+  // The DM surface's reverse path for placement: ends the same row
   // leaveSharedChannel ends. The next syncDms poll's classifyDmRequests finds
   // no live holder for this shareId, so the conversation reappears as a
   // request and can be accepted into any workspace, including this one.
@@ -12696,7 +12696,7 @@ function registerIpcHandlers(
           ),
         );
         const store = linkedChatStoreFor(workspace);
-        // A DM's identity is its LIVE grant recipient set, not its display
+        // A DM's identity is its live grant recipient set, not its display
         // name. Enumerate live chat-channel grants once for deduplication and
         // for deciding which recipients still need a grant.
         const shares = await awaitCurrentDmSession(() =>
@@ -12870,10 +12870,10 @@ function registerIpcHandlers(
     );
   });
 
-  // Ephemeral presence (MU-C5): the renderer NEVER receives the relay bearer
+  // Ephemeral presence (MU-C5): the renderer never receives the relay bearer
   // token — its presence transport calls presencePublish/presencePoll/
   // presenceCancel, and MAIN (the sole token holder) makes the actual relay
-  // presence request. Scope is authorized HERE before the relay (which
+  // presence request. Scope is authorized here before the relay (which
   // re-authorizes from the bearer anyway): a workspace scope must be a synced
   // workspace this account owns; a share scope must be a grant this account has
   // joined. An unauthorized/unavailable scope returns null (renderer → dormant),
@@ -12911,7 +12911,7 @@ function registerIpcHandlers(
         // clears without treating it as a failure.
         return PresenceResult.parse({ ok: true, snapshot: { version: 0, peers: [] } });
       }
-      // The exact renderer lease owns this mutation BEFORE scope resolution
+      // The exact renderer lease owns this mutation before scope resolution
       // warms credentials. Retirement serializes its leave behind any request
       // that may already have landed at the relay.
       const snapshot = await presenceMutationOwner.publish(
@@ -12959,9 +12959,9 @@ function registerIpcHandlers(
     ) {
       return PresenceResult.parse({ ok: false, reason: "aborted" });
     }
-    // Register the controller BEFORE any await: scope resolution warms the
+    // Register the controller before any await: scope resolution warms the
     // credential cache, and a presenceCancel arriving during that window must
-    // abort THIS poll promptly (workspace-switch repaint), not wait out the 35s
+    // abort this poll promptly (workspace-switch repaint), not wait out the 35s
     // safety cap. Ownership keys on (senderId + pollId) so only this window can
     // cancel it, and at most one poll runs per (sender, scope, topic).
     const handle = presencePollRegistry.begin(
@@ -12997,7 +12997,7 @@ function registerIpcHandlers(
       });
     } finally {
       clearTimeout(safety);
-      // Removes only THIS poll's entry — a superseding poll under the same id is
+      // Removes only this poll's entry — a superseding poll under the same id is
       // left untouched.
       handle.release();
     }
@@ -13009,7 +13009,7 @@ function registerIpcHandlers(
     if (!rendererWorkspaceSessions.current(event.sender)) {
       return undefined;
     }
-    // Only aborts a poll THIS sender owns; a cancel for another window's pollId
+    // Only aborts a poll this sender owns; a cancel for another window's pollId
     // is a no-op.
     presencePollRegistry.cancel(event.sender.id, input.pollId);
     return undefined;
@@ -13085,7 +13085,7 @@ function registerIpcHandlers(
     );
   });
 
-  // Enabling agents starts a local run: the workspace must already be OPEN (the
+  // Enabling agents starts a local run: the workspace must already be open (the
   // watcher must be live for the run slot to attach), so open it first.
   ipcMain.handle(CHANNELS.startAgentRun, async (event, payload) => {
     assertTrustedSender(event);
@@ -13323,7 +13323,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.setTitlebarTheme, (event, payload) => {
     assertTrustedSender(event);
     const input = SetTitlebarThemePayload.parse(payload);
-    // Persist so the NEXT launch paints the native chrome in this theme
+    // Persist so the next launch paints the native chrome in this theme
     // before any renderer JS runs (no light flash on dark launches).
     rememberChromeTheme(input.theme);
     const window = BrowserWindow.fromWebContents(event.sender);
@@ -13475,11 +13475,11 @@ function registerIpcHandlers(
         state: currentUpdateState(),
       });
     }
-    // Re-ask at the QUIT BOUNDARY (#579 review, r12): the renderer checked
+    // Re-ask at the quit boundary: the renderer checked
     // before it called, and a reopen can set an edit aside in the gap. Only
     // once main has a fresh answer does it approve the quit that
     // quitAndInstall starts — the ask cannot veto it afterwards, because
-    // that would burn the one-shot latch (#579 review, r10).
+    // that would burn the one-shot latch.
     if (await recoveryChecker.ask()) {
       return UpdateActionResult.parse({
         accepted: false,
@@ -13526,7 +13526,7 @@ function registerIpcHandlers(
     }
   });
 
-  // Double-gated: env flag AND unpackaged build. A packaged app launched
+  // Double-gated: env flag and unpackaged build. A packaged app launched
   // with the env var set must never grow test surface.
   if (process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged) {
     ipcMain.handle(CHANNELS.getLaunchMarks, (event) => {
@@ -13608,7 +13608,7 @@ function testEngineRestartOverrides(): {
 
 async function startRustEngineDaemon(): Promise<boolean> {
   // Everything, including resolving the binary path, runs inside the try: a
-  // throw while BUILDING the options would otherwise reject this whenReady
+  // throw while building the options would otherwise reject this whenReady
   // callback and leave the user with no dialog, on the one path whose job is
   // to explain that the engine could not start.
   try {
@@ -13666,7 +13666,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
       },
     });
     await rustEngineDaemon.start();
-    // The daemon owns capture: its capture.momentRecorded events are the ONLY
+    // The daemon owns capture: its capture.momentRecorded events are the only
     // signal that a moment landed, so bridge them onto the renderer's
     // workspace-activity ping or the history timeline goes permanently stale.
     bridgeCaptureEventsToRenderer(rustEngineDaemon, notifyRenderer);
@@ -13789,9 +13789,9 @@ if (!app.requestSingleInstanceLock()) {
     );
   });
 
-  // Quit interception (#567 / #579 review, r10): a set-aside draft storage
-  // could not keep (#600) lives only in renderer memory, and a quit is its
-  // one irreversible exit — the renderer must get to warn BEFORE any
+  // Quit interception: a set-aside draft storage
+  // could not keep lives only in renderer memory, and a quit is its
+  // one irreversible exit — the renderer must get to warn before any
   // destructive teardown runs. It answers for those drafts alone. This
   // matters doubly for updates: electron-updater's quitAndInstall is
   // ONE-SHOT, so the decision has to come before it is ever called. The
@@ -13801,7 +13801,7 @@ if (!app.requestSingleInstanceLock()) {
   app.on("before-quit", (event) => {
     // No workspace window means nobody to ask and no renderer-held drafts to
     // lose — a hidden export window is not a reason to intercept, and not a
-    // renderer that could answer (#579 review, r12).
+    // renderer that could answer.
     if (!liveWorkspaceWindow()) return;
     quitGuard.beforeQuit(event);
   });
@@ -13882,7 +13882,7 @@ if (!app.requestSingleInstanceLock()) {
       }
     });
 
-    // The persisted zoom must be KNOWN before the first window exists:
+    // The persisted zoom must be known before the first window exists:
     // trackWorkspaceWindow applies a known level synchronously at creation,
     // before any show(), while its async read lands only after
     // createMainWindow's ready-to-show show() — a wrong-scale first frame
@@ -13893,7 +13893,7 @@ if (!app.requestSingleInstanceLock()) {
     cachedPreferredName = cachedSettings.profile.preferredName;
     knownZoomLevel ??= cachedSettings.appearance.zoomLevel;
 
-    // The window exists and its renderer loads WHILE the daemon handshakes;
+    // The window exists and its renderer loads while the daemon handshakes;
     // everything below that needs the daemon still waits for it.
     const window = trackWorkspaceWindow(
       createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
@@ -13966,8 +13966,8 @@ if (!app.requestSingleInstanceLock()) {
       currentVersion: app.getVersion(),
       // A restart already staged has no install left to make — quitAndInstall
       // started its own quit on the first call and has none left to start.
-      // Main makes it, so the fact lives HERE and not in a renderer module a
-      // reload would reset (#579 review, r18). The quit is already approved:
+      // Main makes it, so the fact lives here and not in a renderer module a
+      // reload would reset. The quit is already approved:
       // the IPC handler approves before asking the controller.
       quitForStagedRestart: () => app.quit(),
       onState: (_state, state) => {

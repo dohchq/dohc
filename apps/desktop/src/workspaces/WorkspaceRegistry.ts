@@ -13,7 +13,7 @@ import {
 
 // Electron wiring over the pure registry store. The registry lives in
 // userData; in test mode it lives under DOHC_TEST_HOME so E2E runs are
-// hermetic (gated on test env AND unpackaged build).
+// hermetic (gated on test env and unpackaged build).
 
 function testHome(): string | null {
   return process.env.DOHC_DESKTOP_TEST === "1" && !app.isPackaged

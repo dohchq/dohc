@@ -431,7 +431,7 @@ describe("SitePreviewPage", () => {
   });
 
   it("refuses an ancestor site instead of showing it as this tab's own", async () => {
-    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // getSitePackage returns the deepest containing site for a path, so a
     // stale tab whose own root stopped being a detected site can still get
     // back a detected ancestor above it — here the tab names "report/legacy"
     // but the workspace only has a site rooted at "report" above it.
@@ -475,7 +475,7 @@ describe("SitePreviewPage", () => {
   });
 
   it("aborts a share when the pre-share refresh returns a different site's root than the tab's own", async () => {
-    // getSitePackage returns the deepest CONTAINING site for a path, so a
+    // getSitePackage returns the deepest containing site for a path, so a
     // stale tab whose own root stopped being a detected site can still get
     // back a detected ancestor above it — sharing that ancestor would offer
     // a different site than the one this tab names.
@@ -1262,7 +1262,7 @@ describe("SitePreviewPage", () => {
     expect(screen.getByTestId("site-preview-stop")).toBeTruthy();
   });
 
-  it("refuses to render HTTPS loopback preview URLs", async () => {
+  it("refuses to render https loopback preview URLs", async () => {
     bridgeMock.startSitePreview.mockResolvedValueOnce({
       siteRoot: "report",
       mode: "static",

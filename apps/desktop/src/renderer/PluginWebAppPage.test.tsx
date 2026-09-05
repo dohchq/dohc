@@ -129,8 +129,7 @@ describe("PluginWebAppPage", () => {
       />,
     );
     await screen.findByTestId("plugin-web-app-frame");
-    // MUTATION (drop the report): the tab keeps the raw web app id.
-    expect(titles).toEqual([["t3-code", "app", "T3 Code"]]);
+    expect(titles, "drop the report: the tab keeps the raw web app id.").toEqual([["t3-code", "app", "T3 Code"]]);
   });
 
   it("reports no title for a start that resolves after unmount", async () => {
@@ -173,8 +172,6 @@ describe("PluginWebAppPage", () => {
     await screen.findByTestId("plugin-web-app-frame");
     expect(lastReport()?.visible).toBe(true);
 
-    // MUTATION (ignore the overlay signal): the guest keeps compositing over
-    // the dialog and keeps the clicks aimed at it.
     await act(async () => {
       view.rerender(
         <PluginWebAppPage
@@ -211,8 +208,6 @@ describe("PluginWebAppPage", () => {
     // its answer through this schema and preload parses it again before the
     // renderer sees it. Asserting the keys of this file's own mock would
     // prove only that the mock is unchanged.
-    // MUTATION (drop .strict() from the ok result): a start URL carrying the
-    // one-time pairing credential in its fragment reaches the renderer.
     expect(() =>
       StartPluginWebAppResult.parse({
         status: "ok",
@@ -348,11 +343,8 @@ describe("PluginWebAppPage", () => {
       instanceKey: null,
     });
 
-    // MUTATION (drop the notification, on either side): the page keeps its
-    // ready state over a destroyed view — a blank tab with no error, no hint,
-    // and bounds reports that main silently drops.
     const error = await screen.findByTestId("plugin-web-app-error");
-    expect(error.textContent).toContain("dohc could not open the plugin app");
+    expect(error.textContent, "drop the notification, on either side: the page keeps its ready state over a destroyed view — a blank tab with no error, no hint, and bounds reports that main silently drops.").toContain("dohc could not open the plugin app");
     expect(error.textContent).toContain(
       "The app stopped before it finished opening.",
     );

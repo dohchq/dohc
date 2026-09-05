@@ -14,7 +14,7 @@ describe("jsonStringEncodedLength", () => {
     "two-byte utf-8": "\u00e9\u07ff",
     "three-byte utf-8": "\u0800\uffff",
     "astral pair": "\u{1f642}\u{10000}",
-    // A LONE surrogate: three UTF-8 bytes by its value, six characters once
+    // A lone surrogate: three UTF-8 bytes by its value, six characters once
     // `JSON.stringify` escapes it. Counting it by value under-measures a body
     // by half, on a budget that decides whether a request can cross at all.
     "lone high surrogate": "\ud800",
@@ -25,7 +25,7 @@ describe("jsonStringEncodedLength", () => {
 
   for (const [name, sample] of Object.entries(vectors)) {
     it(`counts ${name} the way JSON.stringify writes it`, () => {
-      // UTF-8 BYTES, the unit a frame is measured in — not UTF-16 units.
+      // UTF-8 bytes, the unit a frame is measured in — not UTF-16 units.
       expect(jsonStringEncodedLength(sample)).toBe(
         Buffer.byteLength(JSON.stringify(sample), "utf8"),
       );

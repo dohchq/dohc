@@ -55,7 +55,7 @@ pub struct EngineDbScan {
 impl EngineDbScan {
     /// Read `db_path` and its sidecars.
     ///
-    /// Do NOT drop every connection first for a "never reaches disk" property:
+    /// Do not drop every connection first for a "never reaches disk" property:
     /// that close checkpoints the WAL into the main file and normally deletes the
     /// WAL, so an overwritten plaintext page is gone before this reads it. Hold a
     /// [`crate::harness::open_readonly_keeper`] across the writer's close and
@@ -80,8 +80,8 @@ impl EngineDbScan {
             db_path.display()
         );
         let mut files = vec![(db_path.to_path_buf(), main)];
-        // The sidecars are present only while the WAL is live. Their ABSENCE is
-        // normal after a clean close; any OTHER read error is not, and must not
+        // The sidecars are present only while the WAL is live. Their absence is
+        // normal after a clean close; any other read error is not, and must not
         // be swallowed. `if let Ok(..)` treated a permissions failure, an I/O
         // error or a Windows sharing violation as "no such file", so a leak
         // living only in an unreadable WAL would produce a passing security test
@@ -162,7 +162,7 @@ impl EngineDbScan {
     /// a value that reached the file through a UTF-16 encoder -- every other
     /// byte is a NUL, so the UTF-8 needle never matches.
     ///
-    /// Use this for MARKERS as well as whole bodies. A whole-body needle only
+    /// Use this for markers as well as whole bodies. A whole-body needle only
     /// matches a leak of the entire file: a site that persisted just the secret
     /// value, or one line of it, defeats it. That was the hole here — the body
     /// gained all three forms while the distinctive marker assertions beside it
@@ -193,7 +193,7 @@ impl EngineDbScan {
     /// Assert a `-wal` sidecar was among the files read, and that it holds
     /// bytes. Without this, a scan whose WAL was checkpointed away still passes
     /// every absence assertion -- over the main file alone, which holds only the
-    /// FINAL page image. The bytes a leak would have touched and then overwritten
+    /// final page image. The bytes a leak would have touched and then overwritten
     /// live in the WAL, so a scan that missed it proves nothing about them.
     ///
     /// # Panics

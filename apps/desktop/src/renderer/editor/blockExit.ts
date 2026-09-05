@@ -7,7 +7,7 @@ import type { EditorView } from "@tiptap/pm/view";
 // The engine-mode (collab) editor has NO trailing-node extension — auto-
 // appending a paragraph would write to the shared Y.Doc on mere open — so a
 // document that ends in a callout, table, or fenced block has no paragraph to
-// escape into. And a FOLDED callout ("toggle") hides its body with CSS, so the
+// escape into. And a folded callout ("toggle") hides its body with CSS, so the
 // default join/caret behavior around it moves text into (or the caret onto)
 // content the user cannot see.
 //
@@ -18,14 +18,14 @@ import type { EditorView } from "@tiptap/pm/view";
 //   - ArrowDown at the very end of the document, when the caret is trapped
 //     inside a top-level callout/table or a code-style block, creates the
 //     paragraph below. This covers codeBlock, callout, and table node types.
-//   - Arrow/Backspace/Delete next to a FOLDED callout select the callout node
+//   - Arrow/Backspace/Delete next to a folded callout select the callout node
 //     instead of joining into / moving the caret onto its hidden body. A
 //     second Backspace/Delete then removes it — making toggles deletable.
 //
-// Registration order matters: this plugin must sit AFTER the slash-command
-// plugin (so menu navigation keeps ArrowDown while the menu is open), BEFORE
+// Registration order matters: this plugin must sit after the slash-command
+// plugin (so menu navigation keeps ArrowDown while the menu is open), before
 // makeCodeBlockContinuationPlugin (so Mod-Enter/ArrowDown in a terminal code
-// block nested in a callout escape past the whole callout), and BEFORE the
+// block nested in a callout escape past the whole callout), and before the
 // StarterKit keymaps (so Mod-Enter beats HardBreak). Top-level code blocks
 // fall through on Mod-Enter for the continuation plugin to handle.
 const blockExitKey = new PluginKey("dohc-block-exit");

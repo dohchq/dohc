@@ -194,7 +194,6 @@ describe("WorkspaceFileListingCache", () => {
     });
     await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-2.md"));
 
-    // MUTATION: treating a mixed set as hidden leaves the file tree stale.
     cache.invalidate({
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "notes/new.md"],

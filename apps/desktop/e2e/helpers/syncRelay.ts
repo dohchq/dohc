@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { desktopRoot } from "./desktopApp";
 
-// Spawns the REAL sync-relay service (services/sync-relay) as a child
+// Spawns the real sync-relay service (services/sync-relay) as a child
 // process for the 0P sync E2E specs — the same pattern as the relay's own
 // integration tests: NODE_ENV=test + SYNC_RELAY_TEST_AUTH accepts
 // `Bearer test:<user>` without a Postgres auth backend, and SQLite storage
@@ -27,7 +27,7 @@ export interface SyncRelayLinkBoundary {
 
 export async function spawnSyncRelay(input: {
   dbPath: string;
-  // Restarts (the offline-rejoin spec) must come back on the SAME port the
+  // Restarts (the offline-rejoin spec) must come back on the same port the
   // desktop app already has in its credential file.
   port?: number;
   linkBoundary?: SyncRelayLinkBoundary;
@@ -126,14 +126,14 @@ const { DatabaseSync } = requireModule("node:sqlite") as {
   };
 };
 
-// R10b: the relay adopts the FIRST replication identity a pusher presents.
+// R10b: the relay adopts the first replication identity a pusher presents.
 // Identity-less /log calls then fail; the owner-only /bootstrap route is the
 // production handoff for a joining daemon. Harnesses still inspect SQLite here
 // to assert adoption itself and to drive tests that do not run the join flow.
 // Only "the db file does not exist yet" reads as "not adopted yet" to a
 // poll; anything else — including schema drift ("no such table") and the
 // malformed-row throw below (whose message embeds raw values that could
-// contain arbitrary text) — must fail loud. Classify by error CODE, and only
+// contain arbitrary text) — must fail loud. Classify by error code, and only
 // for the open failure, never by matching message text.
 function isRelayDbNotReady(error: unknown, dbOpened: boolean): boolean {
   if (dbOpened) return false;

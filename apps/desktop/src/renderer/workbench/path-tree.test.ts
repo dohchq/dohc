@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { buildTree, type FileRow } from "./path-tree";
 
 // Ported + slimmed with path-tree.ts: the sort rule is folders before
-// leaves, then alphabetical (locale-aware). Empty folders STILL sort as
+// leaves, then alphabetical (locale-aware). Empty folders still sort as
 // folders (file === null decides, never children.length).
 
 function row(path: string): FileRow {
@@ -10,12 +10,12 @@ function row(path: string): FileRow {
 }
 
 describe("buildTree — sort order (folders → alphabetical)", () => {
-  it("folders sort BEFORE leaves at every level", () => {
+  it("folders sort before leaves at every level", () => {
     const tree = buildTree([row("zeta.md"), row("alpha/inner.md")], ["alpha"]);
     expect(tree.children.map((c) => c.segment)).toEqual(["alpha", "zeta.md"]);
   });
 
-  it("an EMPTY listed folder still sorts BEFORE a leaf at the same level", () => {
+  it("an empty listed folder still sorts before a leaf at the same level", () => {
     const tree = buildTree([row("zeta.md")], ["alpha"]);
     expect(tree.children.map((c) => c.segment)).toEqual(["alpha", "zeta.md"]);
     const alpha = tree.children[0]!;

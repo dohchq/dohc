@@ -1,14 +1,14 @@
 // MU-C1 — the EPHEMERAL awareness transport (presence / typing / co-viewing).
 //
 // This is the in-memory pub/sub the design calls "the ephemeral awareness
-// channel over the relay transport". It is DELIBERATELY separate from the
+// channel over the relay transport". It is deliberately separate from the
 // durable op log (storage.ts / sync_relay_log): presence, typing, and
 // "viewing this channel/doc" are last-writer, self-expiring, dropped on
-// disconnect, and MUST NEVER be journaled (0P Risk 2 / the G2-C awareness
+// disconnect, and must never be journaled (0P Risk 2 / the G2-C awareness
 // rule). Nothing in this module touches `storage` — it holds no sqlite handle,
 // writes no row, and is lost entirely on relay restart. That is the contract.
 //
-// It rides the SAME relay process a self-hoster already runs (no new service),
+// It rides the same relay process a self-hoster already runs (no new service),
 // so presence is fully self-hostable. If a proxy blocks the presence routes,
 // chat/co-editing still work fully — only presence degrades, exactly the
 // G2-C/design contract.
@@ -18,14 +18,14 @@
 // cursor. A publisher heartbeats faster than the entry TTL to stay "present";
 // a peer polls with the last version and re-parks.
 //
-// Identity is NEVER trusted from the client. The relay stamps each entry's
+// Identity is never trusted from the client. The relay stamps each entry's
 // `userId` from the authenticated Better Auth actor (server-derived, the same
 // posture as MU-C0 authorship). The client's `state` blob is opaque display
 // data (display name, "viewing" | "typing", cursor); attribution keys on the
 // relay-stamped `userId`, so presence cannot impersonate another user.
 //
 // RESOURCE SAFETY (the load-bearing part): everything in the hub is bounded
-// AND time-expired. Expiry is TIME-DRIVEN — a sweep timer removes entries past
+// and time-expired. Expiry is TIME-DRIVEN — a sweep timer removes entries past
 // their TTL and reclaims empty scopes even if nothing ever touches that scope
 // again, so a client that sprays unique topics and disconnects cannot grow
 // memory forever. On top of the TTL there are hard caps: global and
@@ -67,9 +67,9 @@ export interface PresenceHubOptions {
   entryTtlMs?: number;
   // Hard cap on distinct entries in one scope — bounds memory against a
   // misbehaving client spraying clientIds. Updates to existing entries are
-  // always allowed; only NEW distinct entries past the cap are refused.
+  // always allowed; only new distinct entries past the cap are refused.
   maxEntriesPerScope?: number;
-  // Global caps across ALL scopes: total scope count and total entry count.
+  // Global caps across all scopes: total scope count and total entry count.
   maxScopes?: number;
   maxTotalEntries?: number;
   // Per-workspace (scope group) caps, so one workspace spraying topics cannot
@@ -101,7 +101,7 @@ const DEFAULT_PRESENCE_MAX_WAITERS_PER_SCOPE = 512;
 const DEFAULT_PRESENCE_MAX_WAITERS_PER_ACTOR = 64;
 
 // Scope key shared by an owner (workspace route) and every share recipient
-// (share route resolves the granter's workspaceId), so co-viewers of the SAME
+// (share route resolves the granter's workspaceId), so co-viewers of the same
 // (workspace, topic) fan into one scope regardless of how they were
 // authorized. NUL separators keep it unambiguous — the parse boundary
 // (server.ts parseString) rejects control characters in every component, so
@@ -185,7 +185,7 @@ export class PresenceHub {
 
   // Publish (or refresh) this actor's presence in a scope. Returns the fresh
   // snapshot so the publisher immediately sees its peers. `userId` is the
-  // server-derived actor id; the caller must NEVER pass a client-claimed id.
+  // server-derived actor id; the caller must never pass a client-claimed id.
   publish(
     scopeKey: string,
     userId: string,
@@ -196,7 +196,7 @@ export class PresenceHub {
     const existing = this.scopes.get(scopeKey);
     if (existing) this.prune(existing, nowMs);
     const key = entryKey(userId, clientId);
-    // Enforce every entry cap BEFORE creating anything, so a refused publish
+    // Enforce every entry cap before creating anything, so a refused publish
     // allocates nothing. Updates to existing entries are always allowed.
     if (!existing?.entries.has(key)) {
       if ((existing?.entries.size ?? 0) >= this.maxEntriesPerScope) {
@@ -216,14 +216,14 @@ export class PresenceHub {
     return this.snapshotOf(scope);
   }
 
-  // Explicit disconnect: remove this actor's entry NOW (not on TTL). Sent by
+  // Explicit disconnect: remove this actor's entry now (not on TTL). Sent by
   // the client on unmount / blur / page-hide so peers see the departure
   // promptly rather than waiting out the TTL.
   leave(scopeKey: string, userId: string, clientId: string, nowMs: number): PresenceSnapshot {
     const scope = this.scopes.get(scopeKey);
     if (!scope) return { version: 0, peers: [] };
-    // Bump on EITHER removal (same pattern as snapshot()/wait()): a retried
-    // leave whose own entry is already gone can still prune a DIFFERENT stale
+    // Bump on either removal (same pattern as snapshot()/wait()): a retried
+    // leave whose own entry is already gone can still prune a different stale
     // peer here, and that departure must wake parked waiters too.
     const pruned = this.prune(scope, nowMs);
     const deleted = this.deleteEntry(scope, entryKey(userId, clientId));
@@ -245,7 +245,7 @@ export class PresenceHub {
   // Long-poll: resolve immediately if the scope has advanced past `since`,
   // otherwise park until the next change or `holdMs`, then return the current
   // snapshot (the poller re-parks). Aborting the request (client disconnect)
-  // resolves early AND releases the parked slot. Parked waiters are capped —
+  // resolves early and releases the parked slot. Parked waiters are capped —
   // beyond the caps this throws PresenceCapacityError instead of parking.
   wait(scopeKey: string, since: number, options: PresenceWaitOptions): Promise<PresenceSnapshot> {
     const scope = this.scopeFor(scopeKey); // may throw on the scope-count caps

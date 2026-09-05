@@ -175,7 +175,7 @@ describe("the ladder, longest name first", () => {
 });
 
 // This rule replaced a Buffer implementation with a TextDecoder one, and the
-// two are equivalent everywhere EXCEPT a leading U+FEFF: the default decoder
+// two are equivalent everywhere except a leading U+FEFF: the default decoder
 // eats it as a byte-order mark. For filename bytes that is data loss with no
 // error attached.
 describe("truncation decodes filename bytes, not a text stream", () => {
@@ -187,7 +187,7 @@ describe("truncation decodes filename bytes, not a text stream", () => {
     expect(fitted).toBe(`\uFEFF${"a".repeat(budget - 3)}`);
   });
 
-  // A genuine U+FFFD in a filename is a CHARACTER, and the old rule deleted it
+  // A genuine U+FFFD in a filename is a character, and the old rule deleted it
   // whenever the cut landed right after its complete encoding: it stripped
   // every trailing U+FFFD, which cannot tell a sequence the cut broke from one
   // the name already carried. The trash keeps no record of the original name,
@@ -212,11 +212,11 @@ describe("truncation decodes filename bytes, not a text stream", () => {
     expect(fitWithinNameMax("abcdefg\uD800xyz", prefix, { unit: "utf16" })).toBe(
       "abcdefg\uD800",
     );
-    // And a pair the cut DOES split loses its half.
+    // And a pair the cut does split loses its half.
     expect(fitWithinNameMax("abcdefg😀z", prefix, { unit: "utf16" })).toBe("abcdefg");
   });
 
-  // Checked THROUGH the module, against a reference written a different way:
+  // Checked through the module, against a reference written a different way:
   // build the name up code point by code point and keep the longest prefix
   // that fits. Obviously correct, and it shares no code with the byte-level
   // cut, so agreeing means something. An earlier version used
@@ -265,9 +265,9 @@ describe("truncation decodes filename bytes, not a text stream", () => {
 
 // The collision path had the ladder's mechanism sitting right next to it and
 // not wired in. Measuring the component in UTF-16 units is right for NTFS and
-// leaves a multibyte name LONGER than the old byte rule did, so a colliding
+// leaves a multibyte name longer than the old byte rule did, so a colliding
 // CJK name in a deep folder composed past MAX_PATH -- and copyFile answered
-// ENOENT, #613's original symptom arriving through the import path.
+// ENOENT, the original symptom arriving through the import path.
 describe("collision variants ride the same ladder", () => {
   // A real Windows-shaped depth, written without escapes so the length is
   // obvious: 190 characters, leaving 68 for the entry name.

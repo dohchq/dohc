@@ -551,9 +551,6 @@ async fn resolve_refuses_a_stale_target_without_clobbering_the_newer_head() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_cap_merged_resolution_applies_and_withholds_its_body() {
-    // MUTATION: cap the merged arm at MAX_DESKTOP_CAPTURE_TEXT_BYTES again ->
-    // the resolve refuses instead of settling. MUTATION: echo the settled body
-    // through the unclamped `snapshot_json` -> the withheld assertions fail.
     let (_scratch, service, transport, handle, workspace_id) =
         fixture_with_service("over-cap-merged").await;
     let path =
@@ -561,7 +558,10 @@ async fn over_cap_merged_resolution_applies_and_withholds_its_body() {
     // Past MAX_DESKTOP_CAPTURE_TEXT_BYTES (128 KiB). The multi-byte character
     // keeps the byte length honest against a character count.
     let merged = "combined \u{2713} line\n".repeat(12_000);
-    assert!(merged.len() > 128 * 1024);
+    assert!(
+        merged.len() > 128 * 1024,
+        "cap the merged arm at MAX_DESKTOP_CAPTURE_TEXT_BYTES again -> the resolve refuses instead of settling; echo the settled body through the unclamped `snapshot_json` -> the withheld assertions fail."
+    );
     let merged_sha256 = dohc_engine_storage::hex_sha256(merged.as_bytes());
 
     let resolved = transport
@@ -649,8 +649,6 @@ async fn over_cap_merged_resolution_applies_and_withholds_its_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
-    // MUTATION: drop the limit, the unit, or the observed size from the
-    // message -> the refusal names nothing an agent can act on and this fails.
     let (_scratch, transport, handle, workspace_id) = fixture("past-frame-limit").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
@@ -660,11 +658,12 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
     // carry it. A raw-byte check would accept it here and let the client's own
     // framer refuse it, with no limit named anywhere.
     //
-    // MUTATION: measure `text.len()` instead of the encoded request -> the
-    // resolve is accepted and this refusal never happens.
     let newlines = "\n".repeat(4 * 1024 * 1024);
     let encoded_newlines = newlines.len() * 2 + 2;
-    assert!(newlines.len() < frame && encoded_newlines > frame);
+    assert!(
+        newlines.len() < frame && encoded_newlines > frame,
+        "measure `text.len()` instead of the encoded request -> the resolve is accepted and this refusal never happens."
+    );
     let escaped = transport
         .call(
             RequestContext::unbounded(),
@@ -771,16 +770,14 @@ async fn merged_resolution_past_the_frame_limit_is_refused_by_name() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_near_cap_conflict_row_answers_a_resolution_inside_one_control_frame() {
-    // A conflict whose sides nearly fill the row cap the LISTING admits. Its
+    // A conflict whose sides nearly fill the row cap the listing admits. Its
     // resolve answer carries five text bodies — three sides, the settled
     // snapshot, and the moment's before and after — and one frame has to hold
     // all of them. Withholding the settled body alone is not enough: the two
     // in-band residuals still push a near-cap row past the frame, and the
     // daemon's writer treats an oversized answer as a fatal transport error
-    // AFTER the resolution has committed.
+    // after the resolution has committed.
     //
-    // MUTATION: answer with `conflict_json` instead of `settled_conflict_json`
-    // -> the response no longer encodes into one control frame.
     let (_scratch, transport, handle, workspace_id) = fixture("near-cap-row").await;
     let side = "s".repeat(4_100_000);
     let path =
@@ -802,7 +799,7 @@ async fn a_near_cap_conflict_row_answers_a_resolution_inside_one_control_frame()
         .await
         .expect("the row cap admits this conflict, so a caller can reach it");
     assert_eq!(listed.result["conflicts"].as_array().unwrap().len(), 1);
-    // The premise, asserted: the row rides UNDER the cap, bodies in band. A
+    // The premise, asserted: the row rides under the cap, bodies in band. A
     // degraded (withheld) row would no longer carry the in-band residuals
     // whose frame cost this test exists to measure.
     for side_name in ["base", "current", "incoming"] {
@@ -867,8 +864,6 @@ async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
     // beside them. A body-only budget accepts this request and the client's
     // framer then refuses it, naming nothing the caller asked about.
     //
-    // MUTATION: bound the body alone (encoded or raw) instead of the request
-    // -> this resolve is accepted and the refusal never happens.
     let (_scratch, transport, handle, workspace_id) = fixture("metadata-headroom").await;
     let path =
         open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
@@ -931,15 +926,13 @@ async fn metadata_beside_a_large_body_is_measured_against_the_same_frame() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_that_exactly_fills_the_frame_is_applied_and_one_byte_more_is_refused() {
-    // THE BOUNDARY, measured on the real envelope rather than a worst-case
+    // The boundary, measured on the real envelope rather than a worst-case
     // stand-in. This request carries the id and deadline it actually has, so
     // the size the daemon measures is the size that crossed. Substituting
     // `u64::MAX` and `u32::MAX` for them inflates the total by about thirty
     // bytes, and everything inside that band is valid work refused with a size
     // that never existed.
     //
-    // MUTATION: substitute the worst-case id and deadline again -> the at-frame
-    // resolution is refused and this fails.
     let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
     let (_scratch, transport, handle, workspace_id) = fixture("frame-boundary").await;
     let path =
@@ -1054,8 +1047,6 @@ async fn the_largest_accepted_request_crosses_as_one_control_frame() {
     // be one the transport can carry. This pins that: a resolve request built
     // to sit just inside the budget encodes into one control frame.
     //
-    // MUTATION: compare against `max_frame_bytes + 1` -> the envelope the
-    // daemon would accept no longer encodes.
     let frame = WireLimits::SPIKE_DEFAULTS.max_frame_bytes as usize;
     let envelope = Envelope::Request(request(
         12,
@@ -1084,8 +1075,6 @@ async fn a_body_at_the_in_band_cap_is_carried_and_one_byte_more_is_withheld() {
     // Both directions matter — a rule that withholds at the cap costs a
     // hydration round trip for a body that fits.
     //
-    // MUTATION: relax `>` to `>=` in withhold_over_cap_text -> the at-cap
-    // resolution comes back withheld and this fails.
     let cap = 128 * 1024;
     for (name, size, withheld) in [("at-cap", cap, false), ("past-cap", cap + 1, true)] {
         let (_scratch, transport, handle, workspace_id) = fixture(name).await;
@@ -1277,8 +1266,6 @@ async fn oversized_conflict_inventory_is_wire_safe_across_pages_and_session_surv
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conflict_page_cursor_round_trips_without_duplicates_or_gaps() {
-    // MUTATION: ignore afterConflictId (or resume before it) and page two
-    // repeats conflict-000 instead of returning conflict-001.
     let (_scratch, transport, handle, workspace_id) = fixture("cursor").await;
     let text = "\0".repeat(20_000);
     seed_conflicts(&transport, &handle, &workspace_id, 3, &text).await;
@@ -1461,9 +1448,7 @@ async fn escape_heavy_conflict_that_fits_the_control_frame_is_returned() {
 async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refusing() {
     // Three ~3 MB sides serialize past CONFLICT_ROW_HARD_CAP_BYTES (the 8 MiB
     // control frame minus 64 KiB envelope headroom), so this row can never
-    // carry its bodies in band. MUTATION: skip the withholding pass in
-    // `conflicts_list` and this listing refuses with
-    // `conflict-row-exceeds-wire-limit`, taking the healthy neighbor with it.
+    // carry its bodies in band.
     let (_scratch, service, transport, handle, workspace_id) =
         fixture_with_service("over-frame-row").await;
     let oversized = "x".repeat(3_000_000);
@@ -1529,7 +1514,7 @@ async fn over_frame_conflict_row_degrades_to_hydratable_metadata_instead_of_refu
     assert_eq!(egress.bytes, oversized.as_bytes());
 }
 
-/// The replicated shape of an open, which is NOT the RPC DTO's shape: a
+/// The replicated shape of an open, which is not the RPC DTO's shape: a
 /// peer's sides carry `exists`/`path`/`contentKind`, never a nested snapshot
 /// (`dohc-engine-sync::conflict_apply::OpenPayload`). Built here so the test
 /// exercises the route a peer actually takes.
@@ -1569,11 +1554,9 @@ async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
     // withholding cannot shrink it, so a conflict whose non-withheld strings
     // outgrow one row would dead-end `conflicts.list` for every open conflict
     // in the workspace. The bound lives at the shared pre-persistence path
-    // (`insert_text_conflict_if_absent`) because that is the ONLY place both
+    // (`insert_text_conflict_if_absent`) because that is the only place both
     // open routes meet — the RPC DTO never sees a peer's open.
     //
-    // MUTATION: delete the budget check in `insert_text_conflict_if_absent`
-    // and every open below succeeds.
     let (_scratch, transport, handle, workspace_id) = fixture("metadata-budget").await;
     let over_budget = "m".repeat(dohc_engine_domain::CONFLICT_METADATA_BUDGET_BYTES + 1);
 
@@ -1600,14 +1583,14 @@ async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
         );
     }
 
-    // ROUTE 2: a PEER's replicated open, which never passes through the RPC
+    // ROUTE 2: a peer's replicated open, which never passes through the RPC
     // DTO above.
     //
-    // A peer cannot reach the row budget at all, and this pins WHY:
+    // A peer cannot reach the row budget at all, and this pins why:
     // `ReplicationEnvelope::validate` caps every payload at
     // `MAX_PAYLOAD_JSON_BYTES` (256 KiB) before any apply runs, which is some
     // thirty times inside the row budget. So the two routes are covered by
-    // two different bounds, and this test holds BOTH ends — the shared budget
+    // two different bounds, and this test holds both ends — the shared budget
     // for the local route, the payload cap for the replicated one — rather
     // than assuming either covers the other.
     let refused = transport
@@ -1630,10 +1613,9 @@ async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
         .expect_err("a replicated envelope past the payload cap is refused before apply");
     assert_eq!(refused.code, ErrorCode::InvalidParams);
 
-    // The largest conflict a peer CAN serve: a payload just inside the cap.
+    // The largest conflict a peer can serve: a payload just inside the cap.
     // It applies, and the listing still answers — which is the property the
-    // budget protects, reached here by the payload cap instead. MUTATION:
-    // narrowing the budget below this refuses it.
+    // budget protects, reached here by the payload cap instead.
     let peer_summary = "p".repeat(200 * 1024);
     let applied = transport
         .call(
@@ -1655,7 +1637,7 @@ async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
         .expect("the largest legal replicated open applies");
     assert_eq!(applied.result["status"], "applied");
 
-    // EVERY non-withheld string, not an enumerated subset: `metadata.origin`
+    // Every non-withheld string, not an enumerated subset: `metadata.origin`
     // is persisted verbatim and serialized into every row, and no body
     // withholding can shrink it.
     let mut origin_payload = conflict_payload(&workspace_id, 2, "small body");
@@ -1706,7 +1688,7 @@ async fn over_budget_conflict_metadata_is_refused_on_both_open_routes() {
 async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
     // AGENTS.md: measure representative healthy work before adding a limit
     // that rejects it. This is that measurement, executable, so a later
-    // narrowing of the budget fails HERE rather than on a user's workspace.
+    // narrowing of the budget fails here rather than on a user's workspace.
     //
     // Case 1: an ordinary conflict this repo's own paths produce. Case 2: the
     // worst metadata a caller can legitimately supply — every free-form
@@ -1757,7 +1739,7 @@ async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
             request(11, "conflicts.open", Some(handle.clone()), maximal),
         )
         .await
-        .expect("MUTATION: a budget under the measured healthy range refuses this");
+        .expect("a budget under the measured healthy range refuses this");
     assert_eq!(opened.result["inserted"], true);
 
     // And it still lists, which is the property the budget exists to protect.
@@ -1775,7 +1757,7 @@ async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
         .expect("the maximal-metadata conflict lists");
     let mut maximal_row = listed.result["conflicts"][0].clone();
     assert_eq!(maximal_row["id"], "conflict-001");
-    // Measured on the SAME quantity the budget bounds — the row with its
+    // Measured on the same quantity the budget bounds — the row with its
     // bodies withheld — not on the full row, whose bodies the budget exempts.
     for side in ["base", "current", "incoming"] {
         if let Some(snapshot) = maximal_row[side].get_mut("snapshot") {
@@ -1785,7 +1767,7 @@ async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
     let maximal_cost = serde_json::to_string(&maximal_row)
         .expect("serialize maximal row")
         .len();
-    // The headroom the budget keeps over the worst healthy conflict, MEASURED
+    // The headroom the budget keeps over the worst healthy conflict, measured
     // rather than assumed: about 226 KiB against a budget of roughly 8.26 MB,
     // some thirty-five times over. Asserted so a future narrowing of the
     // budget has to confront the measurement here, not a user's workspace.
@@ -1798,7 +1780,7 @@ async fn healthy_conflict_metadata_sits_far_inside_the_row_budget() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_row_over_the_cap_on_the_sum_of_its_bodies_withholds_every_one_of_them() {
-    // The AGGREGATE gap. Three sides exactly at the in-band body limit are
+    // The aggregate gap. Three sides exactly at the in-band body limit are
     // each individually carriable, so the per-body rule withholds none of
     // them — while their sum, beside metadata near the budget, still carries
     // the row past `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the bodies
@@ -1806,9 +1788,6 @@ async fn a_row_over_the_cap_on_the_sum_of_its_bodies_withholds_every_one_of_them
     // the cursor for every open conflict, which is #537 again by another
     // route. The failure is the sum, so the remedy is the sum.
     //
-    // MUTATION: call `withhold_conflict_side_texts` instead of
-    // `withhold_all_conflict_side_texts` in `conflicts_list`, and this listing
-    // refuses with `conflict-row-exceeds-wire-limit`.
     let (_scratch, transport, handle, workspace_id) = fixture("aggregate-row").await;
     // Exactly AT the in-band limit, so no side trips the per-body rule.
     let body = "b".repeat(128 * 1024);
@@ -1861,13 +1840,11 @@ async fn a_row_over_the_cap_on_the_sum_of_its_bodies_withholds_every_one_of_them
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_continuation_id_is_measured_at_both_copies_the_page_serves() {
-    // `conflicts.list` serves a conflict id TWICE: once inside its row, and
+    // `conflicts.list` serves a conflict id twice: once inside its row, and
     // again as `nextAfterConflictId`. Counting one copy would admit an id
     // that then puts the page over the frame, which the daemon's writer
     // treats as fatal rather than answering.
     //
-    // MUTATION: count `conflict_id` once in `non_withheld_encoded_bytes` and
-    // the over-budget open below succeeds.
     let (_scratch, transport, handle, workspace_id) = fixture("cursor-copies").await;
     // Under one copy this fits the budget; under two it cannot.
     let long_id = "c".repeat(6 * 1024 * 1024);
@@ -1884,7 +1861,7 @@ async fn the_continuation_id_is_measured_at_both_copies_the_page_serves() {
 
     // The ENCODED guard: at the largest id the budget admits, the whole page
     // — leading row plus the continuation it hands back — still fits the
-    // frame. This measures what is SERVED rather than summing what is
+    // frame. This measures what is served rather than summing what is
     // stored, so a string served more times than the budget counts fails
     // here even if nobody remembered to enumerate it.
     let paged_id = "c".repeat(4_000_000);
@@ -1939,11 +1916,9 @@ async fn a_page_over_the_frame_beside_its_continuation_withholds_every_body() {
     // BODY is exempt from that budget, though, so an in-band body can occupy
     // the room the second copy needs: row and cursor are each admissible and
     // their sum is not. The daemon's writer treats an over-frame answer as
-    // fatal rather than answering, which is #537's failure shape by a third
+    // fatal rather than answering, which is the failure shape by a third
     // route.
     //
-    // MUTATION: drop the page measure from `conflicts_list` and this page no
-    // longer encodes into a control frame.
     let (_scratch, transport, handle, workspace_id) = fixture("page-continuation").await;
     // Inside the budget at the two copies it counts (7 MB of 8,257,536), and
     // the row carrying one copy still fits the row cap beside its bodies.
@@ -1960,7 +1935,8 @@ async fn a_page_over_the_frame_beside_its_continuation_withholds_every_body() {
             .await
             .expect("the conflict is inside the metadata budget and opens")
             .result["inserted"],
-        true
+        true,
+        "drop the page measure from `conflicts_list` and this page no longer encodes into a control frame.",
     );
     let second = conflict_payload(&workspace_id, 1, "small body");
     transport
@@ -2010,11 +1986,9 @@ async fn a_resolve_answer_over_the_frame_withholds_every_body_it_serves() {
     // `CONFLICT_METADATA_BUDGET_BYTES`, and every body under the 128 KiB
     // in-band limit rides beside it — three sides, the settled snapshot, and
     // the moment's after body. Each part is admissible, their sum is not, and
-    // this answer reports a mutation that ALREADY COMMITTED: an over-frame
+    // this answer reports a mutation that already committed: an over-frame
     // answer loses the acknowledgement for work the workspace kept.
     //
-    // MUTATION: drop the aggregate measure from `conflicts_resolve` and this
-    // answer no longer encodes into a control frame.
     let (_scratch, transport, handle, workspace_id) = fixture("resolve-aggregate").await;
     let side = "s".repeat(128 * 1024);
     let merged = "m".repeat(120 * 1024);
@@ -2093,17 +2067,15 @@ async fn a_resolve_answer_over_the_frame_withholds_every_body_it_serves() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resolve_whose_withheld_answer_cannot_fit_is_refused_before_it_commits() {
-    // Withholding cannot save every answer, and the answer is built AFTER the
+    // Withholding cannot save every answer, and the answer is built after the
     // resolution commits. The strings withholding cannot shrink — this
     // conflict's 8.15 MB of metadata, and a 100 KB object id the answer
     // repeats in `object.id`, `snapshot.objectId` and `moment.objectId` —
     // carry the answer past the frame on their own. Sending it loses the
     // caller's acknowledgement for a mutation the workspace kept; refusing
     // after the commit reports work that happened as work that did not. So
-    // the answer is bounded BEFORE anything is written.
+    // the answer is bounded before anything is written.
     //
-    // MUTATION: drop the budget check from `resolve_text_conflict_with` and
-    // this resolution commits, and answers past the frame.
     let (_scratch, transport, handle, workspace_id) = fixture("resolve-answer-budget").await;
     let summary = "u".repeat(8_150_000);
     let path = open_conflict_against_seeded_head_with(
@@ -2156,7 +2128,7 @@ async fn a_resolve_whose_withheld_answer_cannot_fit_is_refused_before_it_commits
         refused.message
     );
 
-    // NOTHING WAS WRITTEN. The conflict is still open, and the head still
+    // Nothing was WRITTEN. The conflict is still open, and the head still
     // holds what it held before the refusal.
     let listed = transport
         .call(
@@ -2215,10 +2187,8 @@ async fn a_worst_legitimate_resolve_is_admitted() {
     // work anyone can legitimately do. The worst legitimate resolve is every
     // free-form field at the 16 KiB cap the sibling write paths enforce, in
     // the escaping-heaviest form (each quote encodes to two bytes), on the
-    // conflict AND on the request, with UUID-length identifiers.
+    // conflict and on the request, with UUID-length identifiers.
     //
-    // MUTATION: reserve `RESPONSE_FRAME_BYTES` for the structural allowance
-    // and this resolve is refused.
     let (_scratch, transport, handle, workspace_id) = fixture("worst-legitimate").await;
     let field = "\"".repeat(16 * 1024 - 1);
     let path = open_conflict_against_seeded_head_with(
@@ -2288,9 +2258,6 @@ async fn a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance() {
     // `RESOLVE_ANSWER_SCAFFOLDING_BYTES`. Measured on a real resolve answer
     // stripped of every free-form string, which leaves exactly that.
     //
-    // MUTATION: cut `RESOLVE_ANSWER_SCAFFOLDING_BYTES` to 128 bytes and this
-    // fails with the real figure. The allowance is READ, never copied — a
-    // local copy of the number would pass whatever the daemon reserved.
     let (_scratch, transport, handle, workspace_id) = fixture("resolve-scaffolding").await;
     open_conflict_against_seeded_head(&transport, &handle, &workspace_id, 10, "incoming").await;
     let resolved = transport
@@ -2329,7 +2296,7 @@ async fn a_fully_withheld_resolve_answer_fits_its_scaffolding_allowance() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() {
-    // A side's metadata pair is STORED once but SERVED twice: the load reads
+    // A side's metadata pair is stored once but served twice: the load reads
     // one column pair into both the side and its snapshot, so the listing row
     // carries two copies. A pre-persistence measure that counts one copy is
     // an under-estimate, and an under-estimate is the one direction this
@@ -2337,13 +2304,10 @@ async fn side_metadata_is_measured_at_the_two_copies_the_row_actually_carries() 
     // budget exists to refuse.
     //
     // Sized to separate the two rules: six fields of 1 MB each is 6 MB
-    // counted once (inside the budget, so a one-copy measure ADMITS it) and
+    // counted once (inside the budget, so a one-copy measure admits it) and
     // 12 MB counted twice (past the budget, and past the row cap the row
     // would actually have to fit).
     //
-    // MUTATION: count `metadata_summary`/`metadata_correlation_id` once in
-    // `non_withheld_encoded_bytes` and this open succeeds, persisting a
-    // conflict whose row no listing can carry.
     let (_scratch, transport, handle, workspace_id) = fixture("side-metadata-copies").await;
     let field = "s".repeat(1_000_000);
     let mut payload = conflict_payload(&workspace_id, 0, "small body");
@@ -2374,8 +2338,6 @@ async fn a_fully_withheld_conflict_row_fits_the_structural_headroom() {
     // free-form string, which leaves exactly the scaffolding — keys,
     // punctuation, and the numbers beside each withheld body.
     //
-    // MUTATION: drop `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES` to 128 and this
-    // fails with the real figure.
     let (_scratch, transport, handle, workspace_id) = fixture("structural-headroom").await;
     seed_conflicts(&transport, &handle, &workspace_id, 1, "a routine body\n").await;
     let listed = transport
@@ -2487,7 +2449,7 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
         .await
         .expect("open the at-cap conflict");
     assert_eq!(opened.result["inserted"], true);
-    // ONE byte past it: degraded to hydratable metadata.
+    // One byte past it: degraded to hydratable metadata.
     let opened = transport
         .call(
             RequestContext::unbounded(),
@@ -2537,7 +2499,7 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
     );
     assert!(
         at_cap["current"]["snapshot"]["text"].is_string(),
-        "MUTATION: degrade at >= instead of > and the at-cap row loses its in-band body"
+        "degrade at >= instead of > and the at-cap row loses its in-band body"
     );
 
     let past_cap = &rows[1];
@@ -2545,7 +2507,7 @@ async fn a_conflict_row_at_the_hard_cap_ships_in_band_and_one_byte_more_degrades
     assert_eq!(
         past_cap["current"]["snapshot"]["text"],
         Value::Null,
-        "MUTATION: degrade at > cap + 1 and the first over-cap row refuses the page"
+        "degrade at > cap + 1 and the first over-cap row refuses the page"
     );
     assert_eq!(
         past_cap["current"]["snapshot"]["inbandLimitBytes"],

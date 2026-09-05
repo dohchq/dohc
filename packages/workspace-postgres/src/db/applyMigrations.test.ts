@@ -73,7 +73,7 @@ describe.skipIf(!pgAvailable)("applyMigrations bootstraps the full Postgres sche
     expect(migrations.map((m) => m.id)).toContain("0001_better_auth");
 
     const ran = await applyMigrations(client);
-    // A fresh schema gains ALL migrations on the first run, in filename order.
+    // A fresh schema gains all migrations on the first run, in filename order.
     expect(ran).toEqual(migrations.map((m) => m.id));
 
     // The Better Auth tables exist without the retired application schema.

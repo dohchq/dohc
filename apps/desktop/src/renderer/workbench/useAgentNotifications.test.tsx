@@ -120,7 +120,7 @@ describe("useAgentNotifications workspace isolation", () => {
     expect(result.current.notifications).toEqual([]);
 
     // Away to B, then back to A. A polls again (still completed) but the
-    // per-workspace dismissal persisted, so the notice is NOT re-raised.
+    // per-workspace dismissal persisted, so the notice is not re-raised.
     rerender({ ws: "ws-b" });
     rerender({ ws: "ws-a" });
 
@@ -227,7 +227,7 @@ describe("useAgentNotifications idle polling", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
 
-    // A run starts and pings: the hook polls NOW — the first permission ask
+    // A run starts and pings: the hook polls now — the first permission ask
     // must not sit invisible for up to 10s.
     getAgentSessionState.mockImplementation(async () => panelFor("ws-a"));
     await act(async () => {

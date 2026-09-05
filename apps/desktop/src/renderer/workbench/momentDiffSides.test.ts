@@ -14,8 +14,6 @@ const bytes = (byteLength: number) => ({ sha256: "a".repeat(64), byteLength });
 
 describe("momentDiffSides", () => {
   it("keeps the readable preimage when text became binary", () => {
-    // MUTATION: key the page on one record-level kind -> `before` is dropped
-    // and the only readable thing this moment has disappears.
     const sides = momentDiffSides({
       ...base,
       beforeText: "the old words\n",
@@ -23,7 +21,7 @@ describe("momentDiffSides", () => {
       afterBinary: bytes(2048),
     });
 
-    expect(sides.before).toBe("the old words\n");
+    expect(sides.before, "key the page on one record-level kind -> `before` is dropped and the only readable thing this moment has disappears.").toBe("the old words\n");
     expect(sides.after).toBeUndefined();
     expect(sides.afterIsBinary).toBe(true);
     expect(sides.beforeIsBinary).toBe(false);
@@ -63,11 +61,9 @@ describe("momentDiffSides", () => {
   });
 
   it("names the removed bytes when a binary file was deleted", () => {
-    // A delete carries its bytes on the BEFORE side, and the record-level count
+    // A delete carries its bytes on the before side, and the record-level count
     // follows the after side.
     //
-    // MUTATION: read moment.byteLength alone -> a removed file that held 4096
-    // bytes reports "0 bytes".
     const sides = momentDiffSides({
       ...base,
       beforeBinary: bytes(4096),
@@ -75,7 +71,7 @@ describe("momentDiffSides", () => {
       byteLength: undefined,
     });
 
-    expect(sides.bytesOnly).toBe(true);
+    expect(sides.bytesOnly, "read moment.byteLength alone -> a removed file that held 4096 bytes reports '0 bytes'.").toBe(true);
     expect(sides.byteLength).toBe(4096);
   });
 

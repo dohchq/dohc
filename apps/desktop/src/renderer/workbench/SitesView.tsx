@@ -58,9 +58,9 @@ function siteDiagnosticLabel(site: SitePackageInfo): string | null {
 export function SitesView(props: {
   workspaceId: string;
   // Bumped once per settled workspace file listing — including a
-  // content-only edit to an EXISTING file (e.g. dohc.json, package.json),
+  // content-only edit to an existing file (e.g. dohc.json, package.json),
   // not just an add/remove. A structural hash over path/kind/icon alone
-  // produces the SAME value for a content edit, so the effect would never
+  // produces the same value for a content edit, so the effect would never
   // rerun and the Sites view would keep stale titles, diagnostics,
   // scripts, and preview modes until the user manually refreshed it.
   filesSettledRevision: number;

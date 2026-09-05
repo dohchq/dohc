@@ -1,7 +1,7 @@
-//! Resource bounds for a scan / hash / diff run. This slice is largely ABOUT
+//! Resource bounds for a scan / hash / diff run. This slice is largely about
 //! bounds (`plan §Rust policy`: every buffer names its bound), so the config is
 //! a first-class, explicit value — never a `num_cpus` guess in library code
-//! (`PORTING.md` §14: pools sized by config, not the machine).
+//! (pools sized by config, not the machine).
 
 use std::num::NonZeroUsize;
 
@@ -12,7 +12,7 @@ pub const MAX_CAPTURE_TEXT_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Maximum binary payload owned by workspace capture. This mirrors
 /// `MAX_VERSIONED_BINARY_FILE_BYTES` (`versionedTextStore.ts`): content over
-/// this cap is not engine-ownable in ANY representation.
+/// this cap is not engine-ownable in any representation.
 pub const MAX_CAPTURE_BINARY_BYTES: u64 = 5 * 1024 * 1024;
 
 /// What to do when a file exceeds [`ScanBounds::max_file_bytes`]. The TS capture
@@ -37,7 +37,7 @@ pub struct ScanBounds {
     /// *skipped* files count against this too, so a tree of millions of over-cap
     /// files also fails closed (bounded skipped set).
     pub max_files: usize,
-    /// Hard cap on the TOTAL filesystem entries traversed (files + skipped +
+    /// Hard cap on the total filesystem entries traversed (files + skipped +
     /// directories), bounding the DFS working set so a directory-heavy tree
     /// (millions of empty dirs) cannot grow the pending-directory stack or the
     /// walk unbounded. Exceeding it is [`crate::FilesError::TooManyEntries`].
@@ -49,8 +49,7 @@ pub struct ScanBounds {
     /// total hashing memory is bounded by `read_buffer_bytes * hash_workers`.
     pub read_buffer_bytes: NonZeroUsize,
     /// The fixed size of the hash-worker pool. In-flight hashes never exceed
-    /// this — the pool is created once and reused, never spawned per file
-    /// (`PORTING.md` §14: fixed-size, bounded queues).
+    /// this — the pool is created once and reused, never spawned per file.
     pub hash_workers: NonZeroUsize,
     /// Cap on the number of diff entries (added + changed + removed) held in
     /// memory. Exceeding it is [`crate::FilesError::DiffTooLarge`].

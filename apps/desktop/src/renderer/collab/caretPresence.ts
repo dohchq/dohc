@@ -10,7 +10,7 @@ import type { DocPresenceUser } from "./docPresence";
 // separate from docPresence.ts so it has no dependency on the presence
 // transport and is trivial to unit test.
 
-// Muted, brand-adjacent hues (warm paper + graphite) — deliberately NOT
+// Muted, brand-adjacent hues (warm paper + graphite) — deliberately not
 // rainbow. Picked at a saturation/lightness band that reads as a clear
 // border on both the light paper background and the dark graphite
 // background, and gives the extension's white caret-label text comfortable

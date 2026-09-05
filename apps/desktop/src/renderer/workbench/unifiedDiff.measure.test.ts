@@ -1,4 +1,4 @@
-// Measurement harness behind the history-diff work bound (#516).
+// Measurement harness behind the history-diff work bound.
 //
 // It is not part of the normal suite: the numbers are wall-clock and
 // machine-specific, so running them on every `pnpm test` would make the gate
@@ -146,7 +146,7 @@ describe.skipIf(!measuring)("history diff work measurement", () => {
     );
   }, 600_000);
 
-  // The ladder the limit is calibrated from. Every row stays UNDER the limit,
+  // The ladder the limit is calibrated from. Every row stays under the limit,
   // so every row runs the real line-by-line diff and can be reproduced here.
   // The last row is the largest body the limit admits: its time is the claim
   // the limit rests on, not the throughput, which falls off below the bound as

@@ -1840,7 +1840,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
         ),
       },
       state: stateValue,
-      // MUTATION: removing the per-cell +1 bump lets a stale/equal local time lose.
+      // The per-cell +1 bump keeps a stale or equal local time from losing.
       atMs: Math.max(this.tick(optionalSafeInteger(params, "nowMs")), (prior?.atMs ?? -1) + 1),
     };
     state.reactions.set(key, reaction);
@@ -2612,7 +2612,7 @@ export class ChatsLoopbackEngine implements EngineTransport {
       }
       state.scanHighWaterMs = Math.max(state.scanHighWaterMs, message.createdAtMs);
     }
-    // MUTATION: replacing the ledger insert-if-absent with overwrite makes retry count nonzero.
+    // The ledger insert-if-absent is what keeps a retry's count at zero.
     return jsonResult(inserted);
   }
 

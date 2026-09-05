@@ -146,7 +146,7 @@ describe("invokeRegisteredPluginCommand", () => {
     });
   });
 
-  it("reports the retryable plugin-rebuilding status, not a generic failure, when ensureStarted rechecks the barrier and finds it raised (round-17 finding 2)", async () => {
+  it("reports the retryable plugin-rebuilding status, not a generic failure, when ensureStarted rechecks the barrier and finds it raised", async () => {
     const ensureStarted = vi.fn(async () => {
       // Pipeline ensureStarted maps a command's self-drain refusal to this
       // typed retryable error.
@@ -171,7 +171,7 @@ describe("invokeRegisteredPluginCommand", () => {
     });
     // ensureStarted's own throw means invokeRegisteredPluginCommand never
     // has a host to call — nothing to spy on that this test's outcome
-    // does not already prove (#779 round 22 finding 10).
+    // does not already prove.
   });
 
   it("cancels after a successful start when the renderer changed", async () => {

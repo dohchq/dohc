@@ -37,7 +37,7 @@ import { rewriteCollectionSchema } from "./collections/schemaWrite";
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
 // bridge. Reads come from the engine's index; writes ride the record's live
-// document frontmatter map — the SAME path agents and the PropertiesPanel
+// document frontmatter map — the same path agents and the PropertiesPanel
 // take, so attribution and history stay parallel.
 
 // How many records a board or calendar drains before the page-by-page
@@ -319,7 +319,7 @@ export function CollectionPage({
 
   // A typed select value not in the options yet: the whole edit enters the
   // global queue synchronously — before any schema IPC — so navigation and
-  // lineage gates see it. The queue writes the option to the schema FIRST,
+  // lineage gates see it. The queue writes the option to the schema first,
   // then the cell value; a preparation failure retains the edit for retry.
   const createOption = useCallback(
     (create: CollectionOptionCreate) => {

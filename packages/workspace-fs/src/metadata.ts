@@ -63,7 +63,7 @@ function isManifestEntry(value: unknown): value is WorkspaceManifestEntry {
 export async function readManifest(rootDir: string): Promise<WorkspaceManifest> {
   // ENOENT propagates as a plain Error (code preserved) so callers can tell
   // "absent -> fresh" apart from "corrupt -> refuse". Parse/shape failures
-  // become CorruptManifestError and must NEVER be silently reset to empty —
+  // become CorruptManifestError and must never be silently reset to empty —
   // that would re-create/conflict-spam every previously-synced file.
   const raw = await readFile(join(rootDir, MANIFEST_PATH), "utf8");
   let parsed: unknown;
@@ -126,7 +126,7 @@ export function sha256(bytes: Uint8Array | string) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-// Delegates to the ONE extension -> media-type table in workspace-core;
+// Delegates to the one extension -> media-type table in workspace-core;
 // sync metadata needs a concrete type, so unknown extensions become
 // octet-stream here.
 export function mediaTypeForPath(path: string): string {

@@ -1,5 +1,5 @@
 //! Shared test helpers: a self-cleaning scratch workspace and an independent
-//! SHA-256 (a SECOND code path from the crate's streaming pooled hasher, so a
+//! SHA-256 (a second code path from the crate's streaming pooled hasher, so a
 //! hash assertion is non-tautological), plus a best-effort symlink helper.
 //!
 //! Each integration test file is its own crate and uses a different subset of

@@ -1373,7 +1373,7 @@ describe("table Notion conveniences", () => {
     const after = tableNode(editor).content?.[0]?.content?.[0]?.content;
     // A default Enter inside a table cell's single-paragraph content is a
     // no-op in prosemirror-tables (there's no sibling block to split into
-    // within a cell) — asserting it does NOT throw and does NOT delete the
+    // within a cell) — asserting it does not throw and does not delete the
     // table is the contract this test guards; TableKit owns the exact
     // behavior.
     expect(after).toBeDefined();

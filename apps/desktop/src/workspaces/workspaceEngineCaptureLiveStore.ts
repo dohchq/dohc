@@ -39,7 +39,7 @@ import {
   type ShareMountEngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
 
-// A manifest rebuild after a version switch costs ONE unsettled pass, so this
+// A manifest rebuild after a version switch costs one unsettled pass, so this
 // budget is generous by two orders of magnitude. It is bounded rather than
 // unbounded because a workspace under genuinely continuous mutation can keep
 // missing quiescence, and that must still surface as an error rather than hang.
@@ -96,7 +96,7 @@ const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(
  * The in-process store raised `VersionedTextStoreError` with a domain code. The
  * daemon reports the same failure as a `DaemonRefusalError` whose message is
  * that same code, so a caller keying on `error.code` — the obvious way to write
- * "that name is already taken" — matched nothing here (#418).
+ * "that name is already taken" — matched nothing here.
  *
  * A refusal the domain has no code for is rethrown untouched. Collapsing it
  * into a generic code would lose exactly the information this translation
@@ -104,7 +104,7 @@ const DOMAIN_ERROR_CODES: ReadonlySet<string> = new Set(
  */
 function domainErrorFrom(error: unknown): VersionedTextStoreError | null {
   if (!(error instanceof DaemonRefusalError)) return null;
-  // A measured size refusal is the one whose message is NOT its code: the
+  // A measured size refusal is the one whose message is not its code: the
   // engine sends the constraint, the limit and the observed usage as a
   // sentence, so the WIRE code names this refusal and the numbers survive as
   // the message.
@@ -599,7 +599,7 @@ export function createCaptureLiveStores(
   }
 
   /**
-   * The bodies ONE answer withheld: offered first, fetched only if unknown,
+   * The bodies one answer withheld: offered first, fetched only if unknown,
    * and fetched once per digest.
    *
    * Digests repeat inside a single answer. A resolution’s settled snapshot and
@@ -608,7 +608,7 @@ export function createCaptureLiveStores(
    * and the rename insert, store.rs). Hydrating them apart streams a
    * multi-megabyte blob twice for one answer.
    *
-   * The offer matters more than the cache. A resolution has COMMITTED by the
+   * The offer matters more than the cache. A resolution has committed by the
    * time its answer is read, so a read that fails between the commit and the
    * materialization leaves the folder on the losing content while the conflict
    * is closed — the exact shape this surface exists to prevent. A caller that
@@ -618,7 +618,7 @@ export function createCaptureLiveStores(
   interface WithheldBodyReader {
     (sha256: string, path: string): Promise<string>;
     /**
-     * A body this call ALREADY HOLDS. Offering it removes the read that would
+     * A body this call already HOLDS. Offering it removes the read that would
      * otherwise stand between a committed write and the folder it belongs in.
      *
      * The caller offers text it can name but not address: the digest is the
@@ -635,7 +635,7 @@ export function createCaptureLiveStores(
     const reader = (sha256: string, path: string): Promise<string> => {
       const cached = bodies.get(sha256);
       if (cached !== undefined) return cached;
-      // Hashing happens HERE, not at the offer: only an over-cap answer ever
+      // Hashing happens here, not at the offer: only an over-cap answer ever
       // asks, and only then is a candidate worth a digest.
       const held = offered.find(
         (candidate) =>
@@ -760,9 +760,9 @@ export function createCaptureLiveStores(
           await adapter.listTextConflicts({
             workspaceId,
             status: "open",
-            // Ids only, like the merge's resume scan. The walk keeps ONE
+            // Ids only, like the merge's resume scan. The walk keeps one
             // conflict, so hydrating each page would fetch up to three bodies
-            // per conflict passed over and discard every one of them (#655).
+            // per conflict passed over and discard every one of them.
             bodies: "withheld",
             ...(afterConflictId !== undefined ? { afterConflictId } : {}),
           }),
@@ -1211,7 +1211,7 @@ export function createCaptureLiveStores(
           conflict,
           write: {
             object: fileObjectFromWire(write.object),
-            // ONE reader for both: a settled body and the moment’s `afterText`
+            // One reader for both: a settled body and the moment’s `afterText`
             // are the same body under the same digest.
             snapshot: snapshotFromWire(
               await hydratedSnapshot(write.snapshot, withheld),

@@ -8,7 +8,7 @@
 // module never reasons about which settle completes when. Arrival order does
 // not hold, for two independent reasons:
 //
-//   - An ABORTING settle (failed journal, or a synchronous local-edit throw)
+//   - An aborting settle (failed journal, or a synchronous local-edit throw)
 //     throws before it ever reaches `settleChain`, so it completes ahead of
 //     settles that queued before it.
 //   - `settleChain` is per GENERATION while this state is per SESSION, so a
@@ -34,10 +34,10 @@ export function createEngineYDocSaveSeqState(): EngineYDocSaveSeqState {
 }
 
 /**
- * An edit REACHED the settle — journaled onto the session's journal chain and
+ * An edit reached the settle — journaled onto the session's journal chain and
  * counted by the settle it arms. Not when the renderer shipped it: the session
  * queues updates, and counting at hand-over lets a settle armed by an earlier
- * update vouch for edits still waiting in that queue (#514).
+ * update vouch for edits still waiting in that queue.
  *
  * Ordering is the session queue's FIFO guarantee. Assignment, not a maximum:
  * were the order ever to break, a seq that lags under-reports and the document
@@ -60,7 +60,7 @@ export function noteSettleStart(
 }
 
 /**
- * A settle finished (succeeded or failed). Returns the seq THAT settle
+ * A settle finished (succeeded or failed). Returns the seq that settle
  * started at, found by its own token.
  *
  * An unknown token should not happen; if it does, answer 0 rather than guess.

@@ -59,7 +59,7 @@ function normalizeCalloutFoldAttr(value: unknown): "" | "-" | "+" {
 
 // The header lives in a widget decoration placed at `calloutStart + 1` (inside
 // the callout, before its first child), so `getPos()` reports that inner
-// position — NOT the callout's own start. Resolve upward to the enclosing
+// position — not the callout's own start. Resolve upward to the enclosing
 // callout so every handler reads/writes the live node at the correct pos.
 function resolveCallout(
   view: EditorView,
@@ -100,7 +100,7 @@ function buildCalloutHeader(
   header.setAttribute("contenteditable", "false");
 
   // Clicking the header's non-interactive area selects the whole callout
-  // (NodeSelection). This is the ONLY mouse path to select a FOLDED callout —
+  // (NodeSelection). This is the only mouse path to select a folded callout —
   // its body is hidden, and the widget's stopEvent keeps header clicks from
   // ever reaching ProseMirror — and without a selection a folded callout
   // cannot be deleted from the keyboard at all.
@@ -117,7 +117,7 @@ function buildCalloutHeader(
   });
 
   // Assigned once the title input + its commit logic exist below. The fold
-  // toggle calls this FIRST so an in-progress title edit is flushed before the
+  // toggle calls this first so an in-progress title edit is flushed before the
   // header is reminted: the chevron's `mousedown` preventDefault keeps focus on
   // the input (so it never blurs), and toggling fold changes the decoration key
   // and remints the widget — which would drop the input (and its `getPos`)
@@ -278,7 +278,7 @@ function buildCalloutHeader(
   });
   typePicker.append(typeTrigger, typeMenu);
 
-  // Read the callout's CURRENT title from the live doc (not this render
+  // Read the callout's current title from the live doc (not this render
   // closure's `attrs`, which goes stale the moment a remote/agent edit lands).
   const liveCalloutTitle = (): string | null => {
     const callout = resolveCallout(view, getPos);
@@ -305,7 +305,7 @@ function buildCalloutHeader(
     }
     if (event.key === "Escape") {
       event.preventDefault();
-      // Cancel to the CURRENT node title, not the stale closure snapshot.
+      // Cancel to the current node title, not the stale closure snapshot.
       input.value = liveCalloutTitle() ?? attrs.title;
       input.blur();
     }
@@ -341,8 +341,8 @@ function buildCalloutHeader(
 function buildCalloutChromeDecorations(doc: Node): DecorationSet {
   const decorations: Decoration[] = [];
 
-  // Ordinal (document order among callouts), NOT absolute pos, keys the widget.
-  // A collaborator/agent edit BEFORE a callout shifts its pos but not its
+  // Ordinal (document order among callouts), not absolute pos, keys the widget.
+  // A collaborator/agent edit before a callout shifts its pos but not its
   // ordinal, so keying on pos would remint the widget on every such edit —
   // dropping a focused, uncommitted title input without a blur (the commit never
   // fires). Ordinal stays stable through position mapping; only a change to the

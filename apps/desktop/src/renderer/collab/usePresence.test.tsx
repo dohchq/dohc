@@ -95,7 +95,7 @@ describe("usePresence gating + guard", () => {
   });
 
   it("does not repaint after a topic switch (no-stale guard)", async () => {
-    // Two SEPARATE transports so a late snapshot from the old (A) channel is
+    // Two separate transports so a late snapshot from the old (A) channel is
     // distinguishable from anything the live (B) channel could deliver — the
     // product invariant: a slow response for A must never repaint B.
     const tA = pushableTransport();
@@ -105,7 +105,7 @@ describe("usePresence gating + guard", () => {
     view.rerender(<Harness enabled transport={tB.transport} topic="B" />);
     await flush();
     act(() => {
-      // Late resolution of the OLD channel's in-flight poll: the ghost only
+      // Late resolution of the old channel's in-flight poll: the ghost only
       // renders if the stale callback slipped past the guard.
       tA.set([
         { userId: "ghost", clientId: "cg", state: { displayName: "Ghost" }, updatedAtMs: 0 },
@@ -146,7 +146,7 @@ describe("usePresence gating + guard", () => {
       await flush();
       const before = t.publishes.length;
       // A burst of keystrokes: ChatsView calls setTyping(true) on every input
-      // change — only the FIRST may republish.
+      // change — only the first may republish.
       act(() => {
         screen.getByTestId("start-typing").click();
       });
@@ -165,8 +165,8 @@ describe("usePresence gating + guard", () => {
       }
       expect(t.publishes.length).toBe(before + 1); // still just the one edge
       // …and the repeated keystrokes kept the idle window alive: at t=7s the
-      // window measured from the FIRST keystroke (t=5s) has lapsed, but the
-      // one from the LAST keystroke (t=3s+5s=8s) has not — no clear yet…
+      // window measured from the first keystroke (t=5s) has lapsed, but the
+      // one from the last keystroke (t=3s+5s=8s) has not — no clear yet…
       await act(async () => {
         await vi.advanceTimersByTimeAsync(4_000);
       });

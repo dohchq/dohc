@@ -7,7 +7,7 @@ import {
   markdownToYDoc,
 } from "./import-export";
 
-// The refinement is measured against the editor's OWN parse, the way
+// The refinement is measured against the editor's own parse, the way
 // lineBlocks.test.ts measures the block rules: `markdownToYDoc` is what builds
 // the Y.Doc the engine editor binds to, so the nodes below are the nodes a
 // reader would be looking at. Nothing here is a hand-built fixture.
@@ -46,9 +46,7 @@ describe("a match deep in a long block lands the matched line", () => {
     .join("\n");
 
   it("lands the ninetieth item of a hundred-item bullet list", () => {
-    // MUTATION: return null from listItemRange (or from intraBlockRange
-    // outright) -> null here, which is the reveal landing on "Item 1" again.
-    expect(revealed(LONG_LIST, 92)).toBe("Item 90");
+    expect(revealed(LONG_LIST, 92), "return null from listItemRange (or from intraBlockRange outright) -> null here, which is the reveal landing on 'Item 1' again.").toBe("Item 90");
     expect(revealed(LONG_LIST, 102)).toBe("Item 100");
   });
 
@@ -123,7 +121,7 @@ describe("a match deep in a long block lands the matched line", () => {
 
   it("lands the item above a blank line inside the list", () => {
     // The same rule one level down: a line in a gap resolves to the thing
-    // ABOVE it. A loose list keeps its blank lines, and a hit that lands on
+    // above it. A loose list keeps its blank lines, and a hit that lands on
     // one shows the reader the item it follows.
     const loose = ["- Item 1", "", "- Item 2", "", "- Item 3"].join("\n");
     expect(revealed(loose, 4)).toBe("Item 2");
@@ -153,10 +151,8 @@ describe("a match deep in a long block lands the matched line", () => {
       .child(1)
       .child(1)
       .textContent.split("\n")[249];
-    // MUTATION: number the wrong fence line -> this fixture no longer pins line 250.
-    expect(targetLine?.trimStart()).toBe("const value250 = 250;");
-    // MUTATION: keep the item-wide range -> the reveal starts at "Item two".
-    expect(revealed(body, 253)).toBe(targetLine);
+    expect(targetLine?.trimStart(), "number the wrong fence line -> this fixture no longer pins line 250.").toBe("const value250 = 250;");
+    expect(revealed(body, 253), "keep the item-wide range -> the reveal starts at 'Item two'.").toBe(targetLine);
   });
 
   it("lands a fenced-code line in the first item of a nested list", () => {
@@ -191,9 +187,7 @@ describe("a match deep in a long block lands the matched line", () => {
     const targetLine = codeBlock.textContent.split("\n")[149];
     expect(targetLine?.trimStart()).toBe("const nested150 = 150;");
 
-    // MUTATION: apply the first-item guard at every recursion depth. The
-    // reveal then falls back to the whole "Outer two" item.
-    expect(revealed(body, 154)).toBe(targetLine);
+    expect(revealed(body, 154), "apply the first-item guard at every recursion depth. The reveal then falls back to the whole 'Outer two' item.").toBe(targetLine);
   });
 
   it("lands a fenced-code line when a later list item has no text of its own", () => {
@@ -220,9 +214,7 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(item.child(1).type.name).toBe("codeBlock");
     const targetLine = item.child(1).textContent.split("\n")[249];
     expect(targetLine?.trimStart()).toBe("const value250 = 250;");
-    // MUTATION: require nested block index 1 even when the item's own source
-    // line is empty. The reveal then keeps the whole item range.
-    expect(revealed(body, 253)).toBe(targetLine);
+    expect(revealed(body, 253), "require nested block index 1 even when the item's own source line is empty. The reveal then keeps the whole item range.").toBe(targetLine);
   });
 
   it("lands a nested fenced-code line when a tab crosses the list indent", () => {
@@ -261,10 +253,8 @@ describe("a match deep in a long block lands the matched line", () => {
     const item = editorDoc(body).child(0).child(1);
     const itemText = item.textBetween(0, item.content.size, "\n");
 
-    // MUTATION: accept an item with extra children -> this shape refines anyway.
-    expect(item.childCount).toBe(4);
-    // MUTATION: narrow an unproved shape -> this loses the item-wide fallback.
-    expect(revealed(body, 7)).toBe(itemText);
+    expect(item.childCount, "accept an item with extra children -> this shape refines anyway.").toBe(4);
+    expect(revealed(body, 7), "narrow an unproved shape -> this loses the item-wide fallback.").toBe(itemText);
   });
 
   it("keeps the item range when a valid nested fence has trailing item content", () => {
@@ -284,9 +274,7 @@ describe("a match deep in a long block lands the matched line", () => {
     expect(item.childCount).toBe(3);
     expect(item.child(1).type.name).toBe("codeBlock");
     expect(item.child(2).type.name).toBe("paragraph");
-    // MUTATION: loosen `childCount !== 2` to `< 2` -> the fence line narrows
-    // even though the trailing paragraph makes the item shape unprovable.
-    expect(revealed(body, 4)).toBe(itemText);
+    expect(revealed(body, 4), "loosen `childCount !== 2` to `< 2` -> the fence line narrows even though the trailing paragraph makes the item shape unprovable.").toBe(itemText);
     expect(revealed(body, 7)).toBe(itemText);
   });
 
@@ -300,9 +288,7 @@ describe("a match deep in a long block lands the matched line", () => {
   ].join("\n");
 
   it("lands the matched line of a three-hundred-line fenced block", () => {
-    // MUTATION: return null from codeLineRange -> null here, which is the
-    // reveal landing on the opening fence with the match 250 lines below it.
-    expect(revealed(LONG_FENCE, 251)).toBe("const value250 = 250;");
+    expect(revealed(LONG_FENCE, 251), "return null from codeLineRange -> null here, which is the reveal landing on the opening fence with the match 250 lines below it.").toBe("const value250 = 250;");
     expect(revealed(LONG_FENCE, 2)).toBe("const value1 = 1;");
     expect(revealed(LONG_FENCE, 301)).toBe("const value300 = 300;");
   });
@@ -393,7 +379,7 @@ describe("an unsure intra-block match falls back to the block start", () => {
     {
       name: "a nested item, which belongs to the item the block opens with",
       // Three columns reaches inside `- `'s two-column content, so this line
-      // is item ONE's own — and item one starts where the block does.
+      // is item one's own — and item one starts where the block does.
       body: ["- Item 1", "   - nested", "- Item 2"].join("\n"),
       line: 2,
     },
@@ -401,11 +387,7 @@ describe("an unsure intra-block match falls back to the block start", () => {
 
   for (const document of unsure) {
     it(document.name, () => {
-      // MUTATION: drop the body equality in codeLineRange -> the indented
-      // code case lands a line the parse never held. Dropping the count gate
-      // in listItemRange shows up in the drift test below instead: these
-      // documents all agree with the parse, which is why they are here.
-      expect(revealed(document.body, document.line)).toBeNull();
+      expect(revealed(document.body, document.line), "drop the body equality in codeLineRange -> the indented code case lands a line the parse never held. Dropping the count gate in listItemRange shows up in the drift test below instead: these documents all agree with the parse, which is why they are here.").toBeNull();
     });
   }
 
@@ -442,7 +424,7 @@ describe("blockTargetForLine", () => {
   });
 
   it("carries no match for a body with no block to slice", () => {
-    // The #564 recovery path: the read failed, the Y.Doc bound anyway.
+    // The recovery path: the read failed, the Y.Doc bound anyway.
     expect(blockTargetForLine("", 3)).toEqual({ index: 0 });
   });
 });

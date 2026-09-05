@@ -82,7 +82,7 @@ pub struct StateRecord {
     /// The freshly-initialized store's `engine_uuid`, recorded at the
     /// Initialized transition. The reset-freshness proof: a stale same-clone
     /// db (old store or backup copy, bound to the same shadow token) carries
-    /// a DIFFERENT identity and must be refused on resume.
+    /// a different identity and must be refused on resume.
     #[serde(default)]
     pub fresh_engine_uuid: Option<String>,
 }

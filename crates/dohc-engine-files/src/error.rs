@@ -1,8 +1,8 @@
 //! Typed error taxonomy for the files slice. Every variant carries a stable
-//! kebab-case machine `code()` (the compatibility contract; `PORTING.md` §4),
+//! kebab-case machine `code()`, the compatibility contract,
 //! and messages stay redaction-safe: a path may appear (the TS engine already
-//! embeds offending paths in `normalizeWritePath`-style errors,
-//! `LANGUAGE_SEMANTICS_MATRIX.md` 14.3), never file content or secrets.
+//! embeds offending paths in `normalizeWritePath`-style errors), never file
+//! content or secrets.
 
 /// A files-layer failure.
 #[derive(Debug, thiserror::Error)]

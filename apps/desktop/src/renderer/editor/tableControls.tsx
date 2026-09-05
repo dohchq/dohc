@@ -4,7 +4,7 @@
 // TableKit ships every command already; this file is only the missing UI.
 //
 // Interaction model (mirrors Notion's simple tables):
-// - Hovering a cell reveals exactly one small pill handle above its COLUMN
+// - Hovering a cell reveals exactly one small pill handle above its column
 //   and one beside its ROW (the plugin's mousemove handler toggles
 //   `is-active` on the matching grips) — not a bar on every row/column at
 //   once. Clicking a handle selects the row/column and opens its options
@@ -18,16 +18,16 @@
 //
 // GFM round-trip caveat (see AGENTS.md "text is the primitive"): markdown
 // tables express per-COLUMN alignment via the delimiter row (`:---`, `:---:`,
-// `---:`) but NOT merged cells. So there is per-column alignment UI (the
+// `---:`) but not merged cells. So there is per-column alignment UI (the
 // column grip menu's Align left/center/right, applied to every cell in the
 // column) but deliberately no merge/split UI — only what survives a markdown
 // round-trip. Alignment lives on the standard `align` cell attr that
 // @tiptap/extension-table already serializes to / parses from the GFM
 // delimiter row, so the round-trip is lossless with no custom serializer.
 //
-// Grip placement: each grip is a ProseMirror decoration WIDGET nested
+// Grip placement: each grip is a ProseMirror decoration widget nested
 // *inside* the relevant cell (first-row cell for a column grip,
-// first-cell-of-row for a row grip) but rendered in the table's OUTER margin
+// first-cell-of-row for a row grip) but rendered in the table's outer margin
 // via negative CSS offsets (a column grip floats above its column, a row grip
 // floats left of its row — Notion-style), so grip chrome never overlaps or
 // reflows cell text. Nesting the widget inside the cell (rather than a
@@ -333,7 +333,7 @@ function setTableRowHeights(
 }
 
 // Per-column GFM alignment. The value is written to the standard `align`
-// cell attr (TableKit's tableCell/tableHeader) on EVERY cell in the column,
+// cell attr (TableKit's tableCell/tableHeader) on every cell in the column,
 // which @tiptap/extension-table serializes to the delimiter row (`:---`,
 // `:---:`, `---:`) and parses back losslessly — so this survives the markdown
 // round-trip with no custom serializer. Setting it on the whole column keeps
@@ -1754,7 +1754,7 @@ export function makeTableControlsPlugin(
   const runtime = createTableControlsRuntime();
   const rowResizeEnabled = options.rowResizeEnabled ?? true;
   let activeControls: ActiveTableControls | undefined;
-  // Notion reveals ONE column handle (above the hovered column) and ONE row
+  // Notion reveals one column handle (above the hovered column) and one row
   // handle (beside the hovered row) — not chrome on every row/column at
   // once. CSS alone can't express "the row-0 cell of whichever column the
   // pointer is in", so mousemove tracking toggles `is-active` on the

@@ -6,7 +6,7 @@ import {
   compareVersionFilesPage,
 } from "./versionCompare";
 
-// The paged whole-version comparison (#562). The store here is the two seams
+// The paged whole-version comparison. The store here is the two seams
 // the pager reads: the differing-path listing, and per-path side reads.
 
 interface FakeFile {
@@ -103,7 +103,7 @@ describe("compareVersionFilesPage", () => {
     });
     expect(page.files.map((file) => file.path)).toEqual(["a.md", "b.md"]);
     expect(page.nextAfterPath).toBe("b.md");
-    // The cut also stops HYDRATION: c.md's sides are never read.
+    // The cut also stops hydration: c.md's sides are never read.
     expect(
       store.reads.filter((read) => read.path === "c.md"),
     ).toHaveLength(0);
@@ -210,9 +210,7 @@ describe("compareVersionFilesPage", () => {
     };
     const page = await compareVersionFilesPage(store, INPUT);
     expect(page.files.map((file) => file.path)).toEqual(["a.md"]);
-    // MUTATION: drop the lookahead -> "a.md" comes back and the surface
-    // claims more files than exist.
-    expect(page.nextAfterPath).toBeNull();
+    expect(page.nextAfterPath, "drop the lookahead -> 'a.md' comes back and the surface claims more files than exist.").toBeNull();
   });
 
   it("counts the budget in UTF-8 bytes, not UTF-16 code units", async () => {
@@ -234,7 +232,7 @@ describe("compareVersionFilesPage", () => {
 
   it("walks through an all-identical window instead of returning an empty page", async () => {
     // The listing may answer a window in which nothing differed: empty
-    // entries WITH a continuation. An empty page with a continuation would
+    // entries with a continuation. An empty page with a continuation would
     // read as "no differences" on the surface and hide everything past it.
     const calls: Array<string | undefined> = [];
     const store = {
@@ -259,16 +257,14 @@ describe("compareVersionFilesPage", () => {
         }) satisfies TextFileSnapshot,
     };
     const page = await compareVersionFilesPage(store, INPUT);
-    // MUTATION: return the empty first window -> files [] with a
-    // continuation, and z.md is unreachable from the surface.
-    expect(page.files.map((file) => file.path)).toEqual(["z.md"]);
+    expect(page.files.map((file) => file.path), "return the empty first window -> files [] with a continuation, and z.md is unreachable from the surface.").toEqual(["z.md"]);
     expect(page.nextAfterPath).toBeNull();
     expect(calls).toEqual([undefined, "m.md"]);
   });
 
   it("fits a representative healthy comparison in one page", async () => {
     // The budget never rejects — it pages — so AGENTS.md's measure-first
-    // rule does not bind it. What this pins is the healthy SHAPE: a working
+    // rule does not bind it. What this pins is the healthy shape: a working
     // comparison of 40 markdown files, both sides ~2.5 KiB (the shape of
     // this repo's own docs), hydrates ~200 KiB — inside the 256 KiB budget,
     // one page, no "Show more". Shrinking the budget under the ordinary case
@@ -291,8 +287,8 @@ describe("compareVersionFilesPage", () => {
 describe("compareEnginePaths", () => {
   it("orders paths the way the engine does: code points, not UTF-16 units", () => {
     // U+E000 is one UTF-16 unit (0xE000); U+10000 is a surrogate pair
-    // starting 0xD800. UTF-16 comparison puts the pair FIRST; the engine
-    // (SQLite BINARY = UTF-8 bytes = code points) puts it LAST. A cursor
+    // starting 0xD800. UTF-16 comparison puts the pair first; the engine
+    // (SQLite binary = UTF-8 bytes = code points) puts it LAST. A cursor
     // comparison made the UTF-16 way drops or duplicates the row at a page
     // boundary.
     const bmp = ".env";

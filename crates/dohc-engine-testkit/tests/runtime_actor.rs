@@ -65,7 +65,7 @@ fn actor_lifecycle_open_ready_closed() {
     assert_eq!(err.code(), "actor-unavailable");
 }
 
-// oracle: two aliased paths converge on ONE actor / ONE writer connection
+// oracle: two aliased paths converge on one actor / one writer connection
 // (canonical-identity keying), proven with a lexical alias that always works.
 #[test]
 fn lexical_aliases_converge_on_one_actor() {
@@ -90,7 +90,7 @@ fn lexical_aliases_converge_on_one_actor() {
     assert_eq!(doc.body, "via-a");
 }
 
-// oracle: a symlink/junction to the same engine dir converges on the SAME
+// oracle: a symlink/junction to the same engine dir converges on the same
 // actor (portability + file-identity). Skips honestly if the platform refuses
 // to create the alias.
 #[test]
@@ -161,8 +161,8 @@ fn restart_bumps_generation_and_preserves_state() {
 }
 
 // oracle: close deterministically releases the connection. A second open alone
-// does NOT prove release (SQLite permits concurrent connections), so we assert
-// the WAL sidecar was checkpointed away — which only happens when the LAST
+// does not prove release (SQLite permits concurrent connections), so we assert
+// the WAL sidecar was checkpointed away — which only happens when the last
 // connection closes — and, on Windows, that the file is now deletable.
 #[test]
 fn close_releases_the_connection() {
@@ -437,7 +437,7 @@ fn full_command_queue_reports_overloaded() {
     sup.close_all().expect("close all");
 }
 
-// oracle: concurrent opens of the same file converge on ONE actor / ONE writer
+// oracle: concurrent opens of the same file converge on one actor / one writer
 // (the reservation protocol dedups; the lock is not held across the spawn).
 #[test]
 fn concurrent_opens_share_one_actor() {

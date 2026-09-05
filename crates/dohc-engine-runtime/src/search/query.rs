@@ -1,20 +1,20 @@
-//! Policy-filtered FTS query. Ports `searchIndex.ts`'s `ftsQueryForSubstring`,
+//! Policy-filtered FTS query. Ports the TS `ftsQueryForSubstring`,
 //! `querySearchIndex`, and `queryChatMessagesGranular`.
 //!
 //! Candidates are ordered by FTS `rowid` (insertion order), never by relevance
 //! rank — the exact TS ordering, which sidesteps any bm25 cross-engine drift.
-//! File candidates are re-checked LIVE against the current policy at read time
+//! File candidates are re-checked live against the current policy at read time
 //! (a policy changed after indexing must still be honored) and de-duped; a
 //! broken FILE policy fails the file half closed while chat search stays live.
 //!
 //! ## Reader invariant (defense in depth) — DO NOT REMOVE
 //!
-//! The degraded-window "freeze, don't drop" model deliberately LEAVES file rows
+//! The degraded-window "freeze, don't drop" model deliberately leaves file rows
 //! in `engine_search_files_fts` while the FILE policy is broken. The no-leak
-//! guarantee therefore rests on EVERY reader of that table re-checking
+//! guarantee therefore rests on every reader of that table re-checking
 //! [`path_is_search_indexed`] against the freshly-read policy before returning a
 //! row — which fails closed (returns nothing) while degraded. Any new reader of
-//! `engine_search_files_fts` MUST apply the same re-check, or it will serve
+//! `engine_search_files_fts` Must apply the same re-check, or it will serve
 //! frozen rows a broken policy is supposed to hide. `query_search_index` is
 //! currently the sole reader and does this; keep it that way.
 
@@ -27,7 +27,7 @@ use dohc_engine_domain::is_js_trim_ws;
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 
-/// Whether the live head for `object_id` in this version is a BINARY head. Used
+/// Whether the live head for `object_id` in this version is a binary head. Used
 /// by the file-search reader to filter a stale text FTS row whose path has since
 /// been overwritten by binary content (the index freezes such rows; the reader
 /// drops them). A genuinely absent snapshot is not binary — its staleness (a
@@ -107,9 +107,9 @@ pub struct GranularChatMessageSearchBatch {
 /// How a raw query classifies against the trigram/length bounds.
 enum QueryTerm {
     /// Under [`MIN_TRIGRAM_QUERY_CHARS`]: the trigram index cannot serve it. The
-    /// caller MAY fall back to a linear scan (`None` at the public boundary).
+    /// caller may fall back to a linear scan (`None` at the public boundary).
     TooShort,
-    /// Over [`MAX_QUERY_CHARS`]: a Rust-added DoS bound. This FAILS CLOSED (empty
+    /// Over [`MAX_QUERY_CHARS`]: a Rust-added DoS bound. This fails closed (empty
     /// results, never a linear-scan fallback) so a pathological query cannot turn
     /// into an expensive full scan in an adapter.
     TooLong,
@@ -151,12 +151,12 @@ fn fetch_size(limit: usize, multiplier: usize) -> i64 {
 }
 
 /// Query the FTS index for `query`, returning policy-filtered candidates capped
-/// at `limit`. Ports `querySearchIndex` (`searchIndex.ts`).
+/// at `limit`. Ports `querySearchIndex`.
 ///
-/// Returns `None` ONLY when the query is too short for the trigram index AND the
+/// Returns `None` Only when the query is too short for the trigram index and the
 /// FILE policy is healthy — the caller may then fall back to a linear scan.
 /// Under a broken FILE policy a too-short query returns `Some(empty)` instead,
-/// suppressing that fallback (which would fail OPEN). An OVER-long query always
+/// suppressing that fallback (which would fail open). An OVER-long query always
 /// returns `Some(empty)` (fail closed — never the fallback sentinel, so a
 /// pathological query cannot become a linear scan). A well-formed query always
 /// returns `Some`, with the file half empty while the policy is degraded and the
@@ -364,7 +364,7 @@ pub fn query_search_index_keyset(
             }
             let object_id: String = row.get(object_id_column)?;
             // Live re-check (reader invariant): a path indexed while it was TEXT
-            // but now backed by a BINARY head must not be served by its stale
+            // but now backed by a binary head must not be served by its stale
             // former text. The file index "freezes, doesn't drop" (rebuild-time
             // binary exclusion never cleans an already-built index), so — exactly
             // as for the policy re-check above — the reader filters a now-binary

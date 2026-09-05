@@ -12,7 +12,7 @@
 //!
 //! - **Compound commits.** Every mutation and its replication-journal entry (and
 //!   idempotency-ledger row) commit in ONE transaction via
-//!   [`dohc_engine_storage::EngineStore::write_with`] (`PORTING.md` §9).
+//!   [`dohc_engine_storage::EngineStore::write_with`].
 //! - **Identity, not paths.** [`records::SnapshotView`]/[`records::TextSnapshot`]/
 //!   [`records::MomentRecord`] carry a stable `object_id`; a `path` is an alias
 //!   onto it.
@@ -159,6 +159,6 @@ pub use store::{
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 
 /// The secret domain's ciphertext shape and plaintext/ciphertext size cap.
-/// Re-exported so replication appliers bind to the SAME values the local
+/// Re-exported so replication appliers bind to the same values the local
 /// seal/open and secret write paths use instead of restating them.
 pub use dohc_engine_crypto::aead::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};

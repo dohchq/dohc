@@ -45,7 +45,7 @@ async function processTable(): Promise<ProcessRow[]> {
 }
 
 /**
- * Every dohc-workspace-engine process under THIS app's process tree.
+ * Every dohc-workspace-engine process under this app's process tree.
  *
  * Scoped by ancestry on purpose: a developer machine (or a parallel agent)
  * routinely has other dohc engines running, and a kill-by-image-name test would

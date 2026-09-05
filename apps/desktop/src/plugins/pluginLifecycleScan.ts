@@ -212,7 +212,7 @@ function isEnoentAt(
   path: string,
 ): boolean {
   // Branches on the wrapped Node error's actual errno code, not a substring
-  // match against the composed message (CodeRabbit #779 R22) — the message
+  // match against the composed message — the message
   // happens to start with "ENOENT: ..." by Node convention, not by
   // contract, so any future rewording of pathStats's own message would
   // silently break the zero-dependency-install fast path below without

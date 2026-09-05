@@ -11,13 +11,13 @@ export { canonicalRelayUrl, relayUrlsMatch };
 //
 //   dohc-sync:<workspaceId>:<relayUrl>
 //
-// Deliberately NOT opaque (no base64): the user can see what they are
+// Deliberately not opaque (no base64): the user can see what they are
 // pasting, and support can read a code off a screenshot. Workspace ids are
 // colon-free by construction (manifest ids are hostname-safe), so splitting
 // on the first two colons is unambiguous; everything after the second colon
 // is the relay URL (which itself contains colons).
 //
-// Security note for consumers: the relay URL in a PASTED code is untrusted
+// Security note for consumers: the relay URL in a pasted code is untrusted
 // input. The join flow never sends the session token to it — it only checks
 // that it matches the relay the user is already signed in to (see the join
 // handler in main.ts).
@@ -66,7 +66,7 @@ export function parseSyncCode(code: string): SyncCodeParts | null {
   return { workspaceId, relayUrl };
 }
 
-// The copyable "share code" (PR 18) — the receive handle for an external
+// The copyable "share code" — the receive handle for an external
 // share grant, same construction and canonicalization rules as the sync
 // code above:
 //
@@ -74,7 +74,7 @@ export function parseSyncCode(code: string): SyncCodeParts | null {
 //
 // Share ids are relay-minted UUIDs (colon-free, lowercase hex + hyphens), so
 // the same first-two-colons split is unambiguous, and the same security note
-// applies: the relay URL in a PASTED code is untrusted input — the open-share
+// applies: the relay URL in a pasted code is untrusted input — the open-share
 // flow only checks it against the relay the user is already signed in to.
 
 const SHARE_CODE_PREFIX = "dohc-share";

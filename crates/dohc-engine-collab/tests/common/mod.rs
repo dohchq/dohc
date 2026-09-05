@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 /// A temp engine.db that removes itself on drop, with a writer doc cache
 /// beside it (one writer, one cache — the production pairing). Threading the
-/// SAME cache through every append in a test makes later appends HIT it, so
+/// same cache through every append in a test makes later appends hit it, so
 /// the debug differential check re-proves CACHE-VALID across the suite.
 pub struct TempStore {
     pub store: EngineStore,

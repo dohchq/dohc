@@ -23,7 +23,7 @@ export const MENU_COMMANDS = [
 
 export type MenuCommandId = (typeof MENU_COMMANDS)[number];
 
-// THE preload boundary check for menu events: only an exact PRIMITIVE string
+// The preload boundary check for menu events: only an exact primitive string
 // from the closed tuple passes — String objects, toString tricks, case
 // variants, and unknown ids are all dropped. Exported so the boundary itself
 // is unit-tested (not just the renderer-side registry lookup behind it).
@@ -34,10 +34,10 @@ export function isMenuCommand(value: unknown): value is MenuCommandId {
   );
 }
 
-// The closed explorer context-menu command set (Phase E3). Same pattern as
+// The closed explorer context-menu command set. Same pattern as
 // MENU_COMMANDS: the renderer asks main to pop a native menu built from
 // MAIN-owned labels over this closed set, and the chosen id comes back over
-// the SAME invoke. Lives here (dependency-free) so the sandboxed preload can
+// the same invoke. Lives here (dependency-free) so the sandboxed preload can
 // validate the RESULT against it as a plain value before renderer code sees
 // it — the renderer never supplies labels or item structure.
 export const EXPLORER_MENU_COMMANDS = [
@@ -58,7 +58,7 @@ export const EXPLORER_MENU_COMMANDS = [
 
 type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
 
-// THE preload boundary check for the explorer-menu invoke result: only an
+// The preload boundary check for the explorer-menu invoke result: only an
 // exact primitive string from the closed tuple passes (String objects,
 // toString tricks, case variants, unknown ids drop to null = "dismissed").
 export function isExplorerMenuCommand(
@@ -70,7 +70,7 @@ export function isExplorerMenuCommand(
   );
 }
 
-// Closed native workbench context-menu command set (Phase E7). Explorer kept
+// Closed native workbench context-menu command set. Explorer kept
 // its richer file-tree menu; this generic menu covers tabs, editor surfaces,
 // and the status bar. Labels/roles live in main. Renderer receives only the
 // selected command id, validated here before it can route to existing shell
@@ -143,7 +143,7 @@ export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = [
 // tree can hold thousands, and the whole inventory stays in main.
 export const PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT = 20;
 
-// Closed main→renderer update-state event shape (Phase E2 status bar). Like
+// Closed main→renderer update-state event shape. Like
 // MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
 // preload validates against it as a plain value and must stay dependency-free.
 // The tuple mirrors updateMachine's UpdateState["status"] — channels.test.ts
@@ -290,7 +290,7 @@ function optionalPercent(value: unknown): number | undefined | null {
     : null;
 }
 
-// THE preload boundary check for update events: only a plain object whose
+// The preload boundary check for update events: only a plain object whose
 // status is an exact primitive member of the closed tuple, whose message is a
 // bounded primitive string, and whose optional public update metadata is
 // primitive and bounded can cross. Unknown fields are dropped, and String
@@ -309,7 +309,7 @@ export function parseUpdateStateEvent(
   percent?: number;
 } | null {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  // OWN properties only: an object inheriting status/message from a crafted
+  // Own properties only: an object inheriting status/message from a crafted
   // prototype must not pass a check that promises "plain object".
   if (!Object.hasOwn(value, "status") || !Object.hasOwn(value, "message")) {
     return null;
@@ -352,7 +352,7 @@ export function parseUpdateStateEvent(
   };
 }
 
-// Closed main→renderer search-results event shape (Phase E5.0). Like
+// Closed main→renderer search-results event shape. Like
 // parseUpdateStateEvent this lives here, not bridgeContract, because the
 // SANDBOXED preload validates every batch against it as a plain value and
 // must stay dependency-free. The bounds mirror workspaceSearch.ts (the main-
@@ -399,10 +399,10 @@ function isPositiveInt(value: unknown): value is number {
 
 // Dependency-free lexical path check for the preload boundary: relative,
 // forward-slashed, no null bytes, no backslashes, no empty/dot/dot-dot
-// segments. Main ALREADY ran validateUserWritePath before sending (it owns
+// segments. Main already ran validateUserWritePath before sending (it owns
 // containment); this re-check is the sandboxed preload's own closed gate —
 // it cannot require workspace-core, so it enforces the same lexical rules
-// inline. A path that fails drops the WHOLE batch (a tampered event is not
+// inline. A path that fails drops the whole batch (a tampered event is not
 // salvageable row by row).
 export function isSafeRelativePath(value: unknown): value is string {
   if (!isBoundedString(value, SEARCH_EVENT_MAX_PATH_CHARS)) return false;
@@ -414,11 +414,11 @@ export function isSafeRelativePath(value: unknown): value is string {
   return true;
 }
 
-// THE preload boundary check for search-result events: only a plain object
-// whose searchId is a bounded primitive string and whose entries ALL pass the
+// The preload boundary check for search-result events: only a plain object
+// whose searchId is a bounded primitive string and whose entries all pass the
 // closed entry shape (safe relative path, 1-based integer line/column,
 // bounded preview, ordered in-bounds match offsets) gets through — and only
-// the validated fields are REBUILT into a fresh object (extra fields never
+// the validated fields are rebuilt into a fresh object (extra fields never
 // cross; String objects/toString tricks fail the typeof checks). Unit-tested
 // like parseUpdateStateEvent.
 export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | null {
@@ -623,7 +623,7 @@ function isArtifactAssetDescriptor(
 // The editor's save indicator, pushed from main on every real settle outcome.
 // It replaced a renderer-side timer that flipped to "saved" on a timeout no
 // matter what the engine did — a doc could read "Saved" over a zero-byte file.
-// "read-only" is a SEPARATE refusal from "error": the workspace became a
+// "read-only" is a separate refusal from "error": the workspace became a
 // read-only shared view, so this edit and every edit after it is discarded.
 // Advice that suits a transient failure ("try another edit") is futile there,
 // so the two must not share a string. "changed-on-disk" is the same kind of
@@ -847,7 +847,7 @@ export const CHANNELS = {
   listAutomationFailures: "desktop:list-automation-failures",
   dismissAutomationFailure: "desktop:dismiss-automation-failure",
   automationFailuresChanged: "desktop:automation-failures-changed",
-  // Share changes (#646 PR3a). The first three act on a workspace this
+  // Share changes. The first three act on a workspace this
   // machine owns; the last three act from inside an edit-level share view.
   listShareProposals: "desktop:list-share-proposals",
   readShareProposalChanges: "desktop:read-share-proposal-changes",
@@ -948,11 +948,11 @@ export const CHANNELS = {
   getUpdateState: "desktop:get-update-state",
   checkForUpdates: "desktop:check-for-updates",
   installUpdate: "desktop:install-update",
-  // Quit interception (#567): main asks the renderer before a quit proceeds,
-  // so set-aside drafts warn BEFORE any destructive teardown. The renderer
+  // Quit interception: main asks the renderer before a quit proceeds,
+  // so set-aside drafts warn before any destructive teardown. The renderer
   // answers with hold (its dialog owns the decision) or resume (quit).
   quitRequested: "desktop:quit-requested",
-  // Recovery re-check (#579 review, r12): main asks at the QUIT BOUNDARY,
+  // Recovery re-check: main asks at the quit boundary,
   // because a reopen can set an edit aside after the renderer's own check and
   // before the install IPC runs. Request carries an id; the answer invokes
   // back with it.

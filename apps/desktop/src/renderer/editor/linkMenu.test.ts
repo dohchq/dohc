@@ -98,7 +98,7 @@ describe("normalizeLinkUrl", () => {
     );
   });
 
-  it("normalizes network-path URLs to HTTPS", () => {
+  it("normalizes network-path URLs to https", () => {
     expect(normalizeLinkUrl("//example.com/path")).toBe(
       "https://example.com/path",
     );

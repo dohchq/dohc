@@ -8,7 +8,7 @@
 //! by (a) content-addressed dedup — an update blob already in the log is an O(1)
 //! idempotent no-op — and (b) tagging a remote-applied update with its peer
 //! origin and returning `emit_outbound = false`, so a remote update is journaled
-//! into the durable lineage but NEVER re-emitted as our own outbound op.
+//! into the durable lineage but never re-emitted as our own outbound op.
 //!
 //! DEDUP SPAN: the content-addressed fast-path spans the UN-FOLDED update log.
 //! Once an update is folded into a snapshot by compaction its row is pruned, so a
@@ -75,10 +75,10 @@ pub struct RemoteUpdate {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ReplicationApplyOutcome {
     /// The update was newly journaled into the durable lineage at `seq`.
-    /// `emit_outbound` is ALWAYS false — a remote update is not echoed.
+    /// `emit_outbound` is always false — a remote update is not echoed.
     Applied { seq: i64, emit_outbound: bool },
     /// The update bytes were already in the log (content-addressed dedup): an
-    /// idempotent no-op that was NOT re-journaled and is NOT re-emitted.
+    /// idempotent no-op that was not re-journaled and is not re-emitted.
     Deduped { seq: i64 },
 }
 
@@ -156,7 +156,7 @@ pub struct RemoteUpdateApplied {
 
 /// Drain-only outer wrapper that keeps an already-resident writer-cache entry
 /// aligned after the remote append commits. The deferred replay gate remains
-/// cold because its transaction boundary cannot satisfy #943's cache proof.
+/// cold because its transaction boundary cannot satisfy the cache proof.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_remote_update_for_deferred_drain(
     store: &mut EngineStore,
@@ -204,7 +204,7 @@ fn apply_remote_update_outer(
             now_ms,
             maintain_frontier.then_some(&mut candidate),
         )?;
-        // The record-event decision commits WITH the update (#1004): this
+        // The record-event decision commits with the update: this
         // apply replays a parked coordinate, and if the drain's final
         // projection fails after this transaction, the retry's apply is a
         // no-op that derives no facts. The deferred row (deleted only when
@@ -313,7 +313,7 @@ fn apply_remote_update_in_transaction_inner(
             reason: "remote update applied to a non-replicated lineage".to_owned(),
         });
     }
-    // Dedup BEFORE the gate — `blob_seq_in_log`'s doc explains the order.
+    // Dedup before the gate — `blob_seq_in_log`'s doc explains the order.
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
@@ -805,7 +805,7 @@ mod dedupe_hoist_tests {
             replicated_with_applied_delta("dedupe-hoist-folded");
 
         // Fold the applied delta into a snapshot: its log row is pruned, so the
-        // redelivery below is OUTSIDE the dedup span.
+        // redelivery below is outside the dedup span.
         let folded =
             committed(maybe_compact(&mut store, &key, 1, &NoFaults, 1_300).expect("compact"));
         assert!(
@@ -814,7 +814,7 @@ mod dedupe_hoist_tests {
         );
         assert_eq!(update_rows(&store, &key), 0, "folded row pruned");
 
-        // Armed gate: a folded redelivery MUST reach the gate, which the armed
+        // Armed gate: a folded redelivery must reach the gate, which the armed
         // seam turns into a fail-closed refusal.
         let refused = with_armed_gate(|| {
             apply_remote_update(&mut store, &key, &remote, None, None, &NoFaults, 1_400)

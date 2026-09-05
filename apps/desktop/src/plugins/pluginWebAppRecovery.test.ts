@@ -34,17 +34,8 @@ describe("recoverConsumedWebAppCredential", () => {
       onError: (stage, error) => seen.errors.push([stage, error]),
     });
 
-    // MUTATION (drop the unpair): stopping the view unpairs nothing on a
-    // workspace-started host — it stops that host only when an on-demand open
-    // is the reason it runs — so the plugin's server stays paired to a guest
-    // that never arrived. Order matters twice: the page must leave its ready
-    // state even if a teardown hangs, and the unpair needs the plugin's
-    // transport, which the view stop may take away.
     //
-    // MUTATION (unpair outside the section): a reopen queued on that same
-    // lock runs while the unpair is still in flight, reads the plugin's
-    // pre-unpair server state, and gets the doomed server's origin.
-    expect(seen.steps).toEqual(["notify", "enter", "unpair", "stop", "leave"]);
+    expect(seen.steps, "drop the unpair: stopping the view unpairs nothing on a workspace-started host — it stops that host only when an on-demand open is the reason it runs — so the plugin's server stays paired to a guest that never arrived. Order matters twice: the page must leave its ready state even if a teardown hangs, and the unpair needs the plugin's transport, which the view stop may take away.").toEqual(["notify", "enter", "unpair", "stop", "leave"]);
     expect(seen.errors).toEqual([]);
   });
 
@@ -99,10 +90,7 @@ describe("recoverConsumedWebAppCredential", () => {
       onError: () => undefined,
     });
 
-    // MUTATION (notify inside the section, or after the teardown): a busy lock
-    // or a plugin whose stop hangs leaves the tab painting an empty frame with
-    // no error for the whole timeout.
-    expect(notifyFailed).toHaveBeenCalledTimes(1);
+    expect(notifyFailed, "notify inside the section, or after the teardown: a busy lock or a plugin whose stop hangs leaves the tab painting an empty frame with no error for the whole timeout.").toHaveBeenCalledTimes(1);
     enterTeardown();
     await recovery;
   });

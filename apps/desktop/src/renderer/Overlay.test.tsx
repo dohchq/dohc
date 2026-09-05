@@ -44,7 +44,7 @@ describe("Overlay", () => {
     );
   });
 
-  it("closes on Escape (CodeRabbit #779 R32)", () => {
+  it("closes on Escape", () => {
     const onClose = vi.fn();
     render(
       <Overlay onClose={onClose}>
@@ -58,7 +58,7 @@ describe("Overlay", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("closes only the topmost of two nested overlays on Escape (#779 round 4 finding 4)", () => {
+  it("closes only the topmost of two nested overlays on Escape", () => {
     const onCloseOuter = vi.fn();
     const onCloseInner = vi.fn();
     render(
@@ -78,7 +78,7 @@ describe("Overlay", () => {
     expect(onCloseOuter).not.toHaveBeenCalled();
   });
 
-  it("traps Tab focus inside the panel, wrapping both directions (CodeRabbit #779 R32)", () => {
+  it("traps Tab focus inside the panel, wrapping both directions", () => {
     render(
       <Overlay onClose={() => undefined}>
         <button type="button">First</button>

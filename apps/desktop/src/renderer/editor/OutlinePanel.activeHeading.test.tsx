@@ -476,8 +476,7 @@ describe("OutlinePanel active heading measurements", () => {
 
     const expected = resolveActiveHeadingByFullScan([0, 600, 900], 350, 72);
     expect(expected).toBe(0);
-    // MUTATION: skip the update invalidation and the stale cache keeps Review active.
-    expect(harness.activeText()).toBe(["Intro", "Plan", "Review"][expected]);
+    expect(harness.activeText(), "skip the update invalidation and the stale cache keeps Review active.").toBe(["Intro", "Plan", "Review"][expected]);
     expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 
@@ -553,8 +552,7 @@ describe("OutlinePanel active heading measurements", () => {
     harness.setTops(outOfOrderTops);
     harness.emitUpdate();
     expect(resolveActiveHeadingByFullScan(outOfOrderTops, 350, 72)).toBe(0);
-    // MUTATION: drop the nondecreasing clamp and binary search skips the gap.
-    expect(harness.activeText()).toBe("Intro");
+    expect(harness.activeText(), "drop the nondecreasing clamp and binary search skips the gap.").toBe("Intro");
 
     harness.setTops([0, 200, "throw", 600]);
     harness.scrollTo(500);
@@ -655,9 +653,7 @@ describe("OutlinePanel active heading measurements", () => {
     expect(harness.coordsAtPos).not.toHaveBeenCalled();
     harness.scrollTo(351);
 
-    // MUTATION: remove the gesture-start remeasure and the stale cache keeps
-    // Review active on this frame instead of correcting the idle shift.
-    expect(harness.activeText()).toBe("Intro");
+    expect(harness.activeText(), "remove the gesture-start remeasure and the stale cache keeps Review active on this frame instead of correcting the idle shift.").toBe("Intro");
     expect(harness.coordsAtPos).toHaveBeenCalledTimes(3);
   });
 });

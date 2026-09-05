@@ -1,7 +1,7 @@
 // JS-side canonical content JSON for a Y.Doc — the same shape the Rust
 // harness emits from yrs (src/main.rs `content_json`), computed independently
 // from Yjs so the two implementations' views of one converged doc can be
-// compared at CONTENT level (maps, text deltas with formatting attributes,
+// compared at content level (maps, text deltas with formatting attributes,
 // the full XML element tree), not just state vectors.
 //
 // The Yjs v1 wire format does not carry root-type kinds, so both sides read
@@ -104,7 +104,7 @@ function anyWrapped(value: unknown): Json {
 
 // ---- normalization + comparison ---------------------------------------------
 //
-// Applied to BOTH sides' trees before comparison:
+// Applied to both sides' trees before comparison:
 //  - deep-sort object keys (Rust already sorts; JS insertion order varies),
 //  - merge adjacent string delta runs whose attrs are identical (the two
 //    implementations may chunk one logical run differently),
@@ -174,7 +174,7 @@ export function contentsEqual(a: unknown, b: unknown): boolean {
 }
 
 /** Roots outside the declared schema are emitted as `undeclaredRoot`
- * placeholders by BOTH sides — two docs carrying the same undeclared root
+ * placeholders by both sides — two docs carrying the same undeclared root
  * would compare equal without their contents ever being read. Callers must
  * treat any occurrence as a failure. Returns the offending root names. */
 export function undeclaredRoots(content: unknown): string[] {

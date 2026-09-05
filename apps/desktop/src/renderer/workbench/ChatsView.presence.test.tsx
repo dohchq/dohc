@@ -230,7 +230,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-// A collaboration whose factory returns the SAME recording transport for every
+// A collaboration whose factory returns the same recording transport for every
 // scope — the presence tests here exercise a solo/owner (workspace) surface, so
 // one transport is enough to observe topics/publishes.
 function collabWith(transport: PresenceTransport): ChatPresenceCollaboration {
@@ -258,7 +258,7 @@ async function openThread(user: ReturnType<typeof userEvent.setup>) {
 describe("ChatsView presence (MU-C1)", () => {
   it("is dormant for solo: no transport => no presence UI", async () => {
     // With collaboration null, ChatsView receives no transport at all, so the
-    // real dormancy signal is the ABSENCE of presence UI (usePresence's own
+    // real dormancy signal is the absence of presence UI (usePresence's own
     // tests lock that a null transport never constructs a channel/publishes).
     const user = userEvent.setup();
     renderView(null); // collaboration off
@@ -289,7 +289,7 @@ describe("ChatsView presence (MU-C1)", () => {
     );
   });
 
-  it("scopes thread presence to the THREAD id, so sibling threads never share typing", async () => {
+  it("scopes thread presence to the thread id, so sibling threads never share typing", async () => {
     const t = pushableTransport();
     const user = userEvent.setup();
     renderView(collabWith(t.transport));
@@ -440,13 +440,13 @@ describe("ChatsView presence (MU-C1)", () => {
   });
 });
 
-// A collaboration that records EVERY scope its factory is asked for, and tags
+// A collaboration that records every scope its factory is asked for, and tags
 // each publish with the scope it went out on — so a test can assert which relay
 // presence scope (workspace vs share) a conversation lands in, and prove the
 // memoized transport is only rebuilt on a real scope switch.
 // onLeave (optional) fires synchronously when the presence transport's
 // leave() is invoked — used to pin ordering against another async call (e.g.
-// #742 P2-E: presence must leave before the leaveDm IPC ends the row).
+// Presence must leave before the leaveDm IPC ends the row).
 function recordingCollab(onLeave?: (topic: string) => void) {
   const calls: PresenceScopeInput[] = [];
   const publishes: { scope: PresenceScopeInput; topic: string }[] = [];
@@ -573,7 +573,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       workspaceId: "workspace-a",
     });
 
-    // The memoized transport is rebuilt ONLY when the scope actually changes:
+    // The memoized transport is rebuilt only when the scope actually changes:
     // no two consecutive factory calls share a scope identity (no per-render
     // churn), and both the share and workspace scopes were exercised.
     const keys = rec.calls.map(scopeKey);
@@ -584,7 +584,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
     expect(keys).toContain("ws:workspace-a");
   });
 
-  it("opening a thread inside a JOINED channel keeps SHARE scope on the thread topic", async () => {
+  it("opening a thread inside a joined channel keeps SHARE scope on the thread topic", async () => {
     const joinedThread: ChannelThreadRecord = {
       id: "thread-j",
       title: "Ship it?",
@@ -627,7 +627,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
       />,
     );
     await openChannelById(user, "channel-joined");
-    // Into the thread: presence re-scopes to the thread's own topic but STAYS
+    // Into the thread: presence re-scopes to the thread's own topic but stays
     // in the granter's SHARE scope (a thread of a shared channel is shared too).
     await user.click(await screen.findByTestId("chats-thread"));
     await screen.findByTestId("chats-thread-view");
@@ -643,7 +643,7 @@ describe("ChatsView presence scope selection (participant vs owner)", () => {
 });
 
 // A DM is a kind:"dm" chat channel backed by a chat-channel grant, so its
-// presence folds into the SAME scope/topic derivation: the TOPIC is the DM
+// presence folds into the same scope/topic derivation: the TOPIC is the DM
 // channel's cross-machine wireId; the SCOPE is the grant's share scope for the
 // PARTICIPANT (shared to) and the plain workspace scope for the OWNER — the
 // exact owner/participant convergence a joined channel uses.
@@ -763,14 +763,14 @@ describe("ChatsView presence scope selection (DM)", () => {
     expect(keys).toContain("ws:workspace-a");
   });
 
-  // #742 P2-E (round 3): leaveDm ends the DM's share, and an ended scope
+  // leaveDm ends the DM's share, and an ended scope
   // rejects further presence calls (the same ended-grant gate messages use)
   // — so leaveDm must not fire until the presence leave has genuinely
-  // SETTLED at the transport, not merely been dispatched. A transport whose
+  // settled at the transport, not merely been dispatched. A transport whose
   // leave() resolves synchronously (or a hook-level spy) cannot tell a
   // fire-and-forget void-launch from a real await — both would show
   // "presence-leave" before "leave-dm" in the order array. This transport's
-  // leave() hangs until the test releases it, and only records itself AFTER
+  // leave() hangs until the test releases it, and only records itself after
   // that await — so a void-launch upstream would let leaveDm fire while the
   // release is still pending, which the assertion below catches directly.
   it("awaits the transport leave settling before ending the row", async () => {
@@ -842,7 +842,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     expect(order).toEqual(["presence-leave-settled", "leave-dm"]);
   });
 
-  // #742 P2 (round 3): leave() already stopped the channel before leaveDm was
+  // leave() already stopped the channel before leaveDm was
   // even called. If leaveDm rejects, the row never ended and this DM stays
   // open — presence must re-arm, or this client reads as gone to peers until
   // it navigates away and back.
@@ -869,7 +869,7 @@ describe("ChatsView presence scope selection (DM)", () => {
     await waitFor(() => expect(bridgeMock.leaveDm).toHaveBeenCalled());
 
     // Still on the DM (leaveDm failed, goBack never ran) — and a fresh
-    // channel has published again for the SAME topic/scope.
+    // channel has published again for the same topic/scope.
     expect(await screen.findByTestId("chats-dm-view")).toBeTruthy();
     await waitFor(() =>
       expect(rec.publishes.length).toBeGreaterThan(publishesBeforeLeave),
@@ -885,7 +885,7 @@ describe("ChatsView presence scope selection (DM)", () => {
   });
 });
 
-// FIX 3 — presence must not act before its SCOPE is resolved for the CURRENT
+// FIX 3 — presence must not act before its SCOPE is resolved for the current
 // workspace. Scope for a joined channel derives from channelShares (loaded
 // async); until that load lands, and after a workspace switch, presence stays
 // dormant so it never publishes under a guessed or previous-workspace scope.
@@ -1000,7 +1000,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
     );
     // Switch workspaces. The stale-nav render still points at workspace-a's
     // channel while workspaceId is already workspace-b — the gate keeps presence
-    // dormant, so wire-owned is NEVER published under a workspace-b scope.
+    // dormant, so wire-owned is never published under a workspace-b scope.
     view.rerender(
       <ChatsView
         workspaceId="workspace-b"
@@ -1020,7 +1020,7 @@ describe("ChatsView presence scope gating (loaded share state)", () => {
   });
 });
 
-// Presence waits for the share scope to RESOLVE (sharesWorkspaceId), because a
+// Presence waits for the share scope to resolve (sharesWorkspaceId), because a
 // joined channel's scope is derived from the share metadata. Preserving cached
 // metadata on a failed background refresh is right — but only when something
 // was cached. A background refresh supersedes an initial request still in
@@ -1073,7 +1073,7 @@ describe("ChatsView presence when the first share lookup never answers", () => {
       expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(2),
     );
 
-    // Unknown share metadata fails closed, but the scope is RESOLVED, so
+    // Unknown share metadata fails closed, but the scope is resolved, so
     // presence runs instead of waiting on a request that will never answer.
     const buttons = await screen.findAllByTestId("chats-channel");
     await user.click(buttons[0]);

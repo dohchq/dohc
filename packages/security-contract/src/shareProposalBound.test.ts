@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "./shareProposalBound";
 
-// The bound is a MEASURED number, so something has to hold it to the
+// The bound is a measured number, so something has to hold it to the
 // measurement. Every other test of it builds its fixtures from the constant
 // itself and therefore moves with it — those prove the route and the contract
 // agree, not that the number is right.
@@ -17,7 +17,7 @@ describe("the share submit bound", () => {
   it("sits above the healthy work it must not reject", () => {
     expect(
       MAX_SHARE_PROPOSAL_OPS,
-      "MUTATION: a bound at or below measured healthy work rejects work people really do, " +
+      "a bound at or below measured healthy work rejects work people really do, " +
         "which is what AGENTS.md forbids",
     ).toBeGreaterThan(HEALTHY_MAX_CHANGED_FILES);
     expect(MAX_SHARE_PROPOSAL_OPS).toBeGreaterThan(FORTNIGHT_OF_ORDINARY_WORK);
@@ -26,7 +26,7 @@ describe("the share submit bound", () => {
   it("stays inside the range the relay was measured over", () => {
     expect(
       MAX_SHARE_PROPOSAL_OPS,
-      "MUTATION: a bound past the measured range states a cost nobody observed",
+      "a bound past the measured range states a cost nobody observed",
     ).toBeLessThanOrEqual(RELAY_MEASURED_LINEAR_TO);
   });
 });

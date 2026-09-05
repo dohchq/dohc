@@ -166,7 +166,7 @@ describe("runPlaywright", () => {
   it("forwards its argv to the CLI after the test subcommand", async () => {
     const { spawnedArgs } = await drive();
     // Losing the argv is silent scope creep: an argless `test --list`
-    // auto-discovers the config and runs the WHOLE suite, so smoke:settings
+    // auto-discovers the config and runs the whole suite, so smoke:settings
     // would quietly run all 67 tests instead of its one tagged spec.
     expect(spawnedArgs.slice(-3)).toEqual(["test", "--grep", "@x"]);
     expect(spawnedArgs[0]).toBe(playwrightCliPath());

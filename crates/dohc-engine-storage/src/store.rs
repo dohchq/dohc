@@ -23,8 +23,7 @@ fn is_safe_identifier(name: &str) -> bool {
 
 /// A single owned writable connection. Not `Sync`, not cloneable: the workspace
 /// actor owns exactly one and never lets it cross threads
-/// (`STATE_OWNERSHIP.tsv` row `sqlite-conn-versioned-text` → Rust: one writer
-/// per actor). Dropping it closes the connection deterministically.
+/// (one writer per actor). Dropping it closes the connection deterministically.
 #[derive(Debug)]
 pub struct EngineStore {
     conn: Connection,
@@ -45,9 +44,9 @@ pub struct CompoundWrite {
     pub body: String,
     /// The replication op kind journaled alongside the mutation.
     pub op_kind: String,
-    /// Injected wall-clock timestamp (`PORTING.md` §3: one injected clock;
-    /// negative/fractional-in-f64 values are the domain's concern, here the
-    /// calibration slice uses integral millis).
+    /// Injected wall-clock timestamp (one injected clock; negative or
+    /// fractional-in-f64 values are the domain's concern, here the calibration
+    /// slice uses integral millis).
     pub now_ms: i64,
 }
 
@@ -91,7 +90,7 @@ fn check_identifier(value: &str, field: &'static str) -> Result<(), StorageError
 /// [`EngineStore::write_with`]. Mirrors [`WriteOutcome`] but carries the
 /// closure's value on success, so the versioning domain
 /// (`dohc-engine-domain`) can commit a compound mutation + its journal entry
-/// in ONE transaction and still learn what it produced.
+/// in one transaction and still learn what it produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TxnOutcome<T> {
     /// The transaction committed durably and the ack was delivered.
@@ -130,7 +129,7 @@ struct RecordedRequest {
 
 /// Deterministic fingerprint of a write's payload (`doc_id`, `body`, `op_kind`)
 /// as lowercase-hex SHA-256 over NUL-separated fields — the plan's
-/// content-addressing discipline (`PORTING.md` §10/§11). Stored in the
+/// content-addressing discipline. Stored in the
 /// idempotency ledger so a retry can be checked for payload equality.
 fn payload_fingerprint(write: &CompoundWrite) -> String {
     let mut hasher = Sha256::new();
@@ -252,7 +251,7 @@ impl EngineStore {
 
         // Idempotency pre-check: a retry whose ledger row was committed by a
         // prior attempt replays to the recorded result and never re-applies.
-        // A key reused with a DIFFERENT payload is rejected — replaying would
+        // A key reused with a different payload is rejected — replaying would
         // drop the new write or return a stale result.
         if let Some(recorded) = self.lookup_request(&write.request_id)? {
             if recorded.payload_hash != payload_hash {
@@ -327,12 +326,12 @@ impl EngineStore {
         f(&self.conn)
     }
 
-    /// Run a compound domain mutation inside exactly ONE `BEGIN IMMEDIATE`
+    /// Run a compound domain mutation inside exactly one `BEGIN IMMEDIATE`
     /// transaction, consulting the two named storage fault points around the
     /// commit boundary. The closure issues every mutation — the domain write,
     /// its replication-journal entry, and any idempotency-ledger row — against
     /// the same `&Transaction`, so they commit together or not at all (plan
-    /// §Storage and recovery model; PORTING.md §9).
+    /// §Storage and recovery model).
     ///
     /// A `StorageBeforePersist` fault rolls back (drop-is-rollback) and reports
     /// `Crashed { committed: false }`; a `StorageAfterCommitBeforeAck` fault
@@ -363,9 +362,8 @@ impl EngineStore {
             }
         };
 
-        // Cancel/crash point is BETWEEN durable steps, never mid-commit
-        // (PORTING.md §12): the closure has issued all SQL but nothing is
-        // durable yet.
+        // Cancel/crash point is between durable steps, never mid-commit: the
+        // closure has issued all SQL but nothing is durable yet.
         if should_crash(faults, FaultPoint::StorageBeforePersist) {
             drop(tx); // explicit rollback
             return Ok(TxnOutcome::Crashed { committed: false });
@@ -399,7 +397,7 @@ impl EngineStore {
             })
     }
 
-    /// The database's `PRAGMA synchronous` setting (`1` = NORMAL). Exposed so a
+    /// The database's `PRAGMA synchronous` setting (`1` = normal). Exposed so a
     /// weakened-durability configuration is directly assertable.
     pub fn synchronous_setting(&self) -> Result<i64, StorageError> {
         self.conn
@@ -523,7 +521,7 @@ impl EngineStore {
         materialize::pending_job_count(&self.conn)
     }
 
-    /// The highest COMPLETE `target_generation` for `path` in `workspace_id`
+    /// The highest complete `target_generation` for `path` in `workspace_id`
     /// (staleness gate for the materialization pipeline), or `None` if nothing
     /// is materialized there.
     pub fn max_completed_generation_for_path(

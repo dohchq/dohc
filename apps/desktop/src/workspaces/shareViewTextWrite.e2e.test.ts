@@ -31,7 +31,7 @@ import {
   type ResolvedShareViewFilesTarget,
 } from "./shareViewFiles";
 
-// The seam the desktop e2e exposed and every unit test missed (#646 PR3a).
+// The seam the desktop e2e exposed and every unit test missed.
 //
 // A recipient's edit in an edit-level share view has to become a PROPOSABLE
 // change, and "proposable" is not a UI state: it is a moment in this replica's
@@ -360,11 +360,11 @@ describe("share-view text writes through the real store", () => {
       const moments = await momentIdsFor(view, path);
       expect(
         moments.filter((id) => id !== seeded.momentId),
-        "MUTATION: a save that only writes the file leaves the granter's replayed moment alone in the store",
+        "a save that only writes the file leaves the granter's replayed moment alone in the store",
       ).toHaveLength(1);
       expect(
         replicationLogRows(view.rootPath),
-        "MUTATION: a moment nothing journaled is a change the submit lane cannot see",
+        "a moment nothing journaled is a change the submit lane cannot see",
       ).toBeGreaterThan(journalBefore);
       await expect(
         readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
@@ -453,7 +453,7 @@ describe("share-view text writes through the real store", () => {
       });
       expect(
         await momentIdsFor(view, path),
-        "MUTATION: journaling before the hash check sends the granter a change built on bytes the recipient never read",
+        "journaling before the hash check sends the granter a change built on bytes the recipient never read",
       ).toEqual([seeded.momentId]);
       expect(replicationLogRows(view.rootPath)).toBe(journalBefore);
       await expect(
@@ -491,7 +491,7 @@ describe("share-view text writes through the real store", () => {
       ).resolves.toBe("after\n");
       expect(
         await momentIdsFor(workspace, path),
-        "MUTATION: an ordinary workspace writing engine-direct journals every save twice — once here, once from the watcher",
+        "an ordinary workspace writing engine-direct journals every save twice — once here, once from the watcher",
       ).toEqual(before);
     },
     60_000,

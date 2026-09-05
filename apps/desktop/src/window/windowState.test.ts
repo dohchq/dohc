@@ -95,7 +95,7 @@ describe("planWindowPlacement", () => {
     expect(planWindowPlacement(sliver, [PRIMARY]).bounds).toBeNull();
   });
 
-  it("resets when the TITLEBAR is above every display, even if the body is visible", () => {
+  it("resets when the titlebar is above every display, even if the body is visible", () => {
     // codex e0-e1 review: bottom 64px visible used to pass, but the titlebar
     // at y=-736 is unreachable — the user can never drag the window back.
     const titlebarOffTop = {
@@ -117,7 +117,7 @@ describe("planWindowPlacement", () => {
       bounds: { x: 100, y: 1080 - 30, width: 1280, height: 800 },
     };
     // Only 30px of body on PRIMARY's bottom; titlebar band y∈[1050,1090) has
-    // 30px on PRIMARY — exactly grabbable; with the band fully BELOW both
+    // 30px on PRIMARY — exactly grabbable; with the band fully below both
     // displays it resets.
     const fullyBelow = {
       ...saved,

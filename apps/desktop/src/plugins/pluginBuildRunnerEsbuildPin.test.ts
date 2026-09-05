@@ -25,7 +25,7 @@ afterEach(async () => {
   );
 });
 
-describe("buildPluginBundle esbuild binary pin (CodeRabbit #779 R7)", () => {
+describe("buildPluginBundle esbuild binary pin", () => {
   it("refuses to fall back to esbuild's own resolved binary when the staged, pinned binary is unusable", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-esbuild-pin-"));
     roots.push(root);

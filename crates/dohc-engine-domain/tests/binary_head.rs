@@ -1,5 +1,5 @@
 //! A binary head is a real head. Same-path generation supersede runs against
-//! the REAL materializer, and a binary head round-trips through history and
+//! the real materializer, and a binary head round-trips through history and
 //! rollback. The same-path supersede test is the load-bearing proof.
 
 use dohc_engine_domain::{
@@ -73,15 +73,15 @@ fn moment_order(store: &EngineStore, moment_id: &str) -> i64 {
 }
 
 /// M2, SAME PATH (the real supersede scenario — the shipped un-ignored test only
-/// checks a DIFFERENT path). A binary head at doc.md must consume a moment
-/// generation STRICTLY LESS than a subsequent same-path text write, so the
+/// checks a different path). A binary head at doc.md must consume a moment
+/// generation strictly less than a subsequent same-path text write, so the
 /// materializer's `done_gen > target_generation` newest-wins gate supersedes the
-/// older binary when the binary job drains AFTER the newer text job.
+/// older binary when the binary job drains after the newer text job.
 #[test]
 fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
     let (scratch, mut store) = open();
-    // Binary head first (older generation). Give it a LATE recorded_at so its
-    // materialization job sorts AFTER the text job in the drain — modelling the
+    // Binary head first (older generation). Give it a late recorded_at so its
+    // materialization job sorts after the text job in the drain — modelling the
     // delayed/retried binary drain the M2 bug needed.
     let binary_sha = write_binary(
         &mut store,
@@ -143,7 +143,7 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
         .expect("enqueue text job");
 
     // Drain: text (created_at 50) runs first and wins the path; the older binary
-    // (created_at 100) then drains and MUST be superseded (outcome Superseded,
+    // (created_at 100) then drains and must be superseded (outcome Superseded,
     // not Conflict — if generations had collided the gate would miss and the
     // binary would fall through to a preimage Conflict instead).
     let results = run_pending_jobs(
@@ -176,7 +176,7 @@ fn m2_same_path_binary_gen_is_strictly_below_next_text_and_is_superseded() {
     let _ = binary_sha;
 }
 
-/// Round-trip: a text write OVER a binary head, then rolling that text moment
+/// Round-trip: a text write over a binary head, then rolling that text moment
 /// back, must restore the binary head exactly (content_kind='binary', the
 /// original binary sha, empty text), reconstructing the binary preimage from the
 /// moment's before_binary_sha256.
@@ -212,7 +212,7 @@ fn rollback_text_over_binary_restores_the_binary_head() {
         )
         .expect("text over binary");
 
-    // Confirm the text moment recorded a BINARY preimage.
+    // Confirm the text moment recorded a binary preimage.
     let (before_kind, before_bin): (String, Option<String>) = store
         .read_with(|conn| {
             conn.query_row(
@@ -258,7 +258,7 @@ fn rollback_text_over_binary_restores_the_binary_head() {
     assert_eq!(blob_sha, None, "a binary head has no text blob");
     assert_eq!(bin_sha.as_deref(), Some(binary_sha.as_str()));
 
-    // S1 regression: the text-only read surface must NOT serve the restored
+    // S1 regression: the text-only read surface must not serve the restored
     // binary head as an empty text document — it fails closed instead, so a
     // caller can never silently overwrite it as if it were blank text.
     let err = VersionedTextStore::new(&mut store)
@@ -267,11 +267,11 @@ fn rollback_text_over_binary_restores_the_binary_head() {
     assert_eq!(err.code(), "binary-head-not-text");
 }
 
-/// Rolling back a FIRST binary write (no preimage) removes the file and GCs the
+/// Rolling back a first binary write (no preimage) removes the file and GCs the
 /// object — the binary head is not left as a phantom absent-text snapshot.
 ///
 /// M1: the write also enqueued a durable materialization job. Rollback must
-/// cancel it, so DRAINING the materializer afterward leaves NO file on disk. The
+/// cancel it, so draining the materializer afterward leaves NO file on disk. The
 /// pre-M1 code left the pending job, and the drain resurrected the rolled-back
 /// bytes onto disk while the DB said the path was absent.
 #[test]
@@ -302,7 +302,7 @@ fn rollback_first_binary_write_removes_file_and_object() {
         )
         .expect("rollback first binary write");
 
-    // M1: the rolled-back mutation's ORIGINAL job must be cancelled so it can
+    // M1: the rolled-back mutation's original job must be cancelled so it can
     // never re-materialize the rolled-back bytes. A compensating restore job is
     // enqueued unconditionally (a harmless no-op here, since the bytes never
     // reached disk in this pending-no-drain case).
@@ -326,7 +326,7 @@ fn rollback_first_binary_write_removes_file_and_object() {
     assert_eq!(orig, 0, "the original binary job must be cancelled");
     assert_eq!(restore, 1, "a compensating restore job must be enqueued");
 
-    // DISK-STATE proof: draining the materializer must NOT resurrect the file.
+    // DISK-STATE proof: draining the materializer must not resurrect the file.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -383,10 +383,10 @@ fn rollback_first_binary_write_removes_file_and_object() {
 }
 
 /// M1 COMPLETED-job half: rolling back a first binary write whose materialization
-/// job ALREADY drained to disk must reconcile disk with the absent DB head. The
+/// job already drained to disk must reconcile disk with the absent DB head. The
 /// pending-cancel fix alone left disk holding the rolled-back bytes while the DB
 /// said absent; the rollback must enqueue a compensating DELETE so a later drain
-/// removes the file. Proven against DISK, not just DB.
+/// removes the file. Proven against disk, not just DB.
 #[test]
 fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     let (scratch, mut store) = open();
@@ -399,7 +399,7 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         10,
     );
 
-    // Drain FIRST so the binary write is really on disk and its job is COMPLETE.
+    // Drain first so the binary write is really on disk and its job is COMPLETE.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -433,7 +433,7 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
         .expect("rollback completed binary write");
 
     // A compensating job must be pending (the original completed job is not
-    // replayed; a NEW delete job restores disk).
+    // replayed; a new delete job restores disk).
     let pending: i64 = store
         .read_with(|conn| {
             conn.query_row(
@@ -471,10 +471,10 @@ fn rollback_of_completed_binary_write_deletes_the_materialized_file() {
     assert!(view.is_none(), "the DB head must be absent after rollback");
 }
 
-/// M1 COMPLETED-job half, OVERWRITE branch: rolling back a binary write that
-/// overwrote a PREVIOUS binary head, after both reached disk, must restore disk
-/// to the PREVIOUS content (not leave the rolled-back bytes). Exercises the
-/// compensating WRITE (restore-previous) branch, not just the delete branch.
+/// M1 COMPLETED-job half, overwrite branch: rolling back a binary write that
+/// overwrote a previous binary head, after both reached disk, must restore disk
+/// to the previous content (not leave the rolled-back bytes). Exercises the
+/// compensating write (restore-previous) branch, not just the delete branch.
 #[test]
 fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     let (scratch, mut store) = open();
@@ -542,7 +542,7 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
         )
         .expect("rollback completed binary overwrite");
 
-    // Drain the compensating restore → disk holds the PREVIOUS content again.
+    // Drain the compensating restore → disk holds the previous content again.
     run_pending_jobs(
         &store,
         scratch.path(),
@@ -574,9 +574,9 @@ fn rollback_of_completed_binary_overwrite_restores_previous_content_on_disk() {
     assert_eq!(bin.as_deref(), Some(prev_sha.as_str()));
 }
 
-/// Finding 2 (hardening): a TEXT rollback must NEVER touch a materialization job
+/// Finding 2 (hardening): a TEXT rollback must never touch a materialization job
 /// that merely shares the mutation moment id. The disk-reconciliation path runs
-/// ONLY for a binary WRITE moment (and only against a job whose content matches
+/// only for a binary write moment (and only against a job whose content matches
 /// this write's bytes), so an unrelated same-id job survives untouched — a text
 /// mutation cannot cancel or compensate against it.
 #[test]
@@ -659,11 +659,11 @@ fn text_rollback_does_not_touch_a_materialization_job_with_the_same_id() {
     );
 }
 
-/// Finding A (crash-consistency): a PENDING materialization job does NOT prove
-/// the bytes never reached disk — the materializer can crash AFTER the atomic
-/// rename lands but BEFORE marking the job complete
+/// Finding A (crash-consistency): a pending materialization job does not prove
+/// the bytes never reached disk — the materializer can crash after the atomic
+/// rename lands but before marking the job complete
 /// (`MaterializeAfterRenameBeforeComplete`), leaving the written bytes on disk
-/// with a still-pending job. Rolling that write back must reconcile DISK anyway:
+/// with a still-pending job. Rolling that write back must reconcile disk anyway:
 /// the compensating delete runs even though the original job was only pending.
 #[test]
 fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
@@ -677,7 +677,7 @@ fn rollback_of_pending_binary_write_with_bytes_on_disk_cleans_disk() {
         10,
     );
 
-    // Crash AFTER the rename lands but BEFORE marking complete: bytes ON DISK,
+    // Crash after the rename lands but before marking complete: bytes ON DISK,
     // job stays PENDING.
     let faults = ScriptedFaults::crash_at(FaultPoint::MaterializeAfterRenameBeforeComplete);
     let results = run_pending_jobs(

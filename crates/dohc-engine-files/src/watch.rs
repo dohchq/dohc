@@ -43,7 +43,7 @@ const WATCH_REATTACH_ATTEMPTS: usize = 3;
 /// thread (never the async runtime).
 const WATCH_REATTACH_BACKOFF: Duration = Duration::from_millis(200);
 /// How often the idle watcher thread verifies the watched root is still the
-/// SAME directory object the OS watch was attached to. Deleting the watched
+/// same directory object the OS watch was attached to. Deleting the watched
 /// root produces NO error callback on either real backend we ship on -- not
 /// the Windows `ReadDirectoryChangesW` path, and not Linux inotify (which
 /// reports the removal as ordinary `DELETE_SELF` events and then quietly drops
@@ -230,7 +230,7 @@ impl NativeWatcher {
         })
     }
 
-    /// MONOTONE count of watch disruptions since startup: each notify
+    /// Monotone count of watch disruptions since startup: each notify
     /// backend error and each root-identity mismatch increments it, even when
     /// the subsequent re-attach succeeds. A supervisor edge-triggers by
     /// comparing counts — a bool here could only ever be reported once per
@@ -321,7 +321,7 @@ fn watcher_thread(
     let loop_disruptions = Arc::clone(&disruptions);
     // Sticky, NON-DROPPABLE backend-error signal. The bounded `callback_tx`
     // event queue can drop a `try_send` under load, so a re-attach request
-    // must NOT ride on it: a dropped `Event` merely loses a wake (the health
+    // must not ride on it: a dropped `Event` merely loses a wake (the health
     // poll still fires within the interval), but a dropped re-attach request
     // would leave a genuinely-dead watch un-reattached. This flag is set by
     // the callback and consumed by the main loop each iteration.
@@ -348,12 +348,12 @@ fn watcher_thread(
             return;
         }
     };
-    // Bind to the exact directory object BEFORE attaching, so the health poll
+    // Bind to the exact directory object before attaching, so the health poll
     // can detect a delete-then-recreate that existence alone would miss.
     // Binding first is deliberate: a swap landing between these two lines
     // leaves the bound object different from what the path now names, and the
     // poll resolves that with a re-attach. Binding afterwards would record the
-    // NEW object while the watch still sat on the old one -- a dead watch the
+    // new object while the watch still sat on the old one -- a dead watch the
     // poll could never see.
     let mut watched_root = WatchedRoot::bind(&root);
     if watcher.watch(&root, RecursiveMode::Recursive).is_err() {
@@ -397,7 +397,7 @@ fn watcher_thread(
             }
             // Idle: no burst in progress. Wake periodically (rather than
             // blocking on `rx.recv()` forever) to independently verify the
-            // watched root is still the SAME directory object the watch was
+            // watched root is still the same directory object the watch was
             // bound to -- see `WATCH_ROOT_HEALTH_POLL_INTERVAL`.
             _ => match rx.recv_timeout(WATCH_ROOT_HEALTH_POLL_INTERVAL) {
                 Ok(message) => Some(message),
@@ -405,7 +405,7 @@ fn watcher_thread(
                     if !unavailable.load(Ordering::Acquire) && !watched_root.still_bound(&root) {
                         loop_disruptions.fetch_add(1, Ordering::AcqRel);
                         handle.notify_overflow();
-                        // Rebind to the NEW directory object (so we don't
+                        // Rebind to the new directory object (so we don't
                         // reattach every poll forever), then reattach -- same
                         // bind-before-attach ordering as startup, and it also
                         // releases the pin on the object we just lost. On
@@ -451,13 +451,13 @@ fn watcher_thread(
 
 /// Bounded re-attach after the backend reports an error (including the
 /// watched root itself being deleted or replaced, a real case on both
-/// inotify and `ReadDirectoryChangesW`): retry `watch()` on the SAME owned
+/// inotify and `ReadDirectoryChangesW`): retry `watch()` on the same owned
 /// `notify::Watcher` a fixed number of times with a small backoff, run
 /// inline on this dedicated watcher OS thread (never the async runtime, and
 /// never unbounded — a dead watch must not spin this thread forever).
 ///
 /// On success, further events resume flowing normally; the disruption stays
-/// COUNTED in [`NativeWatcher::disruption_count`] (a real disruption did
+/// counted in [`NativeWatcher::disruption_count`] (a real disruption did
 /// happen), but [`NativeWatcher::is_unavailable`] stays false. On exhaustion, the watch is
 /// treated as permanently lost: `unavailable` is set so a supervisor can
 /// observe it and restart the watcher/workspace instead of silently running
@@ -501,7 +501,7 @@ fn attempt_reattach(
 ///
 /// Holding the directory open closes that hole: the kernel cannot free, and so
 /// cannot recycle, an inode that is still referenced, so a recreated root is
-/// GUARANTEED a different number and the comparison becomes sound. Only the
+/// guaranteed a different number and the comparison becomes sound. Only the
 /// root directory's own inode is pinned (not its contents), and the pin is
 /// released the moment we rebind. The handle is Unix-only: on Windows an open
 /// directory handle would block the very `rmdir` this is meant to observe, and
@@ -521,7 +521,7 @@ impl WatchedRoot {
     #[cfg(unix)]
     fn bind(root: &Path) -> Self {
         use std::os::unix::fs::MetadataExt;
-        // Read the identity THROUGH the pinned handle rather than with a
+        // Read the identity through the pinned handle rather than with a
         // second path lookup, so the recorded identity always describes the
         // object actually held open.
         let pin = std::fs::File::open(root).ok();
@@ -543,11 +543,11 @@ impl WatchedRoot {
         }
     }
 
-    /// Whether `root` still resolves to the bound directory object -- NOT mere
+    /// Whether `root` still resolves to the bound directory object -- not mere
     /// existence, which cannot distinguish the original directory from a
     /// delete-then-recreate that leaves the OS watch pointing at a dead
     /// object. Any ambiguity (the root is unreadable now, or was unreadable
-    /// when bound) counts as NOT bound, so it feeds a re-attach attempt rather
+    /// when bound) counts as not bound, so it feeds a re-attach attempt rather
     /// than a silent skip.
     fn still_bound(&self, root: &Path) -> bool {
         match (self.identity, file_id::get_file_id(root).ok()) {
@@ -559,7 +559,7 @@ impl WatchedRoot {
 
 /// R14 robustness coverage: bounded re-attach and the startup deadline.
 /// [`attempt_reattach`] and [`await_ready_with_deadline`] are exercised
-/// directly (white-box) here because deterministically forcing a REAL
+/// directly (white-box) here because deterministically forcing a real
 /// `notify` backend to hang, specifically, is not practical in a fast unit
 /// test; the end-to-end wiring (a deleted watched root eventually surfacing
 /// as [`NativeWatcher::is_unavailable`]) is covered separately in
@@ -586,8 +586,8 @@ mod tests {
     }
 
     /// The defect [`WatchedRoot`]'s pin exists for: on ext4, `rmdir` followed
-    /// by `mkdir` at the same path is handed the SAME inode number, so an
-    /// UNPINNED identity comparison answers "still the same directory object"
+    /// by `mkdir` at the same path is handed the same inode number, so an
+    /// unpinned identity comparison answers "still the same directory object"
     /// for a root that was replaced -- leaving inotify bound to the dead one,
     /// with no error and no event, forever.
     #[test]

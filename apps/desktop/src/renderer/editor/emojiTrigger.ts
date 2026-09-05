@@ -1,6 +1,6 @@
 // `:shortcode:` emoji autocomplete trigger.
 //
-// A THIRD trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
+// A third trigger surface alongside `[[` wikilinks (wikilinkPlugin.ts) and
 // `@`-mentions (mentionTrigger.ts) — same detection shape, same shared
 // picker infrastructure conventions, but it inserts PLAIN UNICODE TEXT
 // (see EmojiPicker.tsx's `applyEmojiPick`). No schema/node involved, so
@@ -18,7 +18,7 @@
 // opens) — a bare `:` shows up too often in prose (times, URLs, ratios) to
 // pop a picker on the very first character.
 //
-// A SECOND behavior layered on top: typing the *closing* colon of a
+// A second behavior layered on top: typing the *closing* colon of a
 // complete, known shortcode (`:smile:`) inserts the emoji immediately,
 // Slack/GitHub-style, without waiting for the user to pick from the list.
 // That's handled via `appendTransaction` (not a manual `view.dispatch` from
@@ -52,7 +52,7 @@ const EMOJI_TRIGGER_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,})$/
 // Completion trigger: same, but the closing `:` has just been typed.
 const EMOJI_COMPLETE_RE = /(?<=^|\s):([a-zA-Z0-9_+-]{2,}):$/
 
-/** PURE: detect an incomplete `:shortcode` at the cursor, same shape and
+/** Pure: detect an incomplete `:shortcode` at the cursor, same shape and
  *  strategy as wikilinkPlugin's `detectAutocomplete` / mentionTrigger's
  *  `detectMentionAutocomplete`. */
 export function detectEmojiAutocomplete(
@@ -86,7 +86,7 @@ type CompleteEmojiShortcode = {
   shortcode: string
 }
 
-/** PURE: detect a JUST-CLOSED `:shortcode:` at the cursor (the closing
+/** Pure: detect a JUST-CLOSED `:shortcode:` at the cursor (the closing
  *  colon is the last character before cursorPos). Doesn't check whether
  *  the shortcode is actually known — callers combine this with
  *  `lookupEmoji`. */
@@ -115,12 +115,12 @@ export function detectCompleteEmojiShortcode(
   return found
 }
 
-/** PURE: did this batch of transactions insert text ending in a colon exactly
+/** Pure: did this batch of transactions insert text ending in a colon exactly
  *  at `cursorPos` (the post-transaction selection head)? This is the signal
  *  that the LOCAL user just typed the closing `:` of a shortcode, and it is
  *  what gates the Slack-style auto-insert.
  *
- *  Without it, `appendTransaction` fires on ANY doc-changing transaction whose
+ *  Without it, `appendTransaction` fires on any doc-changing transaction whose
  *  cursor happens to sit right after a literal `:shortcode:` — most notably a
  *  remote collaborator's edit (a y-sync transaction changes the doc while the
  *  local selection is merely mapped in place), which would silently rewrite a
@@ -143,7 +143,7 @@ function insertedClosingColonAtCursor(
       if (!inserted.endsWith(':')) continue
       // Position just past the inserted content, in this step's output doc…
       let end = step.from + slice.size
-      // …mapped through the rest of THIS transaction's steps…
+      // …mapped through the rest of this transaction's steps…
       end = tr.mapping.slice(i + 1).map(end)
       // …then through every later transaction in the batch, landing in the
       // same coordinate space as `cursorPos` (newState).

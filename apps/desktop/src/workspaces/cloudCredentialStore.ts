@@ -151,7 +151,7 @@ export function createCloudCredentialStore(options: {
 
     // The invalid-session marker: a session the relay proved dead whose
     // credential record could not be deleted. Persisted beside the record so
-    // a RESTART cannot read the dead record back as connected — the marker
+    // a restart cannot read the dead record back as connected — the marker
     // holds a token hash, never the token, so it needs no sealing.
     async loadInvalidMarker() {
       let parsed: unknown;

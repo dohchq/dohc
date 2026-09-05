@@ -18,7 +18,7 @@ import type { MentionCandidate } from "@dohc/workspace-contracts/chat-mentions";
 // asks a blocked run is waiting on. The shell renders those as
 // AgentPermissionRequests cards; answering resumes the run.
 //
-// Scope note (individual-first, LOCAL): this watches the CURRENTLY OPEN
+// Scope note (individual-first, LOCAL): this watches the currently open
 // workspace only. Cross-workspace background runs would need main to track
 // every workspace's session; that's the seam the multi-user chat lanes will
 // also want, so it's intentionally left as a single, obvious future addition.
@@ -31,7 +31,7 @@ export type AgentPermissionRequest = NonNullable<
   AgentPanelSnapshotResult["session"]
 >["pendingPermissions"][number];
 
-// AgentSessionManager replaces a pending entry's CONTENT in place when a
+// AgentSessionManager replaces a pending entry's content in place when a
 // permission-request event reuses a requestId, so identity alone is not
 // equality: compare everything the AgentPermissionRequests card renders.
 function sameAsk(a: AgentPermissionRequest, b: AgentPermissionRequest): boolean {
@@ -56,7 +56,7 @@ interface UseAgentNotifications {
   // The active session's unanswered permission requests (current workspace).
   pendingPermissions: AgentPermissionRequest[];
   // The run those asks belong to — the card scopes its optimistic-hide keys
-  // by run, so a LATER session reusing a provider request id can ask again.
+  // by run, so a later session reusing a provider request id can ask again.
   pendingPermissionsRunId: string | null;
   dismiss: (id: string) => void;
 }
@@ -74,7 +74,7 @@ export function useAgentNotifications(params: {
   const pollIntervalMs = params.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
 
   const [notifications, setNotifications] = useState<AgentNotification[]>([]);
-  // Asks are stored WITH their workspace and filtered synchronously at
+  // Asks are stored with their workspace and filtered synchronously at
   // render (the same isolation rule as notifications below): the render
   // right after a switch must never hand workspace A's request ids to a
   // card that would answer them against workspace B.
@@ -117,7 +117,7 @@ export function useAgentNotifications(params: {
     // workspace, but a busy workspace (a multi-file reconcile, an agent
     // writing in a loop) still pings on every settled batch, and global
     // events reach every window. A wake-driven poll therefore never starts sooner
-    // than pollIntervalMs after the previous poll STARTED — an activity storm
+    // than pollIntervalMs after the previous poll started — an activity storm
     // costs at worst the old fast cadence, while a quiet window still wakes
     // instantly on the first ping.
     let lastPollStartMs = Number.NEGATIVE_INFINITY;
@@ -148,7 +148,7 @@ export function useAgentNotifications(params: {
         const runId = panel.session?.runId ?? null;
         const requests = panel.session?.pendingPermissions ?? [];
         // Reference-stable no-op (same rule as reduceAgentNotifications): a poll
-        // that changes nothing MUST keep `prev` so setState bails out instead of
+        // that changes nothing must keep `prev` so setState bails out instead of
         // re-rendering the host shell every tick.
         setPendingAsks((prev) =>
           prev.workspaceId === workspaceId &&
@@ -193,7 +193,7 @@ export function useAgentNotifications(params: {
     // pollIntervalMs anyway.
     const unsubscribe = bridge().onWorkspaceActivity(() => {
       if (cancelled) return;
-      // Queue while ANY poll is in flight — including the initial one, before
+      // Queue while any poll is in flight — including the initial one, before
       // idleArmed means anything. That poll may have captured a pre-session
       // snapshot and be about to arm the slow timer just as the run's first
       // ask arrives; the queued re-poll (rate-limited in finally) surfaces it.
@@ -233,7 +233,7 @@ export function useAgentNotifications(params: {
     [dismissedFor],
   );
 
-  // Render only the CURRENT workspace's notices, computed synchronously. A
+  // Render only the current workspace's notices, computed synchronously. A
   // switch to workspace B therefore never repaints workspace A's notices, even
   // for the tick before the next poll runs (product invariant: a slow/stale
   // response for A must never repaint B).

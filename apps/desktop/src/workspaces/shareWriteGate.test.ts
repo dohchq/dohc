@@ -35,7 +35,7 @@ describe("shareViewTakesLocalWrites", () => {
   it("refuses a damaged grant, which names no level at all", () => {
     expect(
       shareViewTakesLocalWrites({ access: null, ended: false }),
-      "MUTATION: an `!== \"view\"` test reads a damaged grant as writable",
+      "an `!== \"view\"` test reads a damaged grant as writable",
     ).toBe(false);
   });
 
@@ -43,19 +43,19 @@ describe("shareViewTakesLocalWrites", () => {
     for (const access of ["view", "comment", "edit"] as const) {
       expect(
         shareViewTakesLocalWrites({ access, ended: true }),
-        `${access}: MUTATION: an ended share takes a write nothing will ever send`,
+        `${access}: an ended share takes a write nothing will ever send`,
       ).toBe(false);
     }
   });
 });
 
-// The OTHER rule, and the one 27 handlers sit behind. It is deliberately not
+// The other rule, and the one 27 handlers sit behind. It is deliberately not
 // the rule above: those handlers write the workspace FOLDER, and a share
 // view's folder is a projection of its engine store — so a raw-disk write
 // there leaves a projection stating content no moment does, which nothing can
 // ever send and the next pull silently overwrites.
 //
-// The level cannot widen it, and this is the property that matters: an EDIT
+// The level cannot widen it, and this is the property that matters: an edit
 // share view is refused here exactly as a view share is. The one write a
 // share view admits is routed to the engine through `ShareViewFiles.change`,
 // which asks `shareViewTakesLocalWrites` instead.
@@ -70,11 +70,11 @@ describe("workspaceWriteRefusal", () => {
     expect(workspaceWriteRefusal(undefined)).toBeNull();
   });
 
-  it("refuses EVERY share view, at every level, including edit", () => {
+  it("refuses every share view, at every level, including edit", () => {
     for (const access of ["view", "comment", "edit", "unreadable"] as const) {
       expect(
         workspaceWriteRefusal(marker(access)),
-        `${access}: MUTATION: a level-aware ordinary-write gate opens every raw-disk writer on a share view`,
+        `${access}: a level-aware ordinary-write gate opens every raw-disk writer on a share view`,
       ).toBe("This is a shared view — ask granter@dohc.test for changes.");
     }
   });
@@ -84,7 +84,7 @@ describe("workspaceWriteRefusal", () => {
     // whose marker lost its value, not a workspace that never had one.
     expect(
       workspaceWriteRefusal(null),
-      "MUTATION: `?? null` reads a damaged marker as an ordinary workspace",
+      "`?? null` reads a damaged marker as an ordinary workspace",
     ).toBe("This is a shared view — ask the person who shared it for changes.");
   });
 

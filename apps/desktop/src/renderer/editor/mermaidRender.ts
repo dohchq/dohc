@@ -1,9 +1,9 @@
 // Mermaid diagram rendering inside WYSIWYG code blocks — a ProseMirror
-// decoration layer, deliberately NOT a schema/nodeView change. Mermaid
+// decoration layer, deliberately not a schema/nodeView change. Mermaid
 // fences are plain `codeBlock` nodes with `language: "mermaid"` (the same
 // contract-locked schema every other fence uses — see schema-parity.test.ts).
 // This plugin paints a
-// rendered diagram widget BELOW the block without ever touching the node's
+// rendered diagram widget below the block without ever touching the node's
 // markdown round-trip — the fence text stays the single source of truth.
 //
 // Mirrors the wikilink source/preview toggle (wikilinkPlugin.ts): while the
@@ -55,7 +55,7 @@ type MermaidBlock = {
   text: string
 }
 
-/** PURE: walk the doc, return every `codeBlock` with `language: "mermaid"`. */
+/** Pure: walk the doc, return every `codeBlock` with `language: "mermaid"`. */
 export function computeMermaidBlocks(doc: DocLike): MermaidBlock[] {
   const blocks: MermaidBlock[] = []
   doc.descendants((node, pos) => {
@@ -67,7 +67,7 @@ export function computeMermaidBlocks(doc: DocLike): MermaidBlock[] {
   return blocks
 }
 
-/** PURE: a mermaid block's source collapses whenever the cursor sits
+/** Pure: a mermaid block's source collapses whenever the cursor sits
  *  outside its range — block-granularity version of wikilinkPlugin's
  *  cursor-inside source/preview toggle. */
 export function isMermaidBlockCollapsed(
@@ -77,7 +77,7 @@ export function isMermaidBlockCollapsed(
   return cursorPos < block.pos || cursorPos > block.end
 }
 
-/** A mermaid block paired with a STABLE widget id. The id — not the doc
+/** A mermaid block paired with a stable widget id. The id — not the doc
  *  position — is what the decoration key, the widget DOM (`data-mermaid-id`)
  *  and the render scheduler key are derived from, so a fence that merely
  *  shifts position (an edit above it) keeps its painted widget instead of
@@ -89,9 +89,9 @@ export type MermaidWidgetEntry = {
   text: string
 }
 
-/** PURE: reconcile the previous frame's widget entries against the freshly
+/** Pure: reconcile the previous frame's widget entries against the freshly
  *  computed blocks, reusing an id whenever a block's (mapped) start position
- *  matches a previous entry. `mapPos` maps an OLD doc position into the new
+ *  matches a previous entry. `mapPos` maps an old doc position into the new
  *  document (identity when the transaction didn't change the doc), so a fence
  *  pushed down by an edit above it still matches and keeps its identity. New
  *  fences get a fresh id via `nextId`; deleted fences simply drop out (the
@@ -200,7 +200,7 @@ export class MermaidRenderScheduler {
     this.generation.delete(key)
   }
 
-  /** Drop scheduler state for every key NOT in `activeKeys` — i.e. fences
+  /** Drop scheduler state for every key not in `activeKeys` — i.e. fences
    *  deleted since the last sync — so timers/lastSource/generation don't leak
    *  across an editing session (previously they only cleared on editor
    *  destroy). */
@@ -257,7 +257,7 @@ function readThemeVariables(): Record<string, string> {
 }
 
 /** Lazy-load the mermaid package once per renderer process, then keep it
- *  (re-)initialized for the CURRENT theme — `initialize()` just replaces
+ *  (re-)initialized for the current theme — `initialize()` just replaces
  *  mermaidAPI's in-memory config, read fresh by the next `render()` call,
  *  so flipping themes is cheap. */
 async function loadMermaid(): Promise<MermaidModule> {
@@ -316,7 +316,7 @@ function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElemen
     const container = document.createElement('div')
     container.className = 'dohc-mermaid-preview'
     container.setAttribute('contenteditable', 'false')
-    // Stable per-block id, NOT the doc position: the widget DOM outlives
+    // Stable per-block id, not the doc position: the widget DOM outlives
     // position shifts, so a position baked in here would go stale.
     container.dataset.mermaidId = id
 
@@ -331,7 +331,7 @@ function buildMermaidPreviewWidget(id: string): (view: EditorView) => HTMLElemen
     container.addEventListener('mousedown', stopEditorMouseEvent)
     container.addEventListener('click', (event) => {
       stopEditorMouseEvent(event)
-      // Resolve the fence's CURRENT position from plugin state at click time —
+      // Resolve the fence's current position from plugin state at click time —
       // this widget DOM survives edits above it, so a captured pos is stale.
       const entry = mermaidPreviewKey.getState(view.state)?.entries.find((e) => e.id === id)
       if (entry) focusMermaidSource(view, entry.pos)
@@ -360,7 +360,7 @@ function buildMermaidDecorationSet(
         // Keep the preview immediately after its source fence at the same
         // document boundary.
         side: 0,
-        // Keyed by the STABLE widget id (not the doc position): ProseMirror's
+        // Keyed by the stable widget id (not the doc position): ProseMirror's
         // widget equality is key-based, so an edit above the fence maps the
         // decoration to its new position while PM preserves the painted DOM
         // instead of destroying it and building an empty canvas.

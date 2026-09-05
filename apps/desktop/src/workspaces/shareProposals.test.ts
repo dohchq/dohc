@@ -43,7 +43,7 @@ describe("requireShareViewMembership (seeing and taking back)", () => {
       const scope = requireShareViewMembership(marker({ access }));
       expect(
         scope.shareId,
-        `${access}: MUTATION: a level test here loses the reverse path to a downgrade`,
+        `${access}: a level test here loses the reverse path to a downgrade`,
       ).toBe("share-1");
       expect(scope.grant.access).toBe(access);
     }
@@ -62,7 +62,7 @@ describe("requireShareViewMembership (seeing and taking back)", () => {
   it("refuses a grant that reads back as damage, and a marker with no share id", () => {
     expect(
       () => requireShareViewMembership(marker({ access: null })),
-      "MUTATION: a damaged grant must never resolve a share id",
+      "a damaged grant must never resolve a share id",
     ).toThrow(SharedFileReadOnlyError);
     expect(() => requireShareViewMembership(marker({ shareId: "" }))).toThrow(
       SharedFileReadOnlyError,
@@ -110,7 +110,7 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
   it("refuses a share view whose grant reads back as damage", () => {
     expect(
       () => requireShareViewProposalScope(marker({ access: null })),
-      "MUTATION: a damaged grant must never resolve a submit scope",
+      "a damaged grant must never resolve a submit scope",
     ).toThrow(SharedFileReadOnlyError);
   });
 
@@ -126,7 +126,7 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
     );
   });
 
-  // The granter's own workspace. Its marker is ABSENT, not null.
+  // The granter's own workspace. Its marker is absent, not null.
   it("refuses a workspace that is not a share view", () => {
     expect(() => requireShareViewProposalScope(undefined)).toThrow(
       "This workspace is not a shared view.",
@@ -138,7 +138,7 @@ describe("requireShareViewProposalScope (the recipient lane)", () => {
   it("refuses a share view whose whole marker lost its value", () => {
     expect(
       () => requireShareViewProposalScope(null),
-      "MUTATION: a truthiness read makes a damaged marker an ordinary workspace",
+      "a truthiness read makes a damaged marker an ordinary workspace",
     ).toThrow(SharedFileReadOnlyError);
   });
 });
@@ -159,7 +159,7 @@ describe("assertShareProposalGranter (the granter lane)", () => {
     ]) {
       expect(
         () => assertShareProposalGranter(shareView),
-        "MUTATION: a share view accepting its own changes writes into someone else's workspace",
+        "a share view accepting its own changes writes into someone else's workspace",
       ).toThrow("This is a shared view");
     }
   });

@@ -30,7 +30,7 @@ describe("filesystem entry identity", () => {
   it("answers unknown when either side has no inode to give", () => {
     expect(sameFsEntry({ ino: 0n, dev: 3n }, { ino: 7n, dev: 3n })).toBe("unknown");
     expect(sameFsEntry({ ino: 7n, dev: 3n }, { ino: 0n, dev: 3n })).toBe("unknown");
-    // Both zero would compare EQUAL under a naive check, which is the
+    // Both zero would compare equal under a naive check, which is the
     // dangerous direction: it would read as "same" and let the ladder run on.
     expect(sameFsEntry({ ino: 0n, dev: 3n }, { ino: 0n, dev: 3n })).toBe("unknown");
   });

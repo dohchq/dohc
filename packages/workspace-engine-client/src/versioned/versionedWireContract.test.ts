@@ -172,9 +172,8 @@ describe("versioned typed loopback", () => {
     expect(written.moment.momentId).toBe("moment-a");
 
     // Daemon parity: overwriting an existing head with a requestId (and no
-    // explicit objectId) keeps the file's ORIGINAL object identity — the
+    // explicit objectId) keeps the file's original object identity — the
     // generated id binds new paths only.
-    // MUTATION: apply the requestId-generated object id to existing heads -> fails.
     const overwrite = decodeVersionedTextWriteResult(
       await call(engine, 21, VERSIONED_METHOD.textWrite, {
         versionId: "main",
@@ -251,15 +250,13 @@ describe("versioned typed loopback", () => {
     const binaryWrite = decodeVersionedBinaryWriteResult(
       await call(engine, 6, VERSIONED_METHOD.binaryWrite, binaryParams),
     );
-    // MUTATION: ignore the binary request ledger -> a replay appends another moment.
     const binaryReplay = decodeVersionedBinaryWriteResult(
       await call(engine, 61, VERSIONED_METHOD.binaryWrite, {
         ...binaryParams,
         nowMs: 20,
       }),
     );
-    // MUTATION: include nowMs in the binary fingerprint or replay the first materialization result -> fails.
-    expect(binaryReplay).toMatchObject({
+    expect(binaryReplay, "ignore the binary request ledger -> a replay appends another moment.").toMatchObject({
       deduped: true,
       materializeEnqueued: false,
       materialized: false,
@@ -353,7 +350,7 @@ describe("versioned typed loopback", () => {
       ).entries,
     ).toEqual([{ path: "seed.md", status: "modified" }]);
 
-    // The merge targets main, so main must be ACTIVE for the materialize
+    // The merge targets main, so main must be active for the materialize
     // trio to report applied — daemon parity: inactive targets stay DB-only.
     expect(
       decodeVersionRecord(
@@ -393,7 +390,6 @@ describe("versioned typed loopback", () => {
         }),
       ),
     ).toMatchObject({
-      // MUTATION: include nowMs in the merge fingerprint -> replay mismatch.
       status: "merged",
       writeKind: "write",
       deduped: true,
@@ -548,8 +544,6 @@ describe("versioned typed loopback", () => {
         }),
       ),
     ).toBeNull();
-    // MUTATION: omit any of the three shipped method registrations, decoders,
-    // loopback handlers, or the over-cap discriminator -> this round trip fails.
   });
 
   it("round-trips opaque secret write/fork/compare/apply/restore/delete and protected moments", async () => {
@@ -618,10 +612,8 @@ describe("versioned typed loopback", () => {
       await call(engine, 5, VERSIONED_METHOD.secretsApply, applyParams),
     );
     expect(applied.changed).toBe(true);
-    // MUTATION: derive the target from the active version -> this moment is not in main.
-    expect(applied.moment?.versionId).toBe("main");
-    // MUTATION: loopback hardcodes sync or drops apply metadata -> this fails.
-    expect(applied.moment?.metadata).toEqual({
+    expect(applied.moment?.versionId, "derive the target from the active version -> this moment is not in main.").toBe("main");
+    expect(applied.moment?.metadata, "loopback hardcodes sync or drops apply metadata -> this fails.").toEqual({
       origin: "api",
       summary: "Updated .env from feature",
       correlationId: "merge-correlation-1",
@@ -751,9 +743,6 @@ describe("versioned typed loopback", () => {
     expect(
       await call(engine, 3, VERSIONED_METHOD.searchEnsureIndex, searchParams),
     ).toEqual({});
-    // MUTATION: retain the transport's 48 KiB cap for moment bodies -> the
-    // in-band before/after assertions fail. Remove the 128 KiB cap -> the
-    // over-cap list assertion fails.
   });
 });
 
@@ -1031,8 +1020,8 @@ describe("loopback contract enforcement", () => {
   it("opens a conflict when a binary head leaves the sides disagreeing", async () => {
     // Only the SOURCE side can bring something to apply. When the bytes sit on
     // the target alone, the source changed nothing and the merge is a no-op.
-    // Bytes from the source over a head the target has NOT touched since the
-    // fork fast-forward through the binary write status (#497); a base the two
+    // Bytes from the source over a head the target has not touched since the
+    // fork fast-forward through the binary write status; a base the two
     // live sides never shared still goes to the user.
     const expected = {
       source: "merged",
@@ -1168,8 +1157,7 @@ describe("loopback contract enforcement", () => {
         requestId: "binary-content-equality",
       }),
     );
-    // MUTATION: return moment:null for content equality -> the strict decoder fails.
-    expect(deduped.deduped).toBe(true);
+    expect(deduped.deduped, "return moment:null for content equality -> the strict decoder fails.").toBe(true);
     expect(deduped.moment.momentId).toBe(first.moment.momentId);
   });
 
@@ -1189,8 +1177,7 @@ describe("loopback contract enforcement", () => {
     const replay = decodeVersionRecord(
       await call(engine, 3, VERSIONED_METHOD.versionsCreateNamed, params, "create-stable"),
     );
-    // MUTATION: bypass createNamed's request ledger -> a second version id is minted.
-    expect(replay).toEqual(first);
+    expect(replay, "bypass createNamed's request ledger -> a second version id is minted.").toEqual(first);
   });
 
   it("persists a fresh target merge moment and stamps the merged file head", async () => {
@@ -1273,8 +1260,7 @@ describe("loopback contract enforcement", () => {
         requestId: "unchanged-source-merge",
       }),
     );
-    // MUTATION: ignore textForkBase and overwrite differing targets -> fails.
-    expect(merged).toMatchObject({
+    expect(merged, "ignore textForkBase and overwrite differing targets -> fails.").toMatchObject({
       status: "unchanged",
       materializeEnqueued: false,
       materialized: false,
@@ -1335,8 +1321,7 @@ describe("loopback contract enforcement", () => {
         nowMs: 40,
       }),
     );
-    // MUTATION: include nowMs in rename/delete fingerprints -> replay mismatch.
-    expect(replayedDelete.deduped).toBe(true);
+    expect(replayedDelete.deduped, "include nowMs in rename/delete fingerprints -> replay mismatch.").toBe(true);
     expect(replayedDelete.moment.momentId).toBe(firstDelete.moment.momentId);
   });
 
@@ -1453,7 +1438,6 @@ describe("loopback contract enforcement", () => {
       origin: "api",
       momentId: "target-newer-secret",
     });
-    // MUTATION: remove the source-vs-fork-base comparison -> target is overwritten.
     expect(
       decodeSecretApplyResult(
         await call(engine, 4, VERSIONED_METHOD.secretsApply, {
@@ -1465,6 +1449,7 @@ describe("loopback contract enforcement", () => {
           origin: "sync",
         }),
       ).changed,
+      "remove the source-vs-fork-base comparison -> target is overwritten.",
     ).toBe(false);
     expect(engine.secretValue(WORKSPACE, "main", ".env")).toBe("target-newer");
   });
@@ -1496,7 +1481,6 @@ describe("loopback contract enforcement", () => {
       origin: "api",
       momentId: "feature-delete",
     });
-    // MUTATION: restore the absent-source no-op or restore provenance -> assertions fail.
     const applied = decodeSecretApplyResult(
       await call(engine, 4, VERSIONED_METHOD.secretsApply, {
         workspaceId: WORKSPACE,
@@ -1665,7 +1649,6 @@ describe("loopback contract enforcement", () => {
       momentId: "restore-first",
       origin: "restore",
      });
-    // MUTATION: always append a restore moment even when the protected state is already equal.
     const replay = decodeSecretRestoreResult(
       await call(engine, 4, VERSIONED_METHOD.secretsRestore, {
         workspaceId: WORKSPACE,
@@ -1708,11 +1691,11 @@ describe("loopback contract enforcement", () => {
     };
     decodeSecretDeleteResult(await call(engine, 2, VERSIONED_METHOD.secretsDelete, params));
 
-    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
     expect(
       decodeSecretDeleteResult(
         await call(engine, 3, VERSIONED_METHOD.secretsDelete, params),
       ).moment,
+      "check duplicate secret moment ids before desired-state equality -> this throws.",
     ).toBeNull();
   });
 
@@ -1754,11 +1737,11 @@ describe("loopback contract enforcement", () => {
     };
     decodeSecretApplyResult(await call(engine, 4, VERSIONED_METHOD.secretsApply, params));
 
-    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
     expect(
       decodeSecretApplyResult(
         await call(engine, 5, VERSIONED_METHOD.secretsApply, params),
       ),
+      "check duplicate secret moment ids before desired-state equality -> this throws.",
     ).toEqual({ changed: false, moment: null });
   });
 
@@ -1786,11 +1769,11 @@ describe("loopback contract enforcement", () => {
     };
     decodeSecretRestoreResult(await call(engine, 3, VERSIONED_METHOD.secretsRestore, params));
 
-    // MUTATION: check duplicate secret moment ids before desired-state equality -> this throws.
     expect(
       decodeSecretRestoreResult(
         await call(engine, 4, VERSIONED_METHOD.secretsRestore, params),
       ).restoredMomentId,
+      "check duplicate secret moment ids before desired-state equality -> this throws.",
     ).toBe("restore-retry-b");
   });
 
@@ -1810,7 +1793,6 @@ describe("loopback contract enforcement", () => {
       });
     }
 
-    // MUTATION: omit the source moment path check -> the before-state is written to .other.
     await expect(
       call(engine, 3, VERSIONED_METHOD.secretsRestore, {
         workspaceId: WORKSPACE,
@@ -1864,7 +1846,6 @@ describe("loopback contract enforcement", () => {
 
   it("keeps a fresh workspace versionless until a main write bootstraps it", async () => {
     const engine = new VersionedLoopbackEngine();
-    // MUTATION: pre-install main during workspace access -> this read succeeds.
     await expect(
       call(engine, 0, VERSIONED_METHOD.textRead, {
         versionId: "main",
@@ -1928,13 +1909,11 @@ describe("loopback contract enforcement", () => {
         await call(engine, 1, VERSIONED_METHOD.versionsList, {}),
       ).versions,
     ).toEqual([]);
-    // MUTATION: resolve either version before the structural path floor -> fails.
   });
 
   it("returns null when a binary read points at a text head", async () => {
     const engine = new VersionedLoopbackEngine();
     engine.seedTextFile({ workspace: WORKSPACE, path: "text.md", text: "text" });
-    // MUTATION: text heads are an ordinary absent-binary result, not a shape error.
     expect(
       decodeVersionedBinaryReadResult(
         await call(engine, 1, VERSIONED_METHOD.binaryRead, {
@@ -1942,6 +1921,7 @@ describe("loopback contract enforcement", () => {
           path: "text.md",
         }),
       ),
+      "text heads are an ordinary absent-binary result, not a shape error.",
     ).toBeNull();
   });
 
@@ -1966,7 +1946,6 @@ describe("loopback contract enforcement", () => {
   });
 
   it("rejects a secret moment id already owned by text history", async () => {
-    // MUTATION: make the secret freshness guard consult only secretMoments -> succeeds.
     const engine = new VersionedLoopbackEngine();
     await call(engine, 1, VERSIONED_METHOD.textWrite, {
       versionId: "main",
@@ -1988,7 +1967,6 @@ describe("loopback contract enforcement", () => {
   });
 
   it("rejects a text moment id already owned by secret history", async () => {
-    // MUTATION: make the text freshness guard consult only moments -> succeeds.
     const engine = new VersionedLoopbackEngine();
     await call(engine, 0, VERSIONED_METHOD.versionsEnsureMain, {
       workspaceId: WORKSPACE,
@@ -2028,8 +2006,7 @@ describe("loopback contract enforcement", () => {
     const replay = decodeVersionedTextWriteResult(
       await call(engine, 2, VERSIONED_METHOD.textWrite, { ...params, nowMs: 20 }),
     );
-    // MUTATION: include nowMs in the text-write fingerprint -> this retry refuses.
-    expect(first.deduped).toBe(false);
+    expect(first.deduped, "include nowMs in the text-write fingerprint -> this retry refuses.").toBe(false);
     expect(replay).toMatchObject({
       object: first.object,
       snapshot: first.snapshot,
@@ -2062,7 +2039,6 @@ describe("loopback contract enforcement", () => {
     // normalizeMomentListLimit refusal (limit < 1 = invalid-input), while
     // secrets.moments.list — a daemon extension with no oracle limit — clamps
     // to the daemon's floor of 1.
-    // MUTATION: clamp moments.list or refuse secrets.moments.list -> fails.
     await expect(
       call(engine, 5, VERSIONED_METHOD.momentsList, { limit: 0 }),
     ).rejects.toThrow("invalid-input");
@@ -2086,12 +2062,10 @@ describe("loopback contract enforcement", () => {
         versionId: "missing",
       }),
     ).rejects.toThrow("version-not-found");
-    // MUTATION: filter the empty history without resolving versionId -> succeeds.
   });
 
   it("reports invalid-version for loopback secret apply", async () => {
     const engine = new VersionedLoopbackEngine();
-    // MUTATION: retain the loopback's generic version-not-found spelling -> fails.
     await expect(
       call(engine, 1, VERSIONED_METHOD.secretsApply, {
         workspaceId: WORKSPACE,
@@ -2153,14 +2127,13 @@ describe("loopback contract enforcement", () => {
     });
     const blobParams: VersionedBinaryReadBlobParams = {
       workspaceId: WORKSPACE,
-      // MUTATION: look up the caller's digest verbatim -> uppercase misses the
-      // canonical lowercase blob key.
       sha256: (read?.sha256 ?? "").toUpperCase(),
     };
     expect(
       decodeVersionedBinaryReadBlobResult(
         await call(engine, 2, VERSIONED_METHOD.binaryReadBlob, blobParams),
       ),
+      "look up the caller's digest verbatim -> uppercase misses the canonical lowercase blob key.",
     ).toEqual({
       bytesBase64: null,
       byteLength: bytes.length,
@@ -2280,9 +2253,6 @@ describe("loopback contract enforcement", () => {
         }),
       ).moments[0]?.path,
     ).toBe(".env");
-    // MUTATION: key any seeded file or moment by the raw alias -> canonical
-    // reads or history paths fail. Resolve workspace state before secretValue's
-    // path normalization -> the refusal reports version-not-found instead.
   });
 
   it("paginates protected secret moments without overlap", async () => {
@@ -2308,8 +2278,7 @@ describe("loopback contract enforcement", () => {
         limit: 2,
       }),
     );
-    // MUTATION: the keyset cursor is the last returned order and pages cannot overlap.
-    expect(first.moments).toHaveLength(2);
+    expect(first.moments, "the keyset cursor is the last returned order and pages cannot overlap.").toHaveLength(2);
     expect(first.nextBeforeMomentOrder).toBe(first.moments[1]?.momentOrder);
     const second = decodeSecretsMomentsListResult(
       await call(engine, 5, VERSIONED_METHOD.secretsMomentsList, {
@@ -2391,8 +2360,7 @@ describe("loopback contract enforcement", () => {
         limit: 2,
       }),
     );
-    // MUTATION: require/filter an absent path -> the cross-path history is incomplete.
-    expect(first.moments.map((moment) => [moment.id, moment.path])).toEqual([
+    expect(first.moments.map((moment) => [moment.id, moment.path]), "require/filter an absent path -> the cross-path history is incomplete.").toEqual([
       ["secret-wide-2", ".env"],
       ["secret-wide-1", ".env.local"],
     ]);
@@ -2437,13 +2405,12 @@ describe("loopback contract enforcement", () => {
       momentId: "workspace-secret-feature",
     });
 
-    // MUTATION: require/filter by versionId -> the main-version row disappears or the call refuses.
     const history = decodeSecretsMomentsListResult(
       await call(engine, 4, VERSIONED_METHOD.secretsMomentsList, {
         workspaceId: WORKSPACE,
       }),
     );
-    expect(history.moments.map((moment) => [moment.id, moment.versionId])).toEqual([
+    expect(history.moments.map((moment) => [moment.id, moment.versionId]), "require/filter by versionId -> the main-version row disappears or the call refuses.").toEqual([
       ["workspace-secret-feature", feature.id],
       ["workspace-secret-main", "main"],
     ]);
@@ -2520,8 +2487,6 @@ describe("loopback contract enforcement", () => {
         momentId: "misrouted-secret",
       }),
     ).rejects.toThrow("not-secret-path");
-    // MUTATION: remove either direction of the loopback classification floor ->
-    // a secret leaks into plaintext state or ordinary content disappears into secrets.
   });
 
   it("refuses rename onto an occupied destination", async () => {
@@ -2563,7 +2528,6 @@ describe("loopback contract enforcement", () => {
         }),
       )?.text,
     ).toBe("occupied");
-    // MUTATION: restore Map.set overwrite semantics -> the refusal and source preservation fail.
   });
 
   it.each(["folder/source.md", "folder/./source.md"])(
@@ -2602,7 +2566,6 @@ describe("loopback contract enforcement", () => {
           }),
         )?.text,
       ).toBe("source");
-      // MUTATION: accept the self-rename or record replay state before refusing -> fails.
     },
   );
 
@@ -2638,8 +2601,6 @@ describe("loopback contract enforcement", () => {
         }),
       )?.text,
     ).toBe("fork base");
-    // MUTATION: skip the forkPoint dependency check -> rollback deletes history
-    // still referenced by the named version.
   });
 
   it("refuses duplicate named-version names", async () => {
@@ -2657,7 +2618,6 @@ describe("loopback contract enforcement", () => {
         fromVersionId: "main",
       }),
     ).rejects.toThrow("version-name-conflict");
-    // MUTATION: remove the name lookup before minting the id -> duplicate succeeds.
   });
 
   it("returns all three states for both overlapping and cleanly mergeable divergence", async () => {
@@ -2850,13 +2810,13 @@ describe("loopback contract enforcement", () => {
       }),
     );
 
-    // A delete repeats its preimage on the AFTER side. `delete_text_in_tx`
+    // A delete repeats its preimage on the after side. `delete_text_in_tx`
     // (store.rs) binds one `?8` to both `after_blob_sha256` and
     // `before_blob_sha256`, and `?14`/`?15` to both content kinds and both
     // binary digests; the read joins the blob tables per digest, so the text
     // and byte length hydrate on both sides too. The fake used to null the
     // after side, which made the both-sides digest — and the single blob fetch
-    // it earns — unreachable through the loopback (#487).
+    // it earns — unreachable through the loopback.
     expect(textMoment).toMatchObject({
       beforePresent: true,
       beforeContentKind: "text",
@@ -2965,7 +2925,7 @@ describe("loopback contract enforcement", () => {
   });
 
   // The daemon writes `payload_before_path` — the wire's `beforePath`
-  // (lib.rs:10123) — on EVERY moment that has a preimage, not on renames
+  // (lib.rs:10123) — on every moment that has a preimage, not on renames
   // alone: `CASE WHEN before_present = 2 THEN path` for a text write
   // (store.rs:2909) and a binary write (conflicts.rs:1222), the removed path
   // for a delete (store.rs:3540), and the source path for a rename
@@ -3005,10 +2965,8 @@ describe("loopback contract enforcement", () => {
       }),
     );
 
-    // MUTATION: return `path` for a moment with no preimage -> fails here.
-    expect(created.moment.beforePath).toBeNull();
-    // MUTATION: return null unless the moment is a rename -> fails on all three.
-    expect(overwritten.moment.beforePath).toBe("provenance.md");
+    expect(created.moment.beforePath, "return `path` for a moment with no preimage -> fails here.").toBeNull();
+    expect(overwritten.moment.beforePath, "return null unless the moment is a rename -> fails on all three.").toBe("provenance.md");
     expect(binaryOverText.moment.beforePath).toBe("provenance.md");
     expect(deleted.moment.beforePath).toBe("provenance.md");
 
@@ -3036,8 +2994,7 @@ describe("loopback contract enforcement", () => {
         origin: "api",
       }),
     );
-    // MUTATION: use the moment's own path for a rename too -> fails here.
-    expect(renamed.moment).toMatchObject({ path: "to.md", beforePath: "from.md" });
+    expect(renamed.moment, "use the moment's own path for a rename too -> fails here.").toMatchObject({ path: "to.md", beforePath: "from.md" });
 
     // The next write at the destination reverts to the write rule: its own
     // path, not the path the file once had.
@@ -3147,7 +3104,7 @@ describe("loopback contract enforcement", () => {
 
 describe("versioned result decoder rejection", () => {
   it("reports the wrong-typed nested write field path", () => {
-    // The snapshot and moment stubs are COMPLETE so validation reaches the
+    // The snapshot and moment stubs are complete so validation reaches the
     // one wrong-typed field this test pins: object.createdAtMs.
     const validSnapshot = {
       workspaceId: "w",
@@ -3268,7 +3225,7 @@ describe("versioned result decoder rejection", () => {
 describe("versionedText.list hasYdocMarker", () => {
   // AUDIT-SILENTSAVE round 4 (D3). hasYdocMarker is what stops the desktop
   // capture layer from retiring a settled Y.Doc for exceeding a cap a Y.Doc is
-  // not bound by. A row that silently DEFAULTED to false would re-open exactly
+  // not bound by. A row that silently defaulted to false would re-open exactly
   // that data-loss path, so an absent key must be a protocol violation — the
   // same rule already applied to `materialized`.
   const row = (overrides: Record<string, unknown> = {}) => ({
@@ -3298,7 +3255,7 @@ describe("versionedText.list hasYdocMarker", () => {
     ).toBe(false);
   });
 
-  it("REJECTS a row with no hasYdocMarker instead of assuming unowned", () => {
+  it("Rejects a row with no hasYdocMarker instead of assuming unowned", () => {
     const { hasYdocMarker: _omitted, ...withoutFlag } = row();
     expect(() =>
       decodeVersionedTextListResult({ files: [withoutFlag], nextAfterPath: null }),

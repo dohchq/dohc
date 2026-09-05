@@ -29,7 +29,7 @@ interface RecordedWrite {
 
 /**
  * Records what reaches the capture and, like the real engine capture, honors
- * an abort that arrives while the write is queued. It deliberately does NOT
+ * an abort that arrives while the write is queued. It deliberately does not
  * re-check `aborted` on entry — the real capture does, but modelling that
  * here would hide the writer's own precheck from the tests below (the
  * production contract is that the writer refuses before the capture is ever
@@ -91,7 +91,7 @@ function writerInput(overrides: {
 }
 
 describe("createPluginAuthoredTextWriter", () => {
-  it("refuses a write whose signal already aborted, before the capture is asked (CERT779L D1)", async () => {
+  it("refuses a write whose signal already aborted, before the capture is asked", async () => {
     const controller = new AbortController();
     controller.abort();
     const { capture, writes } = recordingCapture();
@@ -104,7 +104,7 @@ describe("createPluginAuthoredTextWriter", () => {
     expect(writes).toEqual([]);
   });
 
-  it("hands the capture its own signal, so an abort in flight still cancels the write (CERT779L D1)", async () => {
+  it("hands the capture its own signal, so an abort in flight still cancels the write", async () => {
     const controller = new AbortController();
     let releaseWrite: () => void = () => undefined;
     let enterWrite: () => void = () => undefined;
@@ -126,7 +126,7 @@ describe("createPluginAuthoredTextWriter", () => {
       author,
     });
     // Abort only once the write is already inside the capture — past the
-    // writer's own precheck, so ONLY the signal handed to the capture can
+    // writer's own precheck, so only the signal handed to the capture can
     // cancel it from here.
     await entered;
     controller.abort();
@@ -196,7 +196,7 @@ describe("createPluginAuthoredTextWriter", () => {
     ).resolves.toEqual({ path: "notes/today.md" });
   });
 
-  it("writes under the workspace root and reports an owned path as door-written with its path and bytes (#779 A5, round 14 A1)", async () => {
+  it("writes under the workspace root and reports an owned path as door-written with its path and bytes", async () => {
     const { capture, writes } = recordingCapture({ landWrite: true });
     const doorWrites: {
       pluginId: string;

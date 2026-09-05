@@ -224,7 +224,7 @@ describe("pluginIdToSafePath", () => {
     },
   );
 
-  it("refuses an id shaped like another plugin's staging or swap directory (CERT779J B2)", async () => {
+  it("refuses an id shaped like another plugin's staging or swap directory", async () => {
     const victimUuid = randomUUID();
     for (
       const pluginId of [
@@ -259,7 +259,7 @@ describe("pluginIdToSafePath", () => {
       .toContain("victim.previously-");
   });
 
-  it("maps two distinct ids that only differ in where the scope separator falls to distinct paths (#779 round 3 finding 4)", () => {
+  it("maps two distinct ids that only differ in where the scope separator falls to distinct paths", () => {
     const first = "@a/b__c";
     const second = "@a__b/c";
 
@@ -384,7 +384,7 @@ describe("snapshotPluginSource package-manager configuration", () => {
     [".pnpmfile.cjs", "module.exports = { hooks: {} };\n"],
     [".pnpmfile.mjs", "export const hooks = {};\n"],
     ["pnpm-workspace.yaml", "trust-lockfile: true\n"],
-    // Case variants (#779 round 11 A1): Windows and default macOS serve
+    // Case variants: Windows and default macOS serve
     // `.NPMRC` when pnpm opens `.npmrc`, so an exact-case rule rejects
     // nothing on the platforms plugins are authored on.
     [".NPMRC", "@evil:registry=http://127.0.0.1:9/\n"],
@@ -404,7 +404,7 @@ describe("snapshotPluginSource package-manager configuration", () => {
     expect(await stagingLeftovers(fixture)).toEqual([]);
   });
 
-  it("rejects the scoped-registry attack before pnpm can read it (CERT779H)", async () => {
+  it("rejects the scoped-registry attack before pnpm can read it", async () => {
     const fixture = await createPluginFixture();
     // PNPM_CONFIG_REGISTRY pins only the default registry, so this file chose
     // where every @evil-scoped dependency's bytes came from — and the install
@@ -427,7 +427,7 @@ describe("snapshotPluginSource package-manager configuration", () => {
     await expectMissing(liveSnapshotRoot(fixture));
   });
 
-  it("rejects package-manager configuration nested anywhere in the source (#779 round 10 A4)", async () => {
+  it("rejects package-manager configuration nested anywhere in the source", async () => {
     const fixture = await createPluginFixture();
     const nested = join(fixture.pluginRoot, "test", "fixtures");
     await mkdir(nested, { recursive: true });
@@ -552,7 +552,7 @@ describe("snapshotPluginSource dependency validation", () => {
   // devEngines.packageManager pnpm 10.15.0 ran pnpm 10.15.0 — a release that,
   // unlike 11.x, still honors path settings such as modules-dir from a
   // plugin-authored .npmrc. Pinning one field and ignoring the field that
-  // outranks it pins nothing (#779 round 8 D1).
+  // outranks it pins nothing.
   it("rejects a devEngines package manager, which outranks the pinned field", async () => {
     const fixture = await createPluginFixture();
     await writeFile(
@@ -589,7 +589,7 @@ describe("snapshotPluginSource dependency validation", () => {
     expect(failure.error.message).toContain(`"${PINNED_PLUGIN_PACKAGE_MANAGER}"`);
   });
 
-  it("rejects a package.json over its configured byte limit before reading it (CodeRabbit #779 R25)", async () => {
+  it("rejects a package.json over its configured byte limit before reading it", async () => {
     const fixture = await createPluginFixture();
     await writeFile(
       join(fixture.pluginRoot, "package.json"),
@@ -607,7 +607,7 @@ describe("snapshotPluginSource dependency validation", () => {
     );
   });
 
-  it("rejects a pnpm-lock.yaml over its configured byte limit before parsing it (CodeRabbit #779 R25)", async () => {
+  it("rejects a pnpm-lock.yaml over its configured byte limit before parsing it", async () => {
     const fixture = await createPluginFixture();
     const oversizedLockfile =
       `${minimalLockfile()}# ${"x".repeat(MAX_PLUGIN_LOCKFILE_BYTES)}\n`;
@@ -621,9 +621,9 @@ describe("snapshotPluginSource dependency validation", () => {
     );
   });
 
-  it("resolves a deeply diamond-aliased pnpm-lock.yaml without exponential blowup (CodeRabbit #779 R25)", async () => {
+  it("resolves a deeply diamond-aliased pnpm-lock.yaml without exponential blowup", async () => {
     const fixture = await createPluginFixture();
-    // Each level's two keys alias the SAME next-level anchor — a real,
+    // Each level's two keys alias the same next-level anchor — a real,
     // legitimate YAML shape (pnpm lockfiles share specs via &anchor/*alias)
     // that revisits one shared subtree exponentially many times under a
     // stack-only cycle guard. 24 levels is 2^24 (16.7M) redundant visits
@@ -728,7 +728,7 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
 
     // The changed bytes are staged and hashed, and the live snapshot — the
     // tree a panel and a brokered child both read — still serves the
-    // approved payload (#779 round 9 B1).
+    // approved payload.
     await expect(readFile(livePayload, "utf8")).resolves.toBe("approved");
     await expect(readFile(join(staged.snapshotRoot, "payload.txt"), "utf8"))
       .resolves.toBe("unapproved");
@@ -760,7 +760,7 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     await staged.discard();
   });
 
-  it("refuses another plugin's live root that only looks like a staged tree (#779 round 10 A1)", () => {
+  it("refuses another plugin's live root that only looks like a staged tree", () => {
     const plugins = join(sep, "data", "plugins");
     const liveRoot = join(plugins, "example");
     const uuid = "3f2a1c0d-4b5e-4a6f-8c7d-9e0f1a2b3c4d";
@@ -778,7 +778,7 @@ describe("snapshotPluginSource canonical hash and replacement", () => {
     ).toBe(false);
   });
 
-  it("preserves an installed node_modules across a hash-check reconcile that finds no change (fixround Section B item 11)", async () => {
+  it("preserves an installed node_modules across a hash-check reconcile that finds no change", async () => {
     const fixture = await createPluginFixture();
     const first = requireSuccess(await runSnapshot(fixture));
     // Stands in for a real pnpm install's node_modules living inside the
@@ -878,7 +878,7 @@ describe("hashPluginSourceFiles entry kinds", () => {
   });
 });
 
-describe("backslash source entry names (#779 round 7 B1)", () => {
+describe("backslash source entry names", () => {
   it("names the constraint it rejects", () => {
     expect(() => assertSafeSnapshotEntryName("index.ts", "/plugins/p/index.ts"))
       .not.toThrow();
@@ -954,7 +954,6 @@ describe("plugin timeout limits sit beyond measured healthy work", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("snapshots a source file under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const fixture = await createPluginFixture();
     await mkdir(join(fixture.pluginRoot, "..cache"));
     await writeFile(join(fixture.pluginRoot, "..cache", "extra.ts"), "export const x = 1;\n");

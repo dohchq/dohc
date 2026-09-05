@@ -50,7 +50,7 @@ vi.hoisted(() => {
 });
 
 // The record write path opens an engine doc session; these tests drive it
-// with a mocked session whose mirror doc is a REAL Y.Doc, so "the change
+// with a mocked session whose mirror doc is a real Y.Doc, so "the change
 // reached the frontmatter map" is asserted on actual CRDT state.
 const docMock = vi.hoisted(() => ({
   current: null as

@@ -5,7 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
 
-// Same deadline discipline as FileInspector.test.tsx (#568). These tests type
+// Same deadline discipline as FileInspector.test.tsx. These tests type
 // 40-character share codes keystroke by keystroke through jsdom, honest work
 // a busy machine stretches: measured 2026-08-03 on a 24-process load (12 runs)
 // the slowest test ran 1.73s against RTL's 1s default assertion window and
