@@ -38,7 +38,7 @@ function quoteForCmd(token: string): string {
   return `"${escaped}"`;
 }
 
-export interface ResolvedSpawnCommand {
+interface ResolvedSpawnCommand {
   command: string;
   args: string[];
   windowsVerbatimArguments?: boolean;

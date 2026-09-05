@@ -366,7 +366,7 @@ export function selectBlock(editor: Editor | null, pos: number): void {
 
 // ── block context menu ─────────────────────────────────────────────────────
 
-export type BlockMenuTurnIntoId =
+type BlockMenuTurnIntoId =
   | "paragraph"
   | "heading-1"
   | "heading-2"
@@ -376,7 +376,7 @@ export type BlockMenuTurnIntoId =
   | "task-list"
   | "quote";
 
-export type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
+type BlockMenuActionId = "duplicate" | "copy-markdown" | "delete";
 
 export type BlockMenuEntry =
   | { kind: "turn-into"; id: BlockMenuTurnIntoId; label: string; glyph: string }
@@ -415,7 +415,7 @@ const ACTION_ENTRIES: BlockMenuEntry[] = [
   { kind: "action", id: "delete", label: "Delete", glyph: "✕" },
 ];
 
-export const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
+const BLOCK_MENU_ENTRIES: BlockMenuEntry[] = [
   ...TURN_INTO_ENTRIES,
   ...ACTION_ENTRIES,
 ];
@@ -679,7 +679,7 @@ export function BlockMenu({
 // floating-menu math's horizontal clamp, the dropdown itself stays anchored.
 const TURN_INTO_MENU_WIDTH = 190;
 
-export type TurnIntoDropdownPosition = {
+type TurnIntoDropdownPosition = {
   placement: FloatingMenuPlacement;
   maxHeight: number;
 };

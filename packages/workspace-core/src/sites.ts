@@ -12,7 +12,7 @@ export interface SiteScripts {
   build?: string;
 }
 
-export interface SitePackageDerivedFactsInput {
+interface SitePackageDerivedFactsInput {
   root: string;
   configuredBuildOutput?: string | null;
   buildOutputs: readonly string[];
@@ -101,7 +101,7 @@ export interface DohcSiteConfig {
   };
 }
 
-export interface ParsedDohcSiteConfig {
+interface ParsedDohcSiteConfig {
   config?: DohcSiteConfig;
   diagnostics: SiteDiagnostic[];
   // The raw `type` string as written, kept even when it isn't "site" (and so
@@ -160,7 +160,7 @@ const SITE_TITLE_MAX_LENGTH = 200;
 // Framework/package signals are intentionally limited to mainstream web stacks
 // with recognizable package dependencies or official CLI/build tooling. Refresh
 // this list periodically as npm usage and framework conventions move.
-export const WEB_DEPENDENCY_NAMES = [
+const WEB_DEPENDENCY_NAMES = [
   "@angular/cli",
   "@angular/core",
   "@astrojs/react",
@@ -191,7 +191,7 @@ export const WEB_DEPENDENCY_NAMES = [
   "webpack",
 ] as const;
 
-export const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
+const WEB_DEPENDENCIES: ReadonlySet<string> = new Set(WEB_DEPENDENCY_NAMES);
 
 const WEB_SCRIPT_TOKENS = [
   "astro",

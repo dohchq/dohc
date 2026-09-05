@@ -365,7 +365,6 @@ import {
   applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
   resolveSystemThemeIconPath,
-  shouldUseDarkSystemIcon,
 } from "./systemThemeIcon";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
@@ -440,7 +439,6 @@ import {
   shareProposalOpPath,
   type ShareViewProposalScope,
 } from "./workspaces/shareProposals";
-import { createShareProposalOperationScope } from "./workspaces/shareProposalOperationScope";
 import { pathShareLanes } from "./workspaces/relayShareLanes";
 import {
   workspaceSummariesFrom,
@@ -515,6 +513,7 @@ import {
   createChatChannelIpcHandler,
   createListJoinedSharedChannelsIpcHandler,
   createMarkChatThreadReadIpcHandler,
+  assertChatWritable,
   chatShareSessionKey,
   createSetChatReactionIpcHandler,
   handleRelayUnauthorized,
@@ -536,7 +535,6 @@ import {
   SharePinInvalidError,
   shareViewIdentitySelector,
 } from "./workspaces/shareViewRecords";
-import { assertShareChatWritable } from "./workspaces/shareChatGate";
 import {
   assertMountableSelector,
   assertRealMountRoot,
@@ -646,7 +644,6 @@ import {
   type AttachedEngineWorkspace,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
-import { createDesktopEngineWorkspaceSessions } from "./workspaces/desktopEngineWorkspaceSessions";
 import {
   createDesktopLinkedChatStore,
   type DesktopLinkedChatStore,
@@ -776,7 +773,6 @@ import {
   resolveTrackedChatFilePath,
 } from "./workspaces/chatFileReferenceResolution";
 import { formatChatBookmarkProjection } from "./workspaces/chatBookmarkProjection";
-import { projectChatBookmarksAfterPull } from "./workspaces/chatBookmarkPullProjection";
 import {
   archiveChatBookmarkProjection,
   writeChatBookmarkProjection,
@@ -1818,9 +1814,6 @@ function refreshCredentialCache(): Promise<void> {
 function warmCredentialCache(): Promise<void> {
   return credentialSessionCache.warm(() => cloudLogin().credentials());
 }
-function setCachedCredentials(credentials: CloudSessionCredentials): void {
-  credentialSessionCache.set(credentials);
-}
 function clearCachedCredentials(): void {
   credentialSessionCache.clear();
   peekedReceivedGrantKinds.clear();
@@ -2691,18 +2684,18 @@ function queueChatBookmarkProjection(workspaceId: string): void {
 }
 
 async function projectPendingChatBookmarksAfterPull(workspaceId: string): Promise<void> {
-  await projectChatBookmarksAfterPull({
-    readOnly: Boolean(sharedViewOf(workspaceId)),
-    project: async () => {
-      await materializePendingChatBookmarksForWorkspace?.(workspaceId);
-    },
-    reportError: (error) => {
-      console.error(`[desktop] post-pull chat bookmark projection (${workspaceId}):`, error);
-      // The pull marked projections pending and this pass failed to write
-      // them; the background worker retries.
-      queueChatBookmarkProjection(workspaceId);
-    },
-  });
+  // Projection writes generated Markdown into the workspace. A shared view
+  // ingests its filtered relay state but never materializes personal bookmark
+  // files into that read-only tree.
+  if (sharedViewOf(workspaceId)) return;
+  try {
+    await materializePendingChatBookmarksForWorkspace?.(workspaceId);
+  } catch (error) {
+    console.error(`[desktop] post-pull chat bookmark projection (${workspaceId}):`, error);
+    // The pull marked projections pending and this pass failed to write
+    // them; the background worker retries.
+    queueChatBookmarkProjection(workspaceId);
+  }
 }
 
 // Resolves to the live rows this pass did not reach, so an awaited caller can
@@ -5348,7 +5341,7 @@ function desktopIconDirectory(): string {
 function currentDesktopIconPath(): string | null {
   return resolveSystemThemeIconPath(
     desktopIconDirectory(),
-    shouldUseDarkSystemIcon(nativeTheme),
+    nativeTheme.shouldUseDarkColors,
   );
 }
 
@@ -5923,12 +5916,6 @@ async function listOwnedWorkspaceFilesFor(
       );
     },
   });
-}
-
-function listOwnedWorkspaceFiles(workspace: { workspaceId: string }) {
-  return withPhysicalWorkspaceOperation(workspace.workspaceId, (operation) =>
-    listOwnedWorkspaceFilesFor(operation.workspace),
-  );
 }
 
 function workerDatabaseReader(
@@ -9646,14 +9633,15 @@ function registerIpcHandlers(
             credentialGeneration: credentialCacheGeneration,
           };
         };
-        const scope = createShareProposalOperationScope({
-          resolve,
-          same: sameShareProposalGranterScope,
-          changedMessage:
-            "Share changes stopped because this workspace's cloud binding changed.",
-        });
         return await work({
-          ...scope,
+          resolve,
+          assert(scope) {
+            if (!sameShareProposalGranterScope(scope, resolve())) {
+              throw new Error(
+                "Share changes stopped because this workspace's cloud binding changed.",
+              );
+            }
+          },
           readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
           queueCloudSync: () => {
             operation.assertCurrent();
@@ -9741,12 +9729,14 @@ function registerIpcHandlers(
             credentialGeneration: credentialCacheGeneration,
           };
         };
-        return await work(createShareProposalOperationScope({
+        return await work({
           resolve,
-          same: sameScope,
-          changedMessage:
-            "Share changes stopped because this shared view changed.",
-        }));
+          assert(scope) {
+            if (!sameScope(scope, resolve())) {
+              throw new Error("Share changes stopped because this shared view changed.");
+            }
+          },
+        });
       },
     );
   }
@@ -10684,14 +10674,6 @@ function registerIpcHandlers(
         ended: workspace.shareView?.ended === true,
       };
     });
-  }
-
-  // The chat write gate runs before every durable row. A local workspace is
-  // writable by definition. Every received file share stays read-only for
-  // generic desktop chat in Phase 3, whatever its cached relay capability.
-  function assertChatWritable(scope: ChatScope): void {
-    if (scope.kind !== "share") return;
-    assertShareChatWritable(scope);
   }
 
   // Give a received share the sync identity used by its Edit proposal lane.
@@ -13487,7 +13469,6 @@ function registerIpcHandlers(
     if (!autoUpdateController) {
       return UpdateActionResult.parse({
         accepted: false,
-        completed: false,
         state: currentUpdateState(),
       });
     }
@@ -13499,7 +13480,6 @@ function registerIpcHandlers(
     if (await recoveryChecker.ask()) {
       return UpdateActionResult.parse({
         accepted: false,
-        completed: false,
         state: currentUpdateState(),
       });
     }
@@ -13691,8 +13671,12 @@ async function startRustEngineDaemon(): Promise<boolean> {
       rustEngineDaemon,
       relayTransportRoutes,
     );
-    rustEngineWorkspaceSessions =
-      createDesktopEngineWorkspaceSessions(relaySource);
+    // A fresh debug-engine adoption measured 18.7 s for 5,000 files and
+    // 101.8 s for 15,000 files on the launch fixture; 120 s bounds that path
+    // with headroom. The renderer names the wait.
+    rustEngineWorkspaceSessions = new EngineWorkspaceSessions(relaySource, {
+      workspaceOpenDeadlineMs: 120_000,
+    });
     rustEngineRelayClient = new EngineRelayClient({
       sessions: rustEngineWorkspaceSessions,
       routes: relayTransportRoutes,

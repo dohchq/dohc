@@ -57,7 +57,7 @@ export const MAX_LOG_ENTRIES = 500;
 const MAX_LOG_TEXT_CHARS = 10_000;
 const LOG_TRUNCATION_MARKER = "...[truncated]";
 const BUILD_TIMEOUT_MS = 120000;
-export const BUILD_HARD_KILL_GRACE_MS = 5000;
+const BUILD_HARD_KILL_GRACE_MS = 5000;
 // How often a running dev server's descendant tree is polled (POSIX only)
 // so stopChild can still reach a backgrounded descendant after its wrapper
 // has already exited. Frequent enough that a typical preview session (left

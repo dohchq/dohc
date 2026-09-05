@@ -253,7 +253,7 @@ type SyncRelayRoute =
 // compares the two, so check both when widening either.
 export const MAX_BLOB_BYTES = 20 * 1024 * 1024;
 const LINK_STREAM_CHUNK_BYTES = 64 * 1024;
-export const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
+const LINK_BLOB_INFLIGHT_BYTES_PER_GRANT = 64 * 1024 * 1024;
 export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // One PAGE of the continuous replication lane, for the two log routes. It is
 // not the submit bound: a submit is one user act carrying one intent, and it
@@ -261,11 +261,11 @@ export const MAX_KEY_ENVELOPE_BYTES = 16 * 1024;
 // page should hold. Raising this one would only lengthen each replication
 // stall.
 export const MAX_OPS_PER_REQUEST = 500;
-export const DEFAULT_LOG_PAGE_SIZE = 100;
-export const MAX_LOG_PAGE_SIZE = 500;
+const DEFAULT_LOG_PAGE_SIZE = 100;
+const MAX_LOG_PAGE_SIZE = 500;
 const DEFAULT_DISCUSSION_PAGE_SIZE = 50;
 export const DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS = 1_000;
-export const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
+const DEFAULT_DISCUSSION_ACTIVITY_HOLD_MS = 25_000;
 export const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
 const DISCUSSION_CURSOR_MAX_CHARS = 1_024;
 const DISCUSSION_MODERATION_HANDLE_MAX_CHARS = 512;
@@ -279,7 +279,7 @@ export const MAX_PRESENCE_TOPIC_CHARS = 1024;
 export const MAX_CLIENT_ID_CHARS = 128;
 export const MAX_PRESENCE_STATE_BYTES = 8 * 1024;
 export const DEFAULT_PRESENCE_HOLD_MS = 25_000;
-export const MAX_PRESENCE_HOLD_MS = 30_000;
+const MAX_PRESENCE_HOLD_MS = 30_000;
 
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const MAX_WORKSPACE_ID_CHARS = 256;
@@ -5045,7 +5045,7 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
 // Verifies chat authorship before parseLogOp freezes the exact payload bytes.
 // The relay never mutates replicated payloads because the author reads its own
 // operations back and compares those bytes with its local replication log.
-export function assertChatAuthorship(
+function assertChatAuthorship(
   rawOps: unknown[],
   actorUserId: string,
 ): void {

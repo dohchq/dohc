@@ -9,7 +9,7 @@ import {
 import { ErrorBoundary } from "../ErrorBoundary";
 import type { MarkdownReadViewProps } from "./IncrementalMarkdownDocument";
 
-export type MarkdownReadViewLoader = () => Promise<{
+type MarkdownReadViewLoader = () => Promise<{
   default: ComponentType<MarkdownReadViewProps>;
 }>;
 

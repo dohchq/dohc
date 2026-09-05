@@ -29,7 +29,7 @@ export function resolvePersistedZoomApplication(
 
 /** The three things guest zoom needs from a WebContents — no more, so the
  * behavior tests drive the real logic instead of a true-by-construction fake. */
-export interface GuestZoomTarget {
+interface GuestZoomTarget {
   isDestroyed(): boolean;
   setZoomLevel(level: number): void;
   on(event: "did-finish-load", handler: () => void): void;
@@ -56,7 +56,7 @@ export function createGuestZoomApplier(
   };
 }
 
-export type UserSettingsWriteQueue = <T>(
+type UserSettingsWriteQueue = <T>(
   task: () => Promise<T>,
 ) => Promise<T>;
 

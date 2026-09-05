@@ -45,7 +45,7 @@ export interface DocPresenceBinding {
   destroy(): Promise<void>;
 }
 
-export interface DocPresenceOptions {
+interface DocPresenceOptions {
   doc: Y.Doc;
   transport: PresenceTransport;
   topic: string;

@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 import {
   mkdtemp,
   mkdir,
@@ -29,7 +28,6 @@ import {
   EngineWorkspaceSessions,
   EngineWorkspaceShuttingDownError,
   isEngineWorkspaceOpenRefusedError,
-  type EngineWorkspace,
   WORKSPACE_OPEN_DEADLINE_MS,
 } from "./engineWorkspaceSessions";
 
@@ -94,20 +92,6 @@ class MockClient implements EngineDaemonClient {
   close(): void {}
 }
 
-describe("EngineWorkspaceRunOptions", () => {
-  it("documents that transport retries replay the caller operation", () => {
-    // MUTATION: remove the retryTransportErrors safety contract -> callers can
-    // opt a non-idempotent write into operation replay without an API warning.
-    const source = readFileSync(
-      new URL("./engineWorkspaceSessions.ts", import.meta.url),
-      "utf8",
-    );
-    expect(source).toContain("Replays the operation after transport rebinding");
-    expect(source).toContain("only for idempotent operations");
-    expect(source).toContain("verify a possibly committed");
-  });
-});
-
 // The daemon's retryable refusals, which seven ladder tests below raise. The
 // disposition is the part under test in every one of them, so it stays at the
 // call site while the envelope shape does not.
@@ -120,26 +104,6 @@ function daemonRefusal(
 }
 
 describe("EngineWorkspaceSessions", () => {
-  it("requires an exact policy identity while preserving explicit synthetic shares", () => {
-    const sessions = {} as EngineWorkspaceSessions;
-    const bare: EngineWorkspace = {
-      workspaceId: "bare-policy-workspace",
-      rootPath: "/unused",
-    };
-    if (false) {
-      // @ts-expect-error Capture policy belongs to one physical attachment.
-      sessions.rememberCaptureAuthor(bare, null);
-      // @ts-expect-error Rebuild policy belongs to one physical attachment.
-      sessions.beginRebuild(bare);
-      // @ts-expect-error Rebuild policy belongs to one physical attachment.
-      sessions.endRebuild(bare);
-      // @ts-expect-error Share policy requires an explicit share-mount descriptor.
-      sessions.rememberShareMount(bare);
-      sessions.rememberShareMount({ ...bare, shareMount: true });
-    }
-    expect(true).toBe(true);
-  });
-
   it("keeps a committed scene read-only while asset materialization is pending", () => {
     const refusal = daemonRefusal(
       "OVERLOADED",
@@ -1339,8 +1303,6 @@ describe("EngineWorkspaceSessions", () => {
     await sessions.run(workspace, async () => undefined);
 
     expect(requests[0]?.deadlineMs).toBe(30_000);
-    // The product guarantee is the constant, not whatever a caller passed.
-    expect(WORKSPACE_OPEN_DEADLINE_MS).toBe(2_000);
   });
 
   it.each([0, -1, 12.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(

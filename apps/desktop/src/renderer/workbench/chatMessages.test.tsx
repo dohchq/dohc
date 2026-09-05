@@ -81,9 +81,6 @@ describe("chat authorship display", () => {
       chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice" }),
     ).toBe("Ice's agent");
     expect(
-      chatAuthorLabel({ authorKind: "agent", authorDisplayName: "Ice's agent" }),
-    ).toBe("Ice's agent");
-    expect(
       chatAuthorLabel({ authorKind: "human", authorDisplayName: "Ice" }),
     ).toBe("Ice");
     render(

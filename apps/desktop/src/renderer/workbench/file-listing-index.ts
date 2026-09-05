@@ -1,7 +1,7 @@
 import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 import type { WikilinkFile } from "../editor/wikilinkPlugin";
 
-export type FileListingIndex = {
+type FileListingIndex = {
   markdownWikilinkFiles: WikilinkFile[];
   conflictSummaries: string[];
   presentPaths: ReadonlySet<string>;

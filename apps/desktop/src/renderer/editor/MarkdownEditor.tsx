@@ -128,7 +128,7 @@ export type MarkdownEditorHandle = {
   replaceMarkdown: (markdown: string) => void;
 };
 
-export type MarkdownEditorCollab = {
+type MarkdownEditorCollab = {
   ydoc: Y.Doc;
   status: "disabled" | "connecting" | "connected" | "disconnected";
   peerCount: number;
@@ -141,7 +141,7 @@ export type MarkdownEditorCollab = {
   awareness?: Awareness;
 };
 
-export type MarkdownEditorPendingUndo = {
+type MarkdownEditorPendingUndo = {
   token: number;
   restoredText: string;
   undoText: string;

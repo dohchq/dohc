@@ -25,7 +25,7 @@
     "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "node scripts/check-brand.mjs && node --test scripts/pr-checks-workflow.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
+    "test": "node scripts/check-brand.mjs && node --test scripts/ci-verdict-provenance.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
     "test:desktop:e2e": "pnpm --filter @dohc/desktop run test:e2e",
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",
@@ -36,6 +36,7 @@
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/node": "^24.13.3",
+    "js-yaml": "5.2.3",
     "vitest": "^4.1.10"
   }
 }

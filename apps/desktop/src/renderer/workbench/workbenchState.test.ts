@@ -18,13 +18,11 @@ import {
   defaultWorkbenchState,
   DEFAULT_EDITOR_GROUP_ID,
   CHATS_DEFAULT_WIDTH,
-  historyDiffTabPath,
   CHATS_MAX_WIDTH,
   CHATS_MIN_WIDTH,
   HISTORY_TAB_PATH,
   CHATS_TAB_PATH,
   isChatsTabPath,
-  isHistoryDiffTabPath,
   isHistoryTabPath,
   isMomentDiffTabPath,
   momentDiffTabPath,
@@ -45,7 +43,6 @@ import {
   isVirtualTabPath,
   moveTab,
   openTab,
-  parseHistoryDiffTabPath,
   parseSiteTabPath,
   parsePluginPanelTabPath,
   parsePluginViewId,
@@ -566,18 +563,6 @@ describe("tabs", () => {
     expect(isChatsTabPath("dohc://chats/extra")).toBe(false);
     expect(isChatsTabPath(null)).toBe(false);
     expect(isVirtualTabPath(CHATS_TAB_PATH)).toBe(true);
-  });
-
-  it("recognizes history file diffs as virtual tabs with encoded file identity", () => {
-    const path = historyDiffTabPath("change 1", "notes/today plan.md");
-    expect(isHistoryDiffTabPath(path)).toBe(true);
-    expect(isVirtualTabPath(path)).toBe(true);
-    expect(parseHistoryDiffTabPath(path)).toEqual({
-      changeSetId: "change 1",
-      filePath: "notes/today plan.md",
-    });
-    expect(parseHistoryDiffTabPath("dohc://history-diff/change-only")).toBeNull();
-    expect(parseHistoryDiffTabPath("notes/today.md")).toBeNull();
   });
 
   it("recognizes engine moment diffs by their encoded moment id", () => {

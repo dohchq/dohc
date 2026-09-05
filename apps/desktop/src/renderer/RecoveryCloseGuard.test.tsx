@@ -374,7 +374,6 @@ describe("RecoveryCloseGuard", () => {
     };
     const installUpdate = vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: readyState,
     }));
     stubBridge({ installUpdate });
@@ -408,7 +407,6 @@ describe("RecoveryCloseGuard", () => {
   it("installs at once when no set-aside edits exist", async () => {
     const installUpdate = vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: {
         status: "ready" as const,
         message: "Update 1.2.4 is ready.",
@@ -439,7 +437,6 @@ describe("RecoveryCloseGuard", () => {
     const user = userEvent.setup();
     const installUpdate = vi.fn(async () => ({
       accepted: false,
-      completed: false,
       state: {
         status: "ready" as const,
         message: "Update 1.2.4 is ready.",
@@ -544,7 +541,7 @@ describe("RecoveryCloseGuard", () => {
     };
     const installUpdate = vi.fn(async () => {
       options.onInstall?.();
-      return { accepted, completed: false, state: readyState };
+      return { accepted, state: readyState };
     });
     const answerRecoveryCheck = vi.fn(async () => undefined);
     const resumeQuit = vi.fn(async () => undefined);

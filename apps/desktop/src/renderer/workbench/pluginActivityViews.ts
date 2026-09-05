@@ -16,7 +16,7 @@ export interface PluginActivityView {
   plugin: PluginStatusRecord;
 }
 
-export interface PluginCommandEntry {
+interface PluginCommandEntry {
   pluginId: string;
   commandId: string;
   title: string;
@@ -87,7 +87,7 @@ export function pluginCommandEntries(
  * keeps the selection — the plugin is still installed, so turning it back on
  * must bring the view back where the user left it.
  */
-export type PluginViewResolution =
+type PluginViewResolution =
   | { status: "ready"; pluginId: string; panelId: string; title: string }
   | { status: "off"; title: string; pluginTitle: string }
   | { status: "absent" };

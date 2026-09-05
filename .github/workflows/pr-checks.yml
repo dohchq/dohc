@@ -48,7 +48,7 @@
 #     workflow_dispatch:
 #
 # and reverting the "deliberately disabled" test in
-# scripts/pr-checks-workflow.test.mjs to its trigger-coverage version
+# scripts/ci-verdict-provenance.test.mjs to its trigger-coverage version
 # (see the comment there). Until then: agents run the canonical gate and
 # the JS typecheck/tests locally before merging.
 # ------------------------------------------------------------------------

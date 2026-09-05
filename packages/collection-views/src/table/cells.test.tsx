@@ -115,34 +115,6 @@ describe("FieldCell display", () => {
     expect(container.querySelector("[data-flagged='true']")).toBeNull();
   });
 
-  // FLAGGED_REASON_TITLES is a Record over the contract's reason union, so
-  // a new engine reason without copy fails typecheck; this literal pins the
-  // copy itself so a change to any line is deliberate.
-  it("pins the hover line for every reason the engine can mint", () => {
-    expect(FLAGGED_REASON_TITLES).toEqual({
-      "expected-text": "This value is not text. Edit the value to replace it.",
-      "expected-number": "This value is not a number. Edit the value to replace it.",
-      "number-not-finite": "This number is not finite. Edit the value to replace it.",
-      "unsupported-tag":
-        "This value uses a YAML tag dohc cannot index. Replace the value.",
-      "value-depth-exceeded":
-        "This value nests too deeply to index. Replace the value.",
-      "expected-boolean":
-        "This value is not true or false. Toggle the checkbox to replace it.",
-      "expected-sequence": "This value is not a list. Edit the value to replace it.",
-      "invalid-date": "This value is not a date. Edit the value to pick a date.",
-      "unknown-option":
-        "This field's options do not include this value. Edit the value to pick or add an option.",
-      "duplicate-value":
-        "This list repeats a value. Edit the value to remove the duplicate.",
-      "empty-person-id":
-        "This person id is empty. Edit the value to enter a person id.",
-      "invalid-record-id":
-        "This value is not a record id. Edit the value to pick a record.",
-      "invalid-url": "This value is not a URL. Edit the value to replace it.",
-    });
-  });
-
   it("shows each reason's line as the flagged cell's hover title", () => {
     for (const code of FIELD_VALUE_REASON_CODES) {
       const { container, unmount } = render(

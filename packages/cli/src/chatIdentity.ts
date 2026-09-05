@@ -1,6 +1,6 @@
 import { agentDisplayLabel } from "@dohc/workspace-contracts/chat-identity-values";
 
-export interface CliChatAuthor {
+interface CliChatAuthor {
   kind: "human" | "agent";
   displayName: string;
 }

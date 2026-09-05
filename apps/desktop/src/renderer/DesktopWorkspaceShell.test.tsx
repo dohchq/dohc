@@ -545,7 +545,6 @@ function makeBridge(
     })),
     installUpdate: vi.fn(async () => ({
       accepted: true,
-      completed: false,
       state: READY_UPDATE_STATE,
     })),
     getDroppedFilePaths: vi.fn(() => []),
@@ -16351,7 +16350,7 @@ describe("unavailable MCP launcher settings", () => {
 
 // #687/#589: the note's precedence and exact copy are pinned at the
 // AgentsMcpSettings/RunnerSettingsCard layer, but every test there hands
-// sessionRecorderOn and sharedView straight to DesktopSettings — bypassing
+// sessionRecorderOn and sharedView straight to SettingsDialog — bypassing
 // the shell's own derivation. A regression that severs
 // DesktopWorkspaceShell's wiring (for example, replacing the syncStatus ->
 // sessionRecorderOn derivation with `undefined`, or dropping sharedView)

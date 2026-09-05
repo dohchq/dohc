@@ -151,20 +151,6 @@ function graphRadius(node: WorkspaceGraphNode, variant: GraphVariant): number {
     : Math.min(24, 12 + degree(node) * 1.15);
 }
 
-function requestGraphFrame(callback: FrameRequestCallback): number {
-  if (typeof globalThis.requestAnimationFrame === "function") {
-    return globalThis.requestAnimationFrame(callback);
-  }
-  return Number(globalThis.setTimeout(() => callback(performance.now()), 16));
-}
-
-function cancelGraphFrame(handle: number): void {
-  if (typeof globalThis.cancelAnimationFrame === "function") {
-    globalThis.cancelAnimationFrame(handle);
-  }
-  globalThis.clearTimeout(handle);
-}
-
 function initialGraphNode(
   node: WorkspaceGraphNode,
   index: number,
@@ -410,7 +396,7 @@ function useForceGraph(
       dragging ||
       (hasEnergy && settleFramesRef.current < currentLayout.settleFrameLimit)
     ) {
-      frameRef.current = requestGraphFrame(step);
+      frameRef.current = requestAnimationFrame(step);
       return;
     }
     stopGraphMotion(nodes);
@@ -423,7 +409,7 @@ function useForceGraph(
     (boost = 0.7) => {
       alphaRef.current = Math.max(alphaRef.current, boost);
       settleFramesRef.current = 0;
-      if (frameRef.current === null) frameRef.current = requestGraphFrame(step);
+      if (frameRef.current === null) frameRef.current = requestAnimationFrame(step);
     },
     [step],
   );
@@ -456,7 +442,7 @@ function useForceGraph(
 
   useEffect(() => {
     return () => {
-      if (frameRef.current !== null) cancelGraphFrame(frameRef.current);
+      if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
       frameRef.current = null;
     };
   }, []);

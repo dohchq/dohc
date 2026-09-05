@@ -10,7 +10,7 @@ import { chatAuthorLabel } from "./LinkedChats";
 // (reconcile, switch, merge, restore) into one expandable item via its
 // correlationId. Product vocabulary only — no git terms.
 
-export interface EngineHistoryGroup {
+interface EngineHistoryGroup {
   key: string;
   summary: string;
   recordedAtMs: number;

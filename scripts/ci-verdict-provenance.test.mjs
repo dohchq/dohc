@@ -25,7 +25,9 @@ const workflow = await readFile(
   new URL("../.github/workflows/pr-checks.yml", import.meta.url),
   "utf8",
 );
-const triggerBlock = workflow.slice(0, workflow.indexOf("\nconcurrency:"));
+const concurrencyAt = workflow.indexOf("\nconcurrency:");
+assert.notEqual(concurrencyAt, -1, "pr-checks.yml has no concurrency block");
+const triggerBlock = workflow.slice(0, concurrencyAt);
 
 const passVerdict =
   "- 2026-07-27T00:00:00.000Z | run-rust-checks | linux/x64 " +

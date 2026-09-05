@@ -2,13 +2,13 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi, type Mock } from "vitest";
-import { CHANNELS } from "./ipc/channels";
-import { registerWorkspaceSearchIpcHandlers } from "./ipc/workspaceSearchIpc";
+import { CHANNELS } from "../ipc/channels";
+import { registerWorkspaceSearchIpcHandlers } from "../ipc/workspaceSearchIpc";
 import {
   createSearchRegistry,
   type SearchBatch,
-} from "./workspaces/workspaceSearch";
-import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
+} from "./workspaceSearch";
+import { WorkspaceSearchOwner } from "./workspaceSearchOwner";
 
 const roots: string[] = [];
 
@@ -106,7 +106,7 @@ function harness(input: { capture: boolean; rootPath: string }) {
   };
 }
 
-describe("ShareViewFiles workspace search wiring", () => {
+describe("workspace search IPC handlers", () => {
   it("repeated switch cleanup cancels an active ripgrep once and drops its late settlement", async () => {
     const rootPath = await workspaceRoot();
     const killed: string[] = [];
