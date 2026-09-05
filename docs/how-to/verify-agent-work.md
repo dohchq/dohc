@@ -36,6 +36,10 @@ Attach a debugger to those loopback endpoints. Confirm the recorded checkout bef
 Close that app or interrupt its command to stop the session and retain logs, a screenshot, and a trace.
 The session retains its disposable data beside the evidence for diagnosis.
 
+For native folder-dialog QA, run `pnpm qa:debug -- --native-dialogs`.
+Ask the operator to choose the printed disposable workspace, cancel a second picker, and confirm keyboard focus returns to the app.
+Record the operator's result with the session evidence. The automated picker seam does not prove native-dialog behavior.
+
 ## Verify a pull request
 
 Fetch the target branch. Run `pnpm verify:plan --base origin/main` to see the applicable workflow gates.

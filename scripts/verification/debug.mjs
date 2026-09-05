@@ -18,6 +18,7 @@ try {
   for (const path of [profile, home, workspace]) await mkdir(path, { recursive: true });
   await writeFile(join(workspace, "debug.md"), "# Debug workspace\n\nThis workspace belongs to this debug session.\n");
   const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: workspace };
+  if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
