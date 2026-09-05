@@ -1299,7 +1299,7 @@ describe('Y.Doc markdown import/export', () => {
         ]),
       ),
     ).toBe('![split]()')
-    // Backslash traversal (a Windows-style `..\secret\pic.png`) stays BLOCKED:
+    // Backslash traversal (a Windows-style `..\secret\pic.png`) stays blocked:
     // backslashes are folded to '/' before the check and a `..` backslash path
     // is never legitimate authored markdown (unlike a forward-slash `../`,
     // which is now preserved above). Driven through the node attrs directly so
@@ -1321,40 +1321,40 @@ describe('Y.Doc markdown import/export', () => {
     ).toBe('![backslash]()')
   })
 
-  // PARITY FIXTURE. sanitizeImageSrc is implemented TWICE — apps/desktop's
+  // PARITY FIXTURE. sanitizeImageSrc is implemented twice — apps/desktop's
   // editor/extensions.ts and packages/ydoc-projection's
   // dohc-markdown-extensions.ts — because neither package may import the other.
-  // This table is duplicated VERBATIM in the other package's import-export test
+  // This table is duplicated verbatim in the other package's import-export test
   // and is what keeps the two copies from drifting: any change to the image-src
-  // contract has to change both implementations AND both tables, or one side
+  // contract has to change both implementations and both tables, or one side
   // goes red. Driven through the node attrs (not markdown source) so each input
   // reaches the sanitizer exactly as written.
   const IMAGE_SRC_CONTRACT: ReadonlyArray<{ src: string; markdown: string }> = [
-    // KEPT — relative asset paths (the ordinary case).
+    // Kept — relative asset paths (the ordinary case).
     { src: 'assets/pic.png', markdown: '![x](assets/pic.png)' },
     { src: './assets/pic.png', markdown: '![x](./assets/pic.png)' },
-    // KEPT — forward-slash parent traversal, losslessly: the global-folder
+    // Kept — forward-slash parent traversal, losslessly: the global-folder
     // attachment mode authors exactly this. Containment is downstream (the
     // resolver refuses to serve an escaping path; the export drops it).
     { src: '../assets/pic.png', markdown: '![x](../assets/pic.png)' },
     { src: '../../outside.png', markdown: '![x](../../outside.png)' },
-    // KEPT — remote images.
+    // Kept — remote images.
     { src: 'https://example.com/x.png', markdown: '![x](https://example.com/x.png)' },
     { src: 'http://example.com/x.png', markdown: '![x](http://example.com/x.png)' },
-    // DROPPED — every non-http(s) scheme, however obfuscated.
+    // Dropped — every non-http(s) scheme, however obfuscated.
     { src: 'javascript:alert(1)', markdown: '![x]()' },
     { src: 'JavaScript:alert(1)', markdown: '![x]()' },
     { src: 'java\nscript:alert(1)', markdown: '![x]()' },
     { src: 'data:image/svg+xml;base64,PHN2Zz4=', markdown: '![x]()' },
     { src: 'file:///etc/passwd', markdown: '![x]()' },
     { src: 'dohc-file://ws/x.png', markdown: '![x]()' },
-    // DROPPED — absolute and protocol-relative.
+    // Dropped — absolute and protocol-relative.
     { src: '/etc/pic.png', markdown: '![x]()' },
     { src: '//evil.example.com/x.png', markdown: '![x]()' },
-    // DROPPED — backslash-obfuscated traversal (never authored markdown).
+    // Dropped — backslash-obfuscated traversal (never authored markdown).
     { src: '..\\secret\\pic.png', markdown: '![x]()' },
     { src: 'a\\..\\..\\b.png', markdown: '![x]()' },
-    // DROPPED — empty / whitespace-only.
+    // Dropped — empty / whitespace-only.
     { src: '', markdown: '![x]()' },
     { src: '   ', markdown: '![x]()' },
   ]
@@ -2645,10 +2645,10 @@ describe('Y.Doc markdown import/export', () => {
   })
 
   it('round-trips inline math adjacent to marks', () => {
-    // A mark that WRAPS a childless inline atom is dropped by the base markdown
+    // A mark that wraps a childless inline atom is dropped by the base markdown
     // manager (applyMarkToContent only attaches marks to text nodes) — this is
     // shared by every inline atom (image, inlineAtom, wikilink), not a
-    // math quirk. Marks ADJACENT to math round-trip cleanly, which is the case
+    // math quirk. Marks adjacent to math round-trip cleanly, which is the case
     // that matters in practice.
     const input = 'Adjacent **bold** and $x^2$ and *emphasis* stay put.'
     const once = expectStableMarkdownRoundTrip(input, [
@@ -2703,8 +2703,8 @@ describe('Y.Doc markdown import/export', () => {
 })
 
 // A bare TaskItem takes `paragraph+`, so an indented list under a checkbox is
-// schema-invalid and the Y.Doc -> ProseMirror conversion returned an EMPTY
-// document: the whole task list disappeared on open (#700).
+// schema-invalid and the Y.Doc -> ProseMirror conversion returned an empty
+// document: the whole task list disappeared on open.
 describe('a list nested inside a task item', () => {
   const CASES = [
     ['bullet', '- [ ] parent\n  - child one\n  - child two'],
@@ -2723,7 +2723,7 @@ describe('a list nested inside a task item', () => {
 // spaces. Four or more make an indented code block instead, which is a
 // different construct. markdownToYDoc used to drop a top-level fence indented
 // 1-3 spaces together with its whole body, so opening such a document and
-// letting it settle wrote the deletion back to disk (#695). This mirrors the
+// letting it settle wrote the deletion back to disk. This mirrors the
 // desktop editor's suite — both packages parse markdown with the same rules.
 describe('indented code fences', () => {
   function bodyBlocks(markdown: string): JSONContent[] {
@@ -2800,7 +2800,7 @@ describe('indented code fences', () => {
     expect(yDocToMarkdown(markdownToYDoc(once))).toBe(once)
   })
 
-  // Boundary: four spaces is an indented code block, NOT a fence.
+  // Boundary: four spaces is an indented code block, not a fence.
   it('treats a 4-space-indented backtick run as code content, not a fence', () => {
     const blocks = bodyBlocks('    ```\nParagraph')
     expect(blocks.map((block) => block.type)).toEqual(['codeBlock', 'paragraph'])

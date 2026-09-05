@@ -39,7 +39,7 @@ test("the POSIX launcher template names the requested module without changing th
 
 const nodeDir = dirname(process.execPath);
 const isWindows = process.platform === "win32";
-// Absolute interpreter paths, resolved BEFORE any test strips PATH: the
+// Absolute interpreter paths, resolved before any test strips PATH: the
 // stripped PATH must only decide what the launcher script itself can find,
 // never whether the test can start its shell at all.
 const shPath = (() => {
@@ -56,8 +56,8 @@ const cmdPath = process.env.ComSpec ?? "cmd.exe";
 // gate can be exercised without actually installing that Node release.
 // POSIX gets a shell script that delegates every call except `--version`
 // to this host's real Node interpreter, so accepted versions still run the
-// bundle end to end. Windows cannot use a
-// .cmd/.bat stand-in here: the launcher invokes `node` bare (no `call`),
+// bundle end to end. Windows cannot use a.
+// Cmd/.bat stand-in here: the launcher invokes `node` bare (no `call`),
 // and chaining into another batch file that way transfers control
 // permanently instead of returning -- the rest of dohc-mcp.cmd would never
 // run. A byte-patched copy of the real node.exe (with its embedded version

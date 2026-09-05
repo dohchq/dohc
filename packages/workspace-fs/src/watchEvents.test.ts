@@ -43,7 +43,7 @@ describe("shouldIgnoreWatchPath", () => {
     expect(shouldIgnoreWatchPath("notes/.DS_Store")).toBe(true);
   });
 
-  it("does NOT ignore SQLite sidecars — they signal a db change and are collapsed", () => {
+  it("does not ignore SQLite sidecars — they signal a db change and are collapsed", () => {
     // A SQLite write often touches only the WAL; ignoring sidecars would make
     // the change invisible. They pass through here and collapseSqliteSidecars
     // folds them into one base-db update (so the sidecar path never surfaces).
@@ -66,7 +66,7 @@ describe("shouldIgnoreWatchPath", () => {
 
   it("preserves a real database delete even when sidecars are present", () => {
     // Deleting wallet.sqlite removes its sidecars too; the base's own delete
-    // must NOT be downgraded to 'update' (history would lie about the delete).
+    // must not be downgraded to 'update' (history would lie about the delete).
     expect(
       collapseSqliteSidecars([
         { path: "finance/wallet.sqlite-wal", operation: "delete" },

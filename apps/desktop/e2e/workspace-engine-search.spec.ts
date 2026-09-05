@@ -20,7 +20,7 @@ import {
 // a flagged workspace's search panel routes through the engine's FTS index
 // and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
 // a distinguishable row and opens the Chats panel on its thread. The `.env`
-// family (including `.env.local`) is never findable AND never present in the
+// family (including `.env.local`) is never findable and never present in the
 // raw FTS tables. Unflagged workspaces keep the streamed ripgrep path.
 
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
@@ -153,7 +153,7 @@ test("flagged: search finds file content and a chat message; .env.local content 
 
     // 5. ...and ADVERSARIALLY, a raw dump of the FTS index tables in the
     //    persisted engine.db carries no secret plaintext and no .env path,
-    //    while it DOES carry the tracked corpus (the dump inspects a
+    //    while it does carry the tracked corpus (the dump inspects a
     //    populated index, not a missing table).
     const dump = dumpSearchIndexTables(temp.rootPath);
     expect(dump).toContain("notes/roadmap.md");

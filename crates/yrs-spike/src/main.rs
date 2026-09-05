@@ -14,7 +14,7 @@
 //     formatting) and return the delta yrs encoded for them,
 //   - dump a canonical content JSON (maps, text deltas, XML tree) that the
 //     JS driver computes identically from Yjs, so convergence is compared at
-//     CONTENT level, not just state vectors.
+//     content level, not just state vectors.
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write};
@@ -39,7 +39,7 @@ enum Request {
     /// Create (or replace) a doc under `id`. Optional fixed clientId keeps
     /// fuzz runs reproducible under a fixed seed. `offsetKind` defaults to
     /// utf16 — the only wire-safe mode against Yjs peers; "bytes" exists
-    /// SOLELY for the pinned Bytes-divergence probe in fidelity.ts.
+    /// solely for the pinned Bytes-divergence probe in fidelity.ts.
     New {
         id: String,
         #[serde(rename = "clientId")]
@@ -62,7 +62,7 @@ enum Request {
         sv: String,
     },
     /// Canonical content JSON (see `content_json`). `schema` names the
-    /// expected kind of each root type: the Yjs v1 wire format does NOT
+    /// expected kind of each root type: the Yjs v1 wire format does not
     /// carry root-type kinds (a root's kind is defined by typed API access),
     /// so both sides must read roots through the same declared schema —
     /// exactly what the TS engine does with its typed getters.
@@ -177,7 +177,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
             // defaults to UTF-8 byte offsets, which desyncs item lengths (and
             // therefore CRDT clocks) against Yjs peers whenever an edit's
             // byte offset differs from its UTF-16 offset. Every doc that
-            // exchanges updates with Yjs MUST use Utf16; Bytes is accepted
+            // exchanges updates with Yjs must use Utf16; Bytes is accepted
             // here only so the fidelity probe can PIN the divergence.
             let options = Options {
                 offset_kind: match offset_kind {
@@ -227,7 +227,7 @@ fn handle(docs: &mut HashMap<String, Doc>, req: Request) -> Result<Value, String
             let merged = Update::merge_updates(decoded);
             Ok(json!({ "update": B64.encode(merged.encode_v1()) }))
         }
-        // NOTE: every root ref is acquired BEFORE the edit transaction opens —
+        // NOTE: every root ref is acquired before the edit transaction opens —
         // yrs's get_or_insert_* take the doc's store lock, so calling them
         // while a TransactionMut is live deadlocks.
         Request::TextInsert {
@@ -340,10 +340,10 @@ fn b64(s: &str) -> Result<Vec<u8>, String> {
 
 /// Run a yrs-side edit and return the exact v1 delta it produced (state
 /// before the edit -> state after), which the JS driver delivers to Yjs.
-/// The closure reports whether it actually CHANGED the doc — a clamped
+/// The closure reports whether it actually changed the doc — a clamped
 /// out-of-range delete is a legal no-op, and the encoded "delta" of a no-op
 /// is never empty (it carries the doc's full delete set), so byte length
-/// cannot distinguish one. `changed` lets the fuzz count LANDED edits.
+/// cannot distinguish one. `changed` lets the fuzz count landed edits.
 fn with_delta(
     doc: &Doc,
     edit: impl FnOnce(&mut yrs::TransactionMut) -> Result<bool, String>,
@@ -373,7 +373,7 @@ fn snap_utf16(s: &str, idx: u32) -> u32 {
     units
 }
 
-/// The plain text of an XmlText (concatenated string inserts), WITHOUT the
+/// The plain text of an XmlText (concatenated string inserts), without the
 /// formatting tags XmlTextRef::get_string interleaves.
 fn xml_plain_string(txn: &yrs::TransactionMut, t: &yrs::XmlTextRef) -> String {
     let mut out = String::new();
@@ -461,7 +461,7 @@ fn content_json(doc: &Doc, schema: &HashMap<String, RootKind>) -> Value {
         };
         roots.insert(name.clone(), value);
     }
-    // Surface any replicated root the schema did NOT declare so a mismatch in
+    // Surface any replicated root the schema did not declare so a mismatch in
     // root enumeration cannot pass silently.
     let txn = doc.transact();
     for (name, _) in txn.root_refs() {

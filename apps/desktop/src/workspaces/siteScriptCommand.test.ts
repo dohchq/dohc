@@ -57,7 +57,7 @@ describe("commandForSiteScript", () => {
     expect(() => commandForSiteScript(site, "dev")).toThrow(/loopback/);
   });
 
-  it("preserves forwarded args AND npm's documented -- separator, so npm forwards them instead of consuming them", () => {
+  it("preserves forwarded args and npm's documented -- separator, so npm forwards them instead of consuming them", () => {
     const site = packageSite({
       configuredScripts: { dev: "npm run dev -- --port 3000" },
     });

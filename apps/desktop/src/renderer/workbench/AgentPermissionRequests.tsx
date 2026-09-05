@@ -5,7 +5,7 @@ import { bridge } from "../bridge";
 import { useGuestBlockingUiWhile } from "../guestBlockingUi";
 import type { AgentPermissionRequest } from "./useAgentNotifications";
 
-// Floating permission cards (update-toast position, bottom-right): THE place
+// Floating permission cards (update-toast position, bottom-right): the place
 // a blocked agent run asks the user for consent. Requests arrive through the
 // shell's session poll (useAgentNotifications) from any run source — "Try it
 // in a version", chat dispatch, an MCP-connected agent — and answering
@@ -28,7 +28,7 @@ function permissionDecision(kind: string): AgentPermissionDecision {
 export function AgentPermissionRequests(props: {
   workspaceId: string;
   // The run the requests belong to (session runId). Optimistic-hide keys are
-  // scoped by it: a LATER run reusing a provider request id must ask again,
+  // scoped by it: a later run reusing a provider request id must ask again,
   // never inherit an old answer.
   runId: string | null;
   requests: readonly AgentPermissionRequest[];

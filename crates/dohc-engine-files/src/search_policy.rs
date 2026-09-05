@@ -3,8 +3,8 @@
 //!
 //! Ports `enginePathFloor.ts` (the `tracked`/`ignored`/`secret` floor),
 //! `effectivePolicy.ts` (glob validation + matching, TOML rule parsing,
-//! effective-policy resolution), and `searchIndex.ts`'s
-//! `readEngineSearchPolicySync` / `pathIsSearchIndexed`.
+//! effective-policy resolution), and the TS `readEngineSearchPolicySync` /
+//! `pathIsSearchIndexed`.
 //!
 //! The `effectivePolicy.ts` half is held to that claim by
 //! `tests/effective_policy.rs`, which asserts this port against a fixture
@@ -15,7 +15,7 @@
 //!
 //! An **absent** `.dohc/files.toml` / `.dohc/visibility.toml` is a valid
 //! configuration: defaults apply (index normally). A policy file that **exists
-//! but cannot be read or parsed** must NEVER widen search — it fails CLOSED: a
+//! but cannot be read or parsed** must never widen search — it fails closed: a
 //! diagnostic is recorded and, while it is present, no FILE is searchable
 //! (`path_is_search_indexed` returns `false`, the query path returns an empty —
 //! not `None` — result so the caller cannot fall back to an unfiltered scan).
@@ -25,13 +25,13 @@
 //!
 //! ## The path floor and the Rust engine's per-platform posture
 //!
-//! The reserved/ignored/secret segment comparison uses the SAME per-platform
+//! The reserved/ignored/secret segment comparison uses the same per-platform
 //! normalization as the sibling scan floor (`dohc_engine_files::floor`): on
 //! Windows, Win32 strips trailing dots/spaces and NTFS folds case, so `.DOHC`
 //! and `.dohc ` alias `.dohc`; on case-sensitive POSIX only the exact segment
-//! is the floor. This keeps capture and search CONSISTENT within the Rust
+//! is the floor. This keeps capture and search consistent within the Rust
 //! engine (the TS engine lowercases unconditionally — a platform bug the Rust
-//! engine corrects, recorded in `BEHAVIOR_DELTA.md` CAL-3). The `.env` secret
+//! engine corrects). The `.env` secret
 //! family is classified on the DECODED path so a percent-encoded `secrets%2eenv`
 //! cannot slip through as tracked.
 
@@ -51,7 +51,7 @@ const RESERVED_SEGMENTS: &[&str] = &[".dohc", ".git", "node_modules"];
 /// scratch, never user content.
 const IGNORED_FILE_PREFIXES: &[&str] = &[".dohc-write-"];
 
-/// The shared-with-me projection root: a WRITE reservation that classifies as
+/// The shared-with-me projection root: a write reservation that classifies as
 /// non-tracked for the write-side floor search uses.
 const SHARED_WITH_ME_ROOT: &str = "shared-with-me";
 
@@ -117,7 +117,7 @@ fn replace_ci(haystack: &str, needle_lower: &str, replacement: &str) -> String {
 }
 
 /// POSIX absolute, Windows drive-qualified (`C:\`/`C:/`), or UNC (`\\server`).
-/// Ports `isAbsolutePathLike` (`paths.ts`) — NOT `Path::is_absolute`.
+/// Ports `isAbsolutePathLike` (`paths.ts`) — not `Path::is_absolute`.
 fn is_absolute_path_like(path: &str) -> bool {
     if path.starts_with('/') || path.starts_with("\\\\") {
         return true;
@@ -129,7 +129,7 @@ fn is_absolute_path_like(path: &str) -> bool {
         && (bytes[2] == b'\\' || bytes[2] == b'/')
 }
 
-/// Whether a normalized (forward-slash) path has ANY reserved/ignored segment.
+/// Whether a normalized (forward-slash) path has any reserved/ignored segment.
 fn has_ignored_segment(rel_path: &str) -> bool {
     rel_path.split('/').any(|segment| {
         let normalized = normalize_segment(segment);
@@ -146,10 +146,10 @@ fn has_ignored_segment(rel_path: &str) -> bool {
 /// `Ignored`; the `.env` family is `Secret`; everything else is `Tracked`.
 ///
 /// The Windows host-unsafe admission checks (ADS colon, device names, 8.3
-/// aliases) are intentionally NOT re-litigated here: those reject a path at the
-/// WRITE gate (a separate path shard, `LANGUAGE_SEMANTICS_MATRIX.md` 7.x), so a
+/// aliases) are intentionally not re-litigated here: those reject a path at the
+/// write gate, so a
 /// stored snapshot path has already cleared them. Re-running them would only
-/// hide MORE (the fail-closed-safe direction); omitting them never surfaces a
+/// hide more (the fail-closed-safe direction); omitting them never surfaces a
 /// secret, because the secret/ignored classification below is independent.
 pub fn classify_engine_file_path(path: &str) -> PathFloor {
     if path.contains('\0') || is_absolute_path_like(path) {
@@ -186,7 +186,7 @@ pub fn classify_engine_file_path(path: &str) -> PathFloor {
     }
     // Secret: the shared rule (`policy::segments_are_secret`), over search's
     // per-platform normalization (see module docs). Search deliberately does
-    // NOT call `normalized_path_is_secret`, which folds Win32 aliases on every
+    // not call `normalized_path_is_secret`, which folds Win32 aliases on every
     // platform — only the rule is shared, so a class added to it reaches
     // search without importing the relay-facing normalization.
     let normalized_segments: Vec<String> = kept
@@ -351,7 +351,7 @@ fn array_index(key: &str) -> Option<u32> {
     if index == u32::MAX { None } else { Some(index) }
 }
 
-/// Parse `.dohc/files.toml`. Collects ALL shape errors in one pass (never a
+/// Parse `.dohc/files.toml`. Collects all shape errors in one pass (never a
 /// partial application), matching `parseFilesPolicy` (`effectivePolicy.ts`).
 pub fn parse_files_policy(toml_text: &str) -> Result<Vec<FilesPolicyRule>, Vec<String>> {
     let value = match toml_text.parse::<toml::Table>() {
@@ -467,9 +467,9 @@ fn validate_top_level<'a>(
     if parsed.len() != 1 || !parsed.contains_key("rule") {
         errors.push("policy must contain exactly one top-level key: rule".to_owned());
     }
-    // An ABSENT `rule` key also earns this error, not only a present non-array
+    // An absent `rule` key also earns this error, not only a present non-array
     // one: the oracle tests `Array.isArray(parsed.rule)`, so an empty policy
-    // file reports both the missing top-level key AND the array shape.
+    // file reports both the missing top-level key and the array shape.
     let rule = parsed.get("rule");
     if !rule.is_some_and(|value| value.is_array()) {
         errors.push("rule must be an array of tables".to_owned());
@@ -628,14 +628,14 @@ fn read_policy_file<T>(
         })
     };
     let path = root_dir.join(".dohc").join(file_name);
-    // `symlink_metadata` does NOT follow the final symlink, so a symlinked
+    // `symlink_metadata` does not follow the final symlink, so a symlinked
     // policy file is rejected as unreadable (parity with the TS `lstatSync`
     // symlink refusal) rather than followed off-tree.
     //
     // TOCTOU: this is a stat-then-open double-open (a symlink could be swapped
     // in between), matching the TS `lstatSync`-then-`readFileSync` behavior. It
-    // is NOT a leak vector — the bytes are only ever consumed AS policy, and a
-    // non-TOML / oversize / non-file result fails CLOSED (a diagnostic that
+    // is not a leak vector — the bytes are only ever consumed AS policy, and a
+    // non-TOML / oversize / non-file result fails closed (a diagnostic that
     // freezes FILE search), never widens it. Left as-is for TS parity rather
     // than hardened to an open-by-handle read.
     let meta = match std::fs::symlink_metadata(&path) {
@@ -708,9 +708,9 @@ pub fn read_engine_search_policy(root_dir: &Path) -> SearchPolicySnapshot {
     snapshot
 }
 
-/// Whether `path` is search-indexed under `policy`. Ports `pathIsSearchIndexed`
-/// (`searchIndex.ts`): a degraded policy fails CLOSED (`false`); otherwise the
-/// path must be tracked AND searchable AND not hidden (the stricter answer of
+/// Whether `path` is search-indexed under `policy`. Ports `pathIsSearchIndexed`:
+/// a degraded policy fails closed (`false`); otherwise the
+/// path must be tracked and searchable and not hidden (the stricter answer of
 /// `files.toml` and `visibility.toml` wins).
 pub fn path_is_search_indexed(policy: &SearchPolicySnapshot, path: &str) -> bool {
     if policy.is_degraded() {
@@ -783,7 +783,7 @@ mod tests {
         // normalization reduces to lowercasing, the same as the shared
         // predicate's, so the search floor and `normalized_path_is_secret`
         // must agree exactly. A class added to either side alone fails here
-        // on the vectors that carry it (#543, the #484 shape one surface
+        // on the vectors that carry it (#543, the shape one surface
         // over).
         for path in [
             ".env",

@@ -46,7 +46,7 @@ describe("what a share's skipped ops say", () => {
     expect(line?.kind).toBe("boundary");
     expect(
       line?.text,
-      "MUTATION: a boundary refusal that stops naming the share hides the one cause the reader can act on",
+      "a boundary refusal that stops naming the share hides the one cause the reader can act on",
     ).toBe(
       "dohc skipped 1 update outside what this share covers. Ask granter@dohc.test.",
     );
@@ -64,7 +64,7 @@ describe("what a share's skipped ops say", () => {
     expect(line?.kind).toBe("malformed");
     expect(
       line?.text,
-      "MUTATION: telling the reader to ask the granter about a malformed envelope is a false cause AND a false instruction",
+      "telling the reader to ask the granter about a malformed envelope is a false cause and a false instruction",
     ).toBe("dohc couldn't apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
     expect(line?.text).not.toContain("this share covers");
@@ -72,7 +72,7 @@ describe("what a share's skipped ops say", () => {
     // scope the line just refused to claim.
     expect(
       line?.detail,
-      "MUTATION: the persisted detail claims the op was outside the share, contradicting the notice it is attached to",
+      "the persisted detail claims the op was outside the share, contradicting the notice it is attached to",
     ).not.toContain("outside the share boundary");
   });
 
@@ -89,7 +89,7 @@ describe("what a share's skipped ops say", () => {
     expect(rest).toEqual([]);
     expect(
       line?.kind,
-      "MUTATION: classifying an unusable versionId as a boundary refusal tells the reader the share excluded an update it may cover, and sends them to a granter who cannot fix it",
+      "classifying an unusable versionId as a boundary refusal tells the reader the share excluded an update it may cover, and sends them to a granter who cannot fix it",
     ).toBe("malformed");
     expect(line?.text).toBe("dohc couldn't apply 1 update this share sent.");
     expect(line?.text).not.toContain("granter@dohc.test");
@@ -98,7 +98,7 @@ describe("what a share's skipped ops say", () => {
     // title. It must not claim the scope the line just refused to claim.
     expect(
       line?.detail,
-      "MUTATION: the persisted detail says the moment was outside the share boundary, contradicting the notice it is attached to and the code that classifies it",
+      "the persisted detail says the moment was outside the share boundary, contradicting the notice it is attached to and the code that classifies it",
     ).not.toContain("outside the share boundary");
     expect(line?.detail).toContain("128 UTF-16 code units");
   });
@@ -117,7 +117,7 @@ describe("what a share's skipped ops say", () => {
     expect(rest).toEqual([]);
     expect(
       line?.kind,
-      "MUTATION: an oversized update is classed as unappliable and the reader is told nothing can be done",
+      "an oversized update is classed as unappliable and the reader is told nothing can be done",
     ).toBe("oversized");
     expect(line?.text).toBe(
       "dohc skipped 1 update with files over the size limit. Ask granter@dohc.test to make them smaller and share them again.",
@@ -133,7 +133,7 @@ describe("what a share's skipped ops say", () => {
     );
     expect(
       rest,
-      "MUTATION: the size refusal is counted twice, once as unappliable",
+      "the size refusal is counted twice, once as unappliable",
     ).toEqual([]);
     expect(line?.text).toBe(
       "dohc skipped 1 update with files over the size limit. Ask the person who shared it to make them smaller and share them again.",
@@ -162,7 +162,7 @@ describe("what a share's skipped ops say", () => {
     const overflow = allBoundary.find((line) => line.kind === "unknown");
     expect(
       overflow?.text,
-      "MUTATION: the overflow inherits the retained sample's cause and the reader is sent to the granter about it",
+      "the overflow inherits the retained sample's cause and the reader is sent to the granter about it",
     ).toBe("dohc skipped 1 more update from this share.");
     expect(overflow?.text).not.toContain("this share covers");
     expect(overflow?.text).not.toContain("granter@dohc.test");
@@ -183,7 +183,7 @@ describe("what a share's skipped ops say", () => {
     ]);
     expect(
       allMalformed[1]?.text,
-      "MUTATION: the overflow is reported as unappliable, hiding a boundary refusal the reader could act on",
+      "the overflow is reported as unappliable, hiding a boundary refusal the reader could act on",
     ).toBe("dohc skipped 1 more update from this share.");
   });
 

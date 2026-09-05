@@ -13,7 +13,7 @@ export const YDOC_METHOD = {
   // Ends a session without settling and without pruning: the daemon drops the
   // session and its lease and leaves the durable lineage alone. The only exit
   // for a session that may not write its artifact and may not discard its
-  // CRDT — see `EngineYdocProviderSession.evict` (#665).
+  // CRDT — see `EngineYdocProviderSession.evict`.
   evict: "ydoc.evict",
   // Re-fetches the session's lineage after a stale signal; the daemon serves
   // it in `EngineService::ydoc_resync`.
@@ -55,10 +55,10 @@ export type YdocOpenResult = JsonObject & {
   // EngineYdocProviderSession.head.
   head: "present" | "absent";
   // Whether the daemon resumed durable CRDT state for this object. These two
-  // are INDEPENDENT and both are read: an ordinary first open of a captured
+  // are independent and both are read: an ordinary first open of a captured
   // file is lineage-absent and head-present, and a crash-orphaned draft the
   // daemon resurrects is lineage-existing and head-absent. Only both absent
-  // means the session is bound to an EMPTY doc over nothing.
+  // means the session is bound to an empty doc over nothing.
   lineage: "existing" | "absent";
   artifactAssets?: ArtifactAssetDescriptor[];
   seedContent?: string;
@@ -86,7 +86,7 @@ export type YdocRecordUpdateParams = JsonObject & {
   // Only the adapter's applySeedUpdate path sends it — never a replay of
   // prior state. The engine records the open-time head as the lineage's seed
   // source; a session whose only update is that seed then settles and closes
-  // without rewriting the file (#815).
+  // without rewriting the file.
   seed?: boolean;
 };
 

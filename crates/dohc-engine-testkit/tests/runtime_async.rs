@@ -1,5 +1,5 @@
 //! Async actor-loop traces (CAL-2 calibration signal): the tokio command path,
-//! cooperative cancellation BETWEEN bounded units leaving consistent state, and
+//! cooperative cancellation between bounded units leaving consistent state, and
 //! a deadline that trips to `DEADLINE_EXCEEDED` without tearing an in-flight
 //! unit. The synchronous CAL-1 traces (see `runtime_actor.rs`) still exercise
 //! the blocking call sites; these drive the same actor through its async API.
@@ -184,7 +184,7 @@ async fn run_units_counts_after_commit_crash_as_committed() {
 
 // oracle: a deadline trips to DEADLINE_EXCEEDED while a unit is mid-transaction;
 // the in-flight unit still runs to COMMIT (never torn), and the store stays
-// consistent (`PORTING.md` §12).
+// consistent.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deadline_trips_without_tearing_a_unit() {
     let scratch = ScratchDir::new().expect("scratch");

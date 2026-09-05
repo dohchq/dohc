@@ -9,7 +9,7 @@ export type WordCharCount = { words: number; characters: number };
 
 export const EMPTY_WORD_CHAR_COUNT: WordCharCount = { words: 0, characters: 0 };
 
-/** PURE: words = whitespace-split tokens, characters = non-newline chars.
+/** Pure: words = whitespace-split tokens, characters = non-newline chars.
  *  Characters are counted by Unicode code point (not UTF-16 code unit) so
  *  a surrogate-pair character like an emoji counts as one, matching what a
  *  person means by "one character". */
@@ -35,7 +35,7 @@ export type PMTextDocLike = {
 /** The doc's full text, one block per line (headings/paragraphs/list items
  *  etc. each end a "line" so words don't fuse across block boundaries —
  *  "Hello" + "World" reads as two words, not "HelloWorld"). Code blocks
- *  are NOT excluded: their text counts too. */
+ *  are not excluded: their text counts too. */
 export function getDocText(doc: PMTextDocLike): string {
   if (doc.content.size === 0) return "";
   return doc.textBetween(0, doc.content.size, "\n", "\n");

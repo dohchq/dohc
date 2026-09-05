@@ -48,7 +48,7 @@ const auth = createWorkspaceAuth({
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
 // test user so the desktop E2E can drive the real flow without a browser.
-// Double-gated: env flag AND never in production NODE_ENV.
+// Double-gated: env flag and never in production NODE_ENV.
 async function handleTestDeviceApprove(request: Request): Promise<Response> {
   const { userCode, email } = (await request.json()) as {
     userCode?: string;

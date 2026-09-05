@@ -8,7 +8,7 @@
 // extension, render the bar" — no new state/refs needed there.
 //
 // Matching is text-wide and mark-agnostic: `computeMatches` walks the doc's
-// text nodes and merges any that are positionally CONTIGUOUS (next node's
+// text nodes and merges any that are positionally contiguous (next node's
 // `pos` picks up exactly where the previous one's text ended) into one
 // search string before running the query against it. Adjacent text nodes
 // inside the same textblock are always contiguous regardless of the marks
@@ -16,7 +16,7 @@
 // "bold" — a query for "old" correctly spans the mark boundary. A block
 // boundary, or any non-text leaf (hardBreak, an inline atom, …) sitting
 // between two text nodes, breaks contiguity and starts a new run, so a
-// match never silently jumps across one. Code blocks are NOT excluded —
+// match never silently jumps across one. Code blocks are not excluded —
 // find/replace is meant to reach fenced code same as prose.
 
 import { Extension, type Editor } from '@tiptap/core'
@@ -64,7 +64,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-/** PURE: search the doc's text (all of it — prose and code blocks alike)
+/** Pure: search the doc's text (all of it — prose and code blocks alike)
  *  for `query`, returning absolute-position match ranges in document
  *  order. Adjacent text nodes whose positions are contiguous are merged
  *  into one search run first, so a match can span node/mark boundaries
@@ -112,7 +112,7 @@ export function computeMatches(
   return matches
 }
 
-/** PURE: wrapping "next match" index. -1 (nothing active yet) starts at 0;
+/** Pure: wrapping "next match" index. -1 (nothing active yet) starts at 0;
  *  0 matches always yields -1. */
 export function nextMatchIndex(count: number, activeIndex: number): number {
   if (count === 0) return -1
@@ -120,8 +120,8 @@ export function nextMatchIndex(count: number, activeIndex: number): number {
   return (activeIndex + 1) % count
 }
 
-/** PURE: wrapping "previous match" index — from -1/nothing-active wraps to
- *  the LAST match, matching how Shift+Enter behaves before any match is
+/** Pure: wrapping "previous match" index — from -1/nothing-active wraps to
+ *  the last match, matching how Shift+Enter behaves before any match is
  *  selected. */
 export function prevMatchIndex(count: number, activeIndex: number): number {
   if (count === 0) return -1
@@ -134,7 +134,7 @@ function recomputeMatches(state: FindReplaceState, doc: PMDocLike): FindReplaceS
   return { ...state, matches, activeIndex: matches.length ? 0 : -1 }
 }
 
-/** PURE: the find/replace state machine. `doc` is only read for the cases
+/** Pure: the find/replace state machine. `doc` is only read for the cases
  *  that need to recompute matches (a query/case/open change, or a `sync`
  *  after the doc itself changed) — cheap to call unconditionally. */
 export function findReplaceReducer(
@@ -167,7 +167,7 @@ export function findReplaceReducer(
     case 'sync': {
       // The doc changed underneath an open search (typing, a paste, a
       // replace-active) — recompute, and keep the search progressing
-      // forward: first try to hold the SAME match by its (now possibly
+      // forward: first try to hold the same match by its (now possibly
       // shifted) start position; if it's gone (e.g. it was just replaced),
       // advance to the nearest remaining match at or after where we were,
       // wrapping to the first only when nothing follows. This makes
@@ -208,7 +208,7 @@ export function buildReplaceActiveTransaction(
 
 /** Build a replace-all transaction. Applies back-to-front (highest
  *  position first) so each match's [from,to) — computed once against the
- *  ORIGINAL doc — is still valid in the transaction's doc-so-far when its
+ *  original doc — is still valid in the transaction's doc-so-far when its
  *  turn comes, since only positions strictly after it have been edited. */
 export function buildReplaceAllTransaction(
   state: EditorState,

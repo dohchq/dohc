@@ -5,7 +5,7 @@ import type { Writable } from "node:stream";
  *
  * When stdout/stderr is a pipe, Node writes it synchronously, so a reader that
  * has gone away (a launcher that exited, a closed terminal) turns the next
- * `console.log` into a THROWN `EPIPE` inside whatever code happened to be
+ * `console.log` into a thrown `EPIPE` inside whatever code happened to be
  * logging. In Electron's main process an uncaught throw is a
  * "A JavaScript error occurred in the main process" dialog, so a dead log pipe
  * could take the whole app down mid-recovery.

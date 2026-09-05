@@ -1,6 +1,6 @@
 //! Binary conflict sides: what a side must carry to be persisted, what a
-//! resolve still refuses to do with bytes (combined TEXT and divergent MOVES
-//! stay closed), that a resolve measures the LIVE head before acting, that
+//! resolve still refuses to do with bytes (combined TEXT and divergent moves
+//! stay closed), that a resolve measures the live head before acting, that
 //! blob hydration is verified content-addressing, and that text conflicts are
 //! unaffected. Each test asserts a fail-closed invariant.
 
@@ -113,7 +113,7 @@ fn resolve_input(id: &str, kind: ResolveConflictKind) -> ResolveTextConflict {
     }
 }
 
-/// Write a live BINARY head at `path` (its own object + moment).
+/// Write a live binary head at `path` (its own object + moment).
 fn write_binary_head(store: &mut EngineStore, object_id: &str, path: &str, bytes: &[u8]) -> String {
     let sha = hex_sha256(bytes);
     store
@@ -169,7 +169,7 @@ fn incoming_text_snapshot(path: &str, text: &str) -> TextSnapshot {
     }
 }
 
-/// Keeping the CURRENT side of a conflict whose incoming side is binary writes
+/// Keeping the current side of a conflict whose incoming side is binary writes
 /// nothing at all, so the live text head must survive byte for byte.
 #[test]
 fn keep_current_on_binary_incoming_keeps_the_live_head() {
@@ -245,12 +245,10 @@ fn apply_incoming_over_a_binary_base_writes_the_incoming_text() {
 }
 
 /// The review panel renders a binary-BASE conflict as text -- two readable
-/// panes and a "combine by hand" action -- because both LIVE sides are text.
+/// panes and a "combine by hand" action -- because both live sides are text.
 /// Combined text must therefore resolve it. A guard keyed on the base would
 /// put a guaranteed refusal behind a rendered button.
 ///
-/// MUTATION: key the combined-text guard on any side rather than the two live
-/// sides -> this refuses.
 #[test]
 fn apply_merged_over_a_binary_base_writes_the_combined_text() {
     let (_scratch, mut store) = open_store();
@@ -351,7 +349,7 @@ fn apply_merged_with_binary_side_fails_closed() {
     assert_combined_text_refused(&err);
 }
 
-/// A conflict whose recorded CURRENT side no longer describes the live head
+/// A conflict whose recorded current side no longer describes the live head
 /// must fail closed on every resolve path. Nothing was ever written at
 /// `asset.bin`, so this all-binary row is stale on arrival — except for
 /// combined text, which bytes refuse before the head is ever measured.
@@ -398,7 +396,7 @@ fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
     assert_combined_text_refused(&err);
 }
 
-/// A binary side whose sha exists ONLY in the text `blobs` table must still be
+/// A binary side whose sha exists only in the text `blobs` table must still be
 /// rejected — the gate must check `binary_blobs`.
 #[test]
 fn binary_sha_only_in_text_blobs_table_is_rejected() {
@@ -452,7 +450,7 @@ fn empty_binary_sha_is_rejected() {
     );
 }
 
-/// Mismatched claimed sha must reject AND leave no row behind.
+/// Mismatched claimed sha must reject and leave no row behind.
 #[test]
 fn hydrate_mismatch_leaves_no_row() {
     let (_scratch, mut store) = open_store();
@@ -479,7 +477,7 @@ fn hydrate_mismatch_leaves_no_row() {
     assert_eq!(count, 0, "no rows may survive a rejected hydrate");
 }
 
-/// Double-hydrate is idempotent; an uppercase-hex claim of the CORRECT bytes
+/// Double-hydrate is idempotent; an uppercase-hex claim of the correct bytes
 /// is accepted and canonicalized to the lowercase key (case-insensitive claim
 /// comparison, canonical lowercase addressing); wrong claims stay rejected.
 #[test]
@@ -554,7 +552,7 @@ fn hydrate_size_bounds() {
         .expect_err("over-cap bytes must be rejected");
     assert_eq!(err.code(), "blob-too-large");
 
-    // The size cap fires BEFORE the claim comparison: an over-cap buffer with
+    // The size cap fires before the claim comparison: an over-cap buffer with
     // a wrong claim is the size error, never hashed into an integrity error.
     let wrong_claim = hex_sha256(b"not the huge bytes");
     let err = store
@@ -604,7 +602,7 @@ fn hydrate_fails_closed_when_existing_row_is_corrupt() {
     assert_eq!(err.code(), "blob-integrity");
 }
 
-/// An ABSENT text side that carries a text-blob reference (row corruption) is
+/// An absent text side that carries a text-blob reference (row corruption) is
 /// inconsistent durable state and must fail closed on load, not be silently
 /// reconstructed as an ordinary absent side.
 #[test]
@@ -644,7 +642,7 @@ fn absent_text_side_with_blob_reference_fails_closed_on_read() {
     assert_eq!(err.code(), "state-corrupt");
 }
 
-/// The stale-head gate must not treat two ABSENT text states at DIFFERENT
+/// The stale-head gate must not treat two absent text states at different
 /// paths as the same state: a replicated open records per-side paths, so a
 /// divergent recorded current path must fail the match even when both
 /// snapshots are absent.
@@ -735,7 +733,7 @@ fn text_conflict_round_trip_unchanged() {
     assert!(loaded.incoming.binary_sha256.is_none());
 }
 
-/// A binary CURRENT side recorded against a path that holds no live head is
+/// A binary current side recorded against a path that holds no live head is
 /// stale, and combined text is refused for bytes outright.
 #[test]
 fn binary_current_over_an_absent_live_head_blocks_resolve() {
@@ -800,7 +798,7 @@ fn binary_side_with_text_snapshot_rejected() {
     assert_invalid_input(&err, "binary conflict side cannot carry a text snapshot");
 }
 
-/// Binary-side validation must run BEFORE the duplicate-id shortcut: an
+/// Binary-side validation must run before the duplicate-id shortcut: an
 /// invalid/unhydrated binary side reusing an already-open conflict id is
 /// rejected fail-closed, never absorbed as an idempotent duplicate. Honest
 /// duplicates (valid hydrated sides) still no-op.
@@ -880,10 +878,10 @@ fn text_side_with_binary_sha_rejected() {
     assert_invalid_input(&err, "text conflict side cannot reference a binary blob");
 }
 
-/// M3 regression: a TEXT conflict recorded while the path was ABSENT must NOT be
-/// resolvable after a BINARY head appears at that path. The stale-target gate has
+/// M3 regression: a TEXT conflict recorded while the path was absent must not be
+/// resolvable after a binary head appears at that path. The stale-target gate has
 /// to see the binary head (content-kind mismatch) and fail closed with
-/// `ConflictStaleTarget`, NOT invisibly treat the path as still-absent and let the
+/// `ConflictStaleTarget`, not invisibly treat the path as still-absent and let the
 /// incoming text overwrite/delete the newer binary head.
 #[test]
 fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
@@ -936,7 +934,7 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
 fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
     let (_scratch, mut store) = open_store();
     let current = write_file(&mut store, "src.md", "current body");
-    // Incoming is a MOVE: same content, different destination path.
+    // Incoming is a move: same content, different destination path.
     let mut incoming = incoming_text_snapshot("dst.md", "current body");
     incoming.blob_sha256 = current.blob_sha256.clone();
     let c = conflict(

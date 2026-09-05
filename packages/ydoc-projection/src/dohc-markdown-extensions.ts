@@ -112,13 +112,13 @@ export function sanitizeImageSrc(src: string): string {
   }
   // Scheme-less: allow only a workspace-relative path. Backslashes are folded
   // to '/' for the checks so a Windows-style traversal can't sneak through,
-  // but the ORIGINAL (lossless) src is what we return — agents edit the .md.
+  // but the original (lossless) src is what we return — agents edit the.md.
   const forCheck = compact.replace(/\\/g, '/')
   // Reject protocol-relative ("//host") and absolute ("/abs") — both escape
   // the document's folder and can never be a workspace-relative asset.
   if (forCheck.startsWith('/')) return ''
   // CONTRACT (kept in lockstep with apps/desktop/src/renderer/editor): forward-
-  // slash parent traversal (`../foo`) is PRESERVED losslessly. Agents
+  // slash parent traversal (`../foo`) is preserved losslessly. Agents
   // legitimately author upward-relative asset links — the global-folder
   // attachment mode writes `../assets/x.png` so a nested doc can point at one
   // folder at the workspace root.
@@ -431,7 +431,7 @@ function findClosingHighlight(src: string): number {
   return -1
 }
 
-// EVERY `=` inside highlighted text is backslash-escaped so the inline
+// Every `=` inside highlighted text is backslash-escaped so the inline
 // tokenizer's `\`-skipping in findClosingHighlight never mistakes it for a
 // closing delimiter. Escaping only runs of `==` is not enough: a single `=`
 // sitting next to the closing `==` (e.g. the highlight body `a=`) would
@@ -467,7 +467,7 @@ export function escapeHighlightMarkdown(node: JSONContent): JSONContent {
 }
 
 // A `\=` inside a highlight must round-trip as a literal `=` in a plain text
-// node — NOT as an escapedPunctuation atom, because the base manager closes and
+// node — not as an escapedPunctuation atom, because the base manager closes and
 // reopens marks around every inline atom, which would split the `==...==` span.
 // We therefore decode `\=` to this private-use placeholder before tokenizing
 // (so marked sees ordinary text, and no bare `==` can re-fire the highlight
@@ -532,7 +532,7 @@ function wrapLooseCalloutChildren(
   return result
 }
 
-// A line that begins a new block construct, so it must NOT be absorbed as a
+// A line that begins a new block construct, so it must not be absorbed as a
 // blockquote-style lazy-continuation line of the callout's trailing paragraph.
 const CALLOUT_LAZY_BREAK_RE =
   /^ {0,3}(?:>|#{1,6}(?:[ \t]|$)|(?:```|~~~)|[-*+](?:[ \t]|$)|\d{1,9}[.)](?:[ \t]|$)|(?:-[ \t]*){3,}$|(?:_[ \t]*){3,}$|(?:\*[ \t]*){3,}$|<[a-zA-Z!/])/
@@ -600,10 +600,10 @@ const DohcCallout = Node.create({
     tokenize(src, _tokens, helpers) {
       const lines = src.split('\n')
       let count = 0
-      // Track whether an open PARAGRAPH is currently continuable, so we only
+      // Track whether an open paragraph is currently continuable, so we only
       // absorb blockquote-style lazy-continuation lines (mirroring CommonMark).
       // A blank inner line, a heading/list/hr/html/nested-quote, or a fenced
-      // code block all close the paragraph — only then must an unquoted line NOT
+      // code block all close the paragraph — only then must an unquoted line not
       // be pulled in. Tracking just "was the last line blank" wrongly absorbed
       // text after a fence/heading whose (non-blank) line left no paragraph open.
       let paragraphOpen = false
@@ -781,7 +781,7 @@ const DohcHighlight = Mark.create({
 // with dollar signs never turns into math:
 //   - the opening `$` must be followed by a non-space, non-`$` character,
 //   - the closing `$` must be preceded by a non-space character,
-//   - the closing `$` must NOT be immediately followed by a digit.
+//   - the closing `$` must not be immediately followed by a digit.
 // So `$5 and $6` and `a $ b` never fire, while `$x$` does. A backslash-escaped
 // `\$` is left to the `dohcEscape` token (an escapedPunctuation node), so it
 // stays a literal dollar and never opens or closes math — findClosingInlineMath
@@ -880,7 +880,7 @@ const DohcMathBlock = Node.create({
   },
 
   // Block-level tokenizer so a standalone `$$...$$` (single- or multi-line) is
-  // its own block. The `tex` attr stores the EXACT text between the delimiters
+  // its own block. The `tex` attr stores the exact text between the delimiters
   // — including any surrounding newlines — so `$$\nx\n$$` and `$$x$$` each
   // re-serialize byte-for-byte.
   markdownTokenizer: {
@@ -949,8 +949,8 @@ export const DohcTableRowHeight = Extension.create({
 
 // A bare TaskItem takes `paragraph+`, which makes an indented list under a
 // checkbox schema-invalid — the Y.Doc conversion then drops the whole task
-// list (#700). `nested: true` widens it to `paragraph block*`. Every dohc
-// schema registers THIS extension so the editor and the conversions agree.
+// list. `nested: true` widens it to `paragraph block*`. Every dohc
+// schema registers this extension so the editor and the conversions agree.
 export const DohcTaskItem = TaskItem.configure({ nested: true })
 
 // dohc owns the `code` token instead of StarterKit's CodeBlock, whose

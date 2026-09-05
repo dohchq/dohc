@@ -87,7 +87,7 @@ describe("ProposalReviewDialog", () => {
     ).toContain("three");
   });
 
-  // The whole review is ONE read. It used to be a listing plus one read per
+  // The whole review is one read. It used to be a listing plus one read per
   // file, and each of those re-read the entire listing from the relay.
   it("reads the whole review once, however many files it holds", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
@@ -102,7 +102,7 @@ describe("ProposalReviewDialog", () => {
     expect(await screen.findAllByTestId("proposal-review-file")).toHaveLength(5);
     expect(
       bridgeMock.readShareProposalChanges.mock.calls,
-      "MUTATION: a read per file makes a five-file review six round trips",
+      "a read per file makes a five-file review six round trips",
     ).toHaveLength(1);
     expect(bridgeMock.readShareProposalChanges).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -111,7 +111,7 @@ describe("ProposalReviewDialog", () => {
   });
 
   // The whole point of the lazy read. A review carrying what a fortnight of
-  // work changes must OPEN — and opening it must not fetch a single file's
+  // work changes must open — and opening it must not fetch a single file's
   // content, because fetching all of them is what made it impossible before.
   it("opens a review of the full bound without fetching any content", async () => {
     bridgeMock.readShareProposalChanges.mockResolvedValue(
@@ -128,7 +128,7 @@ describe("ProposalReviewDialog", () => {
     );
     expect(
       bridgeMock.readShareProposalFileContent,
-      "MUTATION: fetching content to draw the list restores the eager read this bound depends on",
+      "fetching content to draw the list restores the eager read this bound depends on",
     ).not.toHaveBeenCalled();
     // Every row still says what it is without its content.
     expect(screen.getAllByTestId("proposal-review-file-toggle")[0]!.textContent).toContain(
@@ -139,7 +139,7 @@ describe("ProposalReviewDialog", () => {
     );
   });
 
-  // Opening one file fetches THAT file, and only that file.
+  // Opening one file fetches that file, and only that file.
   it("fetches one file's content when its row is opened", async () => {
     const user = userEvent.setup();
     bridgeMock.readShareProposalChanges.mockResolvedValue(
@@ -159,7 +159,7 @@ describe("ProposalReviewDialog", () => {
     );
     expect(
       bridgeMock.readShareProposalFileContent.mock.calls,
-      "MUTATION: opening one file must not fetch the ones the granter did not open",
+      "opening one file must not fetch the ones the granter did not open",
     ).toHaveLength(1);
     expect(bridgeMock.readShareProposalFileContent).toHaveBeenCalledWith({
       workspaceId: "ws-1",
@@ -185,7 +185,7 @@ describe("ProposalReviewDialog", () => {
 
     expect(
       bridgeMock.readShareProposalFileContent.mock.calls,
-      "MUTATION: refetching on every toggle makes reading a file cost one round trip per click",
+      "refetching on every toggle makes reading a file cost one round trip per click",
     ).toHaveLength(1);
   });
 
@@ -205,7 +205,7 @@ describe("ProposalReviewDialog", () => {
     ).toContain("dohc could not read that file.");
     expect(
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
-      "MUTATION: one unreadable file that disables Decline leaves the granter unable to answer the rest",
+      "one unreadable file that disables Decline leaves the granter unable to answer the rest",
     ).toBe(false);
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
       false,
@@ -220,7 +220,7 @@ describe("ProposalReviewDialog", () => {
     await openFile(user);
     expect(
       (await screen.findByTestId("proposal-review-diff-lines")).textContent,
-      "MUTATION: caching a failed read leaves a transient relay error looking permanent",
+      "caching a failed read leaves a transient relay error looking permanent",
     ).toContain("two");
   });
 
@@ -259,7 +259,7 @@ describe("ProposalReviewDialog", () => {
     const drift = screen.getAllByTestId("proposal-review-drift");
     expect(
       drift.map((line) => line.textContent),
-      "MUTATION: dropping the drift line hides that the granter's copy moved",
+      "dropping the drift line hides that the granter's copy moved",
     ).toEqual(["This file changed since they sent it."]);
     expect(files[0]!.dataset.drifted).toBe("true");
     expect(files[1]!.dataset.drifted).toBeUndefined();
@@ -281,7 +281,7 @@ describe("ProposalReviewDialog", () => {
     await screen.findByTestId("proposal-review-file");
     expect(
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
-      "MUTATION: failing the read on unpreviewable content leaves the granter unable to decline it",
+      "failing the read on unpreviewable content leaves the granter unable to decline it",
     ).toBe(false);
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
       false,
@@ -289,7 +289,7 @@ describe("ProposalReviewDialog", () => {
   });
 
   // Decline is the safe exit: it moves nothing into this workspace. A granter
-  // who cannot READ a proposal must still be able to refuse it — otherwise
+  // who cannot read a proposal must still be able to refuse it — otherwise
   // the only way out is ending the share, which discards the recipient's work
   // without asking.
   it("still offers Decline when the review cannot be read at all", async () => {
@@ -305,7 +305,7 @@ describe("ProposalReviewDialog", () => {
     await screen.findByRole("alert");
     expect(
       screen.getByTestId("proposal-review-decline").hasAttribute("disabled"),
-      "MUTATION: a read failure that disables Decline leaves the granter holding a proposal they can neither see nor answer",
+      "a read failure that disables Decline leaves the granter holding a proposal they can neither see nor answer",
     ).toBe(false);
     // Accept is the opposite: it writes, so it stays disabled.
     expect(screen.getByTestId("proposal-review-accept").hasAttribute("disabled")).toBe(
@@ -420,14 +420,14 @@ describe("ProposalReviewDialog", () => {
     );
 
     // Let the retired answer settle all the way through, so the assertion
-    // below sees what it WOULD have painted.
+    // below sees what it would have painted.
     releaseFirst!();
     for (let flush = 0; flush < 4; flush += 1) {
       await act(async () => {});
     }
     expect(
       screen.getByRole("dialog").textContent,
-      "MUTATION: dropping the liveness token repaints a replaced window",
+      "dropping the liveness token repaints a replaced window",
     ).not.toContain("stale@dohc.test");
     expect(screen.getByRole("dialog").textContent).toContain(
       "Changes from current@dohc.test",

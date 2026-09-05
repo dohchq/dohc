@@ -6,9 +6,9 @@
 // already exists, mkdir …"); one wrote developer prose ("workspace trash
 // directory is a symlink"); the engine client said "must not be a symlink"
 // about a plain file and printed the absolute host path. None names the
-// constraint and the way out (#544, #585, #612), and the refusals that did
+// constraint and the way out, and the refusals that did
 // name a constraint disagreed on whether the thing at the path is a "folder"
-// or a "directory" (#586).
+// or a "directory".
 //
 // The copy lives here once so it cannot drift: one noun, one shape, every
 // surface.

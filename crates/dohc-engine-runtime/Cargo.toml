@@ -35,7 +35,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # blocking OS thread (never on the runtime); commands flow over tokio::sync
 # channels and the worker receives them via `blocking_recv`.
 tokio = { version = "1", features = ["sync", "rt", "time", "macros"] }
-# Cooperative cancellation tree (PORTING.md §12): session/deadline cancellation
+# Cooperative cancellation tree: session/deadline cancellation
 # is checked BETWEEN bounded units, never inside a transaction.
 tokio-util = "0.7"
 

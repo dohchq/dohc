@@ -12,12 +12,12 @@ import type {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 
-// THE captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
+// The captureFor gate (single owner). Workspace-engine alpha (PR 0M-3/0M-5):
 // when the per-workspace flag is on, the engine store under .dohc/engine/ is
-// the workspace's SOLE history recorder — watcher batches become engine
+// the workspace's sole history recorder — watcher batches become engine
 // moments and no legacy .dohc/history change set is written.
 //
-// WHEN the flag is read: on every fresh entry to this gate. A RETAINED session
+// WHEN the flag is read: on every fresh entry to this gate. A retained session
 // gets exactly one — `openWorkspaceActivity` retains what it opens and
 // `workspaceActivity.open` skips a workspace it already watches — so a window
 // that opened its workspace sees one decision per app session, and only a
@@ -27,7 +27,7 @@ import type {
 // (see `EngineOffRecovery` below), and a failed join closes the entry it just
 // retained, so the user's retry re-reads.
 //
-// The daemon is REQUIRED, not optional: `startRustEngineDaemon` quits the app
+// The daemon is required, not optional: `startRustEngineDaemon` quits the app
 // when it cannot start, before any window exists, so no running workspace can
 // reach here without one. Accepting a null would mean silently recording history
 // through the legacy TypeScript engine instead.
@@ -38,20 +38,20 @@ export async function captureForFlaggedWorkspace(
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
 ): Promise<WorkspaceCaptureDecision> {
-  // A shared view never gets a recorder (#540): it is fed exclusively by
+  // A shared view never gets a recorder: it is fed exclusively by
   // the share's filtered pull, and a watcher would re-journal materialized
-  // files. Decided BEFORE the settings read — a shared view materializes no
+  // files. Decided before the settings read — a shared view materializes no
   // settings file, so reading defaults here would start a capture. The
   // caller states the share identity (it owns the registry); the gate owns
   // what that identity means for the decision.
   //
-  // At EDIT level too (#646 PR3): the recipient's edits reach the engine
+  // At edit level too: the recipient's edits reach the engine
   // because the app writes them there itself, so a watcher here would only
   // observe writes this process already journaled.
   if (workspace.shareView) {
     return { capture: null, shareView: true };
   }
-  // ONE read decides both the recorder and what the user is told about it.
+  // One read decides both the recorder and what the user is told about it.
   // A second read taken later (the renderer's) could disagree with this one
   // and give the notice a cause that never happened.
   const { settings, warning } = await readWorkspaceSettingsFile(workspace.rootPath);
@@ -68,7 +68,7 @@ export async function captureForFlaggedWorkspace(
       // recording off for flagged workspaces, a failing engine store must be
       // user-visible, not console-only.
       onCaptureOutcome: hooks.onCaptureOutcome,
-      // PR 0N-1: batches settled while a dohc-tracked agent run is active are
+      // Batches settled while a dohc-tracked agent run is active are
       // stamped with agent authorship (History shows "<User Name>'s agent").
       activeAgentRun: hooks.activeAgentRun,
       rustEngineSessions,
@@ -78,7 +78,7 @@ export async function captureForFlaggedWorkspace(
 }
 
 // How the caller's path recovers from a failed capture build (#541, codex P2
-// on #583). A RETAINED workspace session keeps the failed decision for the
+// on #583). A retained workspace session keeps the failed decision for the
 // whole app session — only a restart re-runs it. A TRANSIENT open (background
 // dispatch, runner self-test) is closed and removed by its release, so the
 // next attempt rebuilds the capture: retry is the instruction that works.
@@ -116,7 +116,7 @@ const UNAVAILABLE_COPY: Record<EngineFeature, string> = {
   "Chat mentions": "Chat mentions are unavailable.",
 };
 
-// What a refusal may SAY when the gate produced no capture (#541). "Not
+// What a refusal may say when the gate produced no capture. "Not
 // enabled" asserts a decision, and after a failed capture build — or an
 // unreadable settings file — the truth is a failure, not a setting the user
 // touched. The refusal names the cause the open-time decision established,
@@ -130,14 +130,14 @@ export function engineOffRefusal(
   feature: EngineFeature,
   recovery: EngineOffRecovery,
 ): string {
-  // #483: the warning already names the unreadable file and the fix. Its
+  // The warning already names the unreadable file and the fix. Its
   // canonical closing instruction is restart — right for a retained session.
   // On a retry path the entry is gone, so fixing the file and trying again
   // rebuilds the capture without a restart. If the warning's format ever
   // drifts past the replace, the untouched text still says restart — heavier
   // than needed on that path, but never false.
   if (status.settingsWarning) {
-    // Same noun rule as below (#541 round 7): lead with what happened to the
+    // Same noun rule as below: lead with what happened to the
     // FEATURE the caller invoked, then the warning's why / file / recovery.
     const warning =
       recovery === "retry"
@@ -153,8 +153,8 @@ export function engineOffRefusal(
   return NOT_ENABLED_COPY[feature];
 }
 
-// The dispatch release (#541, codex P2 round 4 on #583). It resolves to
-// whether a fresh attempt would REBUILD the capture — the fact the refusal's
+// The dispatch release. It resolves to
+// whether a fresh attempt would rebuild the capture — the fact the refusal's
 // recovery derives from — and that is decided from the POST-close state, not
 // from having performed a close: the close's own await is a window, and a
 // renderer/CLI open can retain the workspace during it, then build a fresh
@@ -178,21 +178,21 @@ export function createDispatchRunRelease(input: {
 
 // The dispatch-run seam of the same refusal (#541, codex P2s on #583). Every
 // fact is read at the only moment it is true:
-// - the transient CAUSE comes from the status BEFORE the release — releasing
+// - the transient cause comes from the status before the release — releasing
 //   a transient open deletes the entry, and its defaults read as the opt-out;
 // - after a release that closed the entry, the next attempt rebuilds the
 //   capture: retry;
-// - after a release that KEPT an entry (already open, retained, or reopened
+// - after a release that kept an entry (already open, retained, or reopened
 //   by a retention that landed during the close), the post-state itself
-//   answers. A reopened capture that BUILT means the workspace works right
+//   answers. A reopened capture that built means the workspace works right
 //   now — proceed instead of refusing — and a still-null capture persists
-//   until restart, with the KEPT entry's own status as the cause.
+//   until restart, with the kept entry's own status as the cause.
 // A caller with a capture attached gets a no-op.
 export async function releaseAndRefuseWithoutCapture(input: {
   capture: object | null;
   // Settles behind the kept entry's (re)open, so the capture read below
   // judges a state that has finished forming — the reopener's capture
-  // builds AFTER our release resolves.
+  // builds after our release resolves.
   settleKeptOpen: () => Promise<void>;
   // Live re-read of the workspace's current capture, for the kept-entry path.
   currentCapture: () => object | null;
@@ -217,7 +217,7 @@ export async function releaseAndRefuseWithoutCapture(input: {
 }
 
 // The gate's predicate on its own, for callers that must honor the opt-out
-// WITHOUT touching the engine (e.g. the chat dispatch scan — for an opted-out
+// without touching the engine (e.g. the chat dispatch scan — for an opted-out
 // workspace, merely resolving its stores would create .dohc/engine/).
 export async function workspaceEngineEnabled(
   rootPath: string,
@@ -227,8 +227,8 @@ export async function workspaceEngineEnabled(
 }
 
 // Whether a chat dispatch scan may touch this workspace's engine stores. An
-// OPEN session keeps the capture decision made at open (the flag applies at
-// the NEXT open) — rereading the file here would strand a mid-session
+// open session keeps the capture decision made at open (the flag applies at
+// the next open) — rereading the file here would strand a mid-session
 // opt-out's chats as forever-pending. An unopened workspace (tray-only pump
 // scan) has no snapshot; the file read IS its open-time read.
 export async function dispatchScanEligible(

@@ -19,7 +19,7 @@ describe("local reactor id", () => {
     const first = readOrCreateLocalReactorId(idFile());
     expect(first).toMatch(/^local:/);
 
-    // A fresh call (simulating a later launch) reads the SAME id back off disk.
+    // A fresh call (simulating a later launch) reads the same id back off disk.
     const second = readOrCreateLocalReactorId(idFile());
     expect(second).toBe(first);
 

@@ -58,7 +58,7 @@ async function expectImageDecodeFailure(image: import("@playwright/test").Locato
   expect(decoded).toBe(false);
 }
 
-test("separates viewer extensions from service byte-sniffed MIME types", async ({
+test("separates viewer extensions from service byte-sniffed mime types", async ({
   browser,
   probe,
   stack,

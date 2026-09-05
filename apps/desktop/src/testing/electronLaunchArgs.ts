@@ -9,7 +9,7 @@
  * `shell/browser/api/electron_api_app.cc`). Without the switch every run on a
  * machine shared `AppData/Roaming/Electron`, so a second E2E run — or a
  * developer's own dev app — collided with the lock the first one held and one
- * of the two quit at launch (#530). A per-run directory also drops the profile
+ * of the two quit at launch. A per-run directory also drops the profile
  * state (localStorage, cookies, caches) a previous run left behind.
  *
  * This module holds no Playwright or vitest import, so `src/**` tests and

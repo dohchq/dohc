@@ -6,7 +6,7 @@ import { Explorer, type ExplorerProps } from "./Explorer";
 
 afterEach(cleanup);
 
-// WHAT A DELETE PROMISES (#802, sweep blocker 3 and delta findings 5 and 8).
+// What A DELETE PROMISES (#802, sweep blocker 3 and delta findings 5 and 8).
 //
 // An ordinary workspace's delete goes to a trash and can be restored from
 // there — from the system trash, or from `.dohc/trash` whenever the system
@@ -15,7 +15,7 @@ afterEach(cleanup);
 // A share view's delete removes the projection of a moment. There is no trash
 // on that path, so the local copy goes IRREVERSIBLY — and `AGENTS.md` requires
 // telling the user that before an irreversible change runs, not after. What
-// can still be taken back is the CHANGE, because the granter's copy is
+// can still be taken back is the change, because the granter's copy is
 // untouched until they accept it. Each dialog has to say the one that is true,
 // or it is a durability promise dohc cannot keep.
 
@@ -79,12 +79,12 @@ describe("the delete confirmation states where the file goes", () => {
     expect(text).toContain("system trash");
     expect(text).toContain(".dohc/trash");
     expect(text).toContain("restored from there");
-    // The fallback fires on ANY trash rejection, not only a drive without one
+    // The fallback fires on any trash rejection, not only a drive without one
     // — `deletePath` catches every `trashItem` error, and copy.md names this
     // dialog as the place the narrower claim shipped.
     expect(
       text,
-      "MUTATION: the stated condition is narrower than the one deletePath actually falls back on",
+      "the stated condition is narrower than the one deletePath actually falls back on",
     ).not.toContain("drives without one");
     expect(text).toContain("whenever the system trash refuses");
   });
@@ -95,22 +95,22 @@ describe("the delete confirmation states where the file goes", () => {
     // No recovery is PROMISED — neither location the ordinary dialog names.
     expect(
       text,
-      "MUTATION: a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
+      "a share view's delete has no trash to restore from, so promising one is a durability claim dohc cannot keep",
     ).not.toContain("system trash");
     expect(text).not.toContain(".dohc/trash");
     expect(text).not.toContain("restored from there");
-    // And the irreversibility is STATED, before the change runs. An
+    // And the irreversibility is stated, before the change runs. An
     // irreversible change the user is told about afterwards is the product
     // invariant this dialog exists to satisfy.
     expect(text).toContain("It goes from your copy now.");
     expect(
       text,
-      "MUTATION: the recipient's local copy goes with no trash behind it, and nothing says so before they confirm",
+      "the recipient's local copy goes with no trash behind it, and nothing says so before they confirm",
     ).toContain("There is no trash to restore it from.");
-    // WHO still has it, by name rather than by description.
+    // Who still has it, by name rather than by description.
     expect(
       text,
-      "MUTATION: a delete that describes the granter instead of naming them leaves the reader guessing who to ask",
+      "a delete that describes the granter instead of naming them leaves the reader guessing who to ask",
     ).toContain(GRANTER);
     // And the Next, which is the one thing that can still be taken back.
     expect(text).toContain("You can take the change back before then.");
@@ -122,7 +122,7 @@ describe("the delete confirmation states where the file goes", () => {
     expect(text).toContain("2 items");
     expect(
       text,
-      "MUTATION: a singular sentence over a multi-file selection is wrong on the surface that decides a delete",
+      "a singular sentence over a multi-file selection is wrong on the surface that decides a delete",
     ).toContain("They go from your copy now.");
     expect(text).toContain("There is no trash to restore them from.");
     expect(text).toContain("still has them until");

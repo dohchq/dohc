@@ -75,7 +75,7 @@ describe("workspace summary projection", () => {
       const summary = workspaceSummaryFor(entry({ shareView: raw }));
       expect(
         summary.shareView?.damaged,
-        "MUTATION: display-only chat metadata must not damage the file grant",
+        "display-only chat metadata must not damage the file grant",
       ).toBeUndefined();
       expect(summary.shareView?.access).toBe("comment");
       expect(summary.shareView?.genericChatWritable).toBe(false);
@@ -93,13 +93,13 @@ describe("workspace summary projection", () => {
     ]);
     expect(
       summaries.map((summary) => summary.workspaceId),
-      "MUTATION: one unreadable share record must not empty the workspace list",
+      "one unreadable share record must not empty the workspace list",
     ).toEqual(["ws-healthy", "ws-stale", "ws-also-healthy"]);
   });
 
-  // The share-view marker is RESTRICTIVE: it is what makes the shell treat
+  // The share-view marker is restrictive: it is what makes the shell treat
   // the workspace as someone else's. Dropping it would present a share view
-  // as an ordinary writable workspace — damage failing OPEN, which is the one
+  // as an ordinary writable workspace — damage failing open, which is the one
   // direction this PR must never fail in.
   it("keeps the share-view marker when its grant is unreadable, and marks it damaged", () => {
     const summary = workspaceSummaryFor(
@@ -108,7 +108,7 @@ describe("workspace summary projection", () => {
     expect(summary.workspaceId).toBe("ws-1");
     expect(
       summary.shareView,
-      "MUTATION: dropping the marker presents a share view as an ordinary workspace",
+      "dropping the marker presents a share view as an ordinary workspace",
     ).toBeDefined();
     expect(summary.shareView?.damaged).toBe(true);
     expect(summary.shareView?.shareId).toBe("share-1");
@@ -173,7 +173,7 @@ describe("workspace summary projection", () => {
     ]);
     expect(
       summaries.map((summary) => summary.workspaceId),
-      "MUTATION: a non-object row must not empty the workspace list",
+      "a non-object row must not empty the workspace list",
     ).toEqual(["ws-healthy", "ws-null-row", "ws-null-view", "ws-scalar-view"]);
     // Only the readable mount survives the listing.
     expect(summaries[1]?.shareMounts?.map((m) => m.shareId)).toEqual(["m-good"]);
@@ -187,7 +187,7 @@ describe("workspace summary projection", () => {
       const summary = workspaceSummaryFor(entry({ shareView: raw }));
       expect(
         summary.shareView?.damaged,
-        `MUTATION: shareView ${JSON.stringify(raw)} must not present as an ordinary workspace`,
+        `shareView ${JSON.stringify(raw)} must not present as an ordinary workspace`,
       ).toBe(true);
       // Nothing is invented for a marker that carried nothing.
       expect(summary.shareView?.shareId).toBeUndefined();
@@ -212,18 +212,18 @@ describe("workspace summary projection", () => {
       );
       expect(
         summary.shareView?.damaged,
-        `MUTATION: shareId ${String(shareId)} presents a live share that can never refresh`,
+        `shareId ${String(shareId)} presents a live share that can never refresh`,
       ).toBe(true);
       expect(summary.shareView?.access).toBeUndefined();
     }
   });
 
-  // The mount and open handlers used to parse the RAW registry record. A
+  // The mount and open handlers used to parse the raw registry record. A
   // record nests each level under its pinned grant, so the wire schema could
   // not be satisfied: every mount threw at the end and rolled back, and a
   // freshly opened share view reached the renderer with no level. The unit
   // suites missed it because they never drove a handler with a real record.
-  it("projects a RAW registry record, level and all", () => {
+  it("projects a raw registry record, level and all", () => {
     const summary = workspaceSummaryFor(
       entry({
         shareView: shareView({ ...goodSelector, access: "comment" }),
@@ -240,7 +240,7 @@ describe("workspace summary projection", () => {
     );
     expect(
       summary.shareMounts?.[0]?.access,
-      "MUTATION: a raw parse cannot carry the level; it lives under grantedSelector",
+      "a raw parse cannot carry the level; it lives under grantedSelector",
     ).toBe("view");
     expect(summary.shareView?.access).toBe("comment");
   });
@@ -266,7 +266,7 @@ describe("workspace summary projection", () => {
       );
       expect(
         summary.shareView?.damaged,
-        `MUTATION: ${JSON.stringify(junk)} must not read as an unreadable grant`,
+        `${JSON.stringify(junk)} must not read as an unreadable grant`,
       ).toBeUndefined();
       expect(summary.shareView?.access).toBe("view");
     }
@@ -310,16 +310,16 @@ describe("workspace summary projection", () => {
     ]);
     expect(
       summary.shareMounts?.filter((m) => m.damaged).map((m) => m.shareId),
-      "MUTATION: an unusable label must not read as a healthy mount",
+      "an unusable label must not read as a healthy mount",
     ).toEqual(["m-traversal", "m-secret", "m-slash"]);
   });
 
-  it("treats an ABSENT share view as an ordinary workspace", () => {
+  it("treats an absent share view as an ordinary workspace", () => {
     expect(workspaceSummaryFor(entry()).shareView).toBeUndefined();
     expect(workspaceSummaryFor(entry({ shareView: undefined })).shareView).toBeUndefined();
   });
 
-  // The pinned grant is read back through the SAME function the refresh path
+  // The pinned grant is read back through the same function the refresh path
   // uses. A selector the pull permanently refuses must read as damaged here
   // too, or the shell presents (and retries) a share that can never load.
   it("marks every selector the pull would refuse as damaged", () => {
@@ -335,7 +335,7 @@ describe("workspace summary projection", () => {
       const summary = workspaceSummaryFor(entry({ shareView: shareView(selector) }));
       expect(
         summary.shareView?.damaged,
-        `MUTATION: ${JSON.stringify(selector)} loads here but is refused by the pull`,
+        `${JSON.stringify(selector)} loads here but is refused by the pull`,
       ).toBe(true);
     }
   });
@@ -362,7 +362,7 @@ describe("workspace summary projection", () => {
     );
     expect(
       summary.shareMounts?.map((m) => m.shareId),
-      "MUTATION: dropping a damaged mount strands its folder with no way to remove it",
+      "dropping a damaged mount strands its folder with no way to remove it",
     ).toEqual(["m-good", "m-stale", "m-bademail"]);
     const stale = summary.shareMounts?.find((m) => m.shareId === "m-stale");
     expect(stale?.damaged).toBe(true);

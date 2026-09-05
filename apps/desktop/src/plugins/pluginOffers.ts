@@ -146,7 +146,7 @@ function toOfferedPluginAddError(error: unknown): OfferedPluginAddError {
  * a symlink in every intermediate segment transparently, so a `plugins` or
  * `.dohc` planted as a junction into a synced workspace folder could
  * redirect a later create through it before any check ever ran. Calling this
- * once per level, always against the PREVIOUS level's own verified real
+ * once per level, always against the previous level's own verified real
  * path, closes that gap — each new segment's immediate parent is already
  * known real and contained by the time this creates or inspects it.
  */
@@ -243,7 +243,7 @@ async function removeOwnedEmptyClaim(
   if (entries.length > 0) return;
   // A transient hold (an antivirus scan, an indexer) can fail rmdir() even
   // after every check above already verified there is nothing real left to
-  // protect. This logic only ever RUNS on POSIX in production, but a test
+  // protect. This logic only ever runs on POSIX in production, but a test
   // process can still exercise it against a real Windows disk (platform
   // stubbed at the JS layer, the filesystem underneath is not) — a small
   // bounded retry inline absorbs exactly that, without resurrecting a
@@ -273,9 +273,9 @@ async function removeOwnedEmptyClaim(
  * Windows: rename() refuses to land on an existing DIRECTORY, empty or not
  * (verified empirically — MoveFileEx's REPLACE_EXISTING flag is documented
  * not to accept a directory name, and throws EPERM in practice either way).
- * Onto an existing FILE or symlink, though, it SUCCEEDS and replaces it —
+ * Onto an existing FILE or symlink, though, it succeeds and replaces it —
  * also verified empirically — which would silently destroy whatever a user
- * or agent had placed at target. An upfront check refuses on ANY existing
+ * or agent had placed at target. An upfront check refuses on any existing
  * entry, of any kind, before ever attempting the rename; the rename's own
  * EPERM stays the backstop for the directory case, for whatever a
  * concurrent creator lands in the gap between this check and the rename
@@ -286,7 +286,7 @@ async function removeOwnedEmptyClaim(
  * misreported as an existing plugin.
  *
  * POSIX: a bare rename() cannot tell "nothing at target" from "something
- * raced this call here" — rename() atomically REPLACES an existing empty
+ * raced this call here" — rename() atomically replaces an existing empty
  * directory rather than failing, so a check-then-rename sequence would
  * still clobber whatever a concurrent creator placed at target in the gap
  * between the two. mkdir(target) is the one atomic claim Node exposes: it
@@ -420,7 +420,7 @@ export async function addOfferedPlugin(params: {
     // preserves the inode, so this identity remains valid for `target`
     // afterward. Reading it back off `target` after the rename would instead
     // let anything that lands at that path in the instant between the
-    // rename and this read donate ITS identity to the value
+    // rename and this read donate its identity to the value
     // removeAddedOfferedPlugin later trusts; staging is private to this call
     // the entire time it is being read, so nothing else can ever race it.
     const identity = await targetIdentity(staging);
@@ -450,7 +450,7 @@ export interface OfferedPluginIdentity {
 }
 
 /**
- * The moment this identity is captured is the ONLY point this module can
+ * The moment this identity is captured is the only point this module can
  * ever refuse an unverifiable one — every later comparison only ever
  * checks equality against what was captured here, so a bad value here
  * would make every later check vacuous rather than protective. bigint
@@ -478,11 +478,11 @@ async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
  * appear between this copy landing and the caller's rediscovery rescan, a
  * race this module cannot close, only let the caller detect and unwind.
  *
- * A check on `target` followed by a SEPARATE delete stays racy no matter
+ * A check on `target` followed by a separate delete stays racy no matter
  * how tight the gap: Node has no fd-bound recursive delete, so `plugins/`
  * (or the target itself) could still be swapped for a symlink/junction
  * between the check and the delete syscall actually running. This closes
- * that instead of narrowing it, by binding the delete to a RENAME: moving
+ * that instead of narrowing it, by binding the delete to a rename: moving
  * `target` into `.dohc`'s own contained staging area is one atomic syscall
  * that only ever touches the directory ENTRY currently there — not a
  * symlink's target, and not wherever a parent swap redirects to once the
@@ -492,7 +492,7 @@ async function targetIdentity(target: string): Promise<OfferedPluginIdentity> {
  * platform floor this cannot close, bounded because the harm is only ever
  * relocation into this module's own contained staging (never deletion, and
  * the identity check below still refuses to delete a mismatch). Only after
- * the move does this verify the STAGED item's device+inode against
+ * the move does this verify the staged item's device+inode against
  * `identity` (captured from the staging directory before addOfferedPlugin's
  * own publish rename, so it stays valid without ever being read off a path
  * anything else could still race into); a mismatch renames it straight

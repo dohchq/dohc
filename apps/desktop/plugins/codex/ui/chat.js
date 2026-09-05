@@ -49,7 +49,7 @@ const pendingMessages = new Map();
 // seq applied so far, and the controls fact that arrived with it. Every
 // server frame, the reconnect snapshot, and every /message and /stop
 // response body carry a {controls, seq} pair -- applying whichever has
-// the highest seq, and ignoring anything lower, is the ENTIRE mechanism.
+// the highest seq, and ignoring anything lower, is the entire mechanism.
 // A lost response body, a delayed old frame, the reconnect snapshot, and
 // two consecutive Stop clicks all resolve through this one comparison;
 // none of them need their own special case.
@@ -467,7 +467,7 @@ function resetTranscript() {
   textItems.clear();
   activityItems.clear();
   permissions.clear();
-  // pendingMessages is deliberately NOT cleared here: a /message fetch can
+  // pendingMessages is deliberately not cleared here: a /message fetch can
   // still be in flight when a reconnect fires this reset. Clearing the map
   // would strand it -- the eventual confirm (via the replayed user-message
   // event, in renderUserMessage) or failure handler (markMessageFailed)

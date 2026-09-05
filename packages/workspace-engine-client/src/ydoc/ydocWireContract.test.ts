@@ -9,7 +9,7 @@ import {
 // safety meaning — `content: string | null` (null = the artifact was past the
 // in-band cap, read the file instead) and `materialized: boolean` (false = the
 // settle committed but the file never moved). The daemon test proves the engine
-// EMITS them and the capture test proves the desktop HANDLES them; this pins
+// emits them and the capture test proves the desktop handles them; this pins
 // the decoder in between, which nothing else exercised.
 
 function settleResult(overrides: Record<string, unknown> = {}) {
@@ -43,7 +43,7 @@ describe("decodeYdocSettleResult", () => {
     expect(decoded.content).toBeNull();
   });
 
-  it("REJECTS an absent content key — null means something, missing is a violation", () => {
+  it("Rejects an absent content key — null means something, missing is a violation", () => {
     const { content: _omitted, ...withoutContent } = settleResult();
     expect(() => decodeYdocSettleResult(withoutContent)).toThrow(
       YdocProtocolShapeError,
@@ -63,7 +63,7 @@ describe("decodeYdocSettleResult", () => {
     expect(decoded.materialized).toBe(false);
   });
 
-  it("REJECTS an absent materialized key rather than assuming the file landed", () => {
+  it("Rejects an absent materialized key rather than assuming the file landed", () => {
     const { materialized: _omitted, ...withoutMaterialized } = settleResult();
     expect(() => decodeYdocSettleResult(withoutMaterialized)).toThrow(
       YdocProtocolShapeError,
@@ -95,7 +95,7 @@ describe("decodeYdocSettleResult", () => {
   });
 });
 
-// #534. Two INDEPENDENT facts gate the open consumer's refusal. `head` says
+// Two independent facts gate the open consumer's refusal. `head` says
 // whether the entered version has a snapshot for the path; `lineage` says
 // whether the daemon resumed durable CRDT state. Only both absent means the
 // session is bound to an empty doc over nothing — head-absent alone is the
@@ -183,14 +183,14 @@ describe("decodeYdocOpenResult", () => {
     expect(decoded.lineage).toBe("existing");
   });
 
-  it("REJECTS an absent head key instead of assuming the version has the path", () => {
+  it("Rejects an absent head key instead of assuming the version has the path", () => {
     const { head: _omitted, ...withoutHead } = openResult();
     expect(() => decodeYdocOpenResult(withoutHead)).toThrow(
       YdocProtocolShapeError,
     );
   });
 
-  it("REJECTS an absent lineage key instead of assuming there is nothing to lose", () => {
+  it("Rejects an absent lineage key instead of assuming there is nothing to lose", () => {
     const { lineage: _omitted, ...withoutLineage } = openResult();
     expect(() => decodeYdocOpenResult(withoutLineage)).toThrow(
       YdocProtocolShapeError,

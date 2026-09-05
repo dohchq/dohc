@@ -51,7 +51,7 @@ type HeadingFlashState = {
 };
 
 // `end` turns the flash INLINE: the node at `pos` is the whole block, and a
-// reveal inside a long one (#688) marks the matched lines instead.
+// reveal inside a long one marks the matched lines instead.
 type HeadingFlashMeta =
   | { kind: "show"; pos: number; end?: number; token: number }
   | { kind: "clear"; token: number };
@@ -135,8 +135,8 @@ function findScrollParent(el: HTMLElement | null): HTMLElement | null {
 /** Reveal a navigation target: flash it, scroll it into view, and — when
  *  `moveCursorTo` is given and the editor is editable — put the cursor there.
  *  A number flashes the NODE at that position; a range flashes the text
- *  inside it, which is how a reveal lands inside a long block (#688).
- *  `resolveElement` runs AFTER the flash dispatch, because selection-driven
+ *  inside it, which is how a reveal lands inside a long block.
+ *  `resolveElement` runs after the flash dispatch, because selection-driven
  *  decorations can replace the rendered node and resolving the DOM first
  *  would scroll a detached element — and because an inline flash IS the
  *  element its caller scrolls.
@@ -221,7 +221,7 @@ function scrollToHeading(
 /** Where the reader is in the document. `nonce` lets callers repeat a jump to
  * the same heading without changing the stable anchor identity.
  *
- * Deliberately not consumable, unlike `BlockNavigationTarget` (#680, #685): a
+ * Deliberately not consumable, unlike `BlockNavigationTarget`: a
  * remount re-applies it, so a version switch returns the reader to their
  * heading rather than to the top of the document. */
 export type HeadingNavigationTarget = {

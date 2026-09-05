@@ -155,7 +155,7 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
-  // The relay route table is keyed by the registry's rootPath as an EXACT
+  // The relay route table is keyed by the registry's rootPath as an exact
   // string, and registry paths are forward-slashed even on Windows. A
   // `resolve()`d copy reaches the daemon as backslashes, misses the route, and
   // opens the workspace with no relay configuration. The scratch helper returns

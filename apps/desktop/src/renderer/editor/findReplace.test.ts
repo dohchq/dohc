@@ -174,7 +174,7 @@ describe("findReplaceReducer", () => {
     expect(onSecond.activeIndex).toBe(1);
     const secondMatchFrom = onSecond.matches[1]!.from;
 
-    // An edit AFTER the active match (appending text at the end) doesn't
+    // An edit after the active match (appending text at the end) doesn't
     // shift any earlier position, so the same match should stay active.
     const appendedDoc = fakeDoc([{ text: "the cat sat on the mat, extra", pos: 1 }]);
     const synced = findReplaceReducer(onSecond, { type: "sync" }, appendedDoc);
@@ -255,7 +255,7 @@ describe("buildReplaceActiveTransaction / buildReplaceAllTransaction", () => {
 });
 
 // The reducer/transaction-builder suites above test the pure pieces in
-// isolation; this exercises the REAL registered plugin end-to-end so the
+// isolation; this exercises the real registered plugin end-to-end so the
 // meta-action wiring, the docChanged→auto-sync branch in apply(), and
 // buildFindDecorations can't silently regress.
 describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
@@ -284,7 +284,7 @@ describe("makeFindReplacePlugin (registered plugin, real EditorState)", () => {
     expect((decos as DecorationSet).find()).toHaveLength(2);
   });
 
-  it("a doc-changing transaction WITHOUT find meta auto-syncs matches", () => {
+  it("a doc-changing transaction without find meta auto-syncs matches", () => {
     const { state } = openState("the");
     expect(findReplaceKey.getState(state)?.matches).toHaveLength(2);
 

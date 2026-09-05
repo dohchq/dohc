@@ -1,11 +1,11 @@
 // Conflict handling for everyday people (plan Phase 10): safe markdown edits
-// merge silently; anything ambiguous preserves BOTH versions verbatim and
+// merge silently; anything ambiguous preserves both versions verbatim and
 // describes the situation in prose. Git conflict markers never appear — an AI
 // proposal can sit alongside the conflict, but only a human applies it.
 //
 // This module is BROWSER-SAFE on purpose (no node: imports): the desktop
 // renderer's live-collab reconcile imports it via the "@dohc/workspace-core/
-// mergeMarkdown" subpath. It is deliberately NOT re-exported from the
+// mergeMarkdown" subpath. It is deliberately not re-exported from the
 // workspace-core barrel, which pulls in node:fs modules (databases.ts) that
 // would blank the renderer's module graph at load if dragged in un-tree-shaken.
 

@@ -19,7 +19,7 @@ export type FsDiff = {
 export type ScannedWorkspaceDiff = FsDiff & {
   manifest: WorkspaceManifest;
   // The T0 disk scan the operations were computed from. Push builds the new
-  // baseline from THESE hashes (never a post-push rescan), so an edit landing
+  // baseline from these hashes (never a post-push rescan), so an edit landing
   // during the push window is not absorbed into the baseline as already-synced.
   scanned: ScannedWorkspaceFile[];
 };

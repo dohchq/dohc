@@ -88,7 +88,7 @@ pub enum RuntimeError {
 
     /// A request's deadline elapsed before the operation completed. The
     /// operation's cancellation token was tripped; work already committed
-    /// stays durable (exactly-once ack — `PORTING.md` §12).
+    /// stays durable (exactly-once ack).
     #[error("request deadline elapsed")]
     DeadlineExceeded,
 

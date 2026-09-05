@@ -1,5 +1,5 @@
-//! #738/#739 follow-up (codex P1, PR #747): `cancel_pending_jobs_for_path`
-//! must not cancel a PRIOR pending DELETE job for the same path -- only a
+//! #738/#739 follow-up: `cancel_pending_jobs_for_path`
+//! must not cancel a prior pending DELETE job for the same path -- only a
 //! superseded WRITE. A delete -> recreate -> delete sequence, each blocked
 //! from reaching disk, otherwise strands the original bytes: the old delete
 //! (the only one whose preimage matches disk) gets cancelled, and the newest
@@ -85,7 +85,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     assert_eq!(std::fs::read(&target).expect("v1 on disk"), vec![1, 1, 1]);
 
     // Delete #1: commits (preimage = B0), but its post-commit materialize is
-    // blocked (simulating a file lock) -- job D1 stays PENDING, disk still B0.
+    // blocked (simulating a file lock) -- job D1 stays pending, disk still B0.
     actor
         .versioned_text_delete(
             delete_input("moment-delete-1", "req-delete-1", 20),
@@ -102,7 +102,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     );
 
     // Recreate at the same path with B1: commits, but its post-commit
-    // materialize is ALSO blocked -- job W stays PENDING, disk still B0.
+    // materialize is also blocked -- job W stays pending, disk still B0.
     actor
         .versioned_binary_write(
             binary_input("obj-v2", "moment-v2", "req-v2", vec![2, 2, 2], 30),
@@ -119,7 +119,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     );
 
     // Delete #2: `cancel_pending_jobs_for_path` fires here. Commits (preimage
-    // = B1, the DB's current head), and is ALSO blocked from disk.
+    // = B1, the DB's current head), and is also blocked from disk.
     actor
         .versioned_text_delete(
             delete_input("moment-delete-2", "req-delete-2", 40),

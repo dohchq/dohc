@@ -15,7 +15,7 @@ use dohc_engine_testkit::harness::{
 
 const NO_FAULTS: NoFaults = NoFaults;
 
-/// Assert that opening `db` fails with `expected_code` AND left the file's
+/// Assert that opening `db` fails with `expected_code` And left the file's
 /// bytes and WAL state untouched (the fence must never mutate a rejected store).
 fn assert_rejected_without_mutation(db: &std::path::Path, expected_code: &str) {
     let before = std::fs::read(db).expect("read before");
@@ -170,7 +170,7 @@ fn foreign_unversioned_database_is_rejected_without_mutation() {
     assert_rejected_without_mutation(&db, "foreign-database");
 }
 
-// oracle: durability is pinned, not luck — `synchronous` reads back NORMAL, so
+// oracle: durability is pinned, not luck — `synchronous` reads back normal, so
 // a weakened configuration fails this test.
 #[test]
 fn synchronous_is_pinned_to_normal() {
@@ -224,7 +224,7 @@ fn committed_write_replays_from_wal_on_reopen() {
 }
 
 // oracle: idempotency — a same-payload retry replays exactly-once; a key reused
-// with a DIFFERENT payload is rejected, never silently replayed.
+// with a different payload is rejected, never silently replayed.
 #[test]
 fn idempotency_key_reuse_is_guarded() {
     let scratch = ScratchDir::new().expect("scratch dir");
@@ -252,7 +252,7 @@ fn idempotency_key_reuse_is_guarded() {
     );
     assert_eq!(store.journal_len().expect("journal"), 1);
 
-    // Same key, DIFFERENT payload → typed mismatch, nothing written.
+    // Same key, different payload → typed mismatch, nothing written.
     let conflicting = CompoundWrite {
         request_id: "req-k".to_owned(),
         doc_id: "doc/k".to_owned(),
@@ -300,7 +300,7 @@ fn document_body_bound_is_enforced_at_the_edge() {
         .expect_err("over-limit must fail");
     assert_eq!(err.code(), "document-too-large");
 
-    // The rejected over-limit write left no trace in ANY compound-write
+    // The rejected over-limit write left no trace in any compound-write
     // component (validation runs before the transaction opens).
     assert_eq!(store.document_count().expect("docs"), 2);
     assert_eq!(store.journal_len().expect("journal"), 2);
@@ -349,7 +349,7 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // pending replication refusals (ordinal 22), the parked
     // chat-message-before-thread coordinates (ordinal 23), the
     // materialization-workspace migration (ordinal 24), the bootstrap
-    // main-version name backfill (ordinal 25, #325), the secret fork-base
+    // main-version name backfill (ordinal 25), the secret fork-base
     // timestamp migration (ordinal 26), the Y.Doc path migration
     // (`ydoc_docs.path`) (ordinal 27), the secret-moment source-origin
     // provenance migration (ordinal 28), Y.Doc lineage claims with compact
@@ -360,8 +360,8 @@ fn close_reopen_mutate_cycle_stays_writable() {
     // authority (ordinal 33), the scene Y.Doc content-kind migration
     // (ordinal 34), scene support in Y.Doc recovery decisions (ordinal 35),
     // the share-view file lane (ordinal 36, #646 PR3-1), the
-    // share-proposal submit scan position (ordinal 37, #646 PR3a), the Y.Doc
-    // seed-source provenance (ordinal 38, #815), the protected-history
+    // share-proposal submit scan position (ordinal 37), the Y.Doc
+    // seed-source provenance (ordinal 38), the protected-history
     // time-window index (ordinal 39), per-conversation chat content revisions
     // (ordinal 40), collection adoption (ordinal 41), the collection
     // index (ordinal 42), and the collection historical record-owner

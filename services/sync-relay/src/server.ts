@@ -142,7 +142,7 @@ export interface CreateSyncRelayHandlerOptions {
   ) => Promise<string | null> | string | null;
   newShareId?: () => string;
   newGrantId?: () => string;
-  // #646 PR3a: ids the relay MINTS — proposal ids, and the moment and object
+  // Ids the relay mints — proposal ids, and the moment and object
   // ids a proposal's accept stamps on the granter's own log. Minted, never
   // taken from the recipient: a recipient-supplied moment id could name a
   // moment the granter already holds. Injectable so tests can pin them.
@@ -208,7 +208,7 @@ type SyncRelayRoute =
   | { route: "share-discussion-activity"; shareId: string }
   | { route: "share-discussion-moderation"; shareId: string }
   | { route: "share-blob"; shareId: string; sha256: string }
-  // #646 PR3a. The recipient's half of the proposal lane is share-scoped; the
+  // The recipient's half of the proposal lane is share-scoped; the
   // granter's half is WORKSPACE-scoped, so its authorization is the one
   // ownership line every owner route already sits behind rather than a new
   // per-route check. A recipient cannot even address it: a received share
@@ -216,11 +216,11 @@ type SyncRelayRoute =
   | { route: "share-proposals"; shareId: string }
   | { route: "share-proposal-withdraw"; shareId: string; proposalId: string }
   | { route: "workspace-proposals"; workspaceId: string }
-  // ONE proposal, with its file rows. The listing above carries counts only,
+  // One proposal, with its file rows. The listing above carries counts only,
   // so opening a review reads the proposal the granter opened rather than
   // every open proposal in the workspace.
   | { route: "workspace-proposal"; workspaceId: string; proposalId: string }
-  // ONE op of one proposal. The review lists metadata and loads a file's
+  // One op of one proposal. The review lists metadata and loads a file's
   // content only when the granter opens that file, so this route answers the
   // opening — without re-serving every op of every open proposal to do it.
   | {
@@ -239,7 +239,7 @@ type SyncRelayRoute =
   | { route: "share-presence"; shareId: string };
 
 // Transport cap. The relay never parses content, so it cannot tell a captured
-// file from a document body from a Y.Doc payload; it carries the WIDEST engine
+// file from a document body from a Y.Doc payload; it carries the widest engine
 // ceiling and lets the Rust sync-apply path enforce the real one by referenced
 // kind on hydrate. A blob a peer smuggles under this cap but over its kind's
 // ceiling is rejected client-side as a protocol violation.
@@ -294,13 +294,13 @@ const FILE_FRESHNESS_OP_KINDS = new Set(["moment.append", "version.create"]);
 const MAX_EMAIL_CHARS = 320;
 const MAX_SHARE_ID_CHARS = 128;
 const LINK_INVENTORY_CURSOR_MAX_CHARS = 1_024;
-// #646 PR3a. A submit's idempotency key is the client's own string, not a
+// A submit's idempotency key is the client's own string, not a
 // share id; it takes the same length because both are one opaque identifier,
 // and its own name so the bound says what it bounds.
 const MAX_SUBMIT_ID_CHARS = 128;
 const MAX_IDENTITY_BYTES = 512;
 
-// #646 PR3a. Inside a share's origin namespace (`share:<shareId>:…`), this
+// Inside a share's origin namespace (`share:<shareId>:…`), this
 // prefix belongs to the relay: it names the stream one accepted proposal
 // writes. A recipient's own push may not claim it.
 const PROPOSAL_ORIGIN_PREFIX = "proposal:";
@@ -558,7 +558,7 @@ export function createSyncRelayHandler({
   // Handle a publish (POST) or long-poll (GET) against an already-authorized
   // presence scope. The actor's user id is the SERVER-DERIVED attribution;
   // the client-supplied `state` is opaque display data only. `reauthorize`
-  // re-runs the caller's authorization AFTER a long-poll park: a grant revoked
+  // re-runs the caller's authorization after a long-poll park: a grant revoked
   // while the poll was parked must fail closed on wake, never return a final
   // snapshot for a scope the caller no longer has.
   const respondPresence = async (
@@ -605,13 +605,13 @@ export function createSyncRelayHandler({
     throw methodNotAllowed();
   };
 
-  // #646 PR3a: whether a recipient may PROPOSE changes to the files this
+  // Whether a recipient may propose changes to the files this
   // selector shares. Edit and nothing else — and the refusal is the same
   // `shareNotAppendable()` code and body a comment or a view share gets on the
   // append route, because a level-specific refusal would tell a probing
   // recipient the selector's level. Changes follow PATHS, so a version share
   // (no paths) proposes nothing at any level.
-  // #646 PR3a. The granter's own facts for one proposed change, in the ONE
+  // The granter's own facts for one proposed change, in the one
   // version the proposal was submitted against: which file it is, where that
   // file is now, and the moment that produced the content the recipient
   // started from.
@@ -642,7 +642,7 @@ export function createSyncRelayHandler({
     };
   };
 
-  // ONE op as the granter's review reads it. Shared by the listing and by the
+  // One op as the granter's review reads it. Shared by the listing and by the
   // single-op route, so a row and the file it opens can never disagree about
   // where a change lands or whether it drifted.
   //
@@ -655,7 +655,7 @@ export function createSyncRelayHandler({
       opIndex: op.opIndex,
       basedOnPath: op.basedOnPath,
       operation: op.operation,
-      // WHERE accepting will put it, resolved by the SAME rule the accept
+      // WHERE accepting will put it, resolved by the same rule the accept
       // door uses. The review must name the path the write will use: a
       // content-only change lands at the granter's current path, so showing
       // the recipient's path would tell the granter one thing and do another.
@@ -679,9 +679,9 @@ export function createSyncRelayHandler({
   };
 
   // MU-C4: the thread→channel resolver the chat share filter scopes by. Backed
-  // by the shared workspace's OWN log (earliest chat.thread.create wins), so a
+  // by the shared workspace's own log (earliest chat.thread.create wins), so a
   // member-pushed forgery can never re-bind an existing thread. Memoized per
-  // resolver (= per request): the filter asks about the SAME threadId across
+  // resolver (= per request): the filter asks about the same threadId across
   // thread-scoped rows on the hot read path, and the underlying lookup is a log
   // scan. Safe because a resolver never outlives its request and the log it
   // reads is append-only with earliest-binding-wins semantics.
@@ -705,7 +705,7 @@ export function createSyncRelayHandler({
         return bound;
       },
       // #646 PR2, memoized for the same reason: the file-chat filter asks
-      // about the SAME threadId and the SAME objectId across every
+      // about the same threadId and the same objectId across every
       // thread-scoped row of a page.
       threadFileBinding: (threadId) => {
         if (bindingCache.has(threadId)) return bindingCache.get(threadId);
@@ -728,7 +728,7 @@ export function createSyncRelayHandler({
     };
   };
 
-  // Lazy claim of pending email invites (PR 18 gate fix): the first time an
+  // Lazy claim of pending email invites: the first time an
   // invited account authenticates to the relay, any share addressed to its
   // email becomes a real grant (recipient_user_id filled in). The session
   // email is server-derived (never client-supplied), so this cannot be used
@@ -989,7 +989,7 @@ export function createSyncRelayHandler({
         : null;
     return {
       shareId: share.shareId,
-      // An unreadable row says so. It does NOT get a stand-in scope: empty
+      // An unreadable row says so. It does not get a stand-in scope: empty
       // paths with no version would claim the entire live workspace, on a row
       // whose own reads answer 404. The row stays listed because it is the
       // caller's own share and ending it must remain possible — the reverse
@@ -3071,18 +3071,18 @@ export function createSyncRelayHandler({
       //   1. authorizeShareAction: membership, grant status, granter standing —
       //      every denial is the same byte-identical generic 404.
       //   2. The selector must accept appends: a read-write chat-channel
-      //      grant, or (#646 PR2) a file share at comment or edit. A
-      //      read-only member and a VIEW file share are REFUSED with an
+      //      grant, or a file share at comment or edit. A
+      //      read-only member and a VIEW file share are refused with an
       //      explicit 403 — the member legitimately knows the share exists,
-      //      so this is a refusal, not a 404 — and with ONE code and one
+      //      so this is a refusal, not a 404 — and with one code and one
       //      body, because a level-specific refusal would tell a probing
       //      recipient the selector's level.
       //   3. MU-C0 verified authorship: every authored chat op must claim the
       //      AUTHENTICATED pusher (assertChatAuthorship verifies it) — a
       //      member cannot forge a message or reaction as another member.
-      //   4. Every op must pass the SAME fail-closed chat filter that scopes
+      //   4. Every op must pass the same fail-closed chat filter that scopes
       //      reads: chat.* only, granted channel only, earliest-thread-binding
-      //      honored. One rejected op rejects the WHOLE batch atomically.
+      //      honored. One rejected op rejects the whole batch atomically.
       // Accepted ops land in the OWNER's workspace bucket under a
       // share-namespaced origin id, so a member can never extend (or collide
       // with) the owner's — or another member's — origin sequence space; the
@@ -3096,7 +3096,7 @@ export function createSyncRelayHandler({
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         const input = await readJsonObject(request);
         const originId = parseString(input.originId, "originId", MAX_ORIGIN_ID_CHARS);
-        // #646 PR3a: a share's origin space is shared between the recipient's
+        // A share's origin space is shared between the recipient's
         // own pushes and the streams accept mints for its proposals. The
         // recipient names its half; this prefix is the relay's, and a client
         // that claimed it could take sequence numbers out of an accept stream.
@@ -3108,13 +3108,13 @@ export function createSyncRelayHandler({
         // Authorship runs before the filter and parseLogOp so neither admits nor
         // freezes a payload whose claimed author is missing or forged (MU-C0).
         assertChatAuthorship(input.ops, actor.userId);
-        // Batch-aware channel scoping: a thread created earlier in THIS batch
+        // Batch-aware channel scoping: a thread created earlier in this batch
         // is a valid target for later ops in the same batch (the composer's
-        // thread.create + first message.append), but the LOG's earliest
+        // thread.create + first message.append), but the log's earliest
         // binding always wins over the batch — a batch cannot re-bind an
         // existing thread.
         const pendingThreadBindings = new Map<string, string>();
-        // #646 PR2: the path sibling of the same rule, for a file share. A
+        // The path sibling of the same rule, for a file share. A
         // recipient's `chat.thread.create` names the granted PATH (its own
         // object ids mean nothing here), and the message it composes with
         // rides in the same batch.
@@ -3136,7 +3136,7 @@ export function createSyncRelayHandler({
         };
         const ops = input.ops.map(parseLogOp);
         for (const op of ops) {
-          // The WRITE filter, never the read one: what a recipient may see is
+          // The write filter, never the read one: what a recipient may see is
           // not what it may push into the granter's log (#646 PR3-0).
           const decision = filterOpForShareAppend(
             share.selector,
@@ -3151,7 +3151,7 @@ export function createSyncRelayHandler({
           // attachment's objectId/pathHint) must not survive the append.
           op.payloadJson = JSON.stringify(decision.payload);
           if (op.opKind === "chat.thread.create") {
-            // Read back from the SERVED copy assigned above, which carries the
+            // Read back from the served copy assigned above, which carries the
             // path this relay proved — never the pusher's own string.
             const created = JSON.parse(op.payloadJson) as {
               threadId?: unknown;
@@ -3165,15 +3165,15 @@ export function createSyncRelayHandler({
                 typeof created.linkedPath === "string" &&
                 created.linkedPath.length > 0
               ) {
-                // THE ACCEPT DOOR converts the binding (#646 PR2, review).
+                // The accept door converts the binding.
                 //
                 // A recipient names its file by path because its own object
                 // ids mean nothing here. This is the one moment the relay can
-                // turn that into the granter's OWN object id: the filter just
+                // turn that into the granter's own object id: the filter just
                 // proved an object sits at this exact path. Persisting the
                 // object id instead of the path is what makes a recipient's
                 // thread behave like the granter's — it follows the file
-                // through a rename INSIDE the share, and stops at one that
+                // through a rename inside the share, and stops at one that
                 // leaves it, because both answers come from the same
                 // object→path lookup.
                 //
@@ -3204,14 +3204,14 @@ export function createSyncRelayHandler({
           // own corner of the owner bucket's origin space.
           originId: `share:${share.shareId}:${originId}`,
           ops,
-          // Close the revoke race COMPLETELY: the share is re-verified inside
+          // Close the revoke race completely: the share is re-verified inside
           // the append's own BEGIN IMMEDIATE transaction (the same write lock
           // revokeShare takes), so a revoke committed after the entry check
           // above can never slip a write in — the guard sees it and the whole
           // batch rolls back as the same generic 404. The guard re-runs the
           // full appendability gauntlet: recipient-owned, unrevoked, granter
-          // in standing, and STILL a selector that accepts appends at its
-          // current level (#646) on the same workspace bucket — a level
+          // in standing, and still a selector that accepts appends at its
+          // current level on the same workspace bucket — a level
           // narrowed mid-flight loses the race the same way a revoke does.
           guard: shareActionGuard(
             route.shareId,
@@ -3238,7 +3238,7 @@ export function createSyncRelayHandler({
         const authorized = requireShareAction(route.shareId, actor.userId, "read");
         const share = { ...authorized.share, selector: authorized.effectiveSelector };
         assertSha256(route.sha256);
-        // A blob is served to a recipient ONLY when at least one op that
+        // A blob is served to a recipient only when at least one op that
         // passes the share filter legitimately references it. Everything
         // else — a blob of an unshared file, a secret ciphertext blob, a
         // random hash — is the same generic 404 as a nonexistent share.
@@ -3258,14 +3258,14 @@ export function createSyncRelayHandler({
           headers: { "content-type": "application/octet-stream" },
         });
       }
-      // #646 PR3a. A recipient's blob, charged to the GRANTER's workspace.
+      // A recipient's blob, charged to the GRANTER's workspace.
       // Same level gate as the proposal route, same refusal, so a probe cannot
       // tell the level from the code.
       //
       // It needs no bound of its own. Three already apply and all three are
       // the granter's: MAX_BLOB_BYTES per blob, the granter's workspace quota
       // per workspace (`putBlob` charges it), and the unreferenced-blob sweep,
-      // which reclaims anything no OPEN proposal claims. A blob count would
+      // which reclaims anything no open proposal claims. A blob count would
       // bound bytes less tightly than the byte quota that already refuses
       // them.
       if (route.route === "share-blob" && request.method === "PUT") {
@@ -3297,7 +3297,7 @@ export function createSyncRelayHandler({
       }
       if (route.route === "share-blob") throw methodNotAllowed();
 
-      // #646 PR3a — the proposal lane's front door. The gauntlet mirrors the
+      // The proposal lane's front door. The gauntlet mirrors the
       // share-log POST above stage for stage, and the two routes stay
       // separate on purpose: one route with two destinations is the
       // conflation that let a recipient's file moments reach the granter's log
@@ -3318,14 +3318,14 @@ export function createSyncRelayHandler({
           );
         }
         const ops: ShareProposalOpRow[] = [];
-        // ONE net change per file, proven here rather than trusted. The
+        // One net change per file, proven here rather than trusted. The
         // recipient consolidates before it submits — it knows its own object
         // ids — but a proposal carrying two changes for one file would give
-        // both the SAME base and make them conflict with each other at accept.
+        // both the same base and make them conflict with each other at accept.
         // So the relay refuses the shape instead of relying on the client to
         // avoid it.
         //
-        // ONE set of every path ANY change touches, not one set per side: a
+        // One set of every path any change touches, not one set per side: a
         // delete of `docs/a.md` beside a create of `docs/a.md` is two changes
         // for one file, and a set per side would hold one path each and admit
         // the pair. Compared across changes, never within one — a change that
@@ -3345,7 +3345,7 @@ export function createSyncRelayHandler({
             if (touchedPaths.has(path)) throw shareOpRejected();
           }
           for (const path of paths) touchedPaths.add(path);
-          // WHICH file the change is built on, resolved HERE rather than at
+          // Which file the change is built on, resolved here rather than at
           // accept. The path is where the granter had the file when the
           // recipient read it, and a path is not an identity: a rename between
           // submit and accept moves it to another file, and a delete leaves it
@@ -3395,7 +3395,7 @@ export function createSyncRelayHandler({
           // SERVER-derived. The body never states who proposed anything.
           proposedByUserId: actor.userId,
           // PINNED from the selector the recipient just proved against,
-          // through the SAME rule the read filter serves ops by, so a
+          // through the same rule the read filter serves ops by, so a
           // selector edited between submit and accept cannot move these
           // changes onto a version their author never read.
           versionId: targetVersionId(share.selector),
@@ -3422,7 +3422,7 @@ export function createSyncRelayHandler({
       }
 
       // Not level-gated, for the reason withdraw is not: a recipient must be
-      // able to SEE the changes it can still take back after a downgrade. A
+      // able to see the changes it can still take back after a downgrade. A
       // level that never submitted anything reads an empty list, which is the
       // same answer every level with nothing open gives.
       if (route.route === "share-proposals" && request.method === "GET") {
@@ -3449,7 +3449,7 @@ export function createSyncRelayHandler({
       // The reverse path submitting owes (`AGENTS.md`): a recipient can take
       // its changes back while they are still open.
       //
-      // Deliberately NOT gated on the level. A downgrade from edit to comment
+      // Deliberately not gated on the level. A downgrade from edit to comment
       // stops new submits, and a reverse path that a downgrade removes is not
       // a reverse path — it would strand the recipient's already-sent changes
       // in front of a granter who may never answer them. Membership is still
@@ -3466,7 +3466,7 @@ export function createSyncRelayHandler({
         const proposal = storage.getShareProposal(route.proposalId);
         // A proposal of another share is the same generic 404 as one that
         // never existed — and that is also what makes it this person's:
-        // `authorizeShareAction` proved the caller is THIS share's recipient, and
+        // `authorizeShareAction` proved the caller is this share's recipient, and
         // a path share has exactly one.
         if (!proposal || proposal.shareId !== share.shareId) throw notFound();
         if (!storage.settleShareProposal(route.proposalId, "withdrawn", nowMs())) {
@@ -3480,14 +3480,14 @@ export function createSyncRelayHandler({
         // Cross-user presence: a recipient joins the ephemeral scope for a
         // topic their grant exposes. The share is loaded FAIL-CLOSED (generic
         // 404 for no-grant / revoked / wrong-recipient), and the topic is
-        // gated by the SAME visibility check the durable filter uses, so a
+        // gated by the same visibility check the durable filter uses, so a
         // non-member can neither read nor even confirm presence for a
         // channel/DM they lack a grant for. The scope key resolves to the
         // granter's workspace, so the owner (workspace route) and recipients
-        // fan into ONE scope and see each other.
+        // fan into one scope and see each other.
         await claimPendingShares(actor.userId);
         const topic = parsePresenceTopic(new URL(request.url).searchParams.get("topic"));
-        // The share + topic gate, run BEFORE joining AND re-run after a parked
+        // The share + topic gate, run before joining and re-run after a parked
         // long-poll wakes (respondPresence's reauthorize): a revoke that lands
         // while a recipient's poll is parked fails closed on wake instead of
         // leaking one final snapshot. The resolver lets a chat-channel grant
@@ -3523,21 +3523,21 @@ export function createSyncRelayHandler({
 
       if (!storage.workspaceIsOwnedBy(route.workspaceId, actor.userId)) throw notFound();
 
-      // #646 PR3a — the granter's half. Everything below this line is
-      // owner-scoped by the ONE check above, which is why accept and decline
+      // The granter's half. Everything below this line is
+      // owner-scoped by the one check above, which is why accept and decline
       // live in the workspace namespace rather than the share's: ownership is
       // derived from the workspace, never from the share, so a recipient can
       // never accept its own changes.
       // What the granter still has to answer, and nothing else: this route
-      // serves OPEN proposals only, so it states no `state` and no
+      // serves open proposals only, so it states no `state` and no
       // `settledAtMs` — both would be constants. A settled proposal is
       // history, and this surface asks one question.
-      // A SUMMARY, because this is what a timer polls. The review surface
+      // A summary, because this is what a timer polls. The review surface
       // renders a sender and a count from it; it does not draw files until a
       // granter opens one. Serving every op of every open proposal here
       // resolved a base per op on every tick to build rows nobody read.
       //
-      // WHO sent them is resolved here from the server-derived user id on the
+      // Who sent them is resolved here from the server-derived user id on the
       // proposal row. The granter's client used to rebuild this by fetching
       // its whole share list and matching share ids — a second request per
       // review, and wrong the moment a share has more than one recipient.
@@ -3557,7 +3557,7 @@ export function createSyncRelayHandler({
       }
       if (route.route === "workspace-proposals") throw methodNotAllowed();
 
-      // ONE proposal's file rows, for the review a granter opened. Still no
+      // One proposal's file rows, for the review a granter opened. Still no
       // content: the rows say where each change lands and whether it drifted,
       // and a file's text arrives through the op route below.
       if (route.route === "workspace-proposal" && request.method === "GET") {
@@ -3581,7 +3581,7 @@ export function createSyncRelayHandler({
       }
       if (route.route === "workspace-proposal") throw methodNotAllowed();
 
-      // ONE op, for the review that opened one file. Same resolution as the
+      // One op, for the review that opened one file. Same resolution as the
       // listing above, so the row a granter expands states exactly what the
       // row it clicked stated.
       if (route.route === "workspace-proposal-op" && request.method === "GET") {
@@ -3621,7 +3621,7 @@ export function createSyncRelayHandler({
         // proposal record is the real provenance.
         const summary = proposerEmail ? `Accepted changes from ${proposerEmail}` : null;
         const versionId = proposal.versionId;
-        // THIS proposal's own origin stream, never the recipient's push
+        // This proposal's own origin stream, never the recipient's push
         // origin. The recipient numbers its own stream densely from its own
         // journal, so ops the relay inserted there would take sequence
         // numbers the recipient's next push claims — and `appendLogBatch`
@@ -3639,7 +3639,7 @@ export function createSyncRelayHandler({
           const resolved = proposalBase(route.workspaceId, versionId, op);
           const built = proposalMomentPayload(op, {
             versionId,
-            // A file the granter does not have gets a NEW object id, minted
+            // A file the granter does not have gets a new object id, minted
             // here. The recipient's own id names nothing in this workspace.
             objectId: op.basedOnObjectId ?? newId(),
             objectCreatedAtMs: op.recordedAtMs,
@@ -3659,12 +3659,12 @@ export function createSyncRelayHandler({
         }
         const result = storage.appendLogBatch({
           workspaceId: route.workspaceId,
-          // The SAME share-namespaced origin the chat path already writes, so
+          // The same share-namespaced origin the chat path already writes, so
           // accepted changes reach the granter over the owner lane the relay
           // already runs. Nothing new applies them.
           originId,
           ops: logOps,
-          // The settle rides INSIDE the release's own transaction: the changes
+          // The settle rides inside the release's own transaction: the changes
           // enter the log and the proposal leaves `open` together, or neither
           // happens. A second accept finds the row already moved and its whole
           // batch rolls back.
@@ -3939,7 +3939,7 @@ export function createSyncRelayHandler({
         // anti-enumeration behavior below is identical for both.
         const { selector, access } = (() => {
           if (input.channelWireId !== undefined) {
-            // Fail closed on an AMBIGUOUS body: a chat-channel selector must not
+            // Fail closed on an ambiguous body: a chat-channel selector must not
             // also carry a path/version selector. Silently preferring
             // channelWireId (and dropping the paths) would turn a stale/leftover
             // `paths` field into a full chat-channel grant — a silent intent
@@ -4040,9 +4040,9 @@ export function createSyncRelayHandler({
         }
 
         // Sharing by email. To close the account-enumeration oracle, the
-        // response is IDENTICAL whether or not the email has a dohc account:
+        // response is identical whether or not the email has a dohc account:
         // a known account becomes an immediate recipient, an unknown email
-        // becomes a PENDING invite (claimed when that account first touches
+        // becomes a pending invite (claimed when that account first touches
         // the relay). Either way the response never echoes a recipient user
         // id, so the granter cannot distinguish "has an account" from "does
         // not" by inspecting the reply.
@@ -4961,7 +4961,7 @@ async function readBytes(request: Request, maxBytes: number): Promise<Uint8Array
 
 function parseWorkspaceId(value: unknown): string {
   const workspaceId = parseString(value, "workspaceId", MAX_WORKSPACE_ID_CHARS);
-  // Reserved: "/sync/shares/..." is the share-route namespace (PR 18). A
+  // Reserved: "/sync/shares/..." is the share-route namespace. A
   // workspace with this id could never be addressed, so refuse the claim
   // rather than strand it.
   if (workspaceId === "shares") throw badRequest("workspaceId is reserved");
@@ -4970,7 +4970,7 @@ function parseWorkspaceId(value: unknown): string {
 
 // C0 controls (including NUL) and DEL. Rejected in every parsed string field:
 // the presence scope key joins workspaceId/topic with NUL separators, so an
-// embedded NUL in one component could collide with a DIFFERENT workspace's
+// embedded NUL in one component could collide with a different workspace's
 // scope (workspace "a" + topic "b\0c" vs workspace "a\0b" + topic "c") and
 // leak presence across tenants. Refusing control characters at the parse
 // boundary makes the composite keys unambiguous.
@@ -5102,19 +5102,19 @@ function parseLogOp(value: unknown): SyncRelayLogInput {
   return { originSeq, opKind, payloadJson, recordedAtMs };
 }
 
-// MU-C0 verified authorship. The relay authenticates WHO is pushing
+// MU-C0 verified authorship. The relay authenticates who is pushing
 // (actor.userId, server-derived from the Better Auth session — a client cannot
-// assert it). For every chat op that names an author, that author MUST be the
+// assert it). For every chat op that names an author, that author must be the
 // pusher, or the whole batch is rejected. This is the one place the relay reads
 // into a chat payload — a second narrow, tested relaxation of "payloads are
 // opaque", after PR-18's share filter, scoped to the author field, fail-closed.
 //
-// FAIL-CLOSED COMPLETENESS. The chat.* namespace is EXHAUSTIVE here: every
+// FAIL-CLOSED COMPLETENESS. The chat.* namespace is exhaustive here: every
 // chat op is either an explicitly-enumerated structural (no-author) op or an
 // authored op with a known author field. An unknown/unmapped chat.* op (a
-// future chat.thread.update, chat.message.edit, ...) is REJECTED, never
+// future chat.thread.update, chat.message.edit,...) is rejected, never
 // admitted unverified — shipping a new authored chat op without extending this
-// policy fails CLOSED, not open. Non-chat ops stay fully opaque and pass
+// policy fails closed, not open. Non-chat ops stay fully opaque and pass
 // through untouched.
 //
 // Author identity is always the OPAQUE relay user id (never a raw email — PII
@@ -5142,7 +5142,7 @@ const CHAT_OP_POLICY: Record<string, ChatOpPolicy> = {
   "chat.thread.create": { kind: "structural" },
   "chat.decision.set": { kind: "structural" },
   "chat.attachment.add": { kind: "structural" },
-  // Authored ops: a present author field MUST equal the authenticated pusher.
+  // Authored ops: a present author field must equal the authenticated pusher.
   "chat.message.append": {
     kind: "authored",
     field: "authorUserId",
@@ -5296,7 +5296,7 @@ function jsonResponse(body: unknown, status = 200, headers: Record<string, strin
 function errorResponse(error: unknown): Response {
   // Classified errors carry an intentional 4xx statusCode: our own typed
   // HttpError/SyncRelayConflictError, plus duck-typed auth errors from
-  // workspace-api (UnauthorizedError). Everything else is UNEXPECTED
+  // workspace-api (UnauthorizedError). Everything else is unexpected
   // (SQLite failures, auth-DB hiccups): log it server-side and answer with a
   // generic 500 — never echo error.message, which can leak internals.
   const duckStatus =
@@ -5401,7 +5401,7 @@ function selfShare(): HttpError {
 // MU-C0: a chat op claimed an author other than the authenticated pusher (or a
 // required author was missing). 403 (not 404): the caller IS authenticated and
 // owns the bucket — the request is forbidden, not hidden. Non-retryable; the
-// client must send its OWN identity. Deliberately does not name which op failed.
+// client must send its own identity. Deliberately does not name which op failed.
 function authorshipMismatch(): HttpError {
   return relayHttpError(
     RELAY_ERRORS.authorship_mismatch,
@@ -5432,7 +5432,7 @@ function shareNotAppendable(): HttpError {
 
 // MU-C4 fail-closed append scoping: an op in the batch is not something this
 // share admits — a chat op for another channel, a foreign thread, a forged
-// thread re-bind, a file/secret/unknown op, or (#646 PR3a) a proposed change
+// thread re-bind, a file/secret/unknown op, or a proposed change
 // outside the shared paths or naming a file twice. The whole batch is rejected
 // atomically. Deliberately does not name which op failed or why: the same code
 // and body for every cause is what keeps a probing recipient from reading the
@@ -5441,7 +5441,7 @@ function shareOpRejected(): HttpError {
   return relayHttpError(RELAY_ERRORS.share_op_rejected, "an op is outside this share");
 }
 
-// #646 PR3a: the proposal already moved out of `open`. Every mover — accept,
+// The proposal already moved out of `open`. Every mover — accept,
 // decline, withdraw — races through the same single-row UPDATE, so exactly one
 // wins and the losers all land here rather than acting on stale state.
 function proposalNotOpen(): HttpError {

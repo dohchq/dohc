@@ -21,8 +21,8 @@ export interface RemoteIdentity {
   ownerUserId: string;
 }
 
-// Ops a share pull SKIPPED, kept with the share record because the skip is
-// DURABLE: the pull commits its cursor past a refused op, so that content
+// Ops a share pull skipped, kept with the share record because the skip is
+// durable: the pull commits its cursor past a refused op, so that content
 // never arrives again unless the granter writes the same path a second time.
 // A transient count would clear on the next quiet refresh and on restart,
 // while the content stays missing.
@@ -51,14 +51,14 @@ export interface ShareSkippedOps {
   counted?: string[];
   // Bumped on every write that adds a skipped op.
   generation: number;
-  // The generation the user has seen. Dismissing RAISES this; it never
+  // The generation the user has seen. Dismissing raises this; it never
   // deletes an op. The cursor has already committed past those ops, so the
   // record is the only remaining evidence of what is missing — destroying it
   // would be an irreversible change behind a one-click control. Hiding is
   // reversible, keeps the coordinates for diagnosis, and makes a later
   // refusal (a higher generation) speak up again on its own.
   acknowledgedGeneration?: number;
-  // Whether ops were skipped BEYOND the counted total. Set the first time an
+  // Whether ops were skipped beyond the counted total. Set the first time an
   // op arrives that this record cannot prove it has already counted and
   // cannot remember — past MAX_TRACKED_SKIP_COORDINATES there is nowhere to
   // put it, so it is not counted at all rather than counted again on the next
@@ -128,7 +128,7 @@ export function mergeShareSkippedOps(
 ): ShareSkippedOps {
   const ops = [...(existing?.ops ?? [])];
   // Every coordinate this record has counted: the retained ops, plus the ones
-  // it counted and could not keep. Membership is the ONLY duplicate test —
+  // it counted and could not keep. Membership is the only duplicate test —
   // there is no ordering assumption to break.
   const counted = new Set([
     ...ops.map(coordinate),
@@ -146,10 +146,10 @@ export function mergeShareSkippedOps(
       // the count stops and the record says it is incomplete instead.
       //
       // Visibility is a separate question from exactness. `inexact` flips
-      // once, but every LATER batch of ops the record cannot place is more
+      // once, but every later batch of ops the record cannot place is more
       // content skipped past a committed cursor — leaving those silent would
       // hide them behind an acknowledgement forever. They are counted as news
-      // per BATCH below, which is the identity this record still has.
+      // per batch below, which is the identity this record still has.
       inexact = true;
       uncounted.push(key);
       continue;
@@ -158,7 +158,7 @@ export function mergeShareSkippedOps(
     added = true;
     if (ops.length < MAX_RETAINED_SKIPPED_OPS) ops.push(op);
   }
-  // A batch of ops the record could not place is news UNLESS it is the batch
+  // A batch of ops the record could not place is news unless it is the batch
   // it just saw — that is the retry, and a retry must not resurrect an
   // acknowledged warning.
   const batch =
@@ -210,7 +210,7 @@ export function acknowledgeShareSkips(
   };
 }
 
-// A shared VIEW received through a relay share grant (PR 18): read-only,
+// A shared VIEW received through a relay share grant: read-only,
 // refreshed from the share, never pushed. `ended` marks a revoked share —
 // the local copy stays readable but stops refreshing.
 export interface ShareViewIdentity {
@@ -227,7 +227,7 @@ export interface ShareViewIdentity {
   // rather than asking the relay for a replacement — that ask is the one a
   // relay able to damage a record would answer with a wider scope.
   //
-  // The `access` level rides with it (#646): the level is part of the grant,
+  // The `access` level rides with it: the level is part of the grant,
   // pinned once and enforced on every pull, not re-asked per refresh.
   grantedSelector: ShareViewSelector;
   ended?: boolean;
@@ -237,7 +237,7 @@ export interface ShareViewIdentity {
   skippedOps?: ShareSkippedOps;
   // The relay this share was opened from. A refresh only ever runs against
   // this origin relay; signed into a different relay, the refresh is skipped
-  // rather than misreading a 404 as "the share ended" (PR 18 gate fix).
+  // rather than misreading a 404 as "the share ended".
   // Optional for views registered before this field existed.
   relayUrl?: string;
 }
@@ -273,11 +273,11 @@ export interface ShareMountRecord {
   // run against the relay the share was mounted from.
   relayUrl: string;
   // Account pin: shares are addressed to an account, and recipient routes
-  // 404 identically for "not yours" and "revoked". Signed into a DIFFERENT
-  // account, a refresh must SKIP (not flip the mount to ended). Null on
+  // 404 identically for "not yours" and "revoked". Signed into a different
+  // account, a refresh must skip (not flip the mount to ended). Null on
   // records from before this field existed — those refresh as before.
   recipientEmail?: string | null;
-  // Same REQUIRED pinned selector as ShareViewIdentity.grantedSelector, for
+  // Same required pinned selector as ShareViewIdentity.grantedSelector, for
   // the same reason: the mount's pulls enforce it against the relay's
   // selection, and a record without one is damaged.
   grantedSelector: ShareViewSelector;
@@ -288,7 +288,7 @@ export interface ShareMountRecord {
 }
 
 export interface RegistryEntry extends CreatedWorkspace {
-  // Present only after the user explicitly enables cloud sync (Phase 9).
+  // Present only after the user explicitly enables cloud sync.
   remote?: RemoteIdentity;
   // Durable join gate: true from registration until the first pull has
   // materialized and committed. Boot-time local writers must skip the entry.
@@ -378,7 +378,7 @@ export function createRegistryStore(registryFile: string) {
       text = readFileSync(registryFile, "utf8");
     } catch (error) {
       // Only a genuinely absent file is a fresh empty registry. A permission
-      // or I/O error must NOT be treated as "no workspaces" — that would let
+      // or I/O error must not be treated as "no workspaces" — that would let
       // the next write() clobber a registry we simply failed to read.
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         throw new Error(
@@ -392,7 +392,7 @@ export function createRegistryStore(registryFile: string) {
     try {
       parsed = JSON.parse(text);
     } catch {
-      // A present-but-corrupt file is NOT "no workspaces" — refuse rather
+      // A present-but-corrupt file is not "no workspaces" — refuse rather
       // than let the next write() collapse real data to empty.
       throw new Error(
         `Workspace registry is corrupt (${registryFile}); refusing to overwrite it.`,

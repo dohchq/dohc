@@ -37,7 +37,7 @@ import {
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
 // These tests drive the pull with the selector a mount record pins. No paths
-// selects the whole tracked workspace only WITH a version — no paths and no
+// selects the whole tracked workspace only with a version — no paths and no
 // version selects nothing at all, which the engine refuses.
 const PINNED_SELECTOR = {
   paths: [],
@@ -282,7 +282,7 @@ describe("mount labels", () => {
     expect(validMountLabel("prod-env")).toBe(true);
   });
 
-  // Daemon sessions and relay routes are keyed by workspace id ALONE, and the
+  // Daemon sessions and relay routes are keyed by workspace id alone, and the
   // session cache returns a binding without comparing rootPath. So two host
   // workspaces mounting the same share must not derive the same id, or the
   // second refresh reuses a connection bound to the first host's folder and
@@ -302,7 +302,7 @@ describe("mount labels", () => {
       mountStoreWorkspaceIdFor("host", "a-s"),
     );
 
-    // Two different shares in ONE host stay distinct too.
+    // Two different shares in one host stay distinct too.
     expect(mountStoreWorkspaceIdFor("host-a", "share-2")).not.toBe(a);
   });
 
@@ -313,8 +313,7 @@ describe("mount labels", () => {
     expect(mountRootFor(host, "alex")).toBe(
       join(host, SHARED_WITH_ME_FOLDER, "alex"),
     );
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
-    expect(mountRootFor(host, "..cache")).toBe(
+    expect(mountRootFor(host, "..cache"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe(
       join(host, SHARED_WITH_ME_FOLDER, "..cache"),
     );
   });
@@ -371,7 +370,7 @@ describe("mount labels", () => {
         [{ shareId: SHARE_ID, label: ".env" }],
         true,
       ),
-      "MUTATION: skipping an invalid matching label lets the caller read the projection from disk",
+      "skipping an invalid matching label lets the caller read the projection from disk",
     ).rejects.toThrow(/saved details are invalid/);
   });
 
@@ -388,7 +387,7 @@ describe("mount labels", () => {
         [],
         true,
       ),
-      "MUTATION: an empty but present registry lets stale projection bytes fall through to disk",
+      "an empty but present registry lets stale projection bytes fall through to disk",
     ).rejects.toThrow(
       "dohc cannot use this path because no share owns it. Add the share again, or move the file or folder outside shared-with-me/.",
     );
@@ -409,7 +408,7 @@ describe("mount labels", () => {
         })),
         true,
       ),
-      "MUTATION: first-match routing sends an ambiguous mount path to an arbitrary share",
+      "first-match routing sends an ambiguous mount path to an arbitrary share",
     ).rejects.toThrow(/saved details are invalid/);
   });
 
@@ -540,11 +539,11 @@ describe("mount labels", () => {
         [],
         true,
       ),
-      "MUTATION: an empty ownership tombstone must not turn stale projection bytes into a local import destination",
+      "an empty ownership tombstone must not turn stale projection bytes into a local import destination",
     ).rejects.toThrow(/no share owns it/i);
     await expect(
       refuseImportIntoShareProjection(host, "projection-alias", [], true),
-      "MUTATION: a projection alias must not bypass an empty ownership tombstone",
+      "a projection alias must not bypass an empty ownership tombstone",
     ).rejects.toThrow(/mounted share is read-only/i);
     await expect(
       refuseImportIntoShareProjection(
@@ -553,7 +552,7 @@ describe("mount labels", () => {
         [{ shareId: SHARE_ID, label: ".env" }],
         true,
       ),
-      "MUTATION: a matched but unusable record must not let its projection become a local import destination",
+      "a matched but unusable record must not let its projection become a local import destination",
     ).rejects.toThrow(/saved details are invalid/i);
   });
 
@@ -752,7 +751,7 @@ describe("refreshShareMount", () => {
 
   // The mount closes its own store, and that close is now an RPC that can
   // fail. It must stay best-effort: mountShare treats a rejection here as a
-  // failed mount and DELETES the folder, so a dying sidecar after a committed
+  // failed mount and deletes the folder, so a dying sidecar after a committed
   // cursor would destroy files that had already materialized.
   it("keeps a successful refresh when closing the mount's store fails", async () => {
     const host = await tempHostRoot();
@@ -849,7 +848,7 @@ describe("refreshShareMount", () => {
     expect(harness.transport.requests).toEqual([]);
   });
 
-  it("never follows a symlink planted INSIDE the mount (directory or file)", async () => {
+  it("never follows a symlink planted inside the mount (directory or file)", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -972,7 +971,7 @@ describe("refreshShareMount", () => {
     });
   });
 
-  it("creates NOTHING outside the workspace when a dir symlink sits on a deep write path", async () => {
+  it("creates nothing outside the workspace when a dir symlink sits on a deep write path", async () => {
     const host = await tempHostRoot();
     const elsewhere = await tempHostRoot();
     const relay = new FakeShareRelay();
@@ -985,7 +984,7 @@ describe("refreshShareMount", () => {
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
     await symlink(elsewhere, join(mountRoot, "docs"), "dir");
-    // The granter writes a DEEP path: the repair pass heals the planted
+    // The granter writes a deep path: the repair pass heals the planted
     // link first, so the deep write lands inside the workspace and nothing
     // is ever created through the link.
     relay.addWrite("docs/deep/file.md", "payload");
@@ -1049,7 +1048,7 @@ describe("refreshShareMount", () => {
     const mountRoot = join(host, SHARED_WITH_ME_FOLDER, "alex");
 
     // Plant a directory symlink where the granter's delete will point: the
-    // repair pass heals the link first, the delete lands on the REAL tree,
+    // repair pass heals the link first, the delete lands on the real tree,
     // and the file behind the link is never touched.
     await writeFile(join(elsewhere, "brief.md"), "victim");
     await rm(join(mountRoot, "docs"), { recursive: true, force: true });
@@ -1165,7 +1164,7 @@ describe("share mount refresh failures", () => {
   it("contains a damaged pin to its own row and keeps the loop going", () => {
     expect(
       classifyShareMountRefreshError(new SharePinInvalidError("share-1")),
-      "MUTATION: a damaged pin abandons every mount after it",
+      "a damaged pin abandons every mount after it",
     ).toEqual({ kind: "row", status: "damaged" });
   });
 
@@ -1174,7 +1173,7 @@ describe("share mount refresh failures", () => {
     expect(verdict.kind === "row" && verdict.status).not.toBe("unchanged");
   });
 
-  // The one failure that DOES make every remaining pull pointless.
+  // The one failure that does make every remaining pull pointless.
   it("abandons the refresh only when the session expired", () => {
     expect(classifyShareMountRefreshError(new RelayUnauthorizedError())).toEqual({
       kind: "abort",
@@ -1209,7 +1208,7 @@ describe("refresh result wire shape", () => {
     for (const status of ["updated", "unchanged", "ended", "damaged"]) {
       expect(
         RefreshShareMountsResult.safeParse({ results: [row(status)] }).success,
-        `MUTATION: main emits ${status} but the wire schema drops the whole result`,
+        `main emits ${status} but the wire schema drops the whole result`,
       ).toBe(true);
     }
   });
@@ -1232,7 +1231,7 @@ describe("refresh result wire shape", () => {
       if (verdict.kind !== "row") continue;
       expect(
         RefreshShareMountsResult.safeParse({ results: [row(verdict.status)] }).success,
-        `MUTATION: the classifier returns ${verdict.status}, which the wire cannot carry`,
+        `the classifier returns ${verdict.status}, which the wire cannot carry`,
       ).toBe(true);
     }
   });
@@ -1240,7 +1239,7 @@ describe("refresh result wire shape", () => {
 
 // Identity damage is contained per ROW, like grant damage. The loop used to
 // push raw registry values and parse the whole array at the end, so one
-// record with a 65-character label threw AFTER every pull had run: no row
+// record with a 65-character label threw after every pull had run: no row
 // survived, and the user was told the refresh failed while the healthy
 // mounts had in fact refreshed.
 describe("share mount result rows", () => {
@@ -1266,7 +1265,7 @@ describe("share mount result rows", () => {
     ]) {
       expect(
         shareMountResultRow({ ...bad, status: "unchanged", changedPaths: 0 }),
-        `MUTATION: ${JSON.stringify(bad).slice(0, 40)} fails the whole refresh report`,
+        `${JSON.stringify(bad).slice(0, 40)} fails the whole refresh report`,
       ).toBeNull();
     }
   });
@@ -1291,7 +1290,7 @@ describe("share mount result rows", () => {
       });
       expect(
         row,
-        `MUTATION: ${String(changedPaths)} drops the row, losing the mount's status`,
+        `${String(changedPaths)} drops the row, losing the mount's status`,
       ).not.toBeNull();
       expect(row?.status).toBe("damaged");
       // Derived from the SCHEMA, not from a restatement of its bounds.
@@ -1325,7 +1324,7 @@ describe("share mount result rows", () => {
       }).success;
       expect(
         row !== null,
-        `MUTATION: builder and schema disagree for ${JSON.stringify(identity).slice(0, 40)}`,
+        `builder and schema disagree for ${JSON.stringify(identity).slice(0, 40)}`,
       ).toBe(schemaAccepts);
     }
   });

@@ -17,7 +17,7 @@ import type {
 import { ListEngineMomentsResponse as ListEngineMomentsResponseSchema } from "./bridgeContract";
 import { isWorkspaceUpdatingRefusal } from "@dohc/workspace-engine-client";
 
-// PR 0N-1: main supplies the SAME display-name rule the chat rail uses
+// Main supplies the same display-name rule the chat rail uses
 // (onBehalfOf "local" -> the cloud email or "You"; anything else is already
 // a user-facing label).
 export type EngineMomentAuthorNamer = (
@@ -82,7 +82,7 @@ function engineMomentForIpc(
   return {
     ...engineMomentBaseForIpc(moment, agentAuthorDisplayName),
     momentOrder: moment.momentOrder,
-    // Only stamped for PROTECTED (secret-backed) moments so ordinary rows
+    // Only stamped for protected (secret-backed) moments so ordinary rows
     // stay byte-identical to the pre-PR-08 shape.
     ...(moment.protected ? { protected: true } : {}),
     ...(moment.contentKind === "binary"
@@ -91,7 +91,7 @@ function engineMomentForIpc(
   };
 }
 
-// A binary payload side presents as bytes (byteLength/sha256) — it NEVER
+// A binary payload side presents as bytes (byteLength/sha256) — it never
 // serves text, so a text/binary transition can't fake an empty text side.
 function binarySideDetail(side: { sha256?: string; byteLength?: number }) {
   return {
@@ -118,14 +118,14 @@ export function engineMomentDetailForIpc(
   const moment = detail.moment;
   const before = moment.payload.before ?? null;
   const after = moment.payload.after;
-  // Classified PER SIDE (WS-G1 review fix): a binary->text transition must
+  // Classified per side (WS-G1 review fix): a binary->text transition must
   // not serve the binary preimage's empty anchor text as beforeText (a
   // false empty->text diff) — each side presents by its own contentKind.
   const beforeBinary = before !== null && before.contentKind === "binary" ? before : null;
   const afterBinary = after.contentKind === "binary" ? after : null;
   return {
     ...engineMomentBaseForIpc(moment, agentAuthorDisplayName),
-    // The record-level kind mirrors the timeline row: keyed on the AFTER
+    // The record-level kind mirrors the timeline row: keyed on the after
     // side, so a pure-binary detail keeps its established shape.
     ...(afterBinary !== null
       ? { contentKind: "binary" as const, byteLength: afterBinary.byteLength ?? 0 }
@@ -152,16 +152,16 @@ export function versionConflictForIpc(conflict: {
   incoming: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
   base: { exists: boolean; text?: string; contentKind?: "text" | "binary"; sha256?: string; byteLength?: number };
 }): WorkspaceVersionConflict {
-  // Record-level kind answers ONE question: can these two sides be combined as
-  // text? Only the LIVE sides decide it. A binary BASE is history, and keying
+  // Record-level kind answers one question: can these two sides be combined as
+  // text? Only the live sides decide it. A binary BASE is history, and keying
   // on it would hide two readable texts behind a binary notice; a binary
-  // CURRENT or INCOMING means there is no second text to combine, which is
+  // current or incoming means there is no second text to combine, which is
   // exactly when `resolve_text_conflict` refuses combined text.
   const contentKind =
     conflict.current.contentKind === "binary" || conflict.incoming.contentKind === "binary"
       ? "binary"
       : "text";
-  // Each side reports its OWN kind. A mixed conflict carries the readable
+  // Each side reports its own kind. A mixed conflict carries the readable
   // text beside its binary sibling, so the user reads the side they can read
   // instead of choosing blind between two "Binary file" notices.
   const textSide = (side: {
@@ -175,7 +175,7 @@ export function versionConflictForIpc(conflict: {
     sha256?: string;
     byteLength?: number;
   }) =>
-    // A side without a REAL content hash serializes as null — never
+    // A side without a real content hash serializes as null — never
     // sha256: "", which fails the wire schema and would turn a mixed
     // binary/text conflict into an IPC error.
     side.exists && side.contentKind === "binary" && side.sha256

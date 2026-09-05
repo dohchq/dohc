@@ -175,7 +175,7 @@ async fn overflow_between_prepare_and_ack_is_not_cleared_by_the_older_receipt() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_cancel_leaves_a_consistent_actor_state() {
-    // Racy by nature; the invariant is that WHICHEVER outcome wins, state is
+    // Racy by nature; the invariant is that whichever outcome wins, state is
     // consistent: Cancelled ⇒ generation unchanged + dirty; Completed ⇒
     // generation advanced + not dirty.
     let ws = Scratch::new();
@@ -330,7 +330,7 @@ async fn overflow_is_never_lost_even_when_the_queue_is_saturated() {
     }
 
     // The overflow was folded into the controller (no reconcile cleared it), so
-    // the actor ends dirty — the mark was NOT lost to backpressure.
+    // the actor ends dirty — the mark was not lost to backpressure.
     assert!(
         handle.stats().await.expect("stats").dirty,
         "overflow mark lost under queue saturation"

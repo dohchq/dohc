@@ -91,7 +91,7 @@ afterEach(async () => {
 });
 
 describe("staged source snapshot discard", () => {
-  it("stays retryable when the removal fails, and settles once (#779 round 10 A5)", async () => {
+  it("stays retryable when the removal fails, and settles once", async () => {
     const fixture = await createFixture();
     const staged = await snapshotPluginSource({
       workspaceRoot: fixture.workspaceRoot,

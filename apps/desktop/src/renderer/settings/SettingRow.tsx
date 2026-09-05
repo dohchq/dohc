@@ -120,8 +120,8 @@ export function TextControl(props: {
   placeholder?: string;
   testId?: string;
   // The setting's schema bound. Settings save on change through a schema parse
-  // that THROWS on an over-long value, so a bounded setting must bound its input
-  // — `maxLength` truncates typing AND paste, and the caller clamps besides.
+  // that throws on an over-long value, so a bounded setting must bound its input
+  // — `maxLength` truncates typing and paste, and the caller clamps besides.
   maxLength?: number;
 }) {
   return (

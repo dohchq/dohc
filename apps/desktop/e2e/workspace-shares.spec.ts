@@ -27,7 +27,7 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 18 — external shares on the rebuilt cloud. Two REAL relay accounts
+// External shares on the rebuilt cloud. Two real relay accounts
 // (the test-auth seam mints identity from the bearer token, and resolves
 // "<user>@dohc.test" emails to "<user>"), one real Electron app, and a
 // test-only relay protocol peer as the other party.
@@ -127,7 +127,7 @@ async function mintLinkHandoff(
 }
 
 // The granter's only open proposal, listed then opened — the shape the
-// granter's own review takes. The listing is a summary (#808); its count is
+// granter's own review takes. The listing is a summary; its count is
 // the whole answer it owes a timer, enforced at
 // services/sync-relay/src/shareProposals.test.ts:1700-1723. Opening reads
 // that one proposal's file rows.
@@ -736,7 +736,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     await expect(page.getByTestId("open-shared-view")).toContainText(temp.rootPath);
     await page.getByTestId("open-share-start").click();
 
-    // The shared view opens: banner, shared files, and NOT the private one.
+    // The shared view opens: banner, shared files, and not the private one.
     await expect(page.getByTestId("workspace-shell")).toBeVisible();
     const banner = page.getByTestId("shared-view-banner");
     await expect(banner).toBeVisible();
@@ -783,7 +783,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
       }
     }, UNUSED_CONTENT_HASH);
     // A share view's text save is the one write decided at its own routed
-    // seam rather than by the workspace-wide gate (#646 PR3), so a VIEW share
+    // seam rather than by the workspace-wide gate, so a VIEW share
     // is refused there by the shared-file rule. Every other write handler
     // below still meets the workspace gate and its wording.
     expect(writeAttempt).toContain("SharedFileReadOnlyError");
@@ -793,7 +793,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // a managed agent run, a code-executing site preview, and a write-capable
     // MCP config. All route through the same shared-view guard.
     //
-    // Snapshot the materialized shared file BEFORE the bypass so the engine
+    // Snapshot the materialized shared file before the bypass so the engine
     // Y.Doc apply attempt can be proven inert — not merely non-throwing.
     const sharedFilePath = join(temp.rootPath, "docs/shared.md");
     const originalSharedContents = await readFile(sharedFilePath, "utf8");
@@ -833,10 +833,10 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
         api.startSitePreview({ workspaceId, siteRoot: "docs", mode: "dev" }),
       );
       const mcp = await api.getMcpConfig({ workspaceId });
-      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is WRITABLE, so opening
+      // WS-G2-C-2 gate fix 4: a live engine Y.Doc session is writable, so opening
       // one in a read-only shared view must be refused at the IPC boundary (same
       // class as the write bypass above). applyEngineYDocUpdate on the refused
-      // session must be an inert no-op — it must never throw AND never write.
+      // session must be an inert no-op — it must never throw and never write.
       const engineYDoc = await api.openEngineYDocSession({
         workspaceId,
         sessionId: "shared-view-bypass",
@@ -847,7 +847,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
           sessionId: "shared-view-bypass",
           update: new Uint8Array([1, 2, 3]),
           lineageGeneration: 1,
-          // Typing this from the contract surfaced a SECOND drift the
+          // Typing this from the contract surfaced a second drift the
           // hand-written shape hid: `seq` is required too, so the call would
           // have been rejected at the schema again.
           seq: 1,
@@ -874,7 +874,7 @@ test("receive side: open a share read-only, follow the granter's edits, and see 
     // "allowed" only proves the apply didn't throw — a regression that dropped
     // the read-only guard on applyEngineYDocUpdate (keeping it on open) would
     // still look like a no-op via the missing-session lookup. Prove the update
-    // NEVER LANDED: the materialized shared file on disk is byte-for-byte
+    // never landed: the materialized shared file on disk is byte-for-byte
     // unchanged after the apply attempt.
     expect(await readFile(sharedFilePath, "utf8")).toBe(originalSharedContents);
 
@@ -944,7 +944,7 @@ test("mount side: add a share into a workspace as shared-with-me/, follow edits,
     const shareId = (JSON.parse(create.body) as { shareId: string }).shareId;
     const shareCode = `dohc-share:${shareId}:${relay.baseUrl}`;
 
-    // The recipient's ORDINARY workspace (the mount host) with its own files.
+    // The recipient's ordinary workspace (the mount host) with its own files.
     await seedWorkspaceManifest(temp, hostWorkspaceId);
     await writeWorkspaceFiles(temp, [
       { path: "notes/mine.md", contents: "# Mine\n\nHost workspace file.\n" },
@@ -1371,7 +1371,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
       }
       const threads = await api.listFileChats({ workspaceId, path: "docs/shared.md" });
       if ("status" in threads) throw new Error(threads.code);
-      // The workspace-wide listing is NOT routed to a share view: a share
+      // The workspace-wide listing is not routed to a share view: a share
       // view gets per-file chat only, and #627 is the reason the whole
       // surface is refused rather than filtered.
       let channels: string;
@@ -1415,7 +1415,7 @@ test("direct named Comment keeps desktop generic chat read-only", async () => {
 });
 
 test("edit side: a recipient edits a shared file, sends the changes, and the granter accepts them", async () => {
-  // #646 PR3a — the whole proposal loop, through the real app and a real
+  // The whole proposal loop, through the real app and a real
   // relay. This is the only place in the repo where a real engine and a real
   // relay meet, so it is the only place that can prove the loop rather than
   // one half of it: the recipient's engine journals the edit, the relay holds
@@ -1538,7 +1538,7 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
 
     // The granter's side, read over HTTP as the granter.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
-    // WHO sent them, resolved by the relay from the server-derived user id on
+    // Who sent them, resolved by the relay from the server-derived user id on
     // the proposal row — never rebuilt by the client from its share list.
     expect(summary.proposedByEmail).toBe("e2e-recipient@dohc.test");
     expect(summary.ops).toBe(1);
@@ -1609,10 +1609,10 @@ test("edit side: a recipient edits a shared file, sends the changes, and the gra
 });
 
 test("edit side: a recipient creates, renames, deletes and imports, and the granter accepts all four", async () => {
-  // #802 — the other four writes a share view admits, through the real app,
+  // The other four writes a share view admits, through the real app,
   // the real engine and a real relay. The text edit's loop is proved above;
   // what this proves is that each of these operations becomes a change the
-  // submit lane can see, and that the accept door derives the RIGHT intent
+  // submit lane can see, and that the accept door derives the right intent
   // for each: a create, a rename, a delete, and an import that lands as a
   // create.
   test.setTimeout(300_000);
@@ -1720,7 +1720,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
         await attempt("import", () =>
           api.importWorkspaceFiles({ workspaceId, targetDir: "docs" }),
         ),
-        // The one operation that stays refused at EVERY level, because the
+        // The one operation that stays refused at every level, because the
         // engine has no folder object for it to write.
         await attempt("folder", () =>
           api.createWorkspaceFolder({ workspaceId, relativePath: "docs/plans" }),
@@ -1735,7 +1735,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     ]);
     expect(
       outcome[4],
-      "MUTATION: routing create-folder promises a change no moment can state",
+      "routing create-folder promises a change no moment can state",
     ).toContain("shared view");
 
     // Each landed in the projection, because the projection follows the
@@ -1773,7 +1773,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
       // sent, and one press sends everything pending.
       .toBe(4);
 
-    // ONE proposal holding FOUR net changes — one per object, which is what
+    // One proposal holding FOUR net changes — one per object, which is what
     // the submit consolidates to.
     const { summary, proposal } = await openOnlyProposal(relay.baseUrl, workspaceId);
     expect(summary.ops).toBe(4);
@@ -1826,13 +1826,13 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     expect(created!.operation).toBe("write");
     expect(created!.beforeLatestMomentId ?? null).toBe(null);
 
-    // A rename: the granter's OWN object, moved to the path the recipient
+    // A rename: the granter's own object, moved to the path the recipient
     // meant — the intent rule, not the path the recipient read.
     const renamed = byPath.get("docs/renamed.md");
     expect(renamed, "the recipient's rename must reach the granter").toBeTruthy();
     expect(
       renamed!.operation,
-      "MUTATION: a rename that lands as a write leaves the granter holding both paths",
+      "a rename that lands as a write leaves the granter holding both paths",
     ).toBe("rename");
     expect(renamed!.objectId).toBe(renameSource!.objectId);
     expect(renamed!.beforeLatestMomentId).toBe(renameSource!.latestMomentId);
@@ -1843,7 +1843,7 @@ test("edit side: a recipient creates, renames, deletes and imports, and the gran
     expect(deleted, "the recipient's delete must reach the granter").toBeTruthy();
     expect(
       deleted!.operation,
-      "MUTATION: a delete that lands as a write resurrects the file",
+      "a delete that lands as a write resurrects the file",
     ).toBe("delete");
     expect(deleted!.objectId).toBe(deleteSource!.objectId);
     expect(deleted!.beforeLatestMomentId).toBe(deleteSource!.latestMomentId);

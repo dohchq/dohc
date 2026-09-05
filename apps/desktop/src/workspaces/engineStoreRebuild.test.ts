@@ -1571,7 +1571,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    // Mirrors main.ts's actual rebuild-reopen wiring (round 19): the outer
+    // Mirrors main.ts's actual rebuild-reopen wiring: the outer
     // request gate is already raised — rebuildEngineStore raises it before
     // moveStoreAside — and the reopen's completePendingMove wrapper releases
     // it right after recovery settles, before the activity-open body below

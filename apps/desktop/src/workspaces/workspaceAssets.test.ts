@@ -30,7 +30,7 @@ import {
 } from "./workspaceAssets";
 import { createTestScratch } from "./testTemp";
 
-// The asset/text serving path is the renderer's ONLY window into workspace
+// The asset/text serving path is the renderer's only window into workspace
 // bytes, so its negative paths are security boundaries: traversal and symlink
 // escapes must be refused, and the size caps must hold (one oversized file
 // must never freeze the main process or stream unbounded bytes over IPC).
@@ -1550,11 +1550,11 @@ describe("mediaTypeForExtension", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("writes an asset into a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await makeWorkspace();
     await writeWorkspaceAsset(root, "..cache/pixel.png", new Uint8Array([1, 2, 3]));
     expect(
       new Uint8Array(await readFile(join(root, "..cache", "pixel.png"))),
+      "..-segment: a bare '..-prefix' isInside refuses this real contained name.",
     ).toEqual(new Uint8Array([1, 2, 3]));
   });
 });

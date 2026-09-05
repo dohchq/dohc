@@ -1,8 +1,8 @@
 // Criterion 2 (+4) — seeded alternating-driver fuzz: a Yjs (JS) peer and a
-// yrs (Rust) peer edit the SAME doc in alternating rounds; update delivery is
+// yrs (Rust) peer edit the same doc in alternating rounds; update delivery is
 // randomly ordered, duplicated, and adversarially truncated; some rounds sync
 // via state-vector diffs instead of raw update delivery. At the end both
-// peers must converge to identical CONTENT (canonical doc JSON), identical
+// peers must converge to identical content (canonical doc JSON), identical
 // semantic state vectors, and an identical markdown projection; a yrs
 // merge_updates of the full update log and a yrs full-state re-encode
 // (compaction/snapshot analogs) must reconstruct the same converged content.
@@ -16,7 +16,7 @@
 //
 // Usage: pnpm --filter @dohc/yrs-spike-scripts fuzz [-- --seeds 200 --start 1 --strict]
 // Certification runs must pass --strict: it promotes fault-injection
-// caveats (e.g. a truncated update being ACCEPTED) to hard failures.
+// caveats (e.g. a truncated update being accepted) to hard failures.
 
 import * as Y from "yjs";
 import { markdownToYDoc, plainTextToYDoc, yDocToMarkdown } from "@dohc/ydoc-projection";
@@ -44,7 +44,7 @@ interface FuzzResult {
   deliveries: number;
   duplicates: number;
   truncations: number;
-  // yjs applyUpdate is NOT atomic on malformed input: a rejected truncated
+  // yjs applyUpdate is not atomic on malformed input: a rejected truncated
   // update can leave a partially-integrated prefix (pinned deterministically
   // by the truncation-atomicity probe in fidelity.ts). The enforced invariant
   // is that the prefix converges once the genuine update is delivered.
@@ -78,7 +78,7 @@ const MARKS: Array<Record<string, unknown> | undefined> = [
   { bold: {}, italic: {} },
 ];
 
-// Build the seed doc so EVERY item — including the base lineage — is minted
+// Build the seed doc so every item — including the base lineage — is minted
 // under the fixed, seed-derived clientID. The projection helpers create docs
 // with random client ids, so their content is cloned onto a fixed-id doc
 // (same clone pattern as ydocEngineDriver.replaceDocContent) instead of
@@ -192,7 +192,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     });
   };
 
-  // r.rustEdits counts LANDED edits: the harness reports per-op whether the
+  // r.rustEdits counts landed edits: the harness reports per-op whether the
   // doc actually changed (a clamped out-of-range delete is a legal no-op,
   // and a no-op's encoded "delta" is still non-empty — it carries the full
   // delete set — so byte length cannot tell). An attempt that misses (typed
@@ -225,7 +225,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
         }
       }
     } catch (error) {
-      // ONLY the harness's typed "target not editable" rejection is legal
+      // Only the harness's typed "target not editable" rejection is legal
       // (the random paragraph index landed on a non-editable node). Anything
       // else is a protocol/build regression and must fail the run, not
       // silently drop Rust edits.
@@ -277,12 +277,12 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     const cut = 1 + pick(u.length - 1);
     const bad = u.slice(0, cut);
     const rustErr = await rust.apply(rustId, bad);
-    // The JS probe carries the REAL doc's current state (not a blank doc), so
+    // The JS probe carries the real doc's current state (not a blank doc), so
     // a partial mid-decode application against realistic struct-store state
-    // is observable. yjs applyUpdate is NOT atomic on malformed input (pinned
+    // is observable. yjs applyUpdate is not atomic on malformed input (pinned
     // by the truncation-atomicity probe in fidelity.ts): a rejection may
     // leave a partially-integrated prefix. The enforced invariant is that
-    // the prefix CONVERGES once the genuine update is delivered — anything
+    // the prefix converges once the genuine update is delivered — anything
     // else is corruption and fails the run.
     const probeState = Y.encodeStateAsUpdate(jsDoc);
     const probe = new Y.Doc();
@@ -308,7 +308,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
       }
     }
     if (rustErr === null || !jsRejected) {
-      // ACCEPTANCE of truncated bytes: caveat in dev runs, promoted to a hard
+      // Acceptance of truncated bytes: caveat in dev runs, promoted to a hard
       // failure under --strict (certification).
       r.caveats.push(
         `seed ${seed} ${mode}: truncated update (len ${cut}/${u.length}) accepted by ${rustErr === null ? "yrs" : ""}${rustErr === null && !jsRejected ? " and " : ""}${!jsRejected ? "yjs(probe)" : ""}`,
@@ -391,7 +391,7 @@ async function fuzzOne(rust: RustPeer, seed: number, mode: "plaintext" | "richdo
     fail("markdown projection", `js=${JSON.stringify(jsMd.slice(0, 300))}\nrust=${JSON.stringify(rustMd.slice(0, 300))}`);
   }
 
-  // Compaction analogs: yrs merge of the ENTIRE delivered update log, and
+  // Compaction analogs: yrs merge of the entire delivered update log, and
   // yrs's full-state re-encode, must both reconstruct the converged content.
   const fromMerged = new Y.Doc();
   Y.applyUpdate(fromMerged, await rust.merge(allUpdates));

@@ -59,7 +59,7 @@ export function decideNavigation(
   return { action: "deny" };
 }
 
-// Gate for the EXPLICIT openExternalUrl IPC (the only path to the OS
+// Gate for the explicit openExternalUrl IPC (the only path to the OS
 // browser/mail client): http(s) and mailto only — everything else (file:,
 // javascript:, custom schemes, unparseable) refused. mailto is allowlisted
 // alongside http(s) for the editor's link "Open" action; window.open itself

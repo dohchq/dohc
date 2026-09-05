@@ -28,7 +28,7 @@ export const FEEDBACK_MS = 1200;
 
 // What every action says when the document has no serializer: the editor is
 // not showing this document, so there is nothing honest to copy or export.
-// It states the fact and NOT the cause, because this menu cannot tell an
+// It states the fact and not the cause, because this menu cannot tell an
 // editor that is still opening from one that failed to — and copy.md says to
 // give a reason only when we know it. "document" is the noun this surface
 // already uses (the menu is "Document actions"), and the per-action next step
@@ -40,14 +40,14 @@ export function DocumentMenu(props: {
   // Filename stem (no extension) — becomes the export dialog's suggested
   // name and, absent a `title` frontmatter key, the document's title.
   suggestedName: string;
-  // Called fresh on every action: always the CURRENT document markdown
+  // Called fresh on every action: always the current document markdown
   // (frontmatter included), matching the code editor's own save path.
   //
   // NULL when the document cannot be serialized yet — an engine-backed
   // document whose editor has not mounted (or failed to). Every action here
-  // REFUSES on null rather than falling back to a stale or empty body: a
+  // refuses on null rather than falling back to a stale or empty body: a
   // copy or an export that silently produces nothing is a file the user
-  // believes is their document (#564).
+  // believes is their document.
   getMarkdown: () => string | null;
 }) {
   const [open, setOpen] = useState(false);
@@ -60,7 +60,7 @@ export function DocumentMenu(props: {
   // (the dohc-interface skill), and a label that swaps for 1.2s has no room for one
   // and no time to be read. It is stated in the menu's status line, which
   // every user reaches — a tooltip is not one, because focus stays on the
-  // menu container and never presents it (#666). It stands until the user
+  // menu container and never presents it. It stands until the user
   // closes the menu or another action supersedes it, never on a timer.
   const [instruction, setInstruction] = useState("");
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -108,7 +108,7 @@ export function DocumentMenu(props: {
     return () => window.removeEventListener("mousedown", onPointerDown, true);
   }, [open]);
 
-  // ONE timer, so one label. Merging into the previous feedback stranded it:
+  // One timer, so one label. Merging into the previous feedback stranded it:
   // the replacement timer only ever clears the newest item, so a second
   // refusal inside the window left the first item showing its refusal with
   // nothing left to retire it.
@@ -132,7 +132,7 @@ export function DocumentMenu(props: {
     }, FEEDBACK_MS);
   }
 
-  // NULL is the refusal this menu expects and handles. A THROW is not: the
+  // NULL is the refusal this menu expects and handles. A throw is not: the
   // serializer reads a live editor, and reading it can fail. Called outside a
   // boundary it rejected the action's promise into nothing — no feedback, no
   // log, and the menu still open as though the click had missed (#564,
@@ -191,7 +191,7 @@ export function DocumentMenu(props: {
     if (!serialized) return;
     const documentMarkdown = serialized.markdown;
     if (documentMarkdown === null) {
-      // BEFORE closing: the feedback replaces the item's label, so a refusal
+      // Before closing: the feedback replaces the item's label, so a refusal
       // shown into a closed menu is a refusal the user never sees — the
       // export would just appear to do nothing.
       showFeedback(
@@ -239,7 +239,7 @@ export function DocumentMenu(props: {
   function runItem(id: DocumentMenuItemId) {
     const attempt = ++attempts.current;
     // The token says who may speak next. This says the last one has stopped —
-    // a new action retires its predecessor's answer when it STARTS, not when
+    // a new action retires its predecessor's answer when it starts, not when
     // it finishes. Its own result can be a while away (a clipboard write can
     // sit behind an OS permission prompt), and until then the menu would
     // state a refusal the user is already retrying, under a timer that closes

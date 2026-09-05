@@ -151,8 +151,8 @@ const storage = openSyncRelayStorage(dbPath, { workspaceQuotaBytes });
 // device flow is valid here only when POSTGRES_URL and BETTER_AUTH_SECRET
 // match that service exactly; the relay has no separate login system.
 let pool: Pool | undefined;
-// Share-grant account lookups (PR 18): production resolves against Better
-// Auth's user table on the SAME Postgres the session check uses; the test
+// Share-grant account lookups: production resolves against Better
+// Auth's user table on the same Postgres the session check uses; the test
 // seam maps "<userId>@dohc.test" <-> "<userId>" so share E2E can address
 // recipients by email without a user database.
 const TEST_EMAIL_SUFFIX = "@dohc.test";
@@ -291,7 +291,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
     return new Response(null, { status: 405 });
   }
   if (url.pathname === "/health") {
-    // The presence hub footprint is exposed ONLY under the dev/test seam so
+    // The presence hub footprint is exposed only under the dev/test seam so
     // integration tests can assert parked waiters are released on disconnect;
     // production health stays a bare liveness probe.
     return Response.json({
@@ -305,7 +305,7 @@ const fetchHandler = async (request: Request): Promise<Response> => {
 
 // Hand-rolled node:http -> fetch Request adapter instead of better-auth's
 // toNodeHandler: toNodeHandler silently
-// drops request bodies that arrive WITHOUT a content-type header, which
+// drops request bodies that arrive without a content-type header, which
 // breaks raw-bytes blob PUTs. The relay never mounts better-auth's own
 // routes (it only calls auth.api.getSession), so it does not need that
 // adapter — and blob uploads must not depend on a client remembering to set
@@ -356,7 +356,7 @@ const server = createServer((request, response) => {
   let rejected = false;
   // Client-disconnect propagation: the fetch Request below carries this
   // signal, and the presence long-poll parks on request.signal — so a closed
-  // socket releases its parked waiter IMMEDIATELY instead of holding the slot
+  // socket releases its parked waiter immediately instead of holding the slot
   // for the full hold window ('close' also fires after a normal response
   // finishes, where the late abort is a no-op).
   const disconnect = new AbortController();

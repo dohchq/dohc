@@ -68,7 +68,7 @@ export function requireE2eEngine({
   const name = engineBinaryName(platform);
   const wanted = join(desktopTargetDir, name);
 
-  // An explicit override wins, and it has to win HERE too. Electron always
+  // An explicit override wins, and it has to win here too. Electron always
   // launches the staged path, so honouring the override only in the seed helper
   // would leave Playwright seeding with the override and exercising whatever sat
   // in the staged path — the same skew this refresh exists to remove, arriving
@@ -90,7 +90,7 @@ export function requireE2eEngine({
 
   // The workspace-root build wins whenever it exists, with no mtime comparison.
   // It is authoritative because `cargo build` is the only thing that refreshes
-  // it, and src/testing/engineBinary.ts now resolves it FIRST for the seed
+  // it, and src/testing/engineBinary.ts now resolves it first for the seed
   // helper — so any branch that left a different file staged would have Electron
   // launch one daemon while the seed used another. Keeping a "newer" staged copy
   // is exactly that hole: a previous run's override can be newer than a fresh

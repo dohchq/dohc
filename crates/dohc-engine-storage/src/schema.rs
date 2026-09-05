@@ -1,6 +1,6 @@
 //! The open ritual and the v2 fingerprint fence.
 //!
-//! `open_engine_db` is the **only** place pragmas are set (`PORTING.md` §9). It
+//! `open_engine_db` is the **only** place pragmas are set. It
 //! is ordered so the **fingerprint fence never mutates a rejected database**:
 //!
 //! 1. Reject a non-empty file too small to hold a SQLite header, before the
@@ -33,10 +33,10 @@ use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 
 /// `synchronous = NORMAL`: the SQLite-recommended WAL setting and the TS
-/// engine's effective posture (`LANGUAGE_SEMANTICS_MATRIX.md` §8.6). Durable
+/// engine's effective posture. Durable
 /// across application/process crashes (the crash tiers this crate tests); the
 /// last commit may be lost only on OS crash / power loss, honestly de-scoped to
-/// `TEST_ORACLE.md` tier 3. Pinned AND asserted on open so a weakened value
+/// `TEST_ORACLE.md` tier 3. Pinned and asserted on open so a weakened value
 /// fails a test rather than passing silently.
 const SYNCHRONOUS_NORMAL: i64 = 1;
 
@@ -295,7 +295,7 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
         ENGINE_SCHEMA_VERSION => Ok(Disposition::ExistingV2),
         0 => {
             // Either a brand-new empty file or a non-empty foreign database that
-            // never stamped a version. Refuse to init over the latter — ANY user
+            // never stamped a version. Refuse to init over the latter — any user
             // object (table, view, index, trigger) marks the file as someone
             // else's.
             if has_any_user_object(conn)? {
@@ -308,7 +308,7 @@ fn classify_fingerprint(conn: &Connection) -> Result<Disposition, StorageError> 
             // A non-recognized `user_version` is normally a real foreign
             // fingerprint (e.g. a valid v1 TS database) → export/reset. But a
             // corrupt page-1 header can read `user_version` as garbage; that is
-            // CORRUPTION (restore from backup), not an unsupported version.
+            // corruption (restore from backup), not an unsupported version.
             // Distinguish by a read-only integrity probe: a store that fails
             // `quick_check` is classified corrupt regardless of the version it
             // claims. (A genuine foreign db passes the probe.)

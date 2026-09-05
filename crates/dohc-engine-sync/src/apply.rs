@@ -642,7 +642,7 @@ struct ThreadCreate {
     title: String,
     created_at_ms: i64,
     linked_object_id: Option<String>,
-    /// The file this thread is about, named by PATH (#646 PR2). This is the
+    /// The file this thread is about, named by PATH. This is the
     /// shape a thread's link takes across a SHARE boundary in both
     /// directions: object ids are minted per replica, so neither end can read
     /// the other's. Whoever applies it resolves the path to its own local
@@ -1019,9 +1019,9 @@ fn channel_allocation_base(name: &str) -> String {
 /// beside it.
 ///
 /// An op naming its file by object id is a replica's own op and its id is
-/// already local. An op naming it by PATH crossed a share boundary (#646 PR2)
+/// already local. An op naming it by PATH crossed a share boundary
 /// — in either direction, a recipient replaying the granter's thread or a
-/// granter applying the recipient's — and the path is resolved HERE, against
+/// granter applying the recipient's — and the path is resolved here, against
 /// this store's main version, because that is the only place the two replicas
 /// agree.
 ///
@@ -1043,7 +1043,7 @@ fn linked_object_for_apply(
     // The SECRET floor, applied where this op is applied. A `linkedPath` op
     // reaches a granter over the ordinary owner lane, with no share and no
     // grant in scope, so the relay's filter is the authority on what a share
-    // COVERS and remains so. This is the one rule this surface can state on
+    // covers and remains so. This is the one rule this surface can state on
     // its own: a secret path is never a file a thread may bind to, whoever
     // asked. `validate_addressable_plaintext_path` refuses `Ignored` and
     // accepts `Secret`, so it does not cover this.
@@ -1101,8 +1101,8 @@ fn apply_thread(
         });
     }
     let channel_shape = payload.channel_slug.is_some() || payload.channel_wire_id.is_some();
-    // A file-linked thread names its file ONE way: by object id (a replica's
-    // own op) or by path (an op that crossed a share boundary, #646 PR2).
+    // A file-linked thread names its file one way: by object id (a replica's
+    // own op) or by path (an op that crossed a share boundary).
     // Carrying both is malformed — reading either half would let one op bind
     // one thread to two files.
     if payload.linked_object_id.is_some() && payload.linked_path.is_some() {
@@ -1128,8 +1128,8 @@ fn apply_thread(
             reason: "chat thread linked path is invalid",
         });
     }
-    // A file-linked thread MUST carry its linkedAtMs. The oracle accepts this
-    // op (storing linked_at_ms NULL) but then its OWN reader throws corruptStore
+    // A file-linked thread must carry its linkedAtMs. The oracle accepts this
+    // op (storing linked_at_ms NULL) but then its own reader throws corruptStore
     // (threadFromRow numberValue(null)) — a latent oracle bug that bricks the
     // read surface on both engines. We reject the malformed op at apply
     // (fail-closed), which is deliberately stricter than the oracle; honest

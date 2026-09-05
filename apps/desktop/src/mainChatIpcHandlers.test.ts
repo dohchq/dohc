@@ -496,10 +496,10 @@ describe("runtime main chat IPC boundaries", () => {
   });
 });
 
-// #551: a relay outage must resolve as "unreachable", never as an empty
+// A relay outage must resolve as "unreachable", never as an empty
 // listing — an empty listing is an authoritative "there are no shares" and
 // clobbers whatever the renderer has cached. A missing or rejected session is
-// the third fact: "signed-out", which must CLEAR cached account-scoped rows
+// the third fact: "signed-out", which must clear cached account-scoped rows
 // rather than preserve them across a logout or account switch.
 describe("readRelayChatShareLanes", () => {
   it("reports a transport failure as unreachable, never as an empty listing", async () => {
@@ -683,7 +683,7 @@ describe("readRelayChatShareLanes", () => {
   // below is structurally valid, so the guard used to answer "answered" and
   // hand the contract parse a lane it cannot represent: the parse throws, the
   // IPC call rejects, the renderer's .catch(() => null) commits a null
-  // listing, and every cached invitation and grant disappears (#608).
+  // listing, and every cached invitation and grant disappears.
   function relayRowsOverCap(lane: "granted" | "received") {
     const over = MAX_CHAT_CHANNEL_SHARE_ROWS + 1;
     const rows = Array.from({ length: over }, (_, index) => ({
@@ -707,11 +707,11 @@ describe("readRelayChatShareLanes", () => {
           fetchListing: () => Promise.resolve(relayRowsOverCap(lane)),
           workspaceId: "workspace-1",
         });
-        // NOT "unreachable": that word means dohc could not read the answer,
+        // Not "unreachable": that word means dohc could not read the answer,
         // and it earns a Try again. This answer arrived and will arrive again
         // identically, so it carries what it observed and the limit instead,
         // and the surface names the constraint rather than posing as an
-        // outage (#618 codex).
+        // outage.
         expect(lanes).toEqual({
           state: "over-limit",
           lanes: [{ lane, rows: MAX_CHAT_CHANNEL_SHARE_ROWS + 1 }],
@@ -803,7 +803,7 @@ describe("readRelayChatShareLanes", () => {
   });
 
   // Filtering runs before the cap: an oversized body whose chat-channel rows
-  // fit is a listing dohc CAN represent, and treating it as unreachable would
+  // fit is a listing dohc can represent, and treating it as unreachable would
   // hide real shares behind rows that were never going to be listed.
   it("counts what it will list, not what the relay sent", async () => {
     const listed = Array.from({ length: 10 }, (_, index) => ({
@@ -833,7 +833,7 @@ describe("readRelayChatShareLanes", () => {
 
   // A received grant is ACCOUNT-wide: the relay answers the same rows in every
   // workspace. Scoping them to the workspace that claimed them is what keeps
-  // one workspace's sharing surface independent of another's (#618).
+  // one workspace's sharing surface independent of another's.
   it("drops received shares another local workspace already claimed", async () => {
     const lanes = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set(["share-in-work"]),
@@ -866,8 +866,8 @@ describe("readRelayChatShareLanes", () => {
     ]);
   });
 
-  // #618 codex round 5. The relay keeps returning REVOKED grants to the
-  // granter, so counting them made the cap measure an account's LIFETIME
+  // The relay keeps returning revoked grants to the
+  // granter, so counting them made the cap measure an account's lifetime
   // grants: past the cap the listing stayed over-limit with every grant
   // revoked, and revoking more could not reduce it. Third time this cap
   // produced a permanent-refusal shape, same cause each time — counting rows
@@ -917,7 +917,7 @@ describe("readRelayChatShareLanes", () => {
     ).toBe(true);
   });
 
-  // #618 codex round 4: an ENDED row in another workspace claims nothing. The
+  // An ended row in another workspace claims nothing. The
   // tombstone is that workspace's own write gate and stays for that, but it
   // was never an argument for cross-workspace exclusivity — once A has left,
   // filtering the invitation out of every other workspace makes leaving
@@ -957,7 +957,7 @@ describe("readRelayChatShareLanes", () => {
 
   // The acceptance case for #618: another workspace's received lane being
   // unreadable must not blank a workspace that has shares of its own. The
-  // scoping runs BEFORE the cap, so the rows homed elsewhere never count
+  // scoping runs before the cap, so the rows homed elsewhere never count
   // against this workspace's lane.
   it("still answers this workspace's shares when the rows claimed elsewhere would blow the cap", async () => {
     const claimedElsewhere = Array.from(
@@ -1046,7 +1046,7 @@ describe("chatShareSessionKey", () => {
         userId: "user-1",
       }),
     ).not.toBe(key);
-    // The same account on ANOTHER relay has different rows: its cache must
+    // The same account on another relay has different rows: its cache must
     // not carry over — including from a session with no relay configured.
     expect(
       chatShareSessionKey({
@@ -1061,7 +1061,7 @@ describe("chatShareSessionKey", () => {
   });
 });
 
-// A relay 401 acts if and only if it belongs to the CURRENT credentials, and
+// A relay 401 acts if and only if it belongs to the current credentials, and
 // then it acts completely: memory, broadcast, persistent store — in that
 // order, so views re-scope immediately and a restart cannot read the dead
 // token back into a false connected state.
@@ -1109,7 +1109,7 @@ describe("handleRelayUnauthorized", () => {
       },
     });
     expect(acted).toBe(true);
-    // The second notify is the FINAL state, after the store settled: a
+    // The second notify is the final state, after the store settled: a
     // status read raced by the first broadcast can have seen the expired
     // on-disk session and reported connected.
     expect(steps).toEqual([
@@ -1160,7 +1160,7 @@ describe("handleRelayUnauthorized", () => {
   // clearCachedCredentials, exactly as main.ts wires it) also clears the DM
   // request-lanes cache, so a new account's first failed poll can never be
   // served the previous account's cached request rows. Driven through the
-  // REAL createLastKnownDmRequestLanesCache, not a string log, so this
+  // real createLastKnownDmRequestLanesCache, not a string log, so this
   // proves the cache itself ends up empty, not just that some callback fired.
   it("clears a real DM request-lanes cache when the current-session 401 path runs", async () => {
     const cache = createLastKnownDmRequestLanesCache();
@@ -1182,7 +1182,7 @@ describe("handleRelayUnauthorized", () => {
 });
 
 // The catch classification: signed-out is authoritative only when the relay
-// rejected the CURRENT credentials. A stale token's 401 — a listing still in
+// rejected the current credentials. A stale token's 401 — a listing still in
 // flight across a same-account rotation — says nothing about the current
 // session and must not clear cached rows.
 describe("readRelayChatShareLanes session classification", () => {
@@ -1224,7 +1224,7 @@ describe("readRelayChatShareLanes session classification", () => {
 
     // The ITERABLE non-array: a string lane iterates per character, every
     // character filters out, and the result would read as an authoritative
-    // EMPTY answer — clearing rows out of garbage.
+    // empty answer — clearing rows out of garbage.
     const stringLane = await readRelayChatShareLanes({
       shareIdsClaimedElsewhere: new Set<string>(),
       fetchListing: () =>
@@ -1289,7 +1289,7 @@ describe("readRelayChatShareLanes session classification", () => {
   });
 });
 
-// #640 acceptance: the joined-lane response size must be independent of how
+// Acceptance: the joined-lane response size must be independent of how
 // many channels the account has ever joined. A source-text pin cannot observe
 // a response size, so this drives the real handler — parse, scope, and the
 // contract parse the answer actually crosses IPC through.
@@ -1333,7 +1333,7 @@ describe("createListJoinedSharedChannelsIpcHandler", () => {
     });
   }
 
-  // THE MUTATION TEST at the layer that crosses IPC. Make the handler answer
+  // The mutation test at the layer that crosses IPC. Make the handler answer
   // from the full registry and this fails on the response size.
   it("answers a small named scope out of a huge registry, at the size of the scope", async () => {
     const shown = ["wire-3", "wire-7", "wire-9"];
@@ -1454,7 +1454,7 @@ describe("chat scope write gate", () => {
     };
   }
 
-  it("refuses a mutation on an ENDED share, whatever level it granted", async () => {
+  it("refuses a mutation on an ended share, whatever level it granted", async () => {
     // The granter ended the share. The local copy stays readable and takes no
     // writes — the same rule an ended chat-channel grant follows. Without
     // this the row lands durably, the panel shows it, and the push bails on
@@ -1474,7 +1474,7 @@ describe("chat scope write gate", () => {
     );
     expect(
       run,
-      "MUTATION: an ended share still writes a durable row nothing will ever send",
+      "an ended share still writes a durable row nothing will ever send",
     ).not.toHaveBeenCalled();
   });
   it("refuses thread creation before the store for an independent Comment share", async () => {
@@ -1496,7 +1496,7 @@ describe("chat scope write gate", () => {
       .then(() => "answered", (error: unknown) => String(error));
     expect(
       createThread,
-      "MUTATION: genericChatWritable admitted a received-share thread row",
+      "genericChatWritable admitted a received-share thread row",
     ).not.toHaveBeenCalled();
     expect(outcome).toContain("Chats are read-only in this shared view.");
   });
@@ -1524,7 +1524,7 @@ describe("chat scope write gate", () => {
         .then(() => "answered", (error: unknown) => String(error));
       expect(
         writeRow,
-        `MUTATION: genericChatWritable admitted a received-share ${label} row`,
+        `genericChatWritable admitted a received-share ${label} row`,
       ).not.toHaveBeenCalled();
       expect(outcome, label).toContain("Chats are read-only in this shared view.");
     }

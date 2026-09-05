@@ -23,7 +23,7 @@ describe('desktop editor schema parity', () => {
     expect(schema.marks.highlight).toBeDefined()
     expect(schema.nodes.tableRow?.spec.attrs?.height?.default).toBeNull()
     // `paragraph+` (a bare TaskItem) makes an indented list under a checkbox
-    // schema-invalid, and the Y.Doc conversion drops the whole task list (#700).
+    // schema-invalid, and the Y.Doc conversion drops the whole task list.
     expect(schema.nodes.taskItem?.spec.content).toBe('paragraph block*')
   })
 })

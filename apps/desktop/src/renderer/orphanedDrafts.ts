@@ -8,13 +8,13 @@ import {
   storeDraft,
 } from "./orphanedDraftStorage";
 
-// Set-aside drafts (#567): text a reopen took out of the save pipeline, held
-// until the user copies or dismisses it. The store lives OUTSIDE the keyed
+// Set-aside drafts: text a reopen took out of the save pipeline, held
+// until the user copies or dismisses it. The store lives outside the keyed
 // document view because the notice promises the text stays recoverable —
-// switching or closing the tab must not drop it (#579 review, P1).
+// switching or closing the tab must not drop it.
 //
 // The text never goes back into the document — writing it there is the clobber
-// the capture exists to prevent — but it does reach disk (#600), in the app's
+// the capture exists to prevent — but it does reach disk, in the app's
 // own storage and never in the workspace tree. `orphanedDraftStorage` keeps
 // the copy that outlives the app run; this module keeps the copy every surface
 // reads, and `restoreOrphanedDrafts` puts the two together at startup.
@@ -24,7 +24,7 @@ export type OrphanedDraft = {
   // The full serialized document as the user last had it, frontmatter
   // included — what Copy hands back.
   text: string;
-  // When the reopen set this text aside. THE order key (see the merge in
+  // When the reopen set this text aside. The order key (see the merge in
   // `remapOrphanedDraftPaths`), and deliberately not the id: an id is a slot
   // an allocator can hand out again after a dismissal frees it, so the newest
   // draft in a run can hold a lower id than a survivor captured before it.
@@ -33,7 +33,7 @@ export type OrphanedDraft = {
   capturedAtMs: number;
 };
 
-// THE order every surface reads: oldest first. Capture time is the key, and
+// The order every surface reads: oldest first. Capture time is the key, and
 // the id breaks a tie — two reopens inside one millisecond are ordinary, and
 // leaving those to a stable sort is not enough, because the two halves feed
 // their sort in different orders (this map merges target-then-moved, storage
@@ -98,7 +98,7 @@ function scheduleNotify(): void {
 // Synchronous because event-boundary and render-boundary captures cannot await.
 //
 // Ids are never reused, which is why dismissing does not give one back. The
-// close guard remembers the ids the user approved losing (#579 review, r13),
+// close guard remembers the ids the user approved losing,
 // and re-issuing a dismissed id inside that window would hand a brand-new
 // draft someone else's approval and exit without ever showing it.
 function allocateDraftId(): number {
@@ -118,20 +118,20 @@ export function captureOrphanedDraft(
   // One reading for both halves, or the copy that outlives the run would sort
   // against a different clock than the copy on screen.
   const capturedAtMs = Date.now();
-  // Durable before the notice exists (#600). The write is synchronous, so the
+  // Durable before the notice exists. The write is synchronous, so the
   // answer the close guard needs is already true here — a draft is at risk
-  // only when storage REFUSED it.
+  // only when storage refused it.
   if (storeDraft({ id, workspaceId, path, text, capturedAtMs })) {
     storedIds.add(id);
   }
   // Append, never overwrite: a second reopen with the first notice still up
-  // must not destroy the first draft (#579 review, P2).
+  // must not destroy the first draft.
   drafts.set(key, [...(drafts.get(key) ?? EMPTY), { id, text, capturedAtMs }]);
   scheduleNotify();
   return id;
 }
 
-// A second snapshot from the SAME deletion updates its existing recovery.
+// A second snapshot from the same deletion updates its existing recovery.
 // Separate deletions still use captureOrphanedDraft and append separate rows.
 export function replaceOrphanedDraft(
   workspaceId: string,
@@ -164,7 +164,7 @@ export function replaceOrphanedDraft(
   scheduleNotify();
 }
 
-// Startup restore (#600): the persisted recoveries land in the SAME store the
+// Startup restore: the persisted recoveries land in the same store the
 // in-document notice, the tab dot, the notice center, and the close warning
 // already read, so every one of those surfaces works unchanged. Called once,
 // from main.tsx before the root renders — synchronous, before any subscriber
@@ -212,7 +212,7 @@ export function dismissOrphanedDraft(
 
 // A rename or move re-keys the document, and the recovery must follow it —
 // otherwise the notice dies with the old path while the tab remaps to the new
-// one (#579 review, P1). The caller supplies the same projection the shell
+// one. The caller supplies the same projection the shell
 // applies to tabs and pins. A null projection (a delete) keeps the drafts
 // under their old key: destroying recovery text is never this store's call,
 // and a restored or recreated file shows the notice again.
@@ -261,7 +261,7 @@ export function useOrphanedDrafts(
 }
 
 // Every path in one workspace that holds a set-aside draft. The tab strip
-// marks INACTIVE tabs with it (#579 review, r4) — only the mounted inspector
+// marks inactive tabs with it — only the mounted inspector
 // can report savable-dirty, but recovery is knowable for every tab.
 export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> {
   return useSyncExternalStore(subscribe, () => {
@@ -281,14 +281,14 @@ export function useOrphanedDraftPaths(workspaceId: string): ReadonlySet<string> 
   });
 }
 
-// Every set-aside draft an exit would DESTROY, by id. The close warning keys
-// off this (#579 review, r4): losing these is irreversible, and the user must
-// be told before it runs. It compares the LIVE list against the ids the user
-// approved losing (#579 review, r13) — a count alone cannot tell "the same two
+// Every set-aside draft an exit would destroy, by id. The close warning keys
+// off this: losing these is irreversible, and the user must
+// be told before it runs. It compares the live list against the ids the user
+// approved losing — a count alone cannot tell "the same two
 // drafts" from "one dismissed and one new". A draft the list does not contain
 // was in no warning, and the exit stops for it.
 //
-// A persisted draft is not one of them (#600) — it comes back on the next
+// A persisted draft is not one of them — it comes back on the next
 // launch, and calling it lost would be a lie about durability on every quit.
 // What is left behind the warning is what nothing else can bring back: a
 // secret-classified path the plaintext store refuses, and a draft whose write
@@ -304,13 +304,13 @@ export function atRiskOrphanedDraftIds(): readonly number[] {
 export type OrphanedDraftRow = {
   workspaceId: string;
   // The name the UI shows for this workspace (the shell registers it) — the
-  // raw id is a UUID no user recognizes (#579 review, r10). Falls back to
+  // raw id is a UUID no user recognizes. Falls back to
   // the id when no shell for that workspace ever mounted.
   workspaceLabel: string;
   path: string;
   draft: OrphanedDraft;
   // Whether this row survives a restart. The close warning lists only the
-  // rows that do not (#600).
+  // rows that do not.
   persisted: boolean;
 };
 
@@ -363,7 +363,7 @@ export function useAllOrphanedDrafts(): readonly OrphanedDraftRow[] {
 // Test seam: counts the mutations this run has made. Resetting the store is
 // not enough on its own — an unmounted view can still capture a draft on a
 // later turn, and the notification that follows re-renders the recovery notice
-// inside the NEXT test, under whatever it was about to click. A teardown reads
+// inside the next test, under whatever it was about to click. A teardown reads
 // this to tell "the capture already landed" from "it is still coming".
 export function orphanedDraftStoreVersionForTests(): number {
   return storeVersion;

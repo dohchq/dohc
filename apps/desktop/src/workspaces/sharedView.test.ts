@@ -197,7 +197,7 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 // These tests drive the pull with the selector a share record pins. It is a
-// REAL selector — no paths and no version selects nothing at all, which the
+// real selector — no paths and no version selects nothing at all, which the
 // engine refuses.
 const PINNED_SELECTOR = {
   paths: ["docs"],
@@ -250,7 +250,7 @@ async function denyFileContentRead(absolutePath: string): Promise<void> {
 // This file no longer references the legacy TypeScript engine at all — not by import
 // and not by vi.mock. That is a stronger guarantee than a not-called spy: the
 // module cannot be reached from here even indirectly. The production side is
-// held by the #402 ratchet, which fails if sharedView.ts ever gains a runtime
+// held by the ratchet, which fails if sharedView.ts ever gains a runtime
 // import of the legacy package.
 //
 // materializeSharedViewPaths touches only ensureMainVersion and the two read
@@ -512,7 +512,7 @@ class FakeShareRelay {
   pageSize: number | null = null;
   logRequests = 0;
   beforeLogRequest?: (requestNumber: number) => Promise<void>;
-  // The share metadata route is the ONLY route a re-pin could use. Counted so
+  // The share metadata route is the only route a re-pin could use. Counted so
   // a test can prove that a refresh never reaches it.
   metadataRequests = 0;
   private nextSeq = 1;
@@ -765,7 +765,7 @@ describe("shared view refresh", () => {
       ).rejects.toThrow(/escapes the workspace/);
       await expect(
         lstat(outsideLink),
-        "MUTATION: projection healing removes a link outside the projection",
+        "projection healing removes a link outside the projection",
       ).resolves.toBeDefined();
     } finally {
       await store.close();
@@ -802,7 +802,7 @@ describe("shared view refresh", () => {
           relativePath: "docs/plans",
           shareViewStore: () => store,
         }),
-        "MUTATION: an unreadable directory looks empty and is deleted recursively",
+        "an unreadable directory looks empty and is deleted recursively",
       ).rejects.toThrow("projection directory is unreadable");
       await expect(readFile(join(rootDir, path), "utf8")).resolves.toBe(
         "one\n",
@@ -4408,7 +4408,7 @@ describe("shared view refresh", () => {
     }
   });
 
-  // #859: a share-view FOLDER delete crashing between the store deleting its
+  // A share-view FOLDER delete crashing between the store deleting its
   // children and `materializeSharedViewPaths`' single recursive rm on the
   // folder path used to leave the projection showing files the store had
   // already deleted — the old delete primitive marked only the FOLDER path
@@ -4420,14 +4420,14 @@ describe("shared view refresh", () => {
   // makes them reachable here: the leftover-pending arm below predates #862
   // unchanged, but a path only reaches it when the marker names it.
   //
-  // The crash is driven through the REAL writer, not hand-assembled: a
+  // The crash is driven through the real writer, not hand-assembled: a
   // failing store proxy lets both `deleteTextFile` calls succeed, then makes
   // the very first call `materializeSharedViewPaths` itself makes
   // (`ensureMainVersion`) throw — so `applyShareViewPathDelete` leaves
   // whatever state `applyShareViewPathDelete` produces at that exact point,
   // with disk untouched because materialization never ran its rm.
   //
-  // Also pins a known, accepted residue (finding 6): recovery finishes each
+  // Also pins a known, accepted residue: recovery finishes each
   // child individually and has no equivalent of the folder-level rm's
   // directory removal, so the emptied `docs/plans` stays on disk after
   // recovery where an uninterrupted delete would have removed it too.
@@ -6308,7 +6308,7 @@ describe("shared view refresh", () => {
       "deep body",
     );
     // The cursor moved because refreshSharedViewOnce committed it through
-    // sync.commitCursor — the ONLY thing that advances it. Without this the
+    // sync.commitCursor — the only thing that advances it. Without this the
     // "unchanged" assertion below would pass on a pull that simply forgot to
     // ask for the ops again.
     expect(harness.transport.committedCursor(WORKSPACE)).toBe(2);
@@ -6389,14 +6389,14 @@ describe("shared view refresh", () => {
     ["absent — the record was never written with one", undefined],
     ["null", null],
     ["not an object", "docs"],
-    // Every row below carries a VALID access, so each is refused for the
+    // Every row below carries a valid access, so each is refused for the
     // reason it names rather than for a missing level.
     ["no paths array", { versionId: "v1", access: "view" }],
     [
       "a non-string path",
       { paths: ["docs", 7], versionId: null, access: "view" },
     ],
-    // Selects NOTHING: the relay refuses to create this one
+    // Selects nothing: the relay refuses to create this one
     // (`empty_selector`) and serves nothing through it.
     ["selects nothing", { paths: [], versionId: null, access: "view" }],
     // A version id the relay could not have issued. These are the dangerous
@@ -6413,7 +6413,7 @@ describe("shared view refresh", () => {
       "an unbounded version id",
       { paths: [], versionId: "v".repeat(129), access: "view" },
     ],
-    // The level dimension (#646). A record whose level is missing or
+    // The level dimension. A record whose level is missing or
     // unreadable is damaged the same way, and its refresh must not pull at a
     // level nobody granted.
     ["no access at all", { paths: ["docs"], versionId: null }],
@@ -6457,7 +6457,7 @@ describe("shared view refresh", () => {
 
       expect(
         pulls,
-        `MUTATION: reading a ${label} pin as a grant pulls against a scope the relay never issued`,
+        `reading a ${label} pin as a grant pulls against a scope the relay never issued`,
       ).toBe(0);
       await expect(stat(join(rootDir, "docs/a.md"))).rejects.toMatchObject({
         code: "ENOENT",
@@ -6518,9 +6518,9 @@ describe("shared view refresh", () => {
     await harness.closeAll();
   });
 
-  // A pinned selector is used EXACTLY as recorded, and the relay is never
+  // A pinned selector is used exactly as recorded, and the relay is never
   // asked to restate it. There is no code path left that could.
-  // The pull SKIPS an op it refuses and keeps going, which is the right
+  // The pull skips an op it refuses and keeps going, which is the right
   // liveness call — one op a diverging relay serves must not wedge the share.
   // The cost is that the view quietly stops carrying part of what the granter
   // shares, so the refusal has to reach the caller and the user. The engine
@@ -6574,7 +6574,7 @@ describe("shared view refresh", () => {
 
       expect(
         outcome.refusedOps,
-        "MUTATION: swallowing the refusal leaves a bare count the user never sees",
+        "swallowing the refusal leaves a bare count the user never sees",
       ).toBe(1);
       expect(outcome.refusedDetail).toContain("version-other");
       // And it is logged whole, with the op it refused: the count alone
@@ -6633,7 +6633,7 @@ describe("shared view refresh", () => {
     // in a refresh touches it.
     expect(
       relay.metadataRequests,
-      "MUTATION: re-fetching the selector lets the relay restate the grant on every pull",
+      "re-fetching the selector lets the relay restate the grant on every pull",
     ).toBe(0);
   });
 
@@ -6673,7 +6673,7 @@ describe("shared view refresh", () => {
         rootDir,
         WORKSPACE,
         [{ path: "../escape.md", operation: "write", contentKind: "text" }],
-        // The refusal happens before any CONTENT read, so a store whose
+        // The refusal happens before any content read, so a store whose
         // readTextFile throws still yields the escape error. It is not before
         // every store call — `ensureMainVersion` does run first; making that
         // throw changes the error, which is how this was checked rather than
@@ -6686,9 +6686,6 @@ describe("shared view refresh", () => {
   });
 
   if (process.platform === "win32") {
-    // MUTATION (case-fold): restore case folding and this pin goes red. The
-    // test steers realpath because CI cannot depend on an NTFS directory with
-    // per-directory case sensitivity enabled.
     it("refuses a parent that resolves under a case-distinct sibling", async () => {
       const rootDir = await tempRoot();
       const parent = join(rootDir, "docs");
@@ -6717,7 +6714,7 @@ describe("shared view refresh", () => {
   }
 });
 
-// #646 PR3-1 — which share views ask for a sync identity.
+// Which share views ask for a sync identity.
 //
 // The main process runs this before an Edit share submits document changes.
 // It must fail closed on every tri-state: skip, never throw, and never enrol a
@@ -6823,7 +6820,6 @@ describe("shareViewIdentitySelector", () => {
 
 describe("containment of '..'-prefixed names", () => {
   it("resolves a shared-view target under a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const root = await createTestScratch("dohc-shared-view-dotdot-");
     await mkdir(join(root, "..cache"), { recursive: true });
     await writeFile(join(root, "..cache", "x.md"), "cached");

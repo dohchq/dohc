@@ -95,7 +95,7 @@ describe("share selector validation", () => {
     }
     expect(
       validateFileShareAccess(undefined),
-      "MUTATION: a share must never be minted at a level nobody asked for",
+      "a share must never be minted at a level nobody asked for",
     ).toMatchObject({ ok: false, code: "invalid_access" });
   });
 
@@ -149,7 +149,7 @@ describe("share selector validation", () => {
   });
 
   // The version rule is shared with every recipient surface that reads a
-  // selector BACK (the desktop's share metadata parse and its registry
+  // selector back (the desktop's share metadata parse and its registry
   // record). Restating it per surface is what let "" through one reader while
   // this one refused it — a no-paths selector that carries a version grants
   // the whole tracked workspace.
@@ -157,7 +157,7 @@ describe("share selector validation", () => {
     for (const versionId of ["", "   ", " v1", "v1 ", "v".repeat(MAX_SHARE_VERSION_ID_CHARS + 1)]) {
       expect(
         validateShareSelector({ versionId }),
-        `MUTATION: accepting ${JSON.stringify(versionId)} makes a no-paths selector a whole-workspace grant`,
+        `accepting ${JSON.stringify(versionId)} makes a no-paths selector a whole-workspace grant`,
       ).toMatchObject({ ok: false, code: "invalid_version" });
       expect(isValidShareVersionId(versionId)).toBe(false);
     }
@@ -168,7 +168,7 @@ describe("share selector validation", () => {
     ).toMatchObject({ ok: true });
   });
 
-  // An oversized id has to say HOW oversized. The limit alone reads the same
+  // An oversized id has to say how oversized. The limit alone reads the same
   // for 129 code units and for 10,000, and the caller cannot tell whether it
   // is one character over or sending the wrong field entirely. The engine's
   // twin refusal already names the observed length; this is the same rule
@@ -184,7 +184,7 @@ describe("share selector validation", () => {
 
     expect(
       barelyOver.message,
-      "MUTATION: a limit with no observed length reads the same at 129 and at 10,000",
+      "a limit with no observed length reads the same at 129 and at 10,000",
     ).toContain(`${MAX_SHARE_VERSION_ID_CHARS + 1}`);
     expect(wildlyOver.message).toContain("10000");
     expect(barelyOver.message).not.toBe(wildlyOver.message);
@@ -225,7 +225,7 @@ describe("share op filter", () => {
     }
   });
 
-  it("serves a MINIMAL moment.append payload with the lineage content hash", () => {
+  it("serves a minimal moment.append payload with the lineage content hash", () => {
     const decision = filterOpForShare(
       pathShare,
       "moment.append",
@@ -294,7 +294,7 @@ describe("share op filter", () => {
     expect(decision.payload).toHaveProperty("payloadBeforeBlobSha256", null);
   });
 
-  it("serves a MINIMAL version.create payload with redacted, metadata-free snapshots", () => {
+  it("serves a minimal version.create payload with redacted, metadata-free snapshots", () => {
     const selector: ShareSelector = { paths: ["docs"], versionId: "version-1", access: "view" };
     const decision = filterOpForShare(
       selector,
@@ -335,7 +335,7 @@ describe("share op filter", () => {
     }
   });
 
-  // The recipient re-runs the SAME equality this filter runs
+  // The recipient re-runs the same equality this filter runs
   // (`crates/dohc-engine-sync/src/share.rs`, `enforce_share_view_boundary`),
   // which it can only do when the served moment says which version it is on.
   it("serves the granted version on every moment, for a main share and a version share", () => {
@@ -344,7 +344,7 @@ describe("share op filter", () => {
     if (main.allowed) {
       expect(
         (main.payload as { versionId?: unknown }).versionId,
-        "MUTATION: a served moment with no version identity leaves the recipient unable to version-check it",
+        "a served moment with no version identity leaves the recipient unable to version-check it",
       ).toBe("main");
     }
     const versioned = filterOpForShare(
@@ -363,7 +363,7 @@ describe("share op filter", () => {
       filterOpForShare(pathShare, "moment.append", momentPayload({ path: "src/app.ts", payloadAfterPath: "src/app.ts" }))
         .allowed,
     ).toBe(false);
-    // "docs-private" must NOT match the "docs" folder selector.
+    // "docs-private" must not match the "docs" folder selector.
     expect(
       filterOpForShare(
         pathShare,
@@ -376,7 +376,7 @@ describe("share op filter", () => {
     ).toBe(false);
   });
 
-  it("denies a moment when ANY referenced path is outside the selector (boundary-crossing rename)", () => {
+  it("denies a moment when any referenced path is outside the selector (boundary-crossing rename)", () => {
     const rename = momentPayload({
       operation: "rename",
       path: "docs/a.md",
@@ -594,7 +594,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
   });
 
   // MU-C6 thread presence: a chat-channel grant also admits `chat:thread:<tid>`
-  // — but ONLY for a thread that binds to the granted channel via the same
+  // — but only for a thread that binds to the granted channel via the same
   // forge-resistant earliest-binding resolver the durable chat filter uses.
   it("admits a thread topic bound to the granted channel", () => {
     expect(
@@ -602,7 +602,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     ).toBe(true);
   });
 
-  it("denies a thread topic bound to a DIFFERENT channel", () => {
+  it("denies a thread topic bound to a different channel", () => {
     expect(
       presenceTopicAllowedForShare(channelShare, "chat:thread:thread-out", threadResolver),
     ).toBe(false);
@@ -635,7 +635,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     ).toBe(false);
   });
 
-  // Ordering-collision guard: a chat:thread:-shaped topic must ALWAYS resolve
+  // Ordering-collision guard: a chat:thread:-shaped topic must always resolve
   // via the resolver — bare-wireId equality must never admit it, even when the
   // grant's channelWireId is itself a chat:thread:<id> string. Otherwise a
   // crafted grant could smuggle presence for a foreign thread through the bare
@@ -654,7 +654,7 @@ describe("presence topic gate (MU-C1 x MU-C4)", () => {
     // No resolver => a thread-shaped topic can never be authorized (fail
     // closed), even against a chat:thread:<id> channelWireId.
     expect(presenceTopicAllowedForShare(forged, topic)).toBe(false);
-    // Only a GENUINE earliest binding to this selector's channelWireId admits
+    // Only a genuine earliest binding to this selector's channelWireId admits
     // it — proving the resolver, not bare equality, is the sole authority.
     const boundResolver: ChatShareThreadResolver = {
       channelKind: (wireId) =>
@@ -725,7 +725,7 @@ describe("chat-channel share op filter", () => {
     access: "read-write",
   };
   // The earliest-binding truth used by these tests: thread-in binds to the
-  // shared channel, thread-out binds to a DIFFERENT channel, anything else is
+  // shared channel, thread-out binds to a different channel, anything else is
   // unknown (fail-closed).
   const resolver: ChatShareThreadResolver = {
     channelKind: (wireId) =>
@@ -893,12 +893,12 @@ describe("chat-channel share op filter", () => {
   });
 
   it("excludes a forged thread.create that claims the granted channel for an existing foreign thread", () => {
-    // The op SAYS channelWireId=wire-shared, but the log's earliest binding
+    // The op says channelWireId=wire-shared, but the log's earliest binding
     // for thread-out is wire-private — the re-bind is excluded.
     expect(
       decide("chat.thread.create", { threadId: "thread-out", title: "", createdAtMs: 1, channelSlug: "team", channelWireId: "wire-shared" }).allowed,
     ).toBe(false);
-    // A thread.create claiming BOTH a channel and a linked file is malformed.
+    // A thread.create claiming both a channel and a linked file is malformed.
     expect(
       decide("chat.thread.create", { threadId: "thread-new", title: "", createdAtMs: 1, channelWireId: "wire-shared", linkedObjectId: "obj-1" }).allowed,
     ).toBe(false);
@@ -997,11 +997,11 @@ describe("chat-channel share op filter", () => {
   });
 });
 
-// #646 PR2 — chat follows the file share. A thread is visible through a file
+// Chat follows the file share. A thread is visible through a file
 // share when the FILE it is about is visible through that file share, so every
 // case below is really a statement about one path: the one the relay resolved
 // from the owner's log, never one a client claimed.
-describe("file-chat share filter (#646 PR2)", () => {
+describe("file-chat share filter", () => {
   // docs/in.md is inside the selector; notes/out.md is not. `object-gone` was
   // deleted and `object-unknown` was never seen — the two halves of the
   // tri-state that must both deny.
@@ -1159,7 +1159,7 @@ describe("file-chat share filter (#646 PR2)", () => {
   it("carries a recipient-created thread by path, and the messages that follow it", () => {
     // A recipient's own object ids mean nothing here, so its create names the
     // granted path directly and the relay tests that path with no resolver
-    // hop. The messages it posts LATER — in another batch, resolved from the
+    // hop. The messages it posts later — in another batch, resolved from the
     // log — must resolve through the same binding.
     const created = filterOpForShare(
       share("comment"),
@@ -1180,12 +1180,12 @@ describe("file-chat share filter (#646 PR2)", () => {
     expect(
       filterOpForShare(share("comment"), "chat.message.append", message("thread-by-path"), resolver)
         .allowed,
-      "MUTATION: a recipient's own thread must not go dead after its first batch",
+      "a recipient's own thread must not go dead after its first batch",
     ).toBe(true);
   });
 
   it("refuses a re-create that would move an existing thread into the share", () => {
-    // The log's EARLIEST create binds thread-out to a file outside the
+    // The log's earliest create binds thread-out to a file outside the
     // selector. A later create claiming an in-selector file is the forgery
     // earliest-wins exists to stop.
     expect(
@@ -1197,7 +1197,7 @@ describe("file-chat share filter (#646 PR2)", () => {
       ).allowed,
     ).toBe(false);
     // And the same op in the other direction: a create for a thread already
-    // bound INSIDE, claiming an outside file, is refused too.
+    // bound inside, claiming an outside file, is refused too.
     expect(
       filterOpForShare(
         share("comment"),
@@ -1225,7 +1225,7 @@ describe("file-chat share filter (#646 PR2)", () => {
   });
 
   it("never serves the reader's own state, or any chat kind outside the five", () => {
-    // chat.follow.set and chat.feed.read.set are the READER's state, not the
+    // chat.follow.set and chat.feed.read.set are the reader's state, not the
     // conversation. The allowlist must not grow to fit them.
     const follow = JSON.stringify({
       ownerUserId: "user-a",

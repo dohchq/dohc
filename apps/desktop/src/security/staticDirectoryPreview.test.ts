@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // Serving a directory is real filesystem and socket work, honest work a busy
-// machine stretches (#568). Same 15s deadline the site runner's suite measured
+// machine stretches. Same 15s deadline the site runner's suite measured
 // its way to.
 vi.setConfig({ testTimeout: 15_000 });
 import { createTestScratch } from "../workspaces/testTemp";
@@ -99,8 +99,6 @@ describe("startStaticDirectoryPreview", () => {
     await mkdir(outside, { recursive: true });
     await writeFile(join(outside, "index.html"), "<h1>Escaped</h1>");
 
-    // MUTATION (containment): drop the isInside check and this root is served
-    // even though nothing about it was judged against the containment root.
     await expect(
       startStaticDirectoryPreview(outside, {
         containmentRoot: containment,
@@ -153,13 +151,11 @@ describe("startStaticDirectoryPreview", () => {
     try {
       const asset = await fetch(new URL("/assets/app.js", preview.url));
       expect(asset.status).toBe(200);
-      // MUTATION (mime): a wrong table entry ships JS as octet-stream and the
-      // panel's module never executes.
-      expect(asset.headers.get("content-type")).toBe(
+      expect(asset.headers.get("content-type"), "mime: a wrong table entry ships JS as octet-stream and the panel's module never executes.").toBe(
         "application/javascript; charset=utf-8",
       );
       expect(asset.headers.get("x-content-type-options")).toBe("nosniff");
-      // Sent RAW, because `fetch` rewrites the path before it leaves the
+      // Sent raw, because `fetch` rewrites the path before it leaves the
       // client. A plainly spelled `..` is resolved away by the URL parser on
       // both sides, so it arrives already contained.
       await expect(rawRequestStatus(preview.url, "/../outside.txt")).resolves.toBe(
@@ -168,13 +164,9 @@ describe("startStaticDirectoryPreview", () => {
       // An ENCODED slash is what the parser cannot see: it keeps `%2f`
       // opaque, so the traversal appears only after decodeURIComponent. That
       // is the case the segment check exists for.
-      // MUTATION (traversal): drop the ".." segment check and this reaches
-      // outside.txt above the served root.
       await expect(
         rawRequestStatus(preview.url, "/assets%2f..%2f..%2foutside.txt"),
       ).resolves.toBe(400);
-      // MUTATION (null byte): drop the "\0" check and a truncating path
-      // reaches the filesystem layer.
       await expect(rawRequestStatus(preview.url, "/%00index.html")).resolves.toBe(
         400,
       );
@@ -196,17 +188,14 @@ describe("startStaticDirectoryPreview", () => {
     try {
       const asset = await fetch(new URL("/index.htm", preview.url));
       expect(asset.status).toBe(200);
-      // MUTATION (mime): a missing .htm table entry falls through to
-      // application/octet-stream and the browser downloads the page instead
-      // of rendering it.
-      expect(asset.headers.get("content-type")).toBe("text/html; charset=utf-8");
+      expect(asset.headers.get("content-type"), "mime: a missing .htm table entry falls through to application/octet-stream and the browser downloads the page instead of rendering it.").toBe("text/html; charset=utf-8");
     } finally {
       await preview.stop();
     }
   });
 
   it("refuses an alias that leaves the served root but stays in containment", async () => {
-    // The served root is a SUBDIRECTORY of the containment root, so the
+    // The served root is a subdirectory of the containment root, so the
     // containment check alone still admits the plugin's sibling files. This
     // is the only guard that narrows a request to the served directory.
     const pluginRoot = join(root, "plugin");
@@ -222,8 +211,6 @@ describe("startStaticDirectoryPreview", () => {
       entryLabel: "panel entry",
     });
     try {
-      // MUTATION (served-root narrowing): drop the isInside(root, realTarget)
-      // check and this serves sibling.txt from outside the served directory.
       await expect(rawRequestStatus(preview.url, "/escape/sibling.txt")).resolves.toBe(
         403,
       );
@@ -234,7 +221,7 @@ describe("startStaticDirectoryPreview", () => {
 
   it("forbidSharedWithMePaths refuses even an ordinary same-directory request when the served root itself sits inside shared-with-me", async () => {
     // siteRunner passes forbidSharedWithMePaths: true and, for an owned
-    // (non-share-authority) site, containmentRoot is the WHOLE workspace —
+    // (non-share-authority) site, containmentRoot is the whole workspace —
     // so if this site's own served root turns out to sit inside a
     // shared-with-me mount (its directory misclassified, or reached through
     // a symlink resolved before the server ever starts), the rule must
@@ -255,18 +242,6 @@ describe("startStaticDirectoryPreview", () => {
       forbidSharedWithMePaths: true,
     });
     try {
-      // MUTATION (forbidSharedWithMePaths as a whole): drop BOTH the
-      // spelled-path and resolved-path isSharedWithMePath checks and this
-      // site's own entry file is served normally. The two checks are
-      // mutually redundant for every construction reachable in this test
-      // (no symlink separates "spelled" from "resolved" here, so they see
-      // the identical string) — verified directly: disabling either ONE
-      // alone still left this refused, via the other. Both still guard
-      // genuinely different code paths (one runs before any filesystem
-      // resolution, the other after) even though this specific scenario
-      // cannot distinguish them; disabling only ONE is deliberately NOT
-      // pinned here, to avoid asserting a false claim about which check
-      // did the refusing.
       await expect(rawRequestStatus(preview.url, "/index.html")).resolves.toBe(403);
     } finally {
       await preview.stop();
@@ -275,7 +250,6 @@ describe("startStaticDirectoryPreview", () => {
 });
 
 describe("containment of '..'-prefixed names", () => {
-  // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
   it("serves a root whose own directory NAME starts with '..'", async () => {
     const containment = join(root, "plugin");
     const served = join(containment, "..cache");

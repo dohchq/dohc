@@ -47,7 +47,7 @@ import {
 import type { ZipEntry } from "./zipWriter";
 
 // Deepest already-existing ancestor of a (possibly not-yet-created) path —
-// the part realpath can resolve, so we can check containment BEFORE mkdir.
+// the part realpath can resolve, so we can check containment before mkdir.
 export async function existingAncestor(path: string): Promise<string> {
   let current = path;
   for (;;) {
@@ -77,7 +77,7 @@ export interface WorkspaceFileListingEntry extends WorkspaceFileEntry {
 const MARKDOWN_ICON_HEAD_BYTES = 1024;
 
 // Minimal, dependency-free scan for `icon:` inside a leading `--- ... ---`
-// frontmatter block. Intentionally NOT a full YAML parse: the buffer may be
+// frontmatter block. Intentionally not a full YAML parse: the buffer may be
 // truncated mid-document, and we only want one short scalar. Exported for
 // unit testing. Returns undefined when there is no leading frontmatter, the
 // block closes before an icon, or the value is empty/comment-only.
@@ -126,7 +126,7 @@ async function readMarkdownIcon(absolutePath: string): Promise<string | undefine
 
 // Icon cache: readMarkdownIcon does an open+read+close per markdown file.
 // Without a cache, a full re-listing (e.g. after every save, via the
-// fs-watch -> refreshFiles path) re-pays that IO for the ENTIRE tree even
+// fs-watch -> refreshFiles path) re-pays that IO for the entire tree even
 // when nothing changed. Keyed by absolute path + (mtimeMs, size) — a plain
 // `stat` (one syscall) is enough to prove a file is unchanged and skip the
 // far more expensive open/read/close. Bounded so a huge/rarely-restarted
@@ -230,7 +230,7 @@ export async function listFiles(
 ): Promise<{ files: WorkspaceFileEntry[]; folders: string[] }> {
   const platform = options.platform ?? process.platform;
   const entries: WorkspaceFileListingEntry[] = [];
-  // Directories ride along so EMPTY folders stay visible in the explorer
+  // Directories ride along so empty folders stay visible in the explorer
   // tree (the walk already visits every dir — this is purely additive).
   const folders: string[] = [];
 
@@ -297,7 +297,7 @@ export async function createFile(
   }
   const absolute = join(rootPath, validated.normalized);
   // Lexical validation can't see symlinks, and it read the path as SPELLED.
-  // Both questions get asked of the real path BEFORE mkdir, so a symlinked
+  // Both questions get asked of the real path before mkdir, so a symlinked
   // ancestor can neither have directories created through it nor name a
   // reserved area under an ordinary name.
   const { resolvedAbsolute: target } = await assertResolvedWorkspacePath({
@@ -324,7 +324,7 @@ export async function createFile(
 }
 
 // Import outcome: what landed (workspace-relative paths, destination prefix
-// included) plus how many sources could NOT land — callers surface both, so
+// included) plus how many sources could not land — callers surface both, so
 // an import is never silently smaller than what the user handed us.
 export interface ImportCopyOutcome {
   imported: string[];
@@ -333,7 +333,7 @@ export interface ImportCopyOutcome {
 
 // Resolve + validate an import destination folder ("" / undefined = workspace
 // root). The folder must be a user-writable workspace-relative path (traversal
-// and reserved names refused by validateUserWritePath), must already EXIST as
+// and reserved names refused by validateUserWritePath), must already exist as
 // a real directory — imports target folders the user can see, never mkdir —
 // and must be symlink-free: the final component by lstat, any ancestor by the
 // realpath containment check (a symlinked folder must not teleport an import
@@ -350,13 +350,13 @@ export async function resolveImportDestination(
   if (!validated.ok) {
     throw new Error(`Invalid import destination (${validated.reason}): ${targetDir}`);
   }
-  // EVERY component must be a real directory — lstat refuses a symlink at
+  // Every component must be a real directory — lstat refuses a symlink at
   // any depth, not just the final one. An ancestor symlink that resolves
   // inside the workspace would otherwise smuggle the import into a tree the
   // lexical check never saw (e.g. link -> shared-with-me puts "link/alex"
   // imports into the reserved projection). Workspace-internal destinations
   // have no legitimate ancestor symlinks (unlike macOS system paths on the
-  // drag-in SOURCE side), so strict refusal costs nothing (codex P2).
+  // drag-in SOURCE side), so strict refusal costs nothing.
   let absDir = realRoot;
   for (const segment of validated.normalized.split("/")) {
     absDir = join(absDir, segment);
@@ -393,7 +393,7 @@ function collisionVariants(
 }
 
 /**
- * The same naming rule, for a caller that has to ASK whether a name is taken
+ * The same naming rule, for a caller that has to ask whether a name is taken
  * rather than have `copyFile` refuse it.
  *
  * A share view's import writes its engine store, so it cannot discover a
@@ -424,17 +424,17 @@ export async function importNameFor(
 }
 
 /**
- * COULD this copy failure be about the name being too long? Exported for unit
+ * Could this copy failure be about the name being too long? Exported for unit
  * testing, as `extractFrontmatterIcon` above is: neither an ENOENT from a
  * vanished source nor a real MAX_PATH refusal is arrangeable on demand in that
  * suite, and getting the two confused is the whole point.
  *
- * `maxEntryChars` must be the SAME budget that shaped the candidate list. An
+ * `maxEntryChars` must be the same budget that shaped the candidate list. An
  * earlier revision compared the composed path against `WINDOWS_MAX_PATH_CHARS`
  * directly, with no platform check anywhere in the copy loop -- so on macOS and
  * Linux, where a 259-character path is ordinary, a genuinely missing source
  * read as a length refusal, walked the shorter rungs, and was counted as
- * SKIPPED instead of aborting the batch. Two copies of one fact, disagreeing.
+ * skipped instead of aborting the batch. Two copies of one fact, disagreeing.
  *
  * "Could" is as far as arithmetic gets for ENOENT, so the copy loop asks the
  * filesystem first and only reaches here when both ends are there. See
@@ -449,12 +449,12 @@ export function couldBeLengthRefusal(
   if (code === "ENAMETOOLONG") return true;
   // Windows reports an over-long path as ENOENT. So does a missing source,
   // everywhere -- so ENOENT can only be about length where a composed-path
-  // limit actually applies AND this name exceeds it. Off Windows the budget is
+  // limit actually applies and this name exceeds it. Off Windows the budget is
   // Infinity and this is never true.
   return code === "ENOENT" && candidate.length > maxEntryChars;
 }
 
-// The arithmetic above says an over-budget name COULD be refused for length.
+// The arithmetic above says an over-budget name could be refused for length.
 // It cannot say it WAS. On a long-path-aware Windows host the budget is not
 // the real limit -- a 300-character path works there -- so an ENOENT means
 // something that should exist does not: the source moved after the file dialog
@@ -462,7 +462,7 @@ export function couldBeLengthRefusal(
 // budget silently counted that as `skipped`, and a user does not notice a
 // skipped line.
 //
-// So ask, exactly as `copyFile` asks: `stat`, which FOLLOWS the source link,
+// So ask, exactly as `copyFile` asks: `stat`, which follows the source link,
 // because that is what the copy did. An earlier revision asked `lstat`, which
 // answers about the LINK -- so a source that was a symlink to a missing target
 // read as "still there", its ENOENT was charged to length, and the broken link
@@ -517,7 +517,7 @@ async function classifyCopyEnoent(
   if (dirProbe !== "there") return "unexplained";
   if (sourceProbe === "there") return null;
   if (sourceProbe === "unknown") return "unexplained";
-  // Say WHICH nothing the source resolved to. A dangling link is still at the
+  // Say which nothing the source resolved to. A dangling link is still at the
   // path the user picked, so "no such file" alone sends them to look at
   // something they can plainly see.
   const link = await lstat(source).then(
@@ -538,7 +538,7 @@ async function classifyCopyEnoent(
 // missing and gives the two steps in the order they work: the target has to
 // come back before the user can import it.
 //
-// The name goes LAST and once. This renders in a single-line truncate span
+// The name goes last and once. This renders in a single-line truncate span
 // (DesktopWorkspaceShell), and a basename can be 255 characters -- leading with
 // it pushed both the reason and the instruction off the end of the line.
 function danglingLinkRefusal(source: string): string {
@@ -611,7 +611,7 @@ async function copyWithoutOverwrite(
   absDir: string,
   name: string,
 ): Promise<string | null> {
-  // ONE budget, used both to shape the candidates and to classify a failure.
+  // One budget, used both to shape the candidates and to classify a failure.
   // Two copies of this fact can disagree, and did.
   const maxEntryChars = entryCharBudget(absDir, process.platform);
   for (let attempt = 1; attempt <= MAX_COLLISION_RENAMES + 1; attempt += 1) {
@@ -651,10 +651,10 @@ async function copyWithoutOverwrite(
 
 // Imports copy external files by basename into a destination folder inside
 // the workspace (default: the root). Existing files are never overwritten;
-// a name collision retries as "name (2).ext" so imports are additive AND
+// a name collision retries as "name (2).ext" so imports are additive and
 // lossless — a source only counts as skipped when its basename is invalid or
 // the collision budget runs out.
-// TRUSTS ITS CALLER: copyFile FOLLOWS symlinks and this does no lstat. Its only
+// Trusts its caller: copyFile follows symlinks and this does no lstat. Its only
 // trusted entrypoint is the main-process file-dialog import (paths the user
 // picked in a native dialog). The UNtrusted entrypoint (renderer-supplied OS
 // drag-in) is importDroppedPaths, which lstat-screens sources first — never
@@ -685,7 +685,7 @@ export async function copyIntoWorkspace(
 }
 
 // Defense in depth beyond the zod cap (bridgeContract): the handler refuses an
-// over-long batch ITSELF, so a code path that ever reaches here without the
+// over-long batch itself, so a code path that ever reaches here without the
 // schema (a future internal caller, a test) still cannot flood the import.
 const MAX_IMPORT_PATHS = 100;
 
@@ -719,21 +719,21 @@ export async function importDroppedPaths(
 // could forge the IPC array and name any readable file (e.g. ~/.ssh/id_rsa) to
 // have it copied into a possibly cloud-synced workspace. That residual is
 // inherent once file-write IPCs exist at all (renderer-compromise is already
-// game-over) and a GENUINE user drag may legitimately include any file the
-// user owns, so we do NOT gate by location. We DO bound it:
-//   - count is capped HERE (not just at the zod boundary);
-//   - only REAL regular files import — a FINAL-component symlink is refused
+// game-over) and a genuine user drag may legitimately include any file the
+// user owns, so we do not gate by location. We DO bound it:
+//   - count is capped here (not just at the zod boundary);
+//   - only real regular files import — a FINAL-component symlink is refused
 //     before it is followed (lstat the original source, never realpath-then-
 //     isFile, which would promote a planted symlink-to-secret under the link's
 //     own innocuous name); directories and special files are skipped;
-//   - a source whose CANONICAL path is inside ANY registered workspace's .dohc
+//   - a source whose CANONICAL path is inside any registered workspace's.dohc
 //     is refused (the check runs on realpath(source), so an ancestor symlink
 //     cannot smuggle a metadata source past it).
-// EXPLICIT RESIDUAL (adversarial review, e3fix): a real regular file reached
+// Explicit residual: a real regular file reached
 // through a symlinked ANCESTOR (e.g. drop `/stage/link/id_rsa` where
 // `link -> ~/.ssh`) still imports — lstat refuses only the final component, and
 // realpath then canonicalizes to the secret. This grants a compromised renderer
-// NOTHING beyond the residual above (it could just name `~/.ssh/id_rsa`
+// nothing beyond the residual above (it could just name `~/.ssh/id_rsa`
 // directly), and the only general guard — refusing every symlinked ancestor —
 // would false-reject legitimate drags through SYSTEM symlinks (macOS
 // /tmp -> /private/tmp, /var -> /private/var), i.e. silent import loss for zero
@@ -762,8 +762,8 @@ export async function screenDroppedPaths(
     if (!isAbsolute(source)) continue;
     let real: string;
     try {
-      // lstat the ORIGINAL source (NOT realpath(source)): lstat does not follow
-      // the FINAL component, so a dropped symlink is observed AS a symlink and
+      // lstat the original source (not realpath(source)): lstat does not follow
+      // the final component, so a dropped symlink is observed AS a symlink and
       // refused — never realpath-then-isFile, which would promote a planted
       // symlink-to-secret. Only a real, regular file imports — directories,
       // sockets, devices, FIFOs, and final-component symlinks all fall through.
@@ -785,7 +785,7 @@ export async function screenDroppedPaths(
 
 // Creates a folder (recursively) with the createFile containment sandwich:
 // lexical validation first, then realpath containment of the deepest existing
-// ancestor BEFORE mkdir, re-checked after.
+// ancestor before mkdir, re-checked after.
 export async function createFolder(
   rootPath: string,
   relativePath: string,
@@ -813,17 +813,17 @@ export async function createFolder(
   return validated.normalized;
 }
 
-// ONE move engine for rename + drag-move (F2 and DnD both land here).
+// One move engine for rename + drag-move (F2 and DnD both land here).
 // Rules, in order:
 //   1. Source passes Check A (reserved/traversal) — it already exists, so a
 //      host-unsafe-but-real name must still be movable; destination passes the
-//      full materialize check (we WRITE the new name on this disk).
+//      full materialize check (we write the new name on this disk).
 //   2. Folder into itself/descendant refused (mirrors planDrop's UI no-op).
 //   3. Source: realpath-contain the PARENT, then refuse a symlink source —
 //      the tree never lists symlinks, so no legitimate caller moves one.
-//   4. Destination parent: existingAncestor containment BEFORE mkdir -p,
+//   4. Destination parent: existingAncestor containment before mkdir -p,
 //      re-checked after (the createFile sandwich, verbatim).
-//   5. Overwrite refused: an existing destination throws — EXCEPT when
+//   5. Overwrite refused: an existing destination throws — except when
 //      realpath(dest) === realpath(source), the case-only rename on a
 //      case-insensitive filesystem (on Linux this branch never triggers).
 //      No merge semantics this phase: dir-onto-dir with the same name fails.
@@ -885,14 +885,14 @@ async function inspectWorkspaceMove(
   const realRoot = await realpath(rootPath);
   const absFrom = join(rootPath, normalized.fromPath);
   const absTo = join(rootPath, normalized.toPath);
-  // A move leaks BOTH ways through an alias: `meta/manifest.json -> leak.json`
+  // A move leaks both ways through an alias: `meta/manifest.json -> leak.json`
   // (meta -> .dohc) lifts workspace state into the visible tree, and
   // `notes.md -> meta/notes.md` buries a user file in it.
   //
-  // BOTH ends are entries, because rename touches neither leaf: it moves the
+  // Both ends are entries, because rename touches neither leaf: it moves the
   // source entry, link and all, and it replaces whatever entry sits at the
   // destination. Entry mode resolves each parent chain in full -- so an alias
-  // into a reserved area still refuses -- and holds the final name as SPELLED,
+  // into a reserved area still refuses -- and holds the final name as spelled,
   // which a rename needs: resolving the destination would answer with the
   // existing file's casing on a case-insensitive filesystem and turn a
   // case-only rename into a no-op.
@@ -1014,7 +1014,7 @@ export async function movePath(
   // Descendant guard, case-fold safe. The lexical self/descendant refusal at
   // the top is case-SENSITIVE, so on a case-insensitive filesystem "Foo" ->
   // "foo/bar" slips past it and would move a folder into its own (same-inode)
-  // subtree — corrupting it. Compare REAL paths: if the destination's parent
+  // subtree — corrupting it. Compare real paths: if the destination's parent
   // resolves to the source itself or anywhere beneath it, refuse. (For a file
   // source this is always false — a file has no descendants.)
   if (isInside(realFrom, realDestParent)) {
@@ -1027,7 +1027,7 @@ export async function movePath(
   if (destExists) {
     // Case-only rename carve-out: on a case-insensitive filesystem the
     // destination "exists" because it IS the source under another case.
-    // Compare REAL paths (never strings) so a genuinely distinct file that
+    // Compare real paths (never strings) so a genuinely distinct file that
     // case-collides still refuses — the carve-out must not reopen the
     // overwrite hole.
     if (realFrom !== (await realpath(to))) {
@@ -1043,16 +1043,16 @@ export async function movePath(
   return visibleResultPath;
 }
 
-// Deletes are always RECOVERABLE — never a hard delete:
+// Deletes are always recoverable — never a hard delete:
 //   1. shell.trashItem (injected): the OS trash on all three platforms
 //      (Windows IFileOperation, macOS trashItemAtURL, Linux g_file_trash).
 //   2. Fallback when the OS rejects (g_file_trash refuses cross-filesystem
-//      paths without a .Trash topdir — e.g. /mnt/c under WSL): MOVE the
+//      paths without a.Trash topdir — e.g. /mnt/c under WSL): move the
 //      target into <root>/.dohc/trash/<epoch>-<leaf>. Same-filesystem by
 //      construction (the trash dir lives inside the workspace), so the
 //      rename succeeds exactly where trashItem failed. .dohc is invisible
 //      to tree/watcher/sync (hasIgnoredSegment), so the entry disappears
-//      like OS trash — and the RECOVERY STORY is opening
+//      like OS trash — and the recovery story is opening
 //      <workspace>/.dohc/trash in any file manager and moving it back.
 // The metadata dir resolves through resolveWorkspaceMetadataDir (refuses a
 // symlinked .dohc), and the trash SUBDIR is re-validated after mkdir the same
@@ -1084,7 +1084,7 @@ export async function deletePath(
     label: "Delete path",
     access: "entry",
   });
-  // lstat does NOT follow the final component: decide on the LINK, not what it
+  // lstat does not follow the final component: decide on the LINK, not what it
   // points at. Deleting a symlink must trash the LINK itself — realpath-ing it
   // would resolve to (and trash) its target, which could be a real file
   // anywhere on disk. A regular file/dir still goes through the realpath-then-
@@ -1117,7 +1117,7 @@ export async function deletePath(
   }
 }
 
-// The workspace's own recovery location. MOVES an absolute path already proven
+// The workspace's own recovery location. Moves an absolute path already proven
 // to be inside the workspace into <root>/.dohc/trash and answers where it
 // landed. Nothing here deletes: the recovery story is opening
 // <workspace>/.dohc/trash in any file manager and moving the entry back.
@@ -1128,7 +1128,7 @@ export async function moveIntoWorkspaceTrash(
   const realRoot = await realpath(rootPath);
   const trashDir = join(await resolveWorkspaceMetadataDir(rootPath), "trash");
   // mkdir{recursive} throws a raw errno (EEXIST, or a Windows variant) when a
-  // non-directory squats .dohc/trash. When SOMETHING is at the path, fall
+  // non-directory squats.dohc/trash. When something is at the path, fall
   // through: the check below names the squatter and the way out, which the
   // errno does not. When nothing is there, the mkdir itself failed
   // (permissions, I/O) — rethrow that.
@@ -1137,7 +1137,7 @@ export async function moveIntoWorkspaceTrash(
   } catch (error) {
     if (!(await lstat(trashDir).catch(() => null))) throw error;
   }
-  // Validate AFTER mkdir, lstat-first (a pre-check is insufficient: mkdir
+  // Validate after mkdir, lstat-first (a pre-check is insufficient: mkdir
   // {recursive} silently no-ops on an existing symlink-to-dir, so only the
   // post-mkdir state proves where the rename would land). The check sits
   // immediately before the rename to keep the swap window minimal; a
@@ -1151,7 +1151,7 @@ export async function moveIntoWorkspaceTrash(
     throw new Error(outsideWorkspaceRefusal(DOHC_TRASH_GUARD));
   }
   // Collision-resistant name: back-to-back deletes (multi-select) share a
-  // Date.now() tick, and POSIX rename silently CLOBBERS an existing
+  // Date.now() tick, and POSIX rename silently clobbers an existing
   // destination — two same-basename deletes would destroy the first file's
   // bytes. The per-call UUID makes every trash entry unique. The basename is
   // decorative, so truncate it to fit NAME_MAX (255 bytes on ext4/APFS/NTFS):
@@ -1166,7 +1166,7 @@ export async function moveIntoWorkspaceTrash(
     unit: nameUnitFor(process.platform),
     maxEntryChars: entryCharBudget(trashDir, process.platform),
   });
-  // Captured ONCE, before the first rename. A rung that failed for length
+  // Captured once, before the first rename. A rung that failed for length
   // leaves a window in which another process can REPLACE the source, and the
   // next rung would move the replacement into the trash and report the delete
   // done -- for a file the user never selected. Re-reading this per rung would
@@ -1239,7 +1239,7 @@ export async function collectZipEntries(
     if (!validated.ok) {
       throw new Error(`Invalid export path (${validated.reason}): ${relativePath}`);
     }
-    // The secret floor decided on BOTH spellings: `notes.md -> .env` spells an
+    // The secret floor decided on both spellings: `notes.md ->.env` spells an
     // ordinary file and exports the secret's bytes. The resolved location also
     // decides the reservation, so `link -> .dohc` cannot export workspace state.
     //
@@ -1273,7 +1273,7 @@ export async function collectZipEntries(
   let totalBytes = 0;
 
   async function add(absolute: string, archivePath: string): Promise<void> {
-    // Open no-follow, then fstat + bounded read from the SAME descriptor. The
+    // Open no-follow, then fstat + bounded read from the same descriptor. The
     // walk skips symlink dirents, but a file that was regular at readdir() time
     // could be swapped for a symlink before we read it (TOCTOU) — O_NOFOLLOW
     // makes open fail (ELOOP) on a final-component symlink, closing that

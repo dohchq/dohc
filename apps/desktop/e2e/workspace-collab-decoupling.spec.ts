@@ -19,7 +19,7 @@ import {
 // personal workspace edits a rich doc through the engine Y.Doc provider
 // (recordUpdate + debounced settle)
 // with no relay — the editor loads, editing lands on the .md and in engine.db
-// as ydoc.update ops, with ZERO collab-server involvement: no WebSocket is ever
+// as ydoc.update ops, with zero collab-server involvement: no WebSocket is ever
 // opened for the whole session. The engine.db SQLite readers
 // (engineMomentsOrEmpty / ydocUpdateCount) are shared with
 // workspace-engine-editor.spec via ./helpers/engineDb — one source of truth for

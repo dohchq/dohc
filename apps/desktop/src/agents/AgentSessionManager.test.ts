@@ -359,12 +359,12 @@ describe("AgentSessionManager", () => {
 
     releaseFirst();
     await first;
-    // Only ONE session/run was ever created.
+    // Only one session/run was ever created.
     expect(driverStarts).toBe(1);
     expect(integration.startAgentRun).toHaveBeenCalledTimes(1);
   });
 
-  it("allows a fresh start for a DIFFERENT workspace concurrently", async () => {
+  it("allows a fresh start for a different workspace concurrently", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => {
       release = resolve;
@@ -537,9 +537,7 @@ describe("the workspace's own agent settings", () => {
     const drivers = await manager.probeDrivers("workspace-1");
     expect(drivers.map((driver) => driver.id))
       .toEqual(["fake-driver", "fixture-harness"]);
-    // MUTATION (plugin drivers are global): another workspace, which has no
-    // driver plugin, is offered one anyway.
-    expect((await manager.probeDrivers("workspace-2")).map((driver) => driver.id))
+    expect((await manager.probeDrivers("workspace-2")).map((driver) => driver.id), "plugin drivers are global: another workspace, which has no driver plugin, is offered one anyway.")
       .toEqual(["fake-driver"]);
   });
 
@@ -550,9 +548,7 @@ describe("the workspace's own agent settings", () => {
     });
 
     await manager.probeDrivers("workspace-1");
-    // MUTATION (defaultDriverId is never read): the first installed driver
-    // wins and the workspace's own choice does nothing.
-    expect(manager.panelSnapshot("workspace-1").selectedDriverId)
+    expect(manager.panelSnapshot("workspace-1").selectedDriverId, "defaultDriverId is never read: the first installed driver wins and the workspace's own choice does nothing.")
       .toBe("fixture-harness");
   });
 
@@ -576,9 +572,7 @@ describe("the workspace's own agent settings", () => {
       driverId: "fake-driver",
       prompt: "tidy the notes",
     });
-    // MUTATION (defaultModel is never read): the driver starts with no model
-    // and the setting promises behavior it does not have.
-    expect(startInputs[0]?.model).toBe("sonnet-5");
+    expect(startInputs[0]?.model, "defaultModel is never read: the driver starts with no model and the setting promises behavior it does not have.").toBe("sonnet-5");
   });
 
   it("lets a caller's own model win over the workspace default", async () => {
@@ -620,11 +614,7 @@ describe("what a probe may tell the renderer", () => {
       status: "unauthenticated",
       label: "CLI login",
     });
-    // MUTATION (the summary spreads the probe's auth object): the person's
-    // address is in the value main hands to the IPC layer. The contract
-    // strips it there too, so this pin reads the summary itself — the place
-    // the rule is stated (AgentDriver.ts:67) — not only what survives parsing.
-    expect(JSON.stringify(summarized)).not.toContain("person@example.com");
+    expect(JSON.stringify(summarized), "the summary spreads the probe's auth object: the person's address is in the value main hands to the IPC layer. The contract strips it there too, so this pin reads the summary itself — the place the rule is stated (AgentDriver.ts:67) — not only what survives parsing.").not.toContain("person@example.com");
     expect(JSON.stringify(summarized)).not.toContain("fixture-harness login");
     expect(JSON.stringify(panel)).not.toContain("person@example.com");
   });
@@ -644,10 +634,8 @@ describe("what a probe may tell the renderer", () => {
       detail: "The login expired. Run `fixture-harness login`.",
     });
 
-    // MUTATION (the auth event only appends a notice): the run reads as an
-    // ordinary failure and nothing says a login is what it needs.
     const session = manager.panelSnapshot("workspace-1").session;
-    expect(session?.loginRequired).toBe(true);
+    expect(session?.loginRequired, "the auth event only appends a notice: the run reads as an ordinary failure and nothing says a login is what it needs.").toBe(true);
     expect(session?.authNotices.at(-1))
       .toBe("The login expired. Run `fixture-harness login`.");
   });

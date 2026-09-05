@@ -6,7 +6,7 @@
 //! 1. **`OffsetKind::Utf16` everywhere.** [`Ydoc::wire`] is the only constructor
 //!    a durable/replicated doc may use; it hard-codes `OffsetKind::Utf16`. The
 //!    default `OffsetKind::Bytes` is wire-unsafe against Yjs (positional
-//!    divergence + a struct-store panic on non-ASCII) and is reachable ONLY
+//!    divergence + a struct-store panic on non-ASCII) and is reachable only
 //!    through [`Ydoc::with_mode`] with [`OffsetMode::Bytes`], which the
 //!    cross-engine `offsetProbe` test uses solely to PIN the divergence.
 //! 2. **Nested `Any::Map` key order is nondeterministic through a yrs re-encode.**
@@ -25,7 +25,7 @@
 //!    maps) — the Yjs v1 wire carries no root kinds. The projection records
 //!    provenance including a `destructive` flag.
 //! 5. **yjs `applyUpdate` is not atomic on malformed input; yrs is.** The durable
-//!    layer NEVER journals bytes that failed validation: [`Ydoc::apply`] decodes
+//!    layer never journals bytes that failed validation: [`Ydoc::apply`] decodes
 //!    the whole update before applying (a truncated update is rejected on decode,
 //!    state-unchanged), and the caller only persists bytes an apply accepted.
 
@@ -47,7 +47,7 @@ use crate::limits::{MAX_PROJECTION_BYTES, MAX_PROJECTION_DEPTH, MAX_PROJECTION_N
 
 /// The declared dohc root schema. The Yjs v1 wire format does not carry
 /// root-type kinds — a root's kind is defined by typed API access — so both
-/// engines MUST read roots through this identical declaration (spike finding 4).
+/// engines must read roots through this identical declaration (spike finding 4).
 pub const ROOT_FRONTMATTER: &str = "frontmatter";
 /// Secondary map root (engine metadata).
 pub const ROOT_META: &str = "meta";
@@ -69,7 +69,7 @@ pub const ROOT_SCENE_APP_STATE: &str = "excalidraw:app-state";
 /// Durable Excalidraw asset metadata, keyed by file id.
 pub const ROOT_SCENE_ASSETS: &str = "excalidraw:assets";
 
-/// Which offset mode a `Doc` is built with. `Utf16` is the ONLY wire-safe mode;
+/// Which offset mode a `Doc` is built with. `Utf16` is the only wire-safe mode;
 /// `Bytes` exists solely so the pinned divergence probe can demonstrate the
 /// failure the spike found.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -318,7 +318,7 @@ impl Ydoc {
     }
 
     /// Construct a doc in the requested offset mode. `Bytes` is wire-unsafe and
-    /// exists ONLY for the pinned divergence probe (a `Bytes` doc fed the same
+    /// exists only for the pinned divergence probe (a `Bytes` doc fed the same
     /// non-ASCII lineage diverges from / panics against a `Utf16` doc).
     pub fn with_mode(mode: OffsetMode) -> Self {
         let offset_kind = match mode {
@@ -354,12 +354,12 @@ impl Ydoc {
         Ydoc { doc }
     }
 
-    /// Validate an update WITHOUT mutating any doc: decode the whole v1 update.
+    /// Validate an update without mutating any doc: decode the whole v1 update.
     /// A truncated/malformed update fails here (yrs decodes the full update
     /// before applying — constraint 5), so the durable layer can refuse to
     /// journal bytes that would fail an apply.
     ///
-    /// Pre-validates the raw wire bytes FIRST via
+    /// Pre-validates the raw wire bytes first via
     /// [`crate::replay_parity::prevalidate_update_bytes`], before the real
     /// `Update::decode_v1` below: yrs 0.27.3's `decode_v1` can HARD-ABORT the
     /// whole process on adversarial bytes (uncatchable UB —
@@ -368,7 +368,7 @@ impl Ydoc {
     /// This method, [`Ydoc::apply`] below, and [`merge_updates`] are the
     /// crate's `Update::decode_v1` call sites, and each pre-validates first, so
     /// guarding here — not merely at the durable layer's `validate_update_bytes`
-    /// choke point — is what makes EVERY caller of the raw primitive (durable,
+    /// choke point — is what makes every caller of the raw primitive (durable,
     /// replication, tests, and any future caller) intrinsically safe, not just
     /// the ones that remember to pre-validate first.
     pub fn validate_update(bytes: &[u8]) -> Result<(), CollabError> {
@@ -379,11 +379,11 @@ impl Ydoc {
         Ok(())
     }
 
-    /// Apply a Yjs v1 update. Decodes the WHOLE update first (constraint 5): a
+    /// Apply a Yjs v1 update. Decodes the whole update first (constraint 5): a
     /// truncated update is rejected on decode with the doc state-unchanged, and
     /// no bytes that fail here are ever journaled by the caller.
     ///
-    /// Pre-validates the raw wire bytes FIRST — see [`Ydoc::validate_update`]'s
+    /// Pre-validates the raw wire bytes first — see [`Ydoc::validate_update`]'s
     /// doc comment for why this (not just the durable layer) is the abort-safe
     /// choke point.
     pub fn apply(&self, bytes: &[u8]) -> Result<(), CollabError> {
@@ -476,7 +476,7 @@ impl Ydoc {
         (crate::hex_sha256(source.as_bytes()) == reference.source_sha256).then_some(source)
     }
 
-    /// Resolve exact Markdown source ONLY when it is equivalent to
+    /// Resolve exact Markdown source only when it is equivalent to
     /// `canonical_projection`: the projection witness must be fresh, the
     /// source digest must match, and parsing the source must reproject to
     /// exactly the canonical projection. The digests alone prove freshness
@@ -744,7 +744,7 @@ impl Ydoc {
         projection_node_budget: usize,
     ) -> Result<String, CollabError> {
         let mut out = ProjectionBuffer::new();
-        // Acquire BOTH roots before opening the read txn: yrs `get_or_insert_*`
+        // Acquire both roots before opening the read txn: yrs `get_or_insert_*`
         // takes the store lock, so calling one while a transaction is live
         // deadlocks (spike harness note).
         let frontmatter = self.doc.get_or_insert_map(ROOT_FRONTMATTER);
@@ -817,7 +817,7 @@ impl Ydoc {
     }
 
     /// Delete `len` raw UTF-16 units starting at `index` from the
-    /// [`ROOT_PLAINTEXT`] text (NOT snapped to a code-point boundary — used to
+    /// [`ROOT_PLAINTEXT`] text (not snapped to a code-point boundary — used to
     /// construct interior-scalar-split delete probes) and return the encoded
     /// v1 delta. Test/probe helper, mirroring [`Ydoc::plaintext_insert`].
     pub fn plaintext_delete(&self, index: u32, len: u32) -> Vec<u8> {
@@ -848,7 +848,7 @@ impl Ydoc {
     /// chosen markdown SOURCE into the projection's own block schema —
     /// frontmatter scalars, headings, blockquotes, bullet/ordered/task
     /// lists, fenced code blocks, horizontal rules, and paragraphs — so the
-    /// folded document projects the chosen bytes back AND renders as structure,
+    /// folded document projects the chosen bytes back and renders as structure,
     /// not literal syntax. The production caller reprojects this rewrite and
     /// refuses the resolution when the parser cannot reproduce the chosen bytes.
     pub fn rewrite_content_to_markdown(
@@ -1189,11 +1189,11 @@ fn parse_markdown_blocks(body: &str) -> Vec<MdBlock> {
 /// the projector renders far deeper than 60: measured in-tree, a fold
 /// round-trips byte-exactly at 40, 100 and 120 levels.
 ///
-/// The overflow is also NOT lossless, which the old comment asserted and the
+/// The overflow is also not lossless, which the old comment asserted and the
 /// fold relied on: a paragraph holding `> > …` re-projects with its leading
 /// markers escaped as `&gt;`. That is why the caller
 /// (`fold_resolution_into_ydoc_in_tx`) re-projects and compares before it
-/// commits anything — past this bound a resolution is REFUSED, never silently
+/// commits anything — past this bound a resolution is refused, never silently
 /// stored as bytes the user did not choose.
 ///
 /// 120 sits under the projector's own `MAX_PROJECTION_DEPTH`, so a document
@@ -1514,7 +1514,7 @@ fn content_json(doc: &Doc) -> Value {
             roots.insert(ROOT_BODY.to_string(), out_json(&txn, Out::YXmlFragment(f)));
         }
     }
-    // Surface any replicated root the schema did NOT declare so a mismatch in
+    // Surface any replicated root the schema did not declare so a mismatch in
     // root enumeration cannot pass silently.
     let txn = doc.transact();
     let declared = [
@@ -4708,7 +4708,7 @@ mod projection_tests {
         }));
         let doc = remote_doc_with_body([xml_element("table", &[], rows)]);
 
-        // The property under test is that the projection REFUSES before the
+        // The property under test is that the projection refuses before the
         // amplifying allocation — 18 short rows padded to a 1 MiB column width
         // would materialize ~18 MB. Either bound refusing is correct: the byte
         // cap catches the padding, and the node/complexity budget catches the
@@ -5357,10 +5357,8 @@ mod projection_tests {
     #[test]
     fn resolution_fold_reconstructs_rich_structure_and_projection() {
         // The fold must parse the chosen markdown into the projection's own
-        // schema: the projection reproduces the chosen bytes AND the body
-        // holds real nodes, not literal syntax inside paragraphs. MUTATION:
-        // flattening the fold back to plain paragraphs keeps the projection
-        // equal for most constructs but fails every structure assertion.
+        // schema: the projection reproduces the chosen bytes and the body
+        // holds real nodes, not literal syntax inside paragraphs.
         let doc = Ydoc::wire();
         doc.richdoc_append_paragraph("old content");
         let chosen = "---
@@ -5423,10 +5421,8 @@ fn main() {}
 
     #[test]
     fn resolution_fold_parses_the_projectors_nested_frontmatter() {
-        // Codex #596 round 4: the projector itself emits one-level nested
+        // The projector itself emits one-level nested
         // maps (`scalar_line`), and the fold must accept its own output.
-        // MUTATION: bail on `key:` lines again - the delimiters parse as
-        // horizontal rules, the projection diverges, and this fails.
         let doc = Ydoc::wire();
         doc.richdoc_append_paragraph("old");
         let chosen = "---\nmeta:\n  owner: ice\n  team: dohc\ntitle: Chosen\n---\n\nbody text";
@@ -5751,9 +5747,7 @@ fn main() {}
     #[test]
     fn resolution_fold_bounds_blockquote_depth() {
         // An adversarial run of `> ` prefixes must not recurse without bound
-        // inside the resolve frame. MUTATION: drop the depth bound — the
-        // adversarial arm builds one blockquote per prefix and this count
-        // assertion fails.
+        // inside the resolve frame.
         let adversarial = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(1_000));
         adversarial
@@ -5770,12 +5764,12 @@ fn main() {}
 
     #[test]
     fn a_fold_past_the_quote_budget_is_detectably_lossy_not_silently_wrong() {
-        // The overflow is NOT lossless: the leftover `> ` markers become
+        // The overflow is not lossless: the leftover `> ` markers become
         // paragraph text, which the projector escapes to `&gt;`. The previous
         // comment asserted losslessness and the fold trusted it, so a
         // resolution past the budget would have been stored as bytes the user
         // never chose. This pins the real behaviour — the divergence is
-        // OBSERVABLE — which is what `fold_resolution_into_ydoc_in_tx`
+        // observable — which is what `fold_resolution_into_ydoc_in_tx`
         // re-projects to catch before it commits anything.
         let overflowed = Ydoc::wire();
         let hostile = format!("{}deep", "> ".repeat(QUOTE_FOLD_MAX_DEPTH + 5));
@@ -5803,8 +5797,6 @@ fn main() {}
         // value then mis-parses every following line. A resolution body is
         // user-supplied text, so this is reachable from a tiny input.
         //
-        // MUTATION: restore `Some(start + 1)` — this test panics with
-        // 'attempt to add with overflow'.
         let doc = Ydoc::wire();
         let chosen = format!("{}. item\n\nafter", i64::MAX);
         doc.rewrite_content_to_markdown(ContentKind::Richdoc, &chosen)
@@ -5819,11 +5811,6 @@ fn main() {}
 
     #[test]
     fn a_fold_within_the_quote_budget_roundtrips_byte_exactly() {
-        // MUTATION: lower QUOTE_FOLD_MAX_DEPTH below 100 — the 100-level arm
-        // overflows into escaped paragraph text and this fails. The bound's
-        // previous derivation claimed 60 was the projector's ceiling; it is
-        // not, and a budget set from that false reading would refuse
-        // documents the projection renders happily.
         for levels in [1_usize, 40, 100, QUOTE_FOLD_MAX_DEPTH] {
             let doc = Ydoc::wire();
             let chosen = format!("{}deep", "> ".repeat(levels));

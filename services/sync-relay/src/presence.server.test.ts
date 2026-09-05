@@ -8,7 +8,7 @@ import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
 import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 
 // Server-level tests for the ephemeral awareness transport: authenticated,
-// scoped, server-derived identity, and — the load-bearing invariant — NEVER
+// scoped, server-derived identity, and — the load-bearing invariant — never
 // journaled to the durable log.
 
 let roots: string[] = [];
@@ -186,7 +186,7 @@ describe("presence transport (workspace-owned)", () => {
     // A workspace id with an embedded NUL can never be claimed…
     const claim = await h(post("owner", "/sync/workspaces", { workspaceId: "a\u0000b" }));
     expect(claim.status).toBe(400);
-    // …or addressed: workspace `a\0b` + topic `c` must NOT collide with
+    // …or addressed: workspace `a\0b` + topic `c` must not collide with
     // workspace `a` + topic `b\0c` in the NUL-joined scope key.
     const wsNul = await h(post("owner", "/sync/a%00b/presence?topic=c", { clientId: "x" }));
     expect(wsNul.status).toBe(400);
@@ -237,7 +237,7 @@ describe("presence transport (workspace-owned)", () => {
   });
 });
 
-describe("presence is NEVER journaled (ephemeral invariant)", () => {
+describe("presence is never journaled (ephemeral invariant)", () => {
   it("writes no durable log row and drops on leave", async () => {
     const storage = await testStorage();
     const presence = new PresenceHub();
@@ -320,7 +320,7 @@ describe("presence over a share (cross-user, gated)", () => {
     expect(r.status).toBe(404);
   });
 
-  it("re-authorizes after the park: a revoke DURING a parked long-poll is denied on wake", async () => {
+  it("re-authorizes after the park: a revoke during a parked long-poll is denied on wake", async () => {
     const storage = await testStorage();
     const presence = new PresenceHub();
     const h = makeHandler(storage, presence);
@@ -341,7 +341,7 @@ describe("presence over a share (cross-user, gated)", () => {
     await waitForWaiters(presence, 1);
     expect(presence.stats().waiters).toBe(1);
 
-    // Owner revokes WHILE the guest is parked, then touches the scope (the
+    // Owner revokes while the guest is parked, then touches the scope (the
     // wake that would otherwise hand the revoked guest a final snapshot).
     await h(req("owner", `/sync/shares/${shareId}/revoke`, { method: "POST" }));
     await h(post("owner", "/sync/w/presence?topic=notes/a.md", { clientId: "o2", state: {} }));

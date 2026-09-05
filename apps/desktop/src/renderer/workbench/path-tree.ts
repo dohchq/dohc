@@ -9,7 +9,7 @@ import type { WorkspaceFileEntry } from "../../ipc/bridgeContract";
 
 export type FileRow = WorkspaceFileEntry;
 
-// Explicit folder paths keep EMPTY folders visible in the tree — exactly why
+// Explicit folder paths keep empty folders visible in the tree — exactly why
 // listWorkspaceFiles returns a folders array beside files.
 export type FolderInput = string;
 
@@ -80,7 +80,7 @@ function ensurePathNode(root: BuilderTreeNode, path: string): BuilderTreeNode {
 
 // Sort order: folders before leaves (Obsidian/VS Code convention), ties
 // broken alphabetically (locale-aware). A folder is `file === null` — an
-// EMPTY listed folder still sorts as a folder, never as a leaf.
+// empty listed folder still sorts as a folder, never as a leaf.
 function materializeTree(node: BuilderTreeNode): TreeNode {
   const children = [...node.childrenBySegment.values()].map(materializeTree);
   children.sort((a, b) => {

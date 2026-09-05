@@ -15,7 +15,7 @@ import {
 } from "./ydocWireContract";
 
 interface LoopbackFile {
-  // Object ids are only unique WITHIN a scope, matching the daemon's
+  // Object ids are only unique within a scope, matching the daemon's
   // `DocKey` (workspace_id, version_id, object_id) — a fixture that reuses
   // an id across scopes must never let one scope's row cover another's.
   workspace: string;
@@ -29,7 +29,7 @@ interface LoopbackFile {
 
 // Mirrors `dohc_engine_collab::durable::Regime`: LocalOnly is a prunable
 // fast-resume cache (the artifact is durable canonical), Replicated is the
-// durable canonical CRDT lineage itself, and its close NEVER prunes it.
+// durable canonical CRDT lineage itself, and its close never prunes it.
 type LineageRegime = "local-only" | "replicated";
 
 interface Lineage {
@@ -38,7 +38,7 @@ interface Lineage {
   // The content kind the lineage was created under. `ydoc_open_state_on_store`
   // reads this off the persisted marker whenever durable state exists,
   // never off the reopen's request — a plaintext lineage resurrected under
-  // a richdoc request would settle the EMPTY `body` fragment instead of the
+  // a richdoc request would settle the empty `body` fragment instead of the
   // `plainText` content it actually holds.
   contentKind: YdocContentKind;
   // The content sha the last settle over this lineage materialized, or
@@ -50,7 +50,7 @@ interface Lineage {
   // crates/dohc-engine-collab/src/durable.rs).
   journaledUpdates: number;
   // The captured head sha the lineage's declared seed imported, or `null` —
-  // mirrors `ydoc_docs.seed_source_sha256` (#815). With exactly one journaled
+  // mirrors `ydoc_docs.seed_source_sha256`. With exactly one journaled
   // update, no prior settle, and the captured file still holding this sha,
   // settle answers without materializing and close prunes without refusing.
   seedSourceSha: string | null;
@@ -73,7 +73,7 @@ interface LoopbackSession {
   lineageAbsentAtOpen: boolean;
   firstUpdatePending: boolean;
   // The captured head sha at open — the daemon session's `open_head_sha`,
-  // which a declared seed records as the lineage's seed source (#815).
+  // which a declared seed records as the lineage's seed source.
   openHeadSha: string | null;
 }
 
@@ -105,10 +105,10 @@ function fileKey(workspace: string, versionId: string, path: string): string {
 // Both the daemon's absent-head open (`ydoc_open_state_on_store`,
 // crates/dohc-engine-runtime/src/actor.rs) and its capture ingestion
 // (crates/dohc-workspace-engine/src/store.rs) resolve an unrecorded path to
-// the SAME `derive_capture_object_id`, so a path capture seeds later finds
+// the same `derive_capture_object_id`, so a path capture seeds later finds
 // the id its own earlier open already derived. `seedFile`'s default reuses
 // this instead of an unrelated counter — a mismatched default would make
-// capture-seeding a path AFTER it was already opened land on a fresh object
+// capture-seeding a path after it was already opened land on a fresh object
 // id, orphaning the lineage the open's derived id created.
 function deriveObjectId(fileLookupKey: string): string {
   return `object-derived-${fileLookupKey}`;
@@ -159,7 +159,7 @@ function noMarkerRefusal(): Error {
 }
 
 // The literal from crates/dohc-workspace-engine/src/lib.rs: a seed declared
-// on anything but the first update of a lineage-absent session (#815).
+// on anything but the first update of a lineage-absent session.
 function seedNotFirstUpdateRefusal(): Error {
   return Object.assign(new Error("seed-not-first-update"), {
     wireError: {
@@ -269,7 +269,7 @@ export interface YdocLoopbackEngineOptions {
   // the daemon leaves alone. Those cases belong to a real-daemon test. Scene
   // settles refuse because the loopback has no store-backed asset projector.
   // One deliberate exception mirrors the daemon exactly: a seed-only session
-  // (#815) settles without invoking this hook at all.
+  //  settles without invoking this hook at all.
   materialize?: (input: { path: string; content: string }) => void;
 }
 
@@ -282,13 +282,13 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   private readonly files = new Map<string, LoopbackFile>();
   private readonly sessions = new Map<string, LoopbackSession>();
-  // The durable CRDT rows, which do NOT belong to a session. The daemon keeps
+  // The durable CRDT rows, which do not belong to a session. The daemon keeps
   // them across an eviction and resurrects them on the next open, and a
   // local-only close is the one thing that prunes them
   // (crates/dohc-engine-collab/src/durable.rs). A loopback that stored the
   // lineage in the session map instead would report an evicted document as
   // gone — modelling less than the daemon, so every test driving it would
-  // certify a convergence that does not happen (#665). Keyed by
+  // certify a convergence that does not happen. Keyed by
   // (workspace, version, objectId) — see `lineageKey` — not by path.
   private readonly lineages = new Map<string, Lineage>();
   private readonly eventHandlers = new Set<(event: Event) => void>();
@@ -303,7 +303,7 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   seedFile(input: SeedLoopbackFileInput): void {
     const key = fileKey(input.workspace, input.versionId, input.path);
-    // Mirrors `resolve_capture_object`'s FIRST step, `alias_object_id`: a
+    // Mirrors `resolve_capture_object`'s first step, `alias_object_id`: a
     // path that already has a known alias reuses it, before derivation or
     // disambiguation ever run. An ordinary re-capture of the same path
     // (content changed, no rename) must keep the object identity its
@@ -314,8 +314,8 @@ export class YdocLoopbackEngine implements EngineTransport {
       input.objectId ??
       this.files.get(key)?.objectId ??
       this.resolveDefaultObjectId(input.workspace, key);
-    // The daemon keeps ONE snapshot row per object: a capture that lands
-    // the SAME object at a new path replaces its row rather than adding a
+    // The daemon keeps one snapshot row per object: a capture that lands
+    // the same object at a new path replaces its row rather than adding a
     // second one, or a scan over `files` (capturedFileFor) would find the
     // stale row first and never reach the current one.
     for (const [otherKey, file] of this.files) {
@@ -349,14 +349,14 @@ export class YdocLoopbackEngine implements EngineTransport {
   }
 
   // Mirrors `object_has_live_alias` (crates/dohc-engine-domain/src/store.rs):
-  // true when some path OTHER than `excludingKey`, WITHIN `workspace`,
+  // true when some path other than `excludingKey`, within `workspace`,
   // currently holds this exact object id — the sign an object renamed
   // away and is still referenced elsewhere. Scoped to the workspace like
   // the daemon's query (`WHERE workspace_id = ?1 AND object_id = ?2`):
   // object ids are unique only within a workspace, so a fixture in a
-  // DIFFERENT workspace reusing this exact string must never collide.
+  // different workspace reusing this exact string must never collide.
   // Shared by capture's id resolution (above) and open's collision
-  // refusal (`open()`, actor.rs ydoc_open_state_on_store) — the SAME
+  // refusal (`open()`, actor.rs ydoc_open_state_on_store) — the same
   // rule, at the two sites that mint an id from a bare path.
   private objectHasLiveAliasElsewhere(
     workspace: string,
@@ -377,9 +377,9 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   // Test-only seam for the sync-promotion the daemon does inside
   // `claim_base_in_tx` when a peer's base lands: it promotes the marker's
-  // regime from local-only to replicated. Sync is not built (#356, #378), so
+  // regime from local-only to replicated. Sync is not built, so
   // there is no wire method to reach this from a test; a replicated
-  // lineage's close compacts and KEEPS the CRDT rows regardless of settle
+  // lineage's close compacts and keeps the CRDT rows regardless of settle
   // state, which is what this exists to exercise.
   //
   // Requires an existing lineage entry: a replicated doc has durable state
@@ -525,7 +525,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       objectId = file.objectId;
     } else {
       const derived = deriveObjectId(fileLookupKey);
-      // A derived id still LIVE at another alias means this path's former
+      // A derived id still live at another alias means this path's former
       // file was renamed away: only capture's locked resolution may mint a
       // disambiguated id for that (resolve_capture_object); an open cannot
       // reserve one pre-commit, so it refuses instead of grafting onto the
@@ -536,20 +536,20 @@ export class YdocLoopbackEngine implements EngineTransport {
       objectId = derived;
     }
     const sessionId = `session-${this.nextSessionId++}`;
-    // A surviving lineage RESURRECTS: it is the document's own state, and it
+    // A surviving lineage resurrects: it is the document's own state, and it
     // outranks the file exactly as the daemon's does. Keyed by OBJECT
     // IDENTITY (workspace, version, objectId) — see `lineageKey` — so a
     // rename resurrects the same lineage and a path a different object now
     // occupies does not inherit its predecessor's edits.
     const lineageMapKey = lineageKey(request.workspace, versionId, objectId);
     const lineage = this.lineages.get(lineageMapKey);
-    // NO HEAD in this version. The daemon does NOT refuse here — it derives an
-    // object id and binds an EMPTY doc, which is how a just-created file
+    // NO HEAD in this version. The daemon does not refuse here — it derives an
+    // object id and binds an empty doc, which is how a just-created file
     // becomes editable before capture ingests it (actor.rs
     // ydoc_open_state_on_store, head == None). A loopback that threw instead
     // modelled less than the daemon and hid every consumer bug on that branch.
     //
-    // A RESURRECTION uses the lineage's OWN stored kind, never the reopen's
+    // A resurrection uses the lineage's OWN stored kind, never the reopen's
     // request: ydoc_open_state_on_store reads the persisted marker's
     // content_kind whenever durable state exists. Binding a plaintext
     // lineage as richdoc would settle the empty `body` fragment instead of
@@ -566,7 +566,7 @@ export class YdocLoopbackEngine implements EngineTransport {
     // applies it as a real local update and records it through
     // `ydoc.recordUpdate` (`YdocLiveAdapter.openSession`), exactly as
     // `ydoc_open_state_on_store` does (actor.rs): `initial_update` stays
-    // the EMPTY doc's state, and `seed_content` carries the head's text
+    // the empty doc's state, and `seed_content` carries the head's text
     // separately, `(!lineage_existing).then(|| head...).flatten()`. That
     // recordUpdate is what clears `firstUpdatePending` — embedding the
     // seed directly into the initial doc here (as an earlier version of
@@ -646,12 +646,12 @@ export class YdocLoopbackEngine implements EngineTransport {
     // with NoMarker's wire shape rather than letting an untouched session's
     // structurally-empty projection materialize and clobber whatever the
     // artifact already holds. `close()`'s implicit default already avoids
-    // this; this guards the EXPLICIT settle:true override, and the direct
+    // this; this guards the explicit settle:true override, and the direct
     // `ydoc.settle` RPC, which share this same path.
     if (session.lineageAbsentAtOpen && session.firstUpdatePending) {
       throw noMarkerRefusal();
     }
-    // A session with no edits settles WITHOUT writing (#815): the lineage's
+    // A session with no edits settles without writing: the lineage's
     // whole history is the one declared seed and the captured file still
     // holds its source bytes, so the file already IS this settlement —
     // mirror the daemon's `ydoc_settle_on_store` skip: no materialize, no
@@ -759,7 +759,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       return { closed: true };
     }
 
-    // Missing `settle` means SETTLE unless this session opened onto no
+    // Missing `settle` means settle unless this session opened onto no
     // lineage and has recorded no update yet — mirrors
     // `!(session.lineage_absent && session.first_update_pending)`
     // (crates/dohc-workspace-engine/src/lib.rs).
@@ -774,21 +774,21 @@ export class YdocLoopbackEngine implements EngineTransport {
 
     const entry = this.lineages.get(key);
     if (entry && entry.regime === "local-only") {
-      // Local-only prune would DISCARD the CRDT rows — the daemon refuses
+      // Local-only prune would discard the CRDT rows — the daemon refuses
       // unless the artifact already holds the head's bytes
       // (durable.rs close_session): the projected content must match either
-      // the last settle this lineage recorded, OR a CAPTURED head — the
+      // the last settle this lineage recorded, OR a captured head — the
       // `files` row IS this loopback's disk read, so a present head whose
       // content already matches the projection is the same proof
       // `captured_head_sha` reads there (durable.rs:1278-1310). That query
       // is scoped by (workspace, version, object_id) with NO path
       // restriction — a rename does not mint a new object — so the lookup
       // here resolves by object identity too, never by this session's own
-      // path: a renamed object captured at its NEW path still covers the
-      // OLD session's close, and a path rebound to a DIFFERENT object with
+      // path: a renamed object captured at its new path still covers the
+      // old session's close, and a path rebound to a different object with
       // coincidentally identical content never covers this one. Absent
       // head covers nothing either, same as the daemon's read. A
-      // REPLICATED lineage never takes this branch — its close compacts
+      // replicated lineage never takes this branch — its close compacts
       // and keeps the rows regardless of settle state (see
       // `markSessionReplicated`).
       const currentSha = settled?.sha256 ?? sha256(project(session));
@@ -801,7 +801,7 @@ export class YdocLoopbackEngine implements EngineTransport {
         capturedFile !== undefined &&
         capturedFile.head === "present" &&
         sha256(capturedFile.content) === currentSha;
-      // THIRD proof (#815), mirroring `close_session` (durable.rs): a
+      // Third proof, mirroring `close_session` (durable.rs): a
       // seed-only lineage whose recorded source is still the captured head
       // holds nothing the file does not — pruning discards a cache of the
       // file, not content.
@@ -863,7 +863,7 @@ export class YdocLoopbackEngine implements EngineTransport {
       requiredString(params, "sessionId", "ydoc.resync params"),
     );
     // The live adapter preserves its event position across a resync, so the
-    // loopback sequence stays MONOTONIC — resetting it would make the next
+    // loopback sequence stays monotonic — resetting it would make the next
     // remote update emit seq 1 and re-mark the freshly-resynced session
     // stale.
     return {
@@ -883,8 +883,8 @@ export class YdocLoopbackEngine implements EngineTransport {
   // The daemon's `captured_head_sha` query is scoped by
   // (workspace, version, object_id), not by path (durable.rs) — the
   // loopback's disk read must resolve the same way, so a renamed object's
-  // capture at its NEW path is still found for an OLD session still bound
-  // to it, and a fixture reusing an object id in a DIFFERENT scope never
+  // capture at its new path is still found for an old session still bound
+  // to it, and a fixture reusing an object id in a different scope never
   // covers this one.
   private capturedFileFor(
     workspace: string,

@@ -1,11 +1,10 @@
-//! Base64 with byte-exact parity to Node's `Buffer` semantics
-//! (`LANGUAGE_SEMANTICS_MATRIX.md` §4.7).
+//! Base64 with byte-exact parity to Node's `Buffer` semantics.
 //!
 //! Two decode modes, deliberately distinct:
 //!
 //! - [`encode_standard`] / [`forgiving_decode`] reproduce
 //!   `Buffer.from(bytes).toString("base64")` and `Buffer.from(str, "base64")`.
-//!   Node's decoder is FORGIVING: `=` is a hard TERMINATOR (decoding stops at
+//!   Node's decoder is FORGIVING: `=` is a hard terminator (decoding stops at
 //!   the first one, even mid-string); before it, bytes outside the standard
 //!   alphabet (whitespace, stray punctuation) are skipped; a trailing lone
 //!   leftover symbol is dropped. The TS key-file parser relies on exactly this
@@ -14,8 +13,8 @@
 //!   `=`-terminator rule, so we neither accept a malformed key file Node would
 //!   reject nor reject one it would accept.
 //! - [`strict_decode_exact`] reproduces the TS replication-ingest guard
-//!   (`normalizeBase64Field`, `secretFileStore.ts:500-509`): the string must
-//!   match `^[A-Za-z0-9+/]*={0,2}$`, decode to `expected_len` bytes, AND
+//!   (`normalizeBase64Field`): the string must
+//!   match `^[A-Za-z0-9+/]*={0,2}$`, decode to `expected_len` bytes, and
 //!   re-encode to the identical string (canonical form). Anything else is
 //!   rejected — a poison replication payload never rides a non-canonical field.
 
@@ -69,7 +68,7 @@ fn decode_symbol(b: u8) -> Option<u8> {
 }
 
 /// Forgiving decode matching `Buffer.from(str, "base64")`. Node treats `=` as a
-/// hard TERMINATOR: decoding STOPS at the first `=` (even mid-string). Before
+/// hard terminator: decoding stops at the first `=` (even mid-string). Before
 /// that terminator, any non-alphabet byte (whitespace, stray punctuation) is
 /// skipped. A trailing lone symbol (1 leftover) yields no byte — Node drops it
 /// rather than erroring. Never fails.
@@ -128,7 +127,7 @@ pub fn strict_decode_exact(input: &str, expected_len: usize) -> Result<Vec<u8>, 
 }
 
 /// Strict, canonical decode with no length constraint — the TS `parseBase64`
-/// guard used by the key envelope: the string must be canonical shape AND
+/// guard used by the key envelope: the string must be canonical shape and
 /// re-encode to itself. Rejects non-canonical or non-alphabet input.
 pub fn strict_decode(input: &str) -> Result<Vec<u8>, CryptoError> {
     if !is_canonical_shape(input) {
