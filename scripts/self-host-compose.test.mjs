@@ -3,12 +3,17 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { load } from 'js-yaml'
 
-const compose = load(readFileSync('docker-compose.self-host.yml', 'utf8'))
+const composeText = readFileSync('docker-compose.self-host.yml', 'utf8')
+const compose = load(composeText)
 const envExample = Object.fromEntries(
   readFileSync('.env.self-host.example', 'utf8')
     .split(/\r?\n/)
     .filter((line) => line && !line.startsWith('#'))
-    .map((line) => line.split('=', 2)),
+    .map((line) => {
+      const eq = line.indexOf('=')
+      assert.notEqual(eq, -1, `.env.self-host.example line has no value: ${line}`)
+      return [line.slice(0, eq), line.slice(eq + 1)]
+    }),
 )
 
 const relay = compose.services['sync-relay']
@@ -60,9 +65,7 @@ test('share-web binds every interface so its published port is reachable', () =>
 })
 
 test('the example env names every variable compose requires', () => {
-  const interpolations = readFileSync('docker-compose.self-host.yml', 'utf8').matchAll(
-    /\$\{([A-Z_]+):\?/g,
-  )
+  const interpolations = composeText.matchAll(/\$\{([A-Z0-9_]+):\?/g)
   for (const [, name] of interpolations) {
     assert.ok(name in envExample, `.env.self-host.example must define ${name}`)
   }
