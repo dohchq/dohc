@@ -23,9 +23,7 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
@@ -100,77 +98,6 @@ test("flagged workspace shows engine moments and restores a file end-to-end", as
     await expect
       .poll(() => readFile(join(temp.rootPath, "notes/plan.md"), "utf8"))
       .toBe("second draft\n");
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
-
-// WS-H1 retirement Phase C: an explicitly opted-out workspace has NO history
-// recorder at all — the legacy recorder is retired. The escape hatch must
-// still leave a fully working app: files edit and save, nothing crashes, no
-// engine store appears, no legacy change sets are written, and the app says
-// honestly that history is off (rail placeholder + persistent notice).
-test("explicit opt-out: app works, nothing records anywhere, and the app says history is off", async () => {
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-
-  try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: false },
-    });
-    desktop = await launchDesktopApp({ workspace: temp });
-    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    const page = desktop.page;
-
-    // Files still work: an on-disk write is observed and listed...
-    await writeWorkspaceFiles(temp, [
-      { path: "notes/opted-out.md", contents: "no history here\n" },
-    ]);
-    await waitForWorkspaceFile(page, workspace.workspaceId, "notes/opted-out.md");
-
-    // ...and an app-side edit through the normal bridge saves fine.
-    const expectedContentHash = createHash("sha256")
-      .update(await readFile(join(temp.rootPath, "notes/opted-out.md")))
-      .digest("hex");
-    await page.evaluate(
-      async (input) => {
-        const api = (window as unknown as {
-          dohcDesktop: Pick<DohcDesktopBridge, "writeWorkspaceText">;
-        }).dohcDesktop;
-        await api.writeWorkspaceText({
-          workspaceId: input.workspaceId,
-          relativePath: "notes/opted-out.md",
-          text: "no history here — edited\n",
-          expectedContentHash: input.expectedContentHash,
-        });
-      },
-      { workspaceId: workspace.workspaceId, expectedContentHash },
-    );
-    await expect
-      .poll(() =>
-        readFile(join(temp.rootPath, "notes/opted-out.md"), "utf8").catch(() => ""),
-      )
-      .toBe("no history here — edited\n");
-
-    // The History view says history is off; engine surfaces never mount,
-    // and the Chats panel toggle does not exist for unflagged workspaces.
-    await page.getByTestId("activity-history").click();
-    await expect(page.getByTestId("history-off-placeholder")).toBeVisible();
-    await expect(page.getByTestId("engine-history-list")).toHaveCount(0);
-    await expect(page.getByTestId("titlebar-chats-sidebar")).toHaveCount(0);
-    await expect(page.getByTestId("chats-panel")).toHaveCount(0);
-
-    // The persistent notice is present (reuses the capture-failure pattern).
-    await page.getByTestId("notice-center-toggle").click();
-    await expect(page.getByTestId("notice-history-recording-off")).toBeVisible();
-
-    // And truly nothing records: no engine store, no new legacy change sets.
-    const { existsSync } = await import("node:fs");
-    expect(existsSync(join(temp.rootPath, ".dohc", "engine", "engine.db"))).toBe(false);
-    const { readdir } = await import("node:fs/promises");
-    expect(
-      (await readdir(join(temp.rootPath, ".dohc", "history")).catch(() => [])).length,
-    ).toBe(0);
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

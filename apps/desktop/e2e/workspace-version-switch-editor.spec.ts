@@ -129,9 +129,7 @@ test("switching the active version while a rich doc stays open re-binds the edit
   const draftSentinel = "DRAFTONLY-only-on-draft";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "plan.md", contents: `# Plan\n\n${mainSentinel}\n` },
     ]);

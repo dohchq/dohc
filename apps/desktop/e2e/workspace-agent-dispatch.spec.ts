@@ -79,9 +79,7 @@ test("My agent dispatches a fresh successful run for each human message", async 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     const command = await seedRunnerSettings(temp, "report");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
@@ -132,9 +130,7 @@ test("My agent posts a durable failure note when the runner exits silently", asy
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await seedRunnerSettings(temp, "silent-fail");
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);

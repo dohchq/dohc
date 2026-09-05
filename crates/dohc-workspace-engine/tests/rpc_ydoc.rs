@@ -16,11 +16,9 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
@@ -267,7 +265,6 @@ async fn call_error(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_settle() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(49 * 1024);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -427,7 +424,6 @@ async fn scene_open_seeds_large_embedded_assets_in_the_engine_and_rehydrates_on_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     const PATH: &str = "drawings/untitled.excalidraw";
     write_file(scratch.path(), PATH, b" \n\t");
 
@@ -520,7 +516,6 @@ async fn scene_open_claims_a_whitespace_only_artifact_after_capture_wins() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_still_refuses_a_nonempty_invalid_artifact() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     const PATH: &str = "drawings/invalid.excalidraw";
     write_file(scratch.path(), PATH, b"not JSON");
 
@@ -552,7 +547,6 @@ async fn scene_open_still_refuses_a_nonempty_invalid_artifact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let artifact = serde_json::to_string(&json!({
         "type":"excalidraw",
         "elements":[
@@ -621,7 +615,6 @@ async fn scene_open_seeds_legacy_elements_and_repairs_a_dangling_image() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(512);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let scene = |version: u64, background: &str| {
@@ -733,7 +726,6 @@ async fn default_close_settles_and_releases_a_seeded_image_scene_after_an_edit()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_them() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(2048);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -906,7 +898,6 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recovers() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(2048);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -1028,7 +1019,6 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_retire_of_a_scene_removes_its_owned_asset_sidecar() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(1024);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -1099,7 +1089,6 @@ async fn capture_retire_of_a_scene_removes_its_owned_asset_sidecar() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retired_scene_asset_sidecar_still_supports_open_settle_and_close() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(1024);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -1243,7 +1232,6 @@ async fn retired_scene_asset_sidecar_still_supports_open_settle_and_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_active_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(1024);
     let encoded = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -1380,7 +1368,6 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let element = |id: &str, index: Option<Value>| {
         let mut element = serde_json::Map::from_iter([
             ("id".to_owned(), json!(id)),
@@ -1521,7 +1508,6 @@ async fn legacy_scene_indices_keep_source_z_order_through_seed_settle_and_reopen
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let artifact = serde_json::to_string(&json!({
         "type": "excalidraw",
         "version": 2,
@@ -1590,7 +1576,6 @@ async fn scene_rebind_with_seed_disabled_never_resurrects_the_portable_artifact(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survives_rename() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let artifact = serde_json::to_string(&json!({
         "type": "excalidraw",
         "version": 2,
@@ -1754,7 +1739,6 @@ async fn scene_open_defers_missing_authoritative_asset_then_recovers_and_survive
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let artifact = serde_json::to_string(&json!({
         "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
         "elements": [], "appState": {}, "files": {}
@@ -1815,7 +1799,6 @@ async fn scene_open_rejects_forged_asset_namespace_without_a_writable_fallback()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_join_authorizes_a_tombstoned_image_for_remote_undo_only() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = valid_png_with_text_padding(1024);
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -1955,7 +1938,6 @@ async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable
         ("mime-mismatch", "image/jpeg"),
     ] {
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
         let drawing_path = format!("{case}.excalidraw");
         write_file(
             scratch.path(),
@@ -2060,7 +2042,6 @@ async fn scene_open_rejects_text_sha_and_mime_asset_authority_without_a_writable
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_seed_omits_deleted_and_unused_native_files() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let artifact = serde_json::to_string(&json!({
         "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
         "elements": [{
@@ -2112,7 +2093,6 @@ async fn scene_seed_omits_deleted_and_unused_native_files() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn scene_seed_refuses_a_preexisting_different_asset_at_its_owned_ref() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let image_bytes = vec![1_u8, 2, 3, 4];
     let image_base64 = base64::engine::general_purpose::STANDARD.encode(&image_bytes);
     let artifact = serde_json::to_string(&json!({
@@ -2173,7 +2153,6 @@ async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
     // binary ceiling is beyond that measured healthy native range.
     assert_eq!(dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES, 5_242_880);
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let observed = dohc_engine_domain::MAX_CAPTURE_BINARY_FILE_BYTES + 1;
     let bytes = vec![0x5a; observed];
     let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -2399,7 +2378,6 @@ fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerp
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ydoc_open_rejects_secret_paths() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), ".env.local", b"TOKEN=secret\n");
 
     let service = Arc::new(EngineService::new());
@@ -2435,7 +2413,6 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
     const OLD_STATE_WIRE_CAP: usize = 6 * MIB;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(Arc::clone(&service));
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-large-egress", 1).await;
@@ -2562,7 +2539,6 @@ async fn ydoc_blob_egress_roundtrips_a_state_above_the_old_json_cap() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/live.md", b"before");
     write_file(scratch.path(), "notes/race.md", b"race base");
     write_file(
@@ -2954,7 +2930,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     .await;
     let isolated_session = isolated["sessionId"].as_str().expect("isolated session");
     let other = ScratchDir::new().expect("other scratch");
-    write_shadow_marker_for_harness(other.path(), TOKEN).expect("other marker");
     write_file(other.path(), "bootstrap.md", b"other");
     let other_handle = open_workspace(&transport, &other, "ws-rpc-ydoc-other", 24).await;
     let cross_workspace = transport
@@ -3003,7 +2978,6 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/precious.md", b"precious content");
 
     let service = Arc::new(EngineService::new());
@@ -3072,7 +3046,6 @@ async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -3157,7 +3130,6 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
     // durability — the daemon materializes from the projection it already
     // holds, so the file must land and the response must say `content: null`.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -3276,7 +3248,6 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     // Driven deterministically here (sleep past the debounce + capture.flush)
     // rather than by hoping the scheduler interleaves.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -3366,7 +3337,6 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
     // no lineage. `creating_a_new_file_through_a_ydoc_session_settles_to_disk`
     // below covers the file-absent-everywhere shape the app never produces.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "baseline/alpha.md", b"");
 
     let service = Arc::new(EngineService::new());
@@ -3448,7 +3418,6 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     // Driven deterministically (sleep past the debounce + capture.flush)
     // rather than by hoping the scheduler interleaves.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -3567,7 +3536,6 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // adoption in `ydoc_settle_on_store` and this settle succeeds, silently
     // destroying the ingested content.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
 
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
@@ -3657,7 +3625,6 @@ async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -3734,7 +3701,6 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn opening_an_absent_path_whose_derived_object_lives_elsewhere_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -3805,7 +3771,6 @@ async fn settle_recovers_after_a_transient_replace_failure() {
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -3947,7 +3912,6 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let service = Arc::new(EngineService::new());
@@ -4061,7 +4025,6 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-delete-cancels-pending";
@@ -4213,7 +4176,6 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-inactive-delete-preserves-active";
@@ -4387,7 +4349,6 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     use std::os::windows::fs::OpenOptionsExt;
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/seed.md", b"seed");
 
     let workspace_id = "ws-rpc-ydoc-rename-pair-not-stranded";
@@ -4540,7 +4501,6 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     const TYPED: &str = "what the user typed";
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), PATH, b"base");
 
     let service = Arc::new(EngineService::new());
@@ -4672,7 +4632,6 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
     const PATH: &str = "notes/evict.md";
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), PATH, b"base");
 
     let service = Arc::new(EngineService::new());
@@ -4812,7 +4771,6 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     const PATH: &str = "notes/lineage.md";
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
@@ -5026,7 +4984,6 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     const PATH: &str = "notes/shared.md";
 
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
@@ -5176,7 +5133,6 @@ fn richdoc_update(doc: &Ydoc, paragraph: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_declared_seed_only_session_closes_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(
         scratch.path(),
         "plugins/p/README.md",
@@ -5288,7 +5244,6 @@ async fn a_declared_seed_only_session_closes_without_writing() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_real_edit_after_the_seed_still_settles_to_disk() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(
         scratch.path(),
         "plugins/p/README.md",
@@ -5365,7 +5320,6 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn replayed_prior_session_ops_still_settle_on_close() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/replay.md", b"Original body.\n");
 
     let service = Arc::new(EngineService::new());
@@ -5449,7 +5403,6 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seed_declared_after_the_first_update_refuses() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     write_file(scratch.path(), "notes/late-seed.md", b"Body.\n");
 
     let service = Arc::new(EngineService::new());

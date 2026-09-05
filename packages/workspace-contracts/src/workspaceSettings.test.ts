@@ -5,7 +5,6 @@ import {
   ATTACHMENT_FOLDER_NAME_MAX_LENGTH,
   DEFAULT_WORKSPACE_SETTINGS,
   WorkspaceSettings,
-  workspaceEngineSetting,
 } from "./workspaceSettings";
 
 const decodeWorkspaceSettings = Schema.decodeUnknownResult(WorkspaceSettings);
@@ -38,7 +37,7 @@ describe("WorkspaceSettings", () => {
       { ...DEFAULT_WORKSPACE_SETTINGS, token: "secret" },
       "Expected no excess property",
     );
-    for (const section of ["agents", "sites", "privacy", "experimental", "files"] as const) {
+    for (const section of ["agents", "sites", "privacy", "files"] as const) {
       expectFailureMessage(
         {
           ...DEFAULT_WORKSPACE_SETTINGS,
@@ -98,10 +97,4 @@ describe("WorkspaceSettings", () => {
     );
   });
 
-  it("keeps structured decode failures in the engine setting verdict", () => {
-    expect(workspaceEngineSetting({ ...DEFAULT_WORKSPACE_SETTINGS, token: "secret" })).toEqual({
-      state: "untrusted",
-      cause: 'Expected no excess property\n  at ["token"]',
-    });
-  });
 });

@@ -26,6 +26,7 @@ import {
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
@@ -47,7 +48,6 @@ async function reconnectFailureCapture(prefix: string) {
   const workspaceId = prefix.replace(/-+$/, "");
   const loopback = new VersionedLoopbackEngine();
   const state = {
-    failBackgroundCapture: false,
     generation: 0,
     leaseActive: false,
     releaseCalls: [] as Array<{ generation: number; settle?: boolean }>,
@@ -62,9 +62,8 @@ async function reconnectFailureCapture(prefix: string) {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
-      if (state.failBackgroundCapture) {
-        throw new Error("background capture unavailable");
-      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -211,42 +210,6 @@ it(
   },
 );
 
-it("publishes dead-session recovery without masking background capture health", async () => {
-  const { capture, outcomes, rootPath, state } =
-    await reconnectFailureCapture("dohc-ydoc-outcome-recovery-");
-
-  const healthyBackgroundSession = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  await failRendererUpdate(healthyBackgroundSession);
-  expect(outcomes).toEqual([false]);
-  await healthyBackgroundSession.close({ settle: false });
-  expect(outcomes).toEqual([false, true]);
-
-  const failingBackgroundSession = await capture.openYDocSession({
-    path: "note.md",
-    onRemoteUpdate: () => undefined,
-  });
-  await failRendererUpdate(failingBackgroundSession);
-  expect(outcomes).toEqual([false, true, false]);
-
-  state.failBackgroundCapture = true;
-  await writeFile(join(rootPath, "background.md"), "capture me\n");
-  capture.captureBatch([{ path: "background.md", operation: "update" }]);
-  await capture.flush();
-  expect(outcomes).toEqual([false, true, false, false]);
-
-  state.failBackgroundCapture = false;
-  await failingBackgroundSession.close({ settle: false });
-  expect(outcomes).toEqual([false, true, false, false, false]);
-
-  capture.captureBatch([{ path: "background.md", operation: "update" }]);
-  await capture.flush();
-  expect(outcomes).toEqual([false, true, false, false, false, true]);
-  await capture.stop();
-});
-
 it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", async () => {
   const rootPath = await createTestScratch("dohc-ydoc-restart-");
   const loopback = new VersionedLoopbackEngine();
@@ -265,6 +228,8 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   });
@@ -419,6 +384,8 @@ it("replaces rather than merges an independently rooted lineage after restart", 
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   });
@@ -521,6 +488,8 @@ it("keeps an unclaimed lineage when its full state is the claimed base", async (
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   });
@@ -628,6 +597,8 @@ it("keeps a locally promoted lineage after later updates change its full state",
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   });
@@ -754,6 +725,8 @@ it("replaces a fork that claims a base descended from the same Y.Doc history", a
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   });
@@ -885,7 +858,10 @@ it("opens first when record recovery loses the restarted daemon transport", asyn
       return { id: request.id, result: { closed: true } };
     }
     if (!request.method.startsWith("ydoc.")) {
-      return await versioned.sendRequest(request);
+      return (
+        daemonCaptureLifecycleAnswer(request) ??
+        (await versioned.sendRequest(request))
+      );
     }
     return null;
   };
@@ -980,6 +956,8 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1075,6 +1053,8 @@ it("releases a close-latched failed generation with settle true before the next 
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1205,6 +1185,8 @@ it("defers a version switch behind a dead generation until release converges", a
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1299,12 +1281,6 @@ it("defers a version switch behind a dead generation until release converges", a
   expect(outcomes).toEqual([false]);
   expect(historyCaptureFailed).toBe(true);
 
-  await writeFile(join(rootPath, "unrelated.md"), "captured safely\n");
-  capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
-  await capture.flush();
-  expect(outcomes).toEqual([false, false]);
-  expect(historyCaptureFailed).toBe(true);
-
   // MUTATION: omit markDead's failing-close transition. The switch enters the
   // healthy-session settle branch and fails on the dead wrapper before it can
   // exercise the retained release obligation.
@@ -1327,12 +1303,7 @@ it("defers a version switch behind a dead generation until release converges", a
   });
   expect(closeAttempts).toEqual([false, true, false, true, false]);
   expect(leaseActive).toBe(false);
-  expect(outcomes).toEqual([false, false, true]);
-  expect(historyCaptureFailed).toBe(false);
-  await writeFile(join(rootPath, "unrelated.md"), "captured safely again\n");
-  capture.captureBatch([{ path: "unrelated.md", operation: "update" }]);
-  await capture.flush();
-  expect(outcomes).toEqual([false, false, true, true]);
+  expect(outcomes).toEqual([false, true]);
   expect(historyCaptureFailed).toBe(false);
   const reopened = await capture.openYDocSession({
     path: "note.md",
@@ -1362,6 +1333,8 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1465,6 +1438,8 @@ it("a settle whose materialization was BLOCKED reports an error, never Saved", a
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1560,6 +1535,8 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -1718,6 +1695,8 @@ async function daemonDeathCapture(
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -2386,7 +2365,9 @@ it("an explicit settle against a down daemon fails fast instead of blocking", as
   expect(backoff.delays).toEqual(BOUNDED_CLOSE_BACKOFF_MS);
 
   await session.close({ settle: false }).catch(() => undefined);
-  await capture.stop();
+  // stop() flushes the daemon's own capture; against a dead daemon that
+  // is a transport failure, which is not what this test is about.
+  await capture.stop().catch(() => undefined);
 });
 
 // #514, codex P2. The revive path's ordering. An edit typed after the daemon
@@ -2556,6 +2537,8 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -2706,6 +2689,8 @@ it("announces a recovered edit exactly once when both arm points run", async () 
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -2796,7 +2781,6 @@ it("announces a recovered edit exactly once when both arm points run", async () 
 async function lockedRebindCapture(
   prefix: string,
   options?: {
-    daemonOwnsCapture?: boolean;
     now?: () => number;
     // Wraps the base provider open for one test's own generation, so it
     // can override a single method (e.g. `settleNow`'s timing) while
@@ -2827,6 +2811,8 @@ async function lockedRebindCapture(
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await loopback.sendRequest(request);
     },
   };
@@ -3071,7 +3057,6 @@ async function lockedRebindCapture(
         error instanceof Error ? error.message : String(error),
       );
     },
-    ...(options?.daemonOwnsCapture ? { daemonOwnsCapture: true } : {}),
     ...(options?.now ? { now: options.now } : {}),
   });
   return { capture, state, loopback, workspaceId, rootPath };
@@ -6170,73 +6155,6 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   const finish = await capture.beginFileRename("note.md", "renamed.md");
   expect(typeof finish).toBe("function");
   await capture.stop();
-}, 20_000);
-
-it("in the daemon-owned production configuration, an external delete still cancels a stood-down debt", async () => {
-  // #681 round 6, codex P2-B (real — the same class as #736's dead fence):
-  // production constructs capture with `daemonOwnsCapture: true`
-  // (engineCaptureGate.ts:65), under which `captureBatch` used to return
-  // before ever calling `captureOnePath` — the function that carried
-  // rounds 3-5's entire debt-cleanup fix. Every prior external-removal
-  // pin drove this file's JS-capture harness (`daemonOwnsCapture`
-  // unset), so none of them proved the SHIPPED configuration behaved the
-  // same way. Detached debts arise independently of which side captures
-  // disk content — they come from a Y.Doc session's own close failure,
-  // which `daemonOwnsCapture` never gates — so the cleanup has to run
-  // for them regardless.
-  const { capture, state, rootPath } = await lockedRebindCapture(
-    "dohc-ydoc-daemon-owned-cleanup-",
-    { daemonOwnsCapture: true },
-  );
-  const { session } = await openWithOneEdit(capture, "never written");
-
-  state.locked = true;
-  state.replicated = true;
-  await expect(session.close()).rejects.toThrow(
-    /released, but its pre-close settle failed/,
-  );
-
-  state.locked = false;
-  state.unmaterialized = true;
-  await expect
-    .poll(
-      () => state.errorMessages.filter((message) => message.includes("symlink")),
-      { timeout: 15_000 },
-    )
-    .not.toHaveLength(0);
-
-  // An external program deletes the path. The watcher still reports the
-  // same event in daemon-owned mode — only the disk-to-engine CAPTURE is
-  // the daemon's job, not this registry's own cleanup. `flush()` is not
-  // usable here: in daemon-owned mode it also flushes the DAEMON's own
-  // capture over the wire, which this loopback harness does not model —
-  // poll the observable trace instead.
-  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
-
-  // RED before the fix: `captureBatch` returned before `captureOnePath`
-  // ever ran, so this trace never appeared and the marker never cleared.
-  await expect
-    .poll(
-      () =>
-        state.errorMessages.some((message) =>
-          message.includes("an external delete of note.md removed the path"),
-        ),
-      { timeout: 15_000 },
-    )
-    .toBe(true);
-
-  // The path is recreated and a rename now proceeds cleanly — no stale
-  // refusal, in the same configuration the app actually ships.
-  await writeFile(join(rootPath, "note.md"), "fresh content\n", "utf8");
-  const finish = await capture.beginFileRename("note.md", "elsewhere.md");
-  expect(typeof finish).toBe("function");
-  // No `capture.stop()`/`flush()` here: in daemon-owned mode both also
-  // flush the DAEMON's own capture over the wire (a real RPC this
-  // loopback harness does not model). `session.close()` above DID arm a
-  // detached retry timer regardless of `capture.start()` — but the
-  // external delete's own cancellation already cleared it
-  // (`discardDetachedLockedDebt`, reached through `cancelSuspendedDebts`),
-  // so nothing is left running past this test.
 }, 20_000);
 
 it("a stood-down debt on the rename's destination survives a move that fails because the destination exists", async () => {

@@ -140,7 +140,6 @@ test("a synced field edit reaches a plugin's collections.watch subscription on t
     capture = createWorkspaceEngineCapture({
       ...deviceA.workspace,
       rustEngineSessions: deviceA.sessions,
-      daemonOwnsCapture: true,
     });
     const deviceARelay = deviceA.relay.bind({
       ...deviceA.workspace,

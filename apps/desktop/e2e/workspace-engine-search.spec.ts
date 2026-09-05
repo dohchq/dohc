@@ -84,9 +84,7 @@ test("flagged: search finds file content and a chat message; .env.local content 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     // Disk state: one ordinary tracked file plus a `.env.local` (the family
     // member that originally fell through the secret classifier).
     await writeWorkspaceFiles(temp, [
@@ -173,9 +171,7 @@ test("flagged: a newly saved editor change is searchable before relaunch", async
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/live.md", contents: "# Live search\n\nBefore the edit.\n" },
     ]);

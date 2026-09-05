@@ -8,13 +8,12 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-read-surface";
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -81,7 +80,6 @@ async fn flush_until(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport
         .call(
@@ -150,7 +148,6 @@ async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     // Pre-open disk content: the startup baseline captures text, binary and
     // a secret before the first read RPC ever runs.
     write_file(scratch.path(), "notes/a.md", b"captured text");
@@ -574,7 +571,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     // versions.active answers null when neither active nor main resolves;
     // keyless materialize still answers null when no secret state exists.
     let fresh = ScratchDir::new().expect("fresh scratch");
-    write_shadow_marker_for_harness(fresh.path(), TOKEN).expect("marker");
     let opened = transport
         .call(
             RequestContext::unbounded(),

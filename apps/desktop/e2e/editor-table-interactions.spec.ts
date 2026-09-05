@@ -27,9 +27,7 @@ test("table width, scrolling, row resizing, and reorder previews stay stable", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/table-interactions.md", contents: TABLE_DOC },
     ]);

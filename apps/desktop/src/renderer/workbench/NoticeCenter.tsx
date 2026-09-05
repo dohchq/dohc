@@ -385,56 +385,25 @@ export function NoticeCenter(props: {
       });
     }
 
-    // Persistent while true (WS-H1 retirement Phase C): no engine capture
-    // means NO history recorder exists at all — the legacy recorder is
-    // retired. Honest, persistent, never spammy (both flags change only at
-    // workspace open). Three causes end in no recorder, and only the LAST is
-    // the user's Settings choice — so each earlier cause claims the notice
-    // first. An unreadable settings file reads as opted out; a recorder that
-    // failed to build never got that far. Naming Settings for either would be
-    // a lie about a setting the user never touched.
+    // Persistent while true: no engine capture means no history recorder
+    // exists at all. Never spammy: the flags change only at workspace open,
+    // and the cause comes from main's own open-time decision, riding the
+    // status the renderer already consumes.
     //
-    // The causes come from ONE read — main's, at workspace open, riding the
-    // status the renderer already consumes (#483). A second read here could
-    // name a cause that never happened, or promise "no history" for a
-    // workspace that is recording.
-    //
-    // A shared view leads the cascade (#540) and takes no notice at all, at
-    // any level. At view and comment it gets no recorder BY DESIGN — a
-    // capability, not an opt-out and not a failure. At edit (#646 PR3a) it
-    // does get one, so there is nothing to warn about either. Both ways every
-    // history-off body below would state a cause that is false here, and the
-    // share banner already says what the surface is.
+    // A shared view takes no notice at all (#540): at view and comment it
+    // gets no recorder BY DESIGN, a capability, not a failure; at edit it
+    // does get one. The share banner already says what the surface is.
     if (props.syncStatus?.historyShareView) {
       // Nothing to warn about.
-    } else if (props.syncStatus?.settingsWarning) {
-      next.push({
-        id: "workspace-settings-unreadable",
-        tone: "warning",
-        title: "History is off for this workspace",
-        body: props.syncStatus.settingsWarning,
-        action: { label: "Open Settings", onClick: props.onOpenSettings },
-        Icon: AlertTriangle,
-      });
     } else if (props.syncStatus?.historyRecordingUnavailable) {
-      // #505: the recorder could not be BUILT at open. Nothing records, so
-      // historyRecordingOff is true as well — but that branch names Settings
-      // as the cause, and the user changed no setting. State the failure and
-      // the one step that retries it: main builds the recorder once per
-      // workspace per app session, so reopening the workspace re-reads nothing.
+      // #505: the recorder could not be BUILT at open. Main builds the
+      // recorder once per workspace per app session, so reopening the
+      // workspace re-reads nothing; a restart is the step that retries it.
       next.push({
         id: "history-recording-unavailable",
         tone: "warning",
         title: "History is off for this workspace",
         body: "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.",
-        Icon: AlertTriangle,
-      });
-    } else if (props.syncStatus?.historyRecordingOff) {
-      next.push({
-        id: "history-recording-off",
-        tone: "warning",
-        title: "History is off for this workspace",
-        body: "The workspace engine is turned off in Settings, so changes are not being recorded. Your files still save normally.",
         Icon: AlertTriangle,
       });
     }

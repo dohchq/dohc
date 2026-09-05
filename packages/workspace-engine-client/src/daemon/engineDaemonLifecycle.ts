@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
@@ -997,13 +997,6 @@ async function runEngineDaemonSmoke(
 ): Promise<JsonValue> {
   const rootDir = await mkdtemp(join(tmpdir(), "dohc-rust-engine-smoke-"));
   try {
-    const markerDirectory = join(rootDir, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(
-      join(markerDirectory, "SHADOW_CLONE"),
-      randomBytes(32).toString("hex"),
-      { encoding: "utf8", flag: "wx", mode: 0o600 },
-    );
     // Unique per invocation: the background startup smoke can overlap an
     // explicit smoke (tests, restarts) in the same process, and two live
     // opens must never share one workspaceId.

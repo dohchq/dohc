@@ -77,9 +77,7 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
 
   try {
     await seedWorkspaceManifest(temp, "claude-code-chat-plugin-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await seedPluginSource(temp, { fixtureRoot: pluginSource, pluginId: "claude-code" });
 
     desktop = await launchDesktopApp({

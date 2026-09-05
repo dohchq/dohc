@@ -198,9 +198,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
 
   try {
     await seedWorkspaceManifest(temp, "collections-walkthrough-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);

@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { defaultWorkspaceMode } from "@dohc/workspace-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CreatedWorkspace } from "./createWorkspaceFolder";
-import { workspaceEngineEnabled } from "./engineCaptureGate";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
   mergeWorkspaceSettings,
@@ -71,11 +70,9 @@ describe("workspace settings model", () => {
     ).toBe(true);
   });
 
-  it("parses a pre-experimental settings shape without resetting it — and it opens ON THE ENGINE", () => {
-    // Files written before the experimental group existed: the strict schema
-    // must default the new group instead of silently resetting everything.
-    // WS-H1 flag flip: an absent experimental key now reads as engine ON —
-    // an old settings file with no experimental group opens flagged.
+  it("parses a settings shape without the files group without resetting it", () => {
+    // Files written before the files group existed: the strict schema must
+    // default the new group instead of silently resetting everything.
     const oldShape = {
       version: 1,
       agents: { mcpAutoStart: true, defaultDriverId: "claude", defaultModel: null },
@@ -84,31 +81,8 @@ describe("workspace settings model", () => {
     };
     expect(parseWorkspaceSettings(oldShape)).toEqual({
       ...oldShape,
-      experimental: { workspaceEngineAlpha: true },
       files: { attachmentLocation: "per-document", attachmentFolderName: "assets" },
     });
-  });
-
-  it("WS-H1 flag flip: the engine defaults ON everywhere absent, and explicit false still opts out", () => {
-    // The single-source default: the schema group default, the canonical
-    // DEFAULT_WORKSPACE_SETTINGS, and a from-nothing parse must all agree ON.
-    expect(DEFAULT_WORKSPACE_SETTINGS.experimental.workspaceEngineAlpha).toBe(true);
-    expect(parseWorkspaceSettings(null).experimental.workspaceEngineAlpha).toBe(true);
-    expect(
-      parseWorkspaceSettings({
-        version: 1,
-        agents: { mcpAutoStart: false, defaultDriverId: null, defaultModel: null },
-        sites: { defaultPreviewMode: "auto" },
-        privacy: { confirmExternalLinks: true },
-      }).experimental.workspaceEngineAlpha,
-    ).toBe(true);
-    // The escape hatch: an explicit false is preserved, never coerced on.
-    const optedOut = parseWorkspaceSettings({
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: { workspaceEngineAlpha: false },
-    });
-    expect(optedOut.experimental.workspaceEngineAlpha).toBe(false);
-    expect(workspaceSettingsModified(optedOut)).toBe(true);
   });
 
   it("defaults, merges, and round-trips the attachment-location (files) group", () => {
@@ -137,15 +111,6 @@ describe("workspace settings model", () => {
     expect(parseWorkspaceSettings(emptyName)).toEqual(emptyName);
   });
 
-  it("merges and round-trips the workspace engine opt-out", () => {
-    const optedOut = mergeWorkspaceSettings(DEFAULT_WORKSPACE_SETTINGS, {
-      experimental: { workspaceEngineAlpha: false },
-    });
-    expect(optedOut.experimental.workspaceEngineAlpha).toBe(false);
-    expect(optedOut.privacy).toEqual(DEFAULT_WORKSPACE_SETTINGS.privacy);
-    expect(workspaceSettingsModified(optedOut)).toBe(true);
-    expect(parseWorkspaceSettings(optedOut)).toEqual(optedOut);
-  });
 });
 
 describe("workspace settings file store", () => {
@@ -171,7 +136,7 @@ describe("workspace settings file store", () => {
     });
   });
 
-  it("an on-disk file from before the experimental group still parses as stored", async () => {
+  it("an on-disk file from before the files group still parses as stored", async () => {
     const root = await tempRoot();
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(
@@ -191,47 +156,23 @@ describe("workspace settings file store", () => {
       },
       source: "stored",
     });
-    // WS-H1 flag-flip regression: this pre-experimental on-disk file has no
-    // experimental key, and it must OPEN FLAGGED (engine on) — the exact
-    // cold-adoption read engineCaptureGate performs at workspace open.
-    expect(result.settings.experimental.workspaceEngineAlpha).toBe(true);
   });
 
-  it("an on-disk explicit opt-out (workspaceEngineAlpha: false) survives the default-on flip", async () => {
-    const root = await tempRoot();
-    await writeWorkspaceSettingsFile(root, {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: { workspaceEngineAlpha: false },
-    });
-    const result = await readWorkspaceSettingsFile(root);
-    expect(result.source).toBe("stored");
-    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
-  });
-
-  it("corrupt, unsupported, and oversized files read as opted out and name the file", async () => {
-    // AUDIT-OPTOUT: a file we cannot read may hold the opt-out. Reading it as
-    // defaults (engine ON) would record for a workspace that asked for none.
+  it("corrupt, unsupported, and oversized files read as recovered and name the file", async () => {
     const corrupt = await tempRoot();
     await writeWorkspaceSettingsFile(corrupt, DEFAULT_WORKSPACE_SETTINGS);
     await writeFile(join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
     const corruptResult = await readWorkspaceSettingsFile(corrupt);
     expect(corruptResult.source).toBe("recovered");
-    expect(corruptResult.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(corruptResult.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     expect(corruptResult.warning).toContain(
       join(corrupt, ".dohc", WORKSPACE_SETTINGS_FILE),
     );
-    // Repairing the file is only half the fix: the capture decision is made at
-    // workspace open, so nothing is recorded until the workspace is reopened.
-    expect(corruptResult.warning).toContain("Then restart dohc.");
+    expect(corruptResult.warning).toContain("Reset workspace");
 
-    // The same table packages/mcp asserts against readHistoryRecording. Both
-    // readers share one schema, so neither may turn the engine ON for a body it
-    // rejects. They differ in what they report: this reader recovers to
-    // engine-off settings, and MCP answers "unknown" rather than naming an
-    // opt-out it cannot read (#641).
     for (const body of [
       JSON.stringify({ version: 2 }),
-      JSON.stringify({ experimental: { workspaceEngineAlpha: "false" } }),
+      JSON.stringify({ privacy: { confirmExternalLinks: "false" } }),
       JSON.stringify({}),
       JSON.stringify([]),
       JSON.stringify(null),
@@ -241,10 +182,7 @@ describe("workspace settings file store", () => {
       await writeFile(join(invalid, ".dohc", WORKSPACE_SETTINGS_FILE), body);
       const invalidResult = await readWorkspaceSettingsFile(invalid);
       expect(invalidResult.source, body).toBe("recovered");
-      expect(
-        invalidResult.settings.experimental.workspaceEngineAlpha,
-        body,
-      ).toBe(false);
+      expect(invalidResult.settings, body).toEqual(DEFAULT_WORKSPACE_SETTINGS);
       expect(invalidResult.warning, body).toContain("could not be read");
     }
 
@@ -256,37 +194,23 @@ describe("workspace settings file store", () => {
     );
     const hugeResult = await readWorkspaceSettingsFile(huge);
     expect(hugeResult.source).toBe("recovered");
-    expect(hugeResult.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(hugeResult.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     expect(hugeResult.warning).toContain("too large");
 
     // The warning crosses the IPC boundary; a path must not overflow its bound.
     expect(WorkspaceSettingsResult.parse(hugeResult)).toEqual(hugeResult);
   });
 
-  it("an untrustworthy .dohc FOLDER reads as opted out and names the folder", async () => {
+  it("an untrustworthy .dohc FOLDER reads as recovered and names the folder", async () => {
     // The metadata resolver refuses a non-directory .dohc by throwing, and
-    // its contract says readers stay tolerant. Left uncaught, the throw
-    // reached the #505 build-failure notice, whose restart step repeats the
-    // identical failure — the folder, not the app session, is what is broken.
+    // its contract says readers stay tolerant.
     const root = await tempRoot();
     await writeFile(join(root, ".dohc"), "a file squatting the metadata dir");
     const result = await readWorkspaceSettingsFile(root);
     expect(result.source).toBe("recovered");
-    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(result.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     expect(result.warning).toContain(join(root, ".dohc"));
     expect(result.warning).toContain(".dohc folder");
-    expect(result.warning).toContain("Then restart dohc.");
-  });
-
-  it("an unreadable settings file stops the engine capture gate", async () => {
-    // The gate is the reader that decides whether anything is recorded, so the
-    // fail-closed read is asserted THROUGH it, not only at the file layer.
-    const root = await tempRoot();
-    await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
-    expect(await workspaceEngineEnabled(root)).toBe(true);
-
-    await writeFile(join(root, ".dohc", WORKSPACE_SETTINGS_FILE), "{not json");
-    expect(await workspaceEngineEnabled(root)).toBe(false);
   });
 
   it("refuses to save over an unreadable file, and reset still replaces it", async () => {
@@ -310,7 +234,7 @@ describe("workspace settings file store", () => {
     // dialog snaps its controls back instead of showing an unsaved edit.
     expect(refused.source).toBe("recovered");
     expect(refused.warning).toContain(path);
-    expect(refused.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(refused.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     // The refusal crosses the IPC boundary; a path must not overflow its bound.
     expect(WorkspaceSettingsResult.parse(refused)).toEqual(refused);
 
@@ -333,12 +257,11 @@ describe("workspace settings file store", () => {
         .refusal,
     ).toBeTruthy();
 
-    // The user repairs the file outside dohc: engine on, and a distinctive
-    // value in a group this save does not touch.
+    // The user repairs the file outside dohc with a distinctive value in a
+    // group this save does not touch.
     const repaired = {
       ...DEFAULT_WORKSPACE_SETTINGS,
       agents: { ...DEFAULT_WORKSPACE_SETTINGS.agents, defaultDriverId: "claude" },
-      experimental: { workspaceEngineAlpha: true },
     };
     await writeWorkspaceSettingsFile(root, repaired);
 
@@ -351,7 +274,6 @@ describe("workspace settings file store", () => {
     });
     // What lands on disk is the repaired file plus the one edited control.
     const onDisk = await readWorkspaceSettingsFile(root);
-    expect(onDisk.settings.experimental.workspaceEngineAlpha).toBe(true);
     expect(onDisk.settings.agents.defaultDriverId).toBe("claude");
     expect(onDisk.settings.files.attachmentLocation).toBe("same-folder");
   });
@@ -530,12 +452,12 @@ describe("workspace settings file store", () => {
     ).rejects.toThrow(
       "dohc could not open this workspace's .dohc folder. A link is at .dohc, which must be a real folder. Remove or rename that link. Then retry.",
     );
-    // The READ stays tolerant, like the symlinked-file case below: fail
-    // closed (opted out, warning names the folder), and never follow the
-    // link — nothing is read from or written into the link target.
+    // The READ stays tolerant, like the symlinked-file case below: recover
+    // to defaults with a warning naming the folder, and never follow the
+    // link. Nothing is read from or written into the link target.
     const read = await readWorkspaceSettingsFile(root);
     expect(read.source).toBe("recovered");
-    expect(read.settings.experimental.workspaceEngineAlpha).toBe(false);
+    expect(read.settings).toEqual(DEFAULT_WORKSPACE_SETTINGS);
     expect(read.warning).toContain(join(root, ".dohc"));
     expect(await readdir(outside)).toEqual([]);
   });
@@ -558,7 +480,6 @@ describe("workspace settings file store", () => {
     const result = await readWorkspaceSettingsFile(root);
     expect(result.source).toBe("recovered");
     expect(result.settings.agents.mcpAutoStart).toBe(false);
-    expect(result.settings.experimental.workspaceEngineAlpha).toBe(false);
     expect(result.warning).toContain("not a file dohc can read");
   });
 });

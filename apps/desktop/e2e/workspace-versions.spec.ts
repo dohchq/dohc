@@ -146,9 +146,7 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "v1 text\n" }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
@@ -225,9 +223,7 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "base line\n" },
     ]);
@@ -314,9 +310,7 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     const mainConflictBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
@@ -426,63 +420,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
     await expect
       .poll(() => readWorkspaceBytes(temp.rootPath, "logo.png"), { timeout: 20_000 })
       .toEqual(mainKeepBytes);
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
-
-// WS-H1 flag flip: versions are on by default; only an explicit opt-out
-// hides the surface (and gates the IPC in main).
-test("an explicitly opted-out workspace never shows the versions surface", async () => {
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-
-  try {
-    await writeWorkspaceFiles(temp, [{ path: "plain.md", contents: "hello\n" }]);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: false },
-    });
-    desktop = await launchDesktopApp({ workspace: temp });
-    const page = desktop.page;
-    const workspace = await openWorkspaceFromFirstRun(page, temp);
-
-    await expect(page.getByTestId("workspace-shell")).toBeVisible();
-    await expect(page.getByTestId("version-menu-button")).toHaveCount(0);
-
-    // The IPC surface is gated in main, not just hidden in the renderer.
-    const rejection = await page.evaluate(async (workspaceId) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          listWorkspaceVersions(payload: { workspaceId: string }): Promise<unknown>;
-        };
-      }).dohcDesktop;
-      try {
-        await api.listWorkspaceVersions({ workspaceId });
-        return null;
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, workspace.workspaceId);
-    expect(rejection).toContain("Versions are not enabled");
-
-    // PR 0N-2: the try-in-version gesture is gated by the same flag.
-    const tryRejection = await page.evaluate(async (workspaceId) => {
-      const api = (window as unknown as {
-        dohcDesktop: {
-          tryInWorkspaceVersion(payload: {
-            workspaceId: string;
-            task: string;
-          }): Promise<unknown>;
-        };
-      }).dohcDesktop;
-      try {
-        await api.tryInWorkspaceVersion({ workspaceId, task: "tidy notes" });
-        return null;
-      } catch (error) {
-        return error instanceof Error ? error.message : String(error);
-      }
-    }, workspace.workspaceId);
-    expect(tryRejection).toContain("Versions are not enabled");
   } finally {
     await cleanupDesktopWorkspace(desktop, temp);
   }

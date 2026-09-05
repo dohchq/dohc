@@ -123,9 +123,7 @@ test("a .env is versioned protected: locked history, versions carry it, search f
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "ordinary findable prose\n" },
     ]);

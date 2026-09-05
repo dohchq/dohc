@@ -26,9 +26,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -180,9 +178,7 @@ test("flagged: the persistent chats navigator opens conversations in the editor"
 
   try {
     await seedWorkspaceManifest(temp, "chats-expand-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "# Notes\n" },
     ]);
@@ -251,70 +247,6 @@ test("flagged: the persistent chats navigator opens conversations in the editor"
   }
 });
 
-// WS-H1 flag flip: chats are engine-backed and the engine is now the
-// default, so only an EXPLICIT opt-out disables the surface.
-test("opted-out workspace: no Chats view, channel handlers reject", async () => {
-  const temp = await createTempWorkspace();
-  let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
-
-  try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: false },
-    });
-    desktop = await launchDesktopApp({ workspace: temp });
-    const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
-    const page = desktop.page;
-
-    // No Chats layout control; the activity views are untouched.
-    await expect(page.getByTestId("activity-explorer")).toBeVisible();
-    await expect(page.getByTestId("titlebar-chats-sidebar")).toHaveCount(0);
-
-    // Every channel handler rejects for unflagged workspaces — the read
-    // path, channel creation, thread start, AND read-cursor advancement. A
-    // regression that dropped the enablement guard from any ONE of them
-    // would fail here by name.
-    const rejections = await page.evaluate(async ({ id }) => {
-      const api = (window as unknown as {
-        dohcDesktop: Record<string, (payload: unknown) => Promise<unknown>>;
-      }).dohcDesktop;
-      const calls: Array<[string, unknown]> = [
-        ["listChatChannels", { workspaceId: id }],
-        ["createChatChannel", { workspaceId: id, name: "ops" }],
-        [
-          "startChannelThread",
-          { workspaceId: id, channelId: "channel-x", body: "hello" },
-        ],
-        [
-          "markChatThreadRead",
-          { workspaceId: id, threadId: "thread-x", upToSequence: 1 },
-        ],
-      ];
-      const results: Record<string, string | null> = {};
-      for (const [method, payload] of calls) {
-        try {
-          await api[method](payload);
-          results[method] = null;
-        } catch (error) {
-          results[method] = error instanceof Error ? error.message : String(error);
-        }
-      }
-      return results;
-    }, { id: workspace.workspaceId });
-    for (const method of [
-      "listChatChannels",
-      "createChatChannel",
-      "startChannelThread",
-      "markChatThreadRead",
-    ]) {
-      expect(rejections[method], `${method} must reject when unflagged`).toContain(
-        "Chats are not enabled",
-      );
-    }
-  } finally {
-    await cleanupDesktopWorkspace(desktop, temp);
-  }
-});
-
 // PERFORMANCE (plan chat budgets, scaled to alpha): 50 channels / 500
 // threads first-paint under 500ms; composer-send-to-rendered p50 under
 // 100ms. Measured inside the page (real IPC round trips + real paints).
@@ -325,9 +257,7 @@ test("performance: channel-list first paint and composer send latency", async ()
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     // 50 channels x 10 threads = 500 threads (each with one message), seeded
     // through the engine daemon over RPC (post-cutover the retired TS
     // in-process store cannot create a daemon-acceptable store).

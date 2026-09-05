@@ -50,9 +50,7 @@ test("rich doc edits through the engine Y.Doc: settle lands on .md + engine.db, 
   const sentinel = "Engine-journaled sentence, no double capture.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);
@@ -157,9 +155,7 @@ test("an external edit to a LIVE engine doc is captured (moment.append), not sil
   const external = "External agent wrote this straight to disk while the editor was open.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);
@@ -209,9 +205,7 @@ test("creating a version while a rich doc is live flushes + closes the session (
   const sentinel = "Edit that a version op must flush before switching.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/rich.md", contents: "# Rich\n\nBase paragraph.\n" },
     ]);

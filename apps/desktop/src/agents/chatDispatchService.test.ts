@@ -685,10 +685,9 @@ describe("chatDispatchService", () => {
     ).toHaveLength(1);
   });
 
-  it("never resolves a store when the workspace is scan-ineligible (engine opt-out)", async () => {
-    // AUDIT-OPTOUT: an opted-out workspace must record NOTHING. Resolving the
-    // chat/dispatch stores opens the workspace in the engine daemon, which
-    // creates .dohc/engine/engine.db — so an ineligible scan must be a no-op.
+  it("never resolves a store when the workspace is scan-ineligible", async () => {
+    // Resolving the chat/dispatch stores opens the workspace in the engine
+    // daemon, so an ineligible scan must be a no-op.
     vi.useFakeTimers();
     const gated: string[] = [];
     const fixture = await createFixture({
@@ -2768,19 +2767,18 @@ describe("chatDispatchService", () => {
     ).toHaveLength(1);
   });
 
-  it("refuses a runner self-test on an opted-out workspace before resolving a store", async () => {
-    // AUDIT-OPTOUT: the self-test writes a scratch thread, so resolving the chat
-    // store would create .dohc/engine/engine.db for a workspace that opted out
-    // of recording anything.
+  it("refuses a runner self-test on a workspace without a capture before resolving a store", async () => {
+    // The self-test writes a scratch thread, so resolving the chat store
+    // would open the engine for a workspace whose capture never built.
     const fixture = await createFixture({
       prepareRunWorkspaceFailures: [
-        new Error("Chats are not enabled for this workspace."),
+        new Error("dohc could not start Chats for this workspace. Restart dohc to try again."),
       ],
     });
 
     await expect(fixture.service.runnerSelfTest(WORKSPACE_ID)).resolves.toEqual({
       ok: false,
-      detail: "Chats are not enabled for this workspace.",
+      detail: "dohc could not start Chats for this workspace. Restart dohc to try again.",
     });
 
     expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });

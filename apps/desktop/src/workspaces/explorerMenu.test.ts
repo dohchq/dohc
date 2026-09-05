@@ -69,7 +69,7 @@ describe("an ordinary workspace", () => {
     ]);
   });
 
-  it("offers no collection creation when the workspace engine is disabled", () => {
+  it("offers no collection creation without the workspace engine", () => {
     expect(commands({ kind: "root", engineEnabled: false })).not.toContain(
       "new-collection",
     );

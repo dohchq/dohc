@@ -30,9 +30,7 @@ test("an installed plugin opens a contained instanced web app from its rail view
 
   try {
     await seedWorkspaceManifest(temp, "plugin-web-app-platform-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await seedPluginSource(temp, {
       fixtureRoot,
       pluginId: "hello-plugin",

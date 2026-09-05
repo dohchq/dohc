@@ -1,6 +1,6 @@
 //! The files-into-daemon composition driver: owns the [`FilesActor`], the
 //! [`NativeWatcher`], and the reconcile→apply→acknowledge loop that makes
-//! capture AUTONOMOUS — once a shadow-bound workspace is open, external file
+//! capture AUTONOMOUS — once a root-bound workspace is open, external file
 //! changes on disk are noticed and recorded with no RPC involved.
 //!
 //! Ownership model: the DRIVER TASK owns the files actor and the watcher, so
@@ -1888,10 +1888,9 @@ impl Drop for CaptureDriver {
 }
 
 impl CaptureDriver {
-    /// Spawn the files layer for a SHADOW-BOUND workspace. Must only be
-    /// called after `bind_shadow_clone` succeeded — the sink writes through
-    /// the shadow-bound store actor, and an unmarked root must never spawn a
-    /// watcher (the caller's shadow validation guarantees it).
+    /// Spawn the files layer for a ROOT-BOUND workspace. Must only be
+    /// called after `bind_root` succeeded: the sink writes through the bound
+    /// store actor, and an unbound root must never spawn a watcher.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         root: PathBuf,

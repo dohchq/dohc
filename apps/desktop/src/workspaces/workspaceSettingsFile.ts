@@ -18,29 +18,17 @@ export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
 const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettingsContract);
 
-// A settings file that EXISTS but cannot be read may hold the engine opt-out.
-// Reading it as defaults would turn recording back on for a workspace that
-// asked for none, so an unreadable file reads as opted out and carries a
-// warning the workspace shell shows outside Settings. An ABSENT file is the
-// other case: a new workspace must not be born opted out.
-const UNREADABLE_WORKSPACE_SETTINGS: WorkspaceSettings = {
-  ...DEFAULT_WORKSPACE_SETTINGS,
-  experimental: { workspaceEngineAlpha: false },
-};
-
+// A settings file that EXISTS but cannot be read runs on defaults and carries
+// a warning Settings shows, so the user knows their choices are not in
+// effect. An ABSENT file is the ordinary new-workspace case and warns nothing.
 function unreadableSettings(
   reason: string,
   path: string,
 ): WorkspaceSettingsResult {
   return {
-    settings: UNREADABLE_WORKSPACE_SETTINGS,
+    settings: DEFAULT_WORKSPACE_SETTINGS,
     source: "recovered",
-    // Repairing the file is only half the fix, and the second half is a
-    // RESTART, not a reopen: main decides the recorder once per workspace per
-    // app session (openWorkspaceActivity retains every opened workspace, and
-    // workspaceActivity.open no-ops for one it already watches), so leaving
-    // the workspace and coming back re-reads nothing.
-    warning: `${reason} dohc records no history for this workspace. Fix ${path}. Then restart dohc.`,
+    warning: `${reason} dohc is using default settings. Fix ${path}. Or select Reset workspace in Advanced to replace it.`,
   };
 }
 
@@ -155,16 +143,11 @@ export function resetWorkspaceSettingsFile(
 
 // THE save path: the changed controls, applied to the file as it is NOW.
 //
-// Two ways the old whole-object save wrote an opt-out nobody chose. Over a
-// file dohc cannot read, the caller's resolved object carries the fail-closed
-// `workspaceEngineAlpha: false`, so one unrelated control would land the
-// opt-out on disk and the warning would disappear with it — that one is
-// refused here, and reset stays open as the deliberate way to replace the
-// file. And after the user repairs the file, the caller still holds the
-// resolved copy from before the repair: writing that copy back would undo the
-// repair through the very recovery path the refusal prescribes. Merging the
-// patch onto a fresh read closes both, and every other stale-snapshot save
-// with them.
+// A save over a file dohc cannot read is refused, and reset stays open as the
+// deliberate way to replace the file. After the user repairs the file, the
+// caller may still hold the resolved copy from before the repair: writing
+// that copy back would undo the repair. Merging the patch onto a fresh read
+// closes that, and every other stale-snapshot save with it.
 async function applyWorkspaceSettingsPatch(
   rootPath: string,
   patch: WorkspaceSettingsPatch,

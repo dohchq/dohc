@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   EngineDaemonLifecycle,
@@ -298,12 +297,7 @@ describe("RelayFilePeer receiver contract", () => {
       let lifecycle: EngineDaemonLifecycle | null = null;
       let sessions: EngineWorkspaceSessions | null = null;
       try {
-        await mkdir(join(rootPath, ".dohc", "engine"), { recursive: true });
-        await writeFile(
-          join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),
-          randomBytes(32).toString("hex"),
-          { encoding: "utf8", flag: "wx", mode: 0o600 },
-        );
+        await mkdir(rootPath, { recursive: true });
         relay = await spawnSyncRelay({ dbPath: relayDb });
         await claimRelayWorkspace({ baseUrl: relay.baseUrl, token, workspaceId });
         const identity = {

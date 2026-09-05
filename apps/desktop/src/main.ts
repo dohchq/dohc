@@ -649,13 +649,9 @@ import {
   type DesktopLinkedChatStore,
 } from "./workspaces/liveLinkedChatStore";
 import {
-  captureForFlaggedWorkspace,
-  createDispatchRunRelease,
-  dispatchScanEligible,
+  captureForWorkspace,
+  captureRefusal,
   type EngineFeature,
-  engineOffRefusal,
-  releaseAndRefuseWithoutCapture,
-  workspaceEngineEnabled,
 } from "./workspaces/engineCaptureGate";
 import {
   AgentIntegrationState,
@@ -3136,13 +3132,11 @@ const workspaceActivity = createWorkspaceActivity(notifyRenderer, {
     };
   },
   engineFor: engineForWorkspace,
-  // The flag-gated engine capture (see engineCaptureGate.ts — shared with the
-  // arc-gate QA harness so the harness asserts against the REAL gate). The
-  // gate also owns the shared-view rule (#540): main only states whether the
-  // workspace is one, and the decision carries the cause so the null capture
-  // never wears the Settings opt-out's copy.
-  captureFor: async (workspace, hooks) =>
-    captureForFlaggedWorkspace(
+  // The engine capture gate (engineCaptureGate.ts) owns the shared-view rule
+  // (#540): main only states whether the workspace is one, and the decision
+  // carries the cause.
+  captureFor: (workspace, hooks) =>
+    captureForWorkspace(
       {
         workspaceId: workspace.workspaceId,
         rootPath: workspace.rootPath,
@@ -3395,13 +3389,7 @@ function createTryInVersionSessionsFor(
       lease.assertCurrent();
       const capture = workspaceActivity.engineCaptureFor(lease.state.activity);
       if (!capture) {
-        throw new Error(
-          engineOffRefusal(
-            workspaceActivity.getStatus(workspace, lease.state.activity),
-            "Versions",
-            "restart",
-          ),
-        );
+        throw new Error(captureRefusal("Versions"));
       }
       desktopMarks.measureSince(
         "try-in-version-ops",
@@ -3911,16 +3899,13 @@ async function syncWorkspaceForDispatch(
               activity.engineCaptureFor(workspaceId, workspace.rootPath) !== null
             );
           }
-          const { capture } = await captureForFlaggedWorkspace(
+          const { capture } = captureForWorkspace(
             {
               ...workspace,
               // Guarded above: a shared view already returned false.
               shareView: false,
             },
-            {
-              activeAgentRun: () => null,
-              onCaptureOutcome: () => undefined,
-            },
+            { onCaptureOutcome: () => undefined },
             requireEngineSessions(),
           );
           if (!capture) return false;
@@ -4095,9 +4080,13 @@ async function closeDispatchRunActivity(
   );
 }
 
+// The release closes a TRANSIENT open (background dispatch, runner self-test)
+// and leaves a workspace that was already open, or that a renderer/CLI
+// retained during the run, alone. Decided from the post-run state, not from
+// the open itself: a retention can land while the run is in flight.
 async function acquireDispatchRunActivity(
   workspace: CreatedWorkspace & { attachmentId?: symbol },
-): Promise<() => Promise<boolean>> {
+): Promise<() => Promise<void>> {
   return withWorkspaceAttachmentAsync(workspace, async (lease) => {
     const current = canonicalWorkspaceFor(lease);
     const alreadyOpen = workspaceActivity.isOpen(lease.state.activity);
@@ -4105,13 +4094,17 @@ async function acquireDispatchRunActivity(
       current,
       () => ensureWorkspaceActivityOpen(current),
     );
-    return createDispatchRunRelease({
-      alreadyOpen,
-      isRetained: () =>
+    let released = false;
+    return async () => {
+      if (released) return;
+      released = true;
+      if (alreadyOpen) return;
+      const retained =
         withWorkspaceAttachment(current, (held) => held.state.retainedActivity) ??
-        false,
-      close: () => closeDispatchRunActivity(current),
-    });
+        false;
+      if (retained) return;
+      await closeDispatchRunActivity(current);
+    };
   });
 }
 
@@ -4231,14 +4224,6 @@ const chatDispatchService = createChatDispatchService({
   resourcesPath: () =>
     (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
   queueSync: syncWorkspaceForDispatch,
-  // An opted-out workspace must record NOTHING: without this gate the
-  // workspace-open scan reaches dispatchStoreFor/chatStoreFor, whose daemon
-  // workspace.open creates .dohc/engine/engine.db. Open sessions answer from
-  // their capture snapshot (the flag applies at the NEXT open).
-  scanEligible: (workspace) =>
-    withWorkspaceAttachmentAsync(workspace, () =>
-      dispatchScanEligible(workspace, activity),
-    ),
   prepareRunWorkspace: async (workspace) => {
     const { registered, release } = await withWorkspaceAttachmentAsync(
       workspace,
@@ -4250,27 +4235,11 @@ const chatDispatchService = createChatDispatchService({
         };
       },
     );
-    // The helper owns both orders (#583): cause read before the release,
-    // recovery derived from what the release actually did.
-    await releaseAndRefuseWithoutCapture({
-      capture: activity.engineCaptureFor(workspace.workspaceId),
-      // A retention that landed during our close reopens the workspace; its
-      // capture builds after the release resolves. Settling joins (or, for
-      // an already-retained workspace, starts — the retainer will reuse it)
-      // that open, so the capture read judges a formed state.
-      settleKeptOpen: () =>
-        ensureWorkspaceActivityOpen(registered).then(
-          () => undefined,
-          () => undefined,
-        ),
-      currentCapture: () => activity.engineCaptureFor(workspace.workspaceId),
-      status: () => activity.getStatus(workspace.workspaceId),
-      release,
-      feature: "Chats",
-    });
-    return async () => {
+    if (!activity.engineCaptureFor(workspace.workspaceId)) {
       await release();
-    };
+      throw new Error(captureRefusal("Chats"));
+    }
+    return release;
   },
   authorizeServiceNote: (workspace, threadId, verifiedUserId) =>
     withWorkspaceAttachmentAsync(workspace, async (lease) => {
@@ -4673,13 +4642,7 @@ async function requirePluginEngineCaptureForOperation(
   const workspace = operation.workspace;
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
-    throw new Error(
-      engineOffRefusal(
-        activity.getStatus(workspace.workspaceId),
-        "Plugins",
-        "restart",
-      ),
-    );
+    throw new Error(captureRefusal("Plugins"));
   }
   return { workspace, capture };
 }
@@ -4979,15 +4942,7 @@ async function openCliWorkspace(
   await openWorkspaceActivity(workspace);
   const capture = activity.engineCaptureFor(workspace.workspaceId);
   if (!capture) {
-    throw new Error(
-      engineOffRefusal(
-        activity.getStatus(workspace.workspaceId),
-        "Chats",
-        // openWorkspaceActivity retained this session: only a restart
-        // re-runs the capture decision.
-        "restart",
-      ),
-    );
+    throw new Error(captureRefusal("Chats"));
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
@@ -6015,7 +5970,7 @@ function ownedWorkspaceReadsFor(
     ...(databaseReader ? { databaseReader } : {}),
     listFiles: () => listOwnedWorkspaceFilesFor(workspace),
     collections: {
-      // "No collections" is the honest empty answer while the engine is off;
+      // "No collections" is the honest empty answer without a capture;
       // the addressed reads below must name the missing capability instead.
       list: async () =>
         (await withEngineAdapter(
@@ -7011,9 +6966,7 @@ function registerIpcHandlers(
         const registryEntry = operation.workspace;
         const shareView = sharedViewOf(registryEntry.workspaceId);
         const isSharedView = shareView !== null;
-        const engineEnabled = isSharedView
-          ? false
-          : await workspaceEngineEnabled(registryEntry.rootPath);
+        const engineEnabled = !isSharedView;
         const isMountPath =
           !isSharedView && !!input.path && isSharedWithMePath(input.path);
         const mountForPath = isMountPath
@@ -10569,10 +10522,9 @@ function registerIpcHandlers(
     });
   });
 
-  // Named versions (PR 0M-4). Every handler resolves the workspace through
+  // Named versions. Every handler resolves the workspace through
   // requireWorkspace (renderer identity is never trusted) and is gated on the
-  // workspace-engine alpha capture being attached — for unflagged workspaces
-  // the calls reject.
+  // engine capture being attached.
   async function requireEngineCapture(
     workspaceOrId: string | RegistryEntry,
     feature: EngineFeature,
@@ -10586,11 +10538,7 @@ function registerIpcHandlers(
     await openWorkspaceActivity(workspace);
     const capture = activity.engineCaptureFor(workspace.workspaceId);
     if (!capture) {
-      // #541: the feature's "not enabled" copy holds only for the real
-      // opt-out — after a failed capture build the refusal names the failure.
-      throw new Error(
-        engineOffRefusal(activity.getStatus(workspace.workspaceId), feature, "restart"),
-      );
+      throw new Error(captureRefusal(feature));
     }
     return { workspace, capture };
   }

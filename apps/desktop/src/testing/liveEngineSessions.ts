@@ -25,6 +25,36 @@ const READY_WATCHER_STATUS = {
 } satisfies WatcherStatusResult;
 
 /**
+ * The daemon capture lifecycle the loopback has no concept of: flush,
+ * reconcile, author, watcher status, and pending adoptions. A fake transport
+ * that forwards everything else to a `VersionedLoopbackEngine` answers these
+ * first so `capture.start()`, `flush()`, and `stop()` behave as they do
+ * against the daemon. Returns null for every other method.
+ */
+export function daemonCaptureLifecycleAnswer(
+  request: Request,
+  captureFlushResult: () => CaptureFlushResult = () => ({
+    settled: true,
+    running: true,
+    degraded: false,
+  }),
+): Response | null {
+  switch (request.method) {
+    case "capture.flush":
+    case "capture.reconcile":
+      return { id: request.id, result: captureFlushResult() };
+    case "capture.setAuthor":
+      return { id: request.id, result: { updated: true } };
+    case "watcher.status":
+      return { id: request.id, result: READY_WATCHER_STATUS };
+    case "collections.listPendingAdoptions":
+      return { id: request.id, result: { adoptions: [], nextCursor: null } };
+    default:
+      return null;
+  }
+}
+
+/**
  * Daemon-shaped `EngineWorkspaceSessions` backed by a real
  * `VersionedLoopbackEngine`, for suites that need the daemon capture path
  * without a daemon process.
@@ -82,27 +112,8 @@ export function mockLiveSessions(
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
-      if (request.method === "capture.flush") {
-        return { id: request.id, result: captureFlushResult() };
-      }
-      if (request.method === "capture.reconcile") {
-        return { id: request.id, result: captureFlushResult() };
-      }
-      if (request.method === "capture.setAuthor") {
-        return { id: request.id, result: { updated: true } };
-      }
-      if (request.method === "watcher.status") {
-        return {
-          id: request.id,
-          result: READY_WATCHER_STATUS,
-        };
-      }
-      if (request.method === "collections.listPendingAdoptions") {
-        return {
-          id: request.id,
-          result: { adoptions: [], nextCursor: null },
-        };
-      }
+      const lifecycle = daemonCaptureLifecycleAnswer(request, captureFlushResult);
+      if (lifecycle) return lifecycle;
       const response = await loopback.sendRequest(request);
       if (request.method === VERSIONED_METHOD.textReadBlob) {
         deliverWithheldBlob(loopback, request, response, blobHandlers);

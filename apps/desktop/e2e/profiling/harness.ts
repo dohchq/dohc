@@ -74,10 +74,7 @@ export async function prepareFixture(
   await rm(rootPath, { recursive: true, force: true });
   await cp(sourcePath, rootPath, { recursive: true });
   await seedWorkspaceManifest({ rootPath }, workspaceId);
-  await seedWorkspaceSettings(
-    { rootPath },
-    { experimental: { workspaceEngineAlpha: true } },
-  );
+  await seedWorkspaceSettings({ rootPath });
   return { rootPath, manifest: await readSeedManifest() };
 }
 

@@ -51,9 +51,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
   try {
     // --- Seed workspace A: 1,000 engine moments + one 200-message chat ---
     await seedWorkspaceManifest(temp, WORKSPACE_A_ID);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     // Seeded through the engine daemon over RPC — post-cutover the retired
     // TS in-process store produces stores the daemon refuses.
     const diskWrites: Array<{ path: string; contents: string }> = [];
@@ -106,9 +104,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
 
     // --- Seed workspace B: one file, one moment ---
     await seedWorkspaceManifest(workspaceB, WORKSPACE_B_ID);
-    await seedWorkspaceSettings(workspaceB, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(workspaceB);
     await seedThroughDaemon(
       { workspaceId: WORKSPACE_B_ID, rootPath: workspaceB.rootPath },
       async ({ files }) => {

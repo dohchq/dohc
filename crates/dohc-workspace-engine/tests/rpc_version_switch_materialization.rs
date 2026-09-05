@@ -3,11 +3,9 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::{EngineDbScan, ScratchDir};
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
@@ -29,7 +27,6 @@ async fn fixture(
     String,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let workspace_id = format!("ws-switch-{name}");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let opened = transport

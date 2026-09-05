@@ -407,7 +407,7 @@ function historyOffPlaceholderCopy(
   share: { ended: boolean; granterEmail: string | null } | null,
 ): string {
   if (share) {
-    // A capability, not an opt-out and not a failure: a shared view is fed
+    // A capability, not a failure: a shared view is fed
     // by the share's pull and records no history here. The next step matches
     // the surface — Refresh exists only while the share is live, so an ended
     // share must not name it — and the ended line names who acted, as the
@@ -416,17 +416,9 @@ function historyOffPlaceholderCopy(
       ? `A shared view records no history. ${share.granterEmail ?? "The person who shared it"} ended this share. You can still open the files it shared.`
       : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
   }
-  // #483: the warning already names the unreadable file and the fix.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // #505: a failure, not a decision — same copy as the notice center.
     return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
-  }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out: main read the file and the flag is off. RESTART, not
-    // reopen (#687) — see `chatsOffCopy` below for why reopening the workspace
-    // re-reads the flag nowhere.
-    return "History is off for this workspace. The workspace engine is turned off in Settings → Advanced, so changes are not being recorded. Turn it on. Then restart dohc to record history.";
   }
   // Main has not said recording is off. It may be recording right now, so
   // no cause and no "not recorded" — only what dohc could not do, plus the
@@ -445,18 +437,9 @@ function historyOffPlaceholderCopy(
 // not established. Every line here says what dohc cannot do now, and none of
 // them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
-  // #483: the warning already names the unreadable file and the fix, and the
-  // opt-out line below would blame a Settings toggle nobody touched.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // #505: a failure, not a decision, and not an emptiness.
     return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
-  }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out. The engine is off, so versions cannot be opened here
-    // — which is not the same as there being none. RESTART, not reopen
-    // (#687) — see `chatsOffCopy` below for why reopening re-reads nothing.
-    return "Versions are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to compare versions.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
   // is all this surface knows. No cause, and no claim about what exists.
@@ -472,22 +455,9 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
 // both: the panel has no tab to close, and restarting is what re-runs the
 // capture build either way.
 export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
-  // #483: the warning already names the unreadable file and the fix.
-  if (syncStatus?.settingsWarning) return syncStatus.settingsWarning;
   if (syncStatus?.historyRecordingUnavailable) {
     // #505: a failure, not a decision, and not an emptiness.
     return "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.";
-  }
-  if (syncStatus?.historyRecordingOff) {
-    // The real opt-out. The engine is off, so chats cannot be opened here —
-    // which is not the same as there being none.
-    //
-    // RESTART, not reopen: main decides the recorder once per workspace per
-    // app session — `openWorkspaceActivity` retains every workspace it opens
-    // and `workspaceActivity.open` no-ops for one it already watches — so
-    // leaving the workspace and coming back re-reads the flag nowhere. Same
-    // instruction the settings warning gives, for the same reason.
-    return "Chats are off for this workspace. The workspace engine is turned off in Settings → Advanced. Turn it on. Then restart dohc to use chats.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
   // is all this surface knows. No cause, and no claim about what exists.
@@ -1543,8 +1513,8 @@ export function DesktopWorkspaceShell(props: {
   const [filesRevalidated, setFilesRevalidated] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
   // Main's single answer to "does anything record here" (#542): when the
-  // open-time decision produced no recorder — opt-out, unreadable settings,
-  // or a failed capture build — every engine-history call can only error,
+  // open-time decision produced no recorder (a shared view or a failed
+  // capture build), every engine-history call can only error,
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(
@@ -2768,10 +2738,9 @@ export function DesktopWorkspaceShell(props: {
     );
   }, [refreshFiles, reportShellError]);
 
-  // Workspace-engine alpha (PR 0M-4/0M-5): versions surface, ENGINE history
-  // source, and the linked Chats rail all key off this one per-workspace
-  // capability, read once from the existing settings IPC below — never a
-  // second settings read.
+  // The versions surface, engine history source, and the linked Chats rail
+  // all wait on one per-workspace settings read below; the read landing is
+  // what releases them.
   //
   // The answer is kept WITH the workspace it answered for, so "no answer yet"
   // and "answered off" are never the same state — a bare `false` cannot say
@@ -3370,11 +3339,8 @@ export function DesktopWorkspaceShell(props: {
     captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
   const captureAvailable =
     engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
-  // An unreadable settings file reads as opted out, so the workspace records
-  // nothing. That must never be silent — but the notice says so from MAIN's
-  // open-time read (syncStatus.settingsWarning), the read that decided
-  // whether anything is recorded. This read only drives which engine
-  // surfaces the shell offers (versions and chats).
+  // This read only drives when the shell offers its engine surfaces
+  // (versions and chats); main's status says whether they can be served.
   useAsyncResponseEffect(
     async () => {
       try {
@@ -3387,16 +3353,13 @@ export function DesktopWorkspaceShell(props: {
     },
     {
       onSuccess: (result) => {
-        setEngineRead({
-          workspaceId,
-          enabled: result.settings.experimental.workspaceEngineAlpha,
-        });
+        void result;
+        setEngineRead({ workspaceId, enabled: true });
       },
       onError: () => {
-        // Settings unavailable reads as flag off — never a broken shell.
-        // Capability only, fail-closed (#329): the surface hides, but what
-        // the placeholder then SAYS comes from main's status. This failure
-        // must never be translated into an asserted opt-out (#542).
+        // Settings unavailable hides the engine surfaces, never a broken
+        // shell. Capability only, fail-closed (#329): what the placeholder
+        // then SAYS comes from main's status.
         //
         // It is still an ANSWER. Recording it is what releases the surfaces
         // below from their load state; a failure held as "pending" would
@@ -7235,7 +7198,7 @@ export function DesktopWorkspaceShell(props: {
             sharedView={isShareView}
             // Main's own decision, not the renderer's settings read (#542):
             // only main knows whether a recorder exists for this session, and
-            // a failed capture build is as recorder-less as the opt-out.
+            // a failed capture build leaves none.
             sessionRecorderOn={
               syncStatus ? !statusSaysNoRecorder(syncStatus) : undefined
             }

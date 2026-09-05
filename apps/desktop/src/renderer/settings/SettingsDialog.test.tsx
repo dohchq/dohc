@@ -692,50 +692,12 @@ describe("SettingsDialog", () => {
     ).toBe("success");
   });
 
-  it("blocks the runner self-test when the workspace engine is off", async () => {
-    // AUDIT-OPTOUT: the self-test writes a chat thread, which an opted-out
-    // workspace must never record. The main process refuses it; the button
-    // must not offer it.
-    bridge.getWorkspaceSettings.mockResolvedValueOnce({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: { workspaceEngineAlpha: false },
-      },
-      source: "default" as const,
-    });
-    const user = userEvent.setup();
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        onClose={() => {}}
-      />,
-    );
-
-    await user.type(await screen.findByTestId("runner-command-input"), "claude -p");
-    const button = await screen.findByTestId("runner-self-test-button");
-    expect((button as HTMLButtonElement).disabled).toBe(true);
-    expect(screen.getByTestId("runner-self-test-engine-note").textContent).toContain(
-      "The workspace engine is off",
-    );
-    await user.click(button);
-    expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
-  });
-
   // #687 on this surface. The note's gate is the RENDERER's live settings
   // value, but the recovery depends on main's open-time decision, and the two
   // off states differ. Opened with the engine OFF: main built no recorder and
   // cannot until a restart, so turning the setting on hides the note and
   // enables Test runner over a click that can only fail.
   it("tells the user to restart when this session has no recorder", async () => {
-    bridge.getWorkspaceSettings.mockResolvedValueOnce({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: { workspaceEngineAlpha: false },
-      },
-      source: "default" as const,
-    });
     render(
       <SettingsDialog
         workspaceId="ws-1"
@@ -748,39 +710,8 @@ describe("SettingsDialog", () => {
 
     const note = await screen.findByTestId("runner-self-test-engine-note");
     await waitFor(() =>
-      expect(note.textContent).toContain(
-        "Turn it on in Advanced. Then restart dohc to test the runner.",
-      ),
+      expect(note.textContent).toContain("Restart dohc to test the runner."),
     );
-  });
-
-  // The other off state (#687, codex round 5): the workspace opened with the
-  // engine ON and the user switched it off here. Main's recorder is still
-  // live, so switching back on makes Test runner work at once. Prescribing a
-  // restart would send the user to relaunch the app for nothing.
-  it("asks for no restart when this session already has a recorder", async () => {
-    bridge.getWorkspaceSettings.mockResolvedValueOnce({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: { workspaceEngineAlpha: false },
-      },
-      source: "default" as const,
-    });
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        sessionRecorderOn
-        onClose={() => {}}
-      />,
-    );
-
-    const note = await screen.findByTestId("runner-self-test-engine-note");
-    await waitFor(() =>
-      expect(note.textContent).toContain("Turn it on in Advanced to test the runner."),
-    );
-    expect(note.textContent).not.toContain("restart");
   });
 
   // The third state (#687, codex round 6), and the one the live-setting gate
@@ -1391,10 +1322,7 @@ describe("SettingsDialog", () => {
     const refusal =
       "dohc did not save workspace settings. dohc cannot read /x/.dohc/settings.local.json. Fix that file. Or select Reset workspace in Advanced to replace it.";
     const onDisk = {
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: { workspaceEngineAlpha: false },
-      },
+      settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "recovered" as const,
       warning,
     };
@@ -1466,116 +1394,6 @@ describe("SettingsDialog", () => {
     ).toBe("global-folder");
   });
 
-  // #687: the recovery path this row prescribes has to be the one that works.
-  // Main decides the recorder once per workspace per app session —
-  // `openWorkspaceActivity` retains every workspace it opens and
-  // `workspaceActivity.open` no-ops for one it already watches — so reopening
-  // the workspace re-reads this flag nowhere. Same instruction the History,
-  // versions and chats surfaces give, for the same cause.
-  it("tells the user to restart, not to reopen the workspace", async () => {
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="advanced"
-        onClose={() => {}}
-      />,
-    );
-
-    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
-    await waitFor(() =>
-      expect(row.textContent).toContain(
-        "Restart dohc after you change this setting.",
-      ),
-    );
-    expect(row.textContent).not.toContain("next time the workspace is opened");
-    // And the row may not claim the turn-off is immediate: the retained
-    // capture keeps recording until that restart.
-    expect(row.textContent).toContain("Until you restart, recording does not change.");
-    expect(row.textContent).not.toContain("no history is recorded while it is off");
-  });
-
-  // #589: a shared view is fed by the share's pull and gets no capture, so it
-  // records nothing. It also materializes no settings file, so this read
-  // returns the schema default — ON. The toggle would assert both a choice
-  // nobody made and a recording that never happens.
-  it("states the capability for a shared view instead of the engine toggle", async () => {
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        sharedView
-        initialSection="advanced"
-        onClose={() => {}}
-      />,
-    );
-
-    const row = await screen.findByTestId("settings-row-workspace-engine-alpha");
-    expect(row.textContent).toContain("This workspace is a shared view.");
-    expect(row.textContent).toContain("dohc records nothing here.");
-    expect(
-      screen.getByTestId("settings-workspace-engine-share-view").textContent,
-    ).toContain("no recording");
-    expect(
-      screen.queryByRole("switch", {
-        name: "Use the workspace engine (default on)",
-      }),
-    ).toBeNull();
-  });
-
-  // #329 on this branch: a shared view replaces the engine ROW, and nothing
-  // else. An unreadable settings file must still say so — that warning is the
-  // one surface telling the user their file is damaged, and a share view is
-  // not a reason to swallow it.
-  it("still warns a shared view about an unreadable settings file", async () => {
-    const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";
-    bridge.getWorkspaceSettings.mockResolvedValue({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: { workspaceEngineAlpha: false },
-      },
-      source: "recovered" as const,
-      warning,
-    });
-
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        sharedView
-        initialSection="advanced"
-        onClose={() => {}}
-      />,
-    );
-
-    await waitFor(() =>
-      expect(
-        screen.getAllByTestId("settings-warning").map((node) => node.textContent),
-      ).toContain(warning),
-    );
-    // Still the capability row, not the toggle: the warning rides beside it.
-    expect(screen.getByTestId("settings-workspace-engine-share-view")).toBeTruthy();
-  });
-
-  it("keeps the engine toggle for a workspace that is not a shared view", async () => {
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="advanced"
-        onClose={() => {}}
-      />,
-    );
-
-    expect(
-      await screen.findByRole("switch", {
-        name: "Use the workspace engine (default on)",
-      }),
-    ).toBeTruthy();
-    expect(screen.queryByTestId("settings-workspace-engine-share-view")).toBeNull();
-  });
-
   it("shows one scoped reset action for each settings scope", async () => {
     bridge.getUserSettings.mockResolvedValueOnce({
       settings: {
@@ -1586,7 +1404,7 @@ describe("SettingsDialog", () => {
     });
     workspaceSettingsOnDisk = {
       ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: { workspaceEngineAlpha: false },
+      privacy: { confirmExternalLinks: false },
     };
 
     render(

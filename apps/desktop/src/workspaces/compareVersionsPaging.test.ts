@@ -78,7 +78,6 @@ function captureWith(
     rootPath: root,
     attachmentId: Symbol("test-workspace-attachment"),
     rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine()),
-    daemonOwnsCapture: true,
     store,
     secretStore,
   });

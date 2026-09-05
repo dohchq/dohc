@@ -1,4 +1,5 @@
 [package]
+autobins = false
 name = "dohc-workspace-engine"
 version.workspace = true
 edition = "2024"
@@ -54,13 +55,15 @@ harness = ["dep:filetime"]
 tokio = { version = "1", features = ["test-util"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 proptest = "1"
-# Self-dependency so integration tests (tests/shadow_replay.rs) compile the
-# library with the harness-only marker writers; production builds never do.
+# Self-dependency so integration tests compile the library with the
+# harness-only probes; production builds never do.
 dohc-workspace-engine = { path = ".", features = ["harness"] }
 
 [lints]
 workspace = true
 
+# The rehearsal harness sources are no longer compiled; another change
+# deletes them. Only the daemon is a bin target.
 [[bin]]
-name = "dohc-rehearsal-harness"
-required-features = ["harness"]
+name = "dohc-workspace-engine"
+path = "src/bin/dohc-workspace-engine.rs"

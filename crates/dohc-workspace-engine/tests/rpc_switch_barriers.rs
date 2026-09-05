@@ -7,15 +7,12 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{
-    CaptureApplyProbe, EngineService, shadow_fence::write_shadow_marker_for_harness,
-};
+use dohc_workspace_engine::{CaptureApplyProbe, EngineService};
 use serde_json::{Value, json};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
 
 async fn bounded<T>(what: &str, future: impl Future<Output = T>) -> T {
@@ -72,7 +69,6 @@ async fn fixture(
     String,
 ) {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
     let workspace_id = format!("ws-switch-barrier-{name}");
     let transport = Arc::new(InProcessTransport::new(Arc::new(service)));
@@ -104,7 +100,6 @@ async fn open_additional_workspace(
     workspace_id: &str,
     id: u64,
 ) -> WorkspaceHandle {
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     std::fs::write(scratch.path().join("notes.md"), "other base").expect("seed disk");
     let opened = bounded(
         "additional workspace.open",
@@ -1318,7 +1313,6 @@ async fn create_named_from_an_inactive_version_leaves_its_live_session_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_engine_service_releases_its_single_actor_attachment() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     let workspace_id = "ws-switch-barrier-drop-release";
     let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
     transport
@@ -1379,7 +1373,6 @@ async fn dropping_engine_service_releases_its_single_actor_attachment() {
 #[test]
 fn dropping_engine_service_after_its_runtime_stops_releases_the_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
     let workspace_id = "ws-switch-barrier-stopped-runtime-drop";
     let transport = Arc::new(InProcessTransport::new(Arc::new(EngineService::new())));
@@ -1447,7 +1440,6 @@ fn dropping_engine_service_in_the_final_runtime_future_releases_the_actor() {
     // MUTATION: spawn drop cleanup onto Handle::try_current() and immediately
     // drop this current-thread runtime; the cleanup task is never polled.
     let scratch = ScratchDir::new().expect("scratch");
-    write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
     std::fs::write(scratch.path().join("notes.md"), "main base").expect("seed disk");
     let workspace_id = "ws-switch-barrier-final-future-drop";
     let runtime = tokio::runtime::Builder::new_current_thread()

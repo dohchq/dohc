@@ -30,24 +30,16 @@ interface WatchedWorkspace {
   inFlight: boolean;
   lastSyncedAtMs: number | null;
   engine: CloudSyncEngine | null;
-  // Per-workspace engine-capture singleton; null while the workspace is
-  // explicitly opted out (or the capture build failed). Torn down in stopAll
+  // Per-workspace engine-capture singleton; null for a shared view or when
+  // the capture build failed. Torn down in stopAll
   // AFTER the watcher stops so the final settled batch is captured before
   // shutdown completes.
   capture: WorkspaceEngineCapture | null;
   // True once captureFor resolved and produced NO capture: this workspace
-  // records no history at all (engine opt-out, or a failed capture build).
-  // Drives the persistent "History is off for this workspace" notice.
+  // records no history at all (a shared view, or a failed capture build).
   historyRecordingOff: boolean;
-  // Why the open-time settings read could not be trusted, straight from that
-  // read. Null when the file read normally. The notice states THIS cause
-  // instead of blaming the Settings toggle, and the renderer never answers
-  // the question from a read of its own.
-  settingsWarning: string | null;
-  // True when building the recorder THREW (#505). The workspace records
-  // nothing either way, but the cause is a failure, not the user's Settings
-  // choice — the notice states which, so a real failure never wears the
-  // opt-out's copy.
+  // True when building the recorder THREW (#505): the cause is a failure,
+  // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
   // True when this workspace is a shared view (#540): no recorder by design.
   // Same rule as above — the cause travels with the decision so no consumer
@@ -90,8 +82,8 @@ export interface WorkspaceActivityOptions {
     engineOptions?: { joinBootstrap?: boolean },
   ) => CloudSyncEngine | null;
   // Builds the watcher->engine capture for a workspace; a null capture
-  // (explicit engine opt-out) leaves the workspace with NO history recorder.
-  // Called once per open; main owns the flag read. The hooks are
+  // leaves the workspace with NO history recorder. Called once per open. The
+  // hooks are
   // activity-owned callbacks the builder must wire into the capture it
   // creates (they feed the workspace's history-capture notice state).
   captureFor?: (
@@ -106,16 +98,12 @@ export interface WorkspaceActivityOptions {
   ) => void;
 }
 
-// What the open-time settings read decided: the recorder, and — when the file
-// could not be trusted — why. Both come from ONE read, so the notice can never
-// state a cause the capture decision did not have.
+// What the open-time gate decided: the recorder, and why there is none.
 export interface WorkspaceCaptureDecision {
   capture: WorkspaceEngineCapture | null;
-  warning?: string;
   // True for a shared view (#540): it is fed by the share's pull and never
-  // gets a recorder of its own. A capability, not an opt-out and not a
-  // failure — without this cause the null capture wears the opt-out's copy,
-  // blaming a Settings toggle nobody touched.
+  // gets a recorder of its own. A capability, not a failure; the cause
+  // travels with the decision so no consumer has to guess it.
   //
   // REQUIRED, like the contract field it feeds: an omitted boolean would
   // read as "not a shared view", and the sole producer of `true` could be
@@ -126,10 +114,6 @@ export interface WorkspaceCaptureDecision {
 
 export interface WorkspaceCaptureHooks {
   onCaptureOutcome: (failure: WorkspaceEngineCaptureFailure) => void;
-  // Wire into WorkspaceEngineCaptureOptions.activeAgentRun: the workspace's
-  // live agent-run slot, so settled batches captured while a dohc-tracked
-  // run is active carry agent authorship into engine moments (PR 0N-1).
-  activeAgentRun: () => ActiveAgentRun | null;
 }
 
 export async function closeWorkspaceActivityAndRelay(options: {
@@ -183,16 +167,14 @@ export function createWorkspaceActivity(
       cloudConnected: cloud.connected && !(snap?.authExpired ?? false),
       lastSyncedAtMs: snap?.lastSyncedAtMs ?? w?.lastSyncedAtMs ?? null,
     });
-    // Additive surface: the status bar shows HOW MANY files conflict, the
-    // notice center shows when history capture is failing, and — post flag
-    // flip — when a workspace records no history at all (engine opt-out;
-    // the legacy recorder is retired).
+    // Additive surface: the status bar shows HOW MANY files conflict, and
+    // the notice center shows when history capture is failing or when a
+    // workspace records no history at all.
     const historyCaptureFailure = w?.historyCaptureFailure ?? null;
     const baseStatus = {
       ...status,
       conflictCount,
       historyRecordingOff: w?.historyRecordingOff ?? false,
-      ...(w?.settingsWarning ? { settingsWarning: w.settingsWarning } : {}),
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
@@ -229,26 +211,20 @@ export function createWorkspaceActivity(
         engine: null,
         capture: null,
         historyRecordingOff: false,
-        settingsWarning: null,
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyCaptureFailure: null,
         agentRun: null,
       };
       state.entry = entry;
-      // Resolve the engine capture BEFORE the watcher starts: the watcher
-      // records each settled batch into the engine (or nowhere, for an
-      // opted-out workspace), so the mode must be known from the first
-      // batch. A capture failure leaves the workspace with no recorder —
-      // surfaced via the history-off notice — never a failed open.
+      // Resolve the engine capture BEFORE the watcher starts, so the mode is
+      // known from the first batch. A capture failure leaves the workspace
+      // with no recorder, surfaced via the history-off notice, never a
+      // failed open.
       if (options.captureFor) {
         try {
           const decision =
             await options.captureFor(workspace, {
-              // Live slot read: the capture stamps a settled batch with
-              // whatever run is active at that moment (may flip between
-              // batches within one open).
-              activeAgentRun: () => entry.agentRun,
               onCaptureOutcome: (failure) => {
                 // Transition-only: the FIRST failure raises the notice, the
                 // first success after a failure clears it, and repeated
@@ -268,21 +244,17 @@ export function createWorkspaceActivity(
             return statusFor(workspace, state);
           }
           entry.capture = decision.capture;
-          entry.settingsWarning = decision.warning ?? null;
           entry.historyShareView = decision.shareView;
         } catch (error) {
           console.error(
             `[desktop] workspace engine capture unavailable for ${workspace.rootPath}:`,
             error,
           );
-          // The build FAILED — the user chose nothing. Carry that apart from
-          // the opt-out (#505) so the notice states the true cause. The error
-          // itself stays in the log: it is developer-facing, and the notice
-          // owes the user a state and a next step, not a stack.
+          // The error itself stays in the log: it is developer-facing, and
+          // the notice owes the user a state and a next step, not a stack.
           entry.historyRecordingUnavailable = true;
         }
-        // No capture => no recorder of any kind (Phase C removed legacy
-        // recording). Make that honest and visible, not silent.
+        // No capture means no recorder of any kind. Make that visible.
         entry.historyRecordingOff = entry.capture === null;
       }
       // stopAll may have raced the capture build; do not start a watcher no
@@ -291,8 +263,7 @@ export function createWorkspaceActivity(
         return statusFor(workspace, state);
       }
       entry.handle = startWorkspaceWatch(workspace, {
-        // Non-null from the FIRST batch for engine workspaces; null records
-        // nothing (opt-out).
+        // Non-null from the FIRST batch; null records nothing.
         engineCapture: () => entry.capture,
         onSettledBatch: (events) => options.onWatcherBatch?.(workspace, events),
         onRecorded: (events) => {
@@ -557,8 +528,8 @@ export function createWorkspaceActivity(
     return entry.capture?.registerExpectedEngineEvents(events) ?? null;
   }
 
-  // The per-workspace engine capture instance (null when the workspace is
-  // opted out or not open). Version-operation IPC handlers gate on this: no
+  // The per-workspace engine capture instance (null when the workspace has
+  // no capture or is not open). Version-operation IPC handlers gate on this: no
   // capture, no versions surface.
   function engineCaptureFor(state: WorkspaceActivityState,
     expectedRootPath?: string,

@@ -21,7 +21,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -30,7 +30,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "capture-differential-rust";
 /// Generous: watcher settle + drive interval + scan/hash time per step.
 const WAIT: Duration = Duration::from_secs(20);
@@ -425,7 +424,6 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
             .unwrap_or_else(|| panic!("no golden for {}", scenario.name));
 
         let scratch = ScratchDir::new().expect("scratch");
-        write_shadow_marker_for_harness(scratch.path(), TOKEN).expect("marker");
         let db = scratch.engine_db_path().expect("db path");
         let transport = InProcessTransport::new(Arc::new(EngineService::new()));
         let mut id: u64 = 1;

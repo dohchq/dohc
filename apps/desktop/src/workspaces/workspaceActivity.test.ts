@@ -9,7 +9,7 @@ import {
   type WorkspaceCaptureHooks,
 } from "./workspaceActivity";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
-import { captureForFlaggedWorkspace } from "./engineCaptureGate";
+import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
 
@@ -50,9 +50,6 @@ function workspace(): ActivityWorkspace {
   };
 }
 
-// PR 0N-1: the capture hooks expose the workspace's LIVE agent-run slot so
-// the engine capture can stamp settled batches with agent authorship while a
-// dohc-tracked run is active.
 describe("workspaceActivity capture hooks", () => {
   it("keeps an old attachment close from stopping its successor", async () => {
     const successorRoot = await createTestScratch("dohc-activity-successor-");
@@ -115,33 +112,44 @@ describe("workspaceActivity capture hooks", () => {
     await activity.stopAll();
   });
 
-  it("wires the live agent-run slot into captureFor's hooks", async () => {
-    let liveSlot: (() => unknown) | null = null;
+  it("forwards the agent-run slot to the open workspace's capture", async () => {
+    const setActiveAgentRun = vi.fn(async () => undefined);
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: (_workspace, hooks) => {
-        liveSlot = hooks.activeAgentRun;
-        return { capture: null, shareView: false };
-      },
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          setActiveAgentRun,
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+      }),
     });
     await activity.open(workspace());
-    expect(liveSlot).not.toBeNull();
-    expect(liveSlot!()).toBeNull();
+    expect(activity.hasAgentRun("activity-test")).toBe(false);
 
     const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
     await activity.setAgentRun("activity-test", run);
-    expect(liveSlot!()).toEqual(run);
+    expect(setActiveAgentRun).toHaveBeenLastCalledWith(run);
+    expect(activity.hasAgentRun("activity-test")).toBe(true);
     await activity.setAgentRun("activity-test", null);
-    expect(liveSlot!()).toBeNull();
+    expect(setActiveAgentRun).toHaveBeenLastCalledWith(null);
+    expect(activity.hasAgentRun("activity-test")).toBe(false);
     await activity.stopAll();
   });
 
   it("claims the single attribution slot atomically and clears by owner run id", async () => {
-    let liveSlot: (() => unknown) | null = null;
+    const setActiveAgentRun = vi.fn(async () => undefined);
     const activity = createWorkspaceActivity(() => {}, {
-      captureFor: (_workspace, hooks) => {
-        liveSlot = hooks.activeAgentRun;
-        return { capture: null, shareView: false };
-      },
+      captureFor: () => ({
+        shareView: false,
+        capture: {
+          start: vi.fn(),
+          setActiveAgentRun,
+          settleAndCloseAllLiveSessions: vi.fn(async () => undefined),
+          stop: vi.fn(async () => undefined),
+        } as never,
+      }),
     });
     await activity.open(workspace());
     const first = {
@@ -157,24 +165,24 @@ describe("workspaceActivity capture hooks", () => {
     expect(await activity.claimAgentRun("activity-test", first)).toBe(true);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(false);
     await activity.clearAgentRun("activity-test", second.agentRunId);
-    expect(liveSlot!()).toEqual(first);
+    expect(setActiveAgentRun).toHaveBeenLastCalledWith(first);
+    expect(activity.hasAgentRun("activity-test")).toBe(true);
     await activity.clearAgentRun("activity-test", first.agentRunId);
-    expect(liveSlot!()).toBeNull();
+    expect(setActiveAgentRun).toHaveBeenLastCalledWith(null);
+    expect(activity.hasAgentRun("activity-test")).toBe(false);
     expect(await activity.claimAgentRun("activity-test", second)).toBe(true);
     await activity.stopAll();
   });
 });
 
 describe("workspaceActivity history-off status (retirement Phase C)", () => {
-  it("reports historyRecordingOff when captureFor yields no capture (engine opt-out)", async () => {
+  it("reports historyRecordingOff when captureFor yields no capture", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({ capture: null, shareView: false }),
     });
     const status = await activity.open(workspace());
     expect(status.historyRecordingOff).toBe(true);
     expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
-    // A decision, not a failure and not a shared view: the notice may name
-    // Settings for this one and only this one.
     expect(status.historyRecordingUnavailable).toBe(false);
     expect(status.historyShareView).toBe(false);
     // No capture also means no versions surface.
@@ -190,7 +198,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
   it("separates a shared view's null capture from the engine opt-out", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
-        captureForFlaggedWorkspace(
+        captureForWorkspace(
           {
             workspaceId: w.workspaceId,
             rootPath: w.rootPath,
@@ -210,35 +218,9 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 
-  // #483: main's open-time read is the ONLY source of the notice's cause. It
-  // rides the status the renderer already consumes, so a renderer-side read
-  // can neither invent a cause nor promise "no history" while recording.
-  it("carries the open-time read's reason into the status", async () => {
-    const warning =
-      "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
-    const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null, warning, shareView: false }),
-    });
-    const status = await activity.open(workspace());
-    expect(status.historyRecordingOff).toBe(true);
-    expect(status.settingsWarning).toBe(warning);
-    expect(activity.getStatus("activity-test").settingsWarning).toBe(warning);
-    await activity.stopAll();
-  });
-
-  it("carries no reason when the open-time read was fine", async () => {
-    const activity = createWorkspaceActivity(() => {}, {
-      captureFor: () => ({ capture: null, shareView: false }),
-    });
-    const status = await activity.open(workspace());
-    expect(status.historyRecordingOff).toBe(true);
-    expect(status.settingsWarning).toBeUndefined();
-    await activity.stopAll();
-  });
-
-  // #505: a capture build that THREW leaves the same empty recorder, but the
-  // cause is a failure. The status separates the two so the notice can.
-  it("separates a failed capture build from the engine opt-out", async () => {
+  // #505: a capture build that THREW leaves an empty recorder, and the
+  // cause is a failure. The status says so, so the notice can.
+  it("marks a failed capture build unavailable", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => {

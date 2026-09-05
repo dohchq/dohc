@@ -31,9 +31,7 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
   const sentinel = "Typed with no collab server anywhere.";
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/solo.md", contents: "# Solo\n\nStart here.\n" },
     ]);
@@ -118,9 +116,7 @@ test("collab-style materializations (bridge text writes) on an engine-flagged wo
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/shared-doc.md", contents: "# Shared doc\n\nBase text.\n" },
     ]);

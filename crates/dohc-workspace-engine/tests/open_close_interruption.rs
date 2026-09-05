@@ -19,10 +19,8 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_testkit::ScratchDir;
-use dohc_workspace_engine::{EngineService, shadow_fence::write_shadow_marker_for_harness};
+use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
     Request {
@@ -144,9 +142,7 @@ fn lcg(state: &mut u64) -> u64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
     let scratch_t = ScratchDir::new().expect("scratch t");
-    write_shadow_marker_for_harness(scratch_t.path(), TOKEN).expect("marker t");
     let scratch_s = ScratchDir::new().expect("scratch s");
-    write_shadow_marker_for_harness(scratch_s.path(), TOKEN).expect("marker s");
     let root_t = scratch_t.path().to_string_lossy().to_string();
     let root_s = scratch_s.path().to_string_lossy().to_string();
 

@@ -1128,34 +1128,17 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
-  // Additive (WS-H1 retirement Phase C): true when this workspace records NO
-  // history at all — the engine is explicitly opted out and the legacy
-  // recorder no longer exists. Drives the persistent "History is off"
-  // notice. Optional so older producers/fixtures keep parsing.
+  // True when this workspace records NO history at all: no capture was built
+  // at open. Optional so older producers/fixtures keep parsing.
   historyRecordingOff: z.boolean().optional(),
-  // Additive (#483): why main's open-time settings read could not trust the
-  // file, when it could not. The notice states this cause instead of blaming
-  // the Settings toggle. Bounded like the settings warning it carries: the
-  // sentence names a full path. Optional so older producers/fixtures keep
-  // parsing.
-  settingsWarning: z.string().min(1).max(4600).optional(),
-  // #505: true when the recorder could not be BUILT at workspace open — a
-  // failure, not a decision. `historyRecordingOff` is true as well (nothing
-  // records either way), so the notice must read this first: the opt-out copy
-  // names Settings, which nobody touched here.
-  //
-  // REQUIRED where its neighbours above are optional, and deliberately so. An
-  // omitted boolean reads as false, and false here does not mean "unknown" —
-  // it asserts the user chose this, which is the false cause #505 is about. A
-  // producer that cannot say which cause it means must not compile.
+  // #505: true when the recorder could not be BUILT at workspace open.
+  // `historyRecordingOff` is true as well. REQUIRED: an omitted boolean
+  // reads as false, and a producer that cannot say which cause it means must
+  // not compile.
   historyRecordingUnavailable: z.boolean(),
-  // #540: true when this workspace is a shared view — fed by the share's
-  // pull, never a recorder of its own. A capability, not an opt-out and not
-  // a failure, so the notice must not blame the Settings toggle.
-  //
-  // REQUIRED for the same reason as its neighbour: an omitted boolean reads
-  // as false, and false asserts "not a shared view", which routes the notice
-  // to the opt-out's copy — a cause nobody chose.
+  // #540: true when this workspace is a shared view, fed by the share's pull
+  // and never a recorder of its own. A capability, not a failure. REQUIRED
+  // for the same reason as its neighbour.
   historyShareView: z.boolean(),
   // Additive (0P-B relay sync): true after repeated non-auth sync failures.
   // Local changes remain safe and the engine keeps retrying with backoff.

@@ -45,9 +45,7 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -158,9 +156,7 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     // Seed BEFORE launch, through the engine daemon (post-cutover the
     // retired TS in-process store is refused): the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a

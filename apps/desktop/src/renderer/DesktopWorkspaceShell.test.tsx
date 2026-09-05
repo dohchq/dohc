@@ -328,7 +328,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-function makeBridge(
+function makeBaseBridge(
   uiStatePromise: Promise<WorkspaceUiState | null>,
   platform: NodeJS.Platform = "linux",
 ) {
@@ -423,18 +423,8 @@ function makeBridge(
       settings: DEFAULT_USER_SETTINGS,
       source: "stored" as const,
     })),
-    // WS-H1: this suite renders the shell as an EXPLICITLY OPTED-OUT
-    // workspace (engine off). Post retirement Phase C that means NO history
-    // source at all — the rail shows the history-off placeholder. The engine
-    // history surface has its own tests (workbench/EngineHistory.test.ts).
     getWorkspaceSettings: vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: false,
-        },
-      },
+      settings: DEFAULT_WORKSPACE_SETTINGS,
       source: "stored" as const,
     })),
     setWorkspaceSettings: vi.fn(
@@ -712,22 +702,15 @@ function makeBridge(
 // Engine-flagged variant: the same bridge with the workspace-engine alpha on
 // plus the minimal engine/chats IPC surface the flagged shell touches on
 // mount (empty history, no try-session, Main only, no chats yet).
-function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
-  const bridge = makeBridge(uiStatePromise);
-  bridge.getWorkspaceSettings = vi.fn(async (): Promise<WorkspaceSettingsResult> => ({
-    settings: {
-      ...DEFAULT_WORKSPACE_SETTINGS,
-      experimental: {
-        ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-        workspaceEngineAlpha: true,
-      },
-    },
-    source: "stored" as const,
-  }));
+// Every workspace has the engine, so every bridge answers the engine
+// surfaces: collections, history, versions, chats. Typed to the contracts so
+// a test that drives real rows can swap an implementation in.
+function makeBridge(
+  uiStatePromise: Promise<WorkspaceUiState | null>,
+  platform: NodeJS.Platform = "linux",
+) {
+  const bridge = makeBaseBridge(uiStatePromise, platform);
   return Object.assign(bridge, {
-    // Collections (Phase 2 views): the flagged shell lists collections on
-    // ready and on activity. Typed to the contract; the collection tests
-    // swap in real rows.
     listCollections: vi.fn(
       async (_payload: ListCollectionsPayload): Promise<ListCollectionsResult> => ({
         collections: [],
@@ -822,6 +805,8 @@ function makeEngineBridge(uiStatePromise: Promise<WorkspaceUiState | null>) {
   });
 }
 
+const makeEngineBridge = makeBridge;
+
 function renderShell(
   bridge: ReturnType<typeof makeBridge>,
   workspace: Workspace = WORKSPACE,
@@ -876,6 +861,15 @@ async function enterMarkdownSource(
     expect(content?.getAttribute("contenteditable")).toBe("true");
     return content!;
   });
+}
+
+// A history page that never lands. The editor-boundary suites measure draft
+// flushes and editor identity across renames, deletes, and close-all; the
+// first history commit bumps the inspector's refresh key, which is a
+// different behavior with its own tests.
+function holdHistory(bridge: ReturnType<typeof makeBridge>) {
+  bridge.listEngineMoments = vi.fn(() => new Promise<never>(() => {}));
+  return bridge;
 }
 
 function sourceEditorText(editor: HTMLElement): string {
@@ -1018,9 +1012,8 @@ const SHARE_VIEW: Workspace = {
 };
 
 // A bridge that answers the way MAIN answers for a shared view: the capture
-// gate short-circuits before the settings read, so requireEngineCapture has
-// no capture and every capture-backed call is refused with engineOffRefusal
-// copy. A fake that resolved these would model more than main can do, and
+// gate short-circuits, so requireEngineCapture has no capture and every
+// capture-backed call is refused. A fake that resolved these would model more than main can do, and
 // every no-call pin below would pass even after the fix was reverted.
 //
 // `listFileChats` is the one that ANSWERS (#646 PR2): main resolves a chat
@@ -1073,8 +1066,7 @@ function makeShareBridge(
 // read, so they still prove nothing about it.)
 async function settleEngineOnRead(bridge: ReturnType<typeof makeEngineBridge>) {
   await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
-  const read = await bridge.getWorkspaceSettings();
-  expect(read.settings.experimental.workspaceEngineAlpha).toBe(true);
+  await bridge.getWorkspaceSettings();
   await act(async () => {});
 }
 
@@ -2166,24 +2158,6 @@ describe("collection folders", () => {
     await user.keyboard("{Control>}k{/Control}");
     const palette = await screen.findByTestId("command-palette");
     expect(await within(palette).findByText("New collection")).toBeTruthy();
-  });
-
-  it("does not offer New collection when the workspace engine is disabled", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    const user = userEvent.setup();
-    renderShell(bridge);
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalled());
-    await act(async () => {});
-
-    await user.keyboard("{Control>}k{/Control}");
-    const palette = await screen.findByTestId("command-palette");
-    await within(palette).findByText("New editor group right");
-    expect(within(palette).queryByText("New collection")).toBeNull();
-
-    // The application menu feeds the same registry. A command that is not
-    // present must not reach the dialog even if main emits its closed id.
-    act(() => bridge.emitMenuCommand("new-collection"));
-    expect(screen.queryByLabelText("Collection name")).toBeNull();
   });
 
   // assertWritableWorkspace refuses createWorkspaceFile on the share's
@@ -3684,16 +3658,6 @@ describe("application menu command routing", () => {
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 
-  it("ignores Toggle Chats when the workspace has no Chats command", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
-    renderShell(bridge);
-    await screen.findByTestId("side-panel");
-
-    act(() => bridge.emitMenuCommand("toggle-chats"));
-
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.getByTestId("side-panel")).toBeTruthy();
-  });
 });
 
 describe("targeted chat navigation", () => {
@@ -4133,11 +4097,6 @@ describe("workspace switch admission", () => {
       return {
         settings: {
           ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha:
-              selectedWorkspace.workspaceId === OTHER_WORKSPACE.workspaceId,
-          },
         },
         source: "stored",
       };
@@ -5432,8 +5391,10 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
-    const bridge = makeBridge(
-      Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+    const bridge = holdHistory(
+      makeBridge(
+        Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+      ),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
       issued += 1;
@@ -6614,10 +6575,7 @@ describe("ui-state merge-on-load", () => {
     expect(await screen.findByTestId("tab-b.md")).toBeTruthy();
     expect(screen.getByTestId("tab-b.md").dataset.active).toBe("true");
     expect((await screen.findByTestId("side-panel")).style.width).toBe("320px");
-    // chatsVisible is stored true, but this workspace is engine-off: the
-    // Chats panel (and its titlebar toggle) must not exist at all.
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
+    expect(await screen.findByTestId("chats-panel")).toBeTruthy();
   });
 });
 
@@ -7736,7 +7694,7 @@ async function openDirtyMarkdown(
   editor: HTMLElement;
 }> {
   const user = userEvent.setup();
-  renderShell(bridge);
+  renderShell(holdHistory(bridge));
   const row = (await screen.findAllByTestId("tree-row")).find(
     (candidate) => candidate.dataset.path === "a.md",
   )!;
@@ -7946,6 +7904,7 @@ describe("dirty tab close boundaries", () => {
         activeEditorGroup: "left",
       }),
     );
+    holdHistory(bridge);
     bridge.writeWorkspaceText = vi.fn(
       async (payload: { relativePath: string }) => {
         if (firstPath === null) {
@@ -10066,54 +10025,6 @@ describe("graph view", () => {
 });
 
 describe("history page", () => {
-  it("opens history as a full editor tab showing the history-off placeholder for an opted-out workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    // Main's status says the opt-out happened (#542): the placeholder's
-    // Settings copy is earned by that status, not by the renderer's own read.
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    await user.click(await screen.findByTestId("history-open-tab"));
-
-    const historyTab = await screen.findByTestId("tab-dohc://history");
-    expect(historyTab.dataset.active).toBe("true");
-    const page = await screen.findByTestId("history-page");
-    // Retirement Phase C: an opted-out workspace has no history source; the
-    // page says so instead of rendering an empty timeline.
-    const placeholder = within(page).getByTestId("history-off-placeholder");
-    await waitFor(() => {
-      expect(placeholder.textContent).toContain("History is off for this workspace");
-      expect(placeholder.textContent).toContain("turned off in Settings");
-    });
-  });
-
-  // The Next has to be the one that works (#687). Main decides the recorder
-  // once per workspace per app session — `openWorkspaceActivity` retains every
-  // workspace it opens and `workspaceActivity.open` no-ops for one it already
-  // watches — so leaving the workspace and coming back re-reads the flag
-  // nowhere. Same instruction the Chats surface gives, for the same cause.
-  it("tells the user to restart, not to reopen the workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain(
-        "Turn it on. Then restart dohc to record history.",
-      ),
-    );
-    expect(placeholder.textContent).not.toContain("reopen");
-  });
-
   // #542: the renderer's own settings read failed, and main has NOT said
   // recording is off — it may be recording right now. The placeholder must
   // not blame Settings, and must not promise "not recorded": either would be
@@ -10157,10 +10068,9 @@ describe("history page", () => {
     const user = userEvent.setup();
     renderShell(bridge);
 
-    // Prove the renderer's read really said engine-ON before anything is
-    // asserted: this engine-only control exists only once the settings read
-    // resolved the flag true. Without this the pins below pass vacuously in
-    // the pre-read window where engineEnabled is still false.
+    // Prove the renderer's settings read landed before anything is asserted:
+    // this engine-only control exists only once it resolved. Without this the
+    // pins below pass vacuously in the pre-read window.
     await screen.findByTestId("titlebar-chats-sidebar");
 
     await user.click(screen.getByTestId("activity-history"));
@@ -10168,7 +10078,6 @@ describe("history page", () => {
     expect(placeholder.textContent).toContain(
       "dohc could not start recording history for this workspace.",
     );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
 
     // Activity pushes take the no-engine refresh path too — the pin that
     // kills the recurring listEngineMoments error loop. The residual this
@@ -10296,30 +10205,6 @@ describe("history page", () => {
         "dohc could not start recording history for this workspace.",
       ),
     );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
-  });
-
-  // #483 on this surface: an unreadable settings file is the cause main
-  // established, and its warning already names the file and the fix.
-  it("names the unreadable settings file when that read is the cause", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    const warnedStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning:
-        "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
-    };
-    bridge.openWorkspace = vi.fn(async () => warnedStatus);
-    bridge.getSyncStatus = vi.fn(async () => warnedStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain("/ws/.dohc/settings.local.json"),
-    );
-    expect(placeholder.textContent).not.toContain("turned off in Settings");
   });
 
   // #540's class on this surface: a shared view records no history BY
@@ -13418,53 +13303,7 @@ describe("history page", () => {
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // The same door, on the lane whose stale answer states a CAUSE. An older
-  // status saying the recorder is off, landing over a newer one that says
-  // nothing of the kind, makes the placeholder name a Settings toggle the
-  // workspace has not got — the false-statement class of #626, from a lane
-  // that never claimed its write.
-  it("keeps an older opted-out refresh from naming a cause the newest status refutes", async () => {
-    const recordingOff = { ...SYNC_STATUS, historyRecordingOff: true };
-    const heldRead = deferred<typeof SYNC_STATUS | typeof recordingOff>();
-    let holdNextRead = false;
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getSyncStatus = vi.fn(() => {
-      if (holdNextRead) {
-        holdNextRead = false;
-        return heldRead.promise;
-      }
-      return Promise.resolve(SYNC_STATUS);
-    });
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(screen.getByTestId("activity-history"));
-    const placeholder = await screen.findByTestId("history-off-placeholder");
-    await waitFor(() =>
-      expect(placeholder.textContent).toContain("History is unavailable"),
-    );
-
-    // One refresh's status read is still in flight when a newer one answers.
-    holdNextRead = true;
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(holdNextRead).toBe(false));
-    act(() => {
-      bridge.emitWorkspaceActivity();
-    });
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(3));
-
-    // The older read answers last, and it says the workspace opted out.
-    await act(async () => {
-      heldRead.resolve(recordingOff);
-      await heldRead.promise;
-    });
-    expect(placeholder.textContent).toContain("History is unavailable");
-    expect(placeholder.textContent).not.toContain("Settings");
-  });
-
-  it("commits opted-out sync status when the sibling agent read fails", async () => {
+  it("commits sync status when the sibling agent read fails", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     let failNextAgentRead = false;
     let statusChanged = false;
@@ -13502,7 +13341,7 @@ describe("history page", () => {
     expect(error.textContent).not.toContain("Could not refresh history.");
   });
 
-  it("marks opted-out history ready when one status lane succeeds", async () => {
+  it("marks history ready when one status lane succeeds", async () => {
     const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
     const bridge = makeBridge(Promise.resolve(null));
     bridge.getAgentRunStatus = vi.fn(async () => {
@@ -13519,38 +13358,6 @@ describe("history page", () => {
         .find((entry) => entry.ordinal > previousOrdinal);
       expect(timeline?.phases["history-ready"]).toEqual(expect.any(Number));
     });
-  });
-
-  it("does not mark opted-out history ready when both status lanes fail", async () => {
-    const previousOrdinal = rendererMarks.readSwitchTimeline().at(-1)?.ordinal ?? 0;
-    const bridge = makeBridge(Promise.resolve(null));
-    const statusRead = deferred<SyncStatusResult>();
-    const agentRead = deferred<AgentRunStatusResult>();
-    bridge.getSyncStatus = vi.fn(() => statusRead.promise);
-    bridge.getAgentRunStatus = vi.fn(() => agentRead.promise);
-    renderShell(bridge);
-
-    await waitFor(() => expect(bridge.getSyncStatus).toHaveBeenCalledTimes(1));
-    await waitFor(() => expect(bridge.getAgentRunStatus).toHaveBeenCalledTimes(1));
-    await act(async () => {
-      // refreshHistory registered its aggregate settlement before these reads
-      // left the synchronous call stack. Awaiting the same lane promises here
-      // is the exact completion fence for its all-settled continuation.
-      const refreshSettled = Promise.allSettled([
-        statusRead.promise,
-        agentRead.promise,
-      ]);
-      statusRead.reject(new Error("sync status failed"));
-      agentRead.reject(new Error("agent status failed"));
-      await refreshSettled;
-    });
-    await screen.findByTestId("workspace-shell-error");
-
-    const timeline = rendererMarks
-      .readSwitchTimeline()
-      .find((entry) => entry.ordinal > previousOrdinal);
-    expect(timeline).toBeDefined();
-    expect(timeline?.phases["history-ready"]).toBeUndefined();
   });
 
   it("does not report an older opted-out refresh after a newer one succeeds", async () => {
@@ -13646,10 +13453,6 @@ describe("history page", () => {
       settings.resolve({
         settings: {
           ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
         },
         source: "stored",
       });
@@ -13830,68 +13633,6 @@ describe("versions surface after a failed capture build", () => {
     await waitFor(() => expect(bridge.listWorkspaceVersions).toHaveBeenCalled());
   });
 
-  it("does not reuse a late capability read after leaving and returning", async () => {
-    const staleFirstRead = deferred<WorkspaceSettingsResult>();
-    const freshReturnRead = deferred<WorkspaceSettingsResult>();
-    const engineOn: WorkspaceSettingsResult = {
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: true,
-        },
-      },
-      source: "stored",
-    };
-    const engineOff: WorkspaceSettingsResult = {
-      settings: {
-        ...DEFAULT_WORKSPACE_SETTINGS,
-        experimental: {
-          ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-          workspaceEngineAlpha: false,
-        },
-      },
-      source: "stored",
-    };
-    const bridge = makeEngineBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi
-      .fn()
-      .mockImplementationOnce(() => staleFirstRead.promise)
-      .mockResolvedValueOnce(engineOff)
-      .mockImplementationOnce(() => freshReturnRead.promise);
-    const workspaces = [WORKSPACE, OTHER_WORKSPACE];
-    const view = renderShell(bridge, WORKSPACE, workspaces);
-
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={OTHER_WORKSPACE}
-        workspaces={workspaces}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2));
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-
-    await act(async () => {
-      staleFirstRead.resolve(engineOn);
-      await staleFirstRead.promise;
-    });
-    view.rerender(
-      <DesktopWorkspaceShell
-        workspace={WORKSPACE}
-        workspaces={workspaces}
-        {...shellBootstrapProps(bridge)}
-        onSwitchWorkspace={() => {}}
-      />,
-    );
-
-    await waitFor(() => expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(3));
-    // MUTATION: let the first response commit after its dependency changes.
-    // Returning to that workspace exposes the obsolete engine-on answer.
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-  });
-
   // The window the test above cannot see. Its status fake answers in the same
   // microtask flush as the settings read, and PRODUCTION NEVER DOES:
   // `getWorkspaceSettings` is one file read, while `openWorkspace` waits for
@@ -13990,10 +13731,6 @@ describe("versions surface after a failed capture build", () => {
       settings.resolve({
         settings: {
           ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
         },
         source: "stored",
       });
@@ -14091,34 +13828,6 @@ describe("version-compare off copy", () => {
     expect(copy).not.toContain("no versions");
   });
 
-  it("calls the opt-out off, never empty", () => {
-    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Versions are off for this workspace.");
-    expect(copy).toContain("Settings → Advanced");
-    expect(copy).not.toContain("no versions");
-  });
-
-  // The Next has to be the one that works (#687). Main decides the recorder
-  // once per workspace per app session — `openWorkspaceActivity` retains every
-  // workspace it opens and `workspaceActivity.open` no-ops for one it already
-  // watches — so leaving the workspace and coming back re-reads the flag
-  // nowhere. Same instruction the Chats surface gives, for the same cause.
-  it("tells the user to restart, not to reopen the workspace", () => {
-    const copy = versionCompareOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Turn it on. Then restart dohc to compare versions.");
-    expect(copy).not.toContain("reopen");
-  });
-
-  it("names the unreadable settings file instead of blaming the toggle", () => {
-    // #483: the opt-out line below names Settings, and nobody touched it.
-    const copy = versionCompareOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
-    });
-    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
-  });
-
   it("claims nothing when main established nothing", () => {
     // The renderer's own read failed. It proves nothing either way (#542).
     const copy = versionCompareOffCopy(base);
@@ -14153,33 +13862,6 @@ describe("chats off copy", () => {
       "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.",
     );
     expect(copy).not.toContain("no chats");
-  });
-
-  it("calls the opt-out off, never empty", () => {
-    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Chats are off for this workspace.");
-    expect(copy).toContain("Settings → Advanced");
-    expect(copy).not.toContain("no chats");
-  });
-
-  // The Next has to be the one that works. Main decides the recorder once per
-  // app session — `openWorkspaceActivity` retains every workspace it opens and
-  // `workspaceActivity.open` no-ops for one it already watches — so leaving
-  // the workspace and coming back re-reads the flag nowhere.
-  it("tells the user to restart, not to reopen the workspace", () => {
-    const copy = chatsOffCopy({ ...base, historyRecordingOff: true });
-    expect(copy).toContain("Turn it on. Then restart dohc to use chats.");
-    expect(copy).not.toContain("reopen");
-  });
-
-  it("names the unreadable settings file instead of blaming the toggle", () => {
-    // #483: the opt-out line above names Settings, and nobody touched it.
-    const copy = chatsOffCopy({
-      ...base,
-      historyRecordingOff: true,
-      settingsWarning: "dohc could not read /w/x/.dohc/settings.json.",
-    });
-    expect(copy).toBe("dohc could not read /w/x/.dohc/settings.json.");
   });
 
   it("claims nothing when main established nothing", () => {
@@ -14770,10 +14452,6 @@ describe("moment-diff tab after a failed capture build", () => {
       settings.resolve({
         settings: {
           ...DEFAULT_WORKSPACE_SETTINGS,
-          experimental: {
-            ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-            workspaceEngineAlpha: true,
-          },
         },
         source: "stored",
       });
@@ -15241,18 +14919,6 @@ describe("open editors", () => {
 });
 
 describe("chats panel (right side)", () => {
-  it("never renders a right panel (or a collapsed stub) for an engine-off workspace", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    renderShell(bridge);
-
-    await screen.findByText("a.md");
-    expect(screen.queryByTestId("chats-panel")).toBeNull();
-    expect(screen.queryByTestId("titlebar-chats-sidebar")).toBeNull();
-    // The old history rail is gone for good — no timeline, no restore stub.
-    expect(screen.queryByTestId("history-timeline")).toBeNull();
-    expect(screen.queryByTestId("history-restore")).toBeNull();
-  });
-
   it("toggles from the titlebar and hides entirely when collapsed", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     const user = userEvent.setup();
@@ -15817,92 +15483,6 @@ describe("runner note reaches the card through the shell's own wiring", () => {
   });
 });
 
-// AUDIT-OPTOUT: a settings file that cannot be read reads as opted out, so the
-// workspace records no history. The Settings dialog is not enough — the user
-// must see it without opening Settings.
-//
-// #483: the notice states what MAIN's open-time read found — the read that
-// decided whether anything is recorded. The renderer's own read of the same
-// file happens at a different moment and can disagree with it: one way round
-// the user gets a true "history is off" under a false cause, the other way a
-// recording workspace promises "no history".
-const UNREADABLE_WARNING =
-  "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.";
-
-const OPTED_OUT_READ = async (): Promise<WorkspaceSettingsResult> => ({
-  settings: {
-    ...DEFAULT_WORKSPACE_SETTINGS,
-    experimental: {
-      ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-      workspaceEngineAlpha: false,
-    },
-  },
-  source: "recovered" as const,
-  warning: UNREADABLE_WARNING,
-});
-
-describe("unreadable workspace settings", () => {
-  it("raises the settings warning in the notice center, not only in Settings", async () => {
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
-    const offStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning: UNREADABLE_WARNING,
-    };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    expect(
-      (await screen.findByTestId("notice-workspace-settings-unreadable"))
-        .textContent,
-    ).toContain("/ws/.dohc/settings.local.json");
-  });
-
-  it("names main's cause even when the renderer's own read succeeded", async () => {
-    // Main's read hit a transient error at open, so nothing is recorded for
-    // this session. The renderer read the same file a moment later and it was
-    // fine — the notice must still say WHY, not blame the Settings toggle.
-    const bridge = makeBridge(Promise.resolve(null));
-    const offStatus = {
-      ...SYNC_STATUS,
-      historyRecordingOff: true,
-      settingsWarning: UNREADABLE_WARNING,
-    };
-    bridge.openWorkspace = vi.fn(async () => offStatus);
-    bridge.getSyncStatus = vi.fn(async () => offStatus);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    expect(
-      (await screen.findByTestId("notice-workspace-settings-unreadable"))
-        .textContent,
-    ).toContain("/ws/.dohc/settings.local.json");
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
-  });
-
-  it("never promises 'no history' while the workspace is recording", async () => {
-    // The reverse race: the renderer's read failed, main's succeeded and the
-    // engine is recording. A notice sourced from the renderer's read would be
-    // a false privacy assurance.
-    const bridge = makeBridge(Promise.resolve(null));
-    bridge.getWorkspaceSettings = vi.fn(OPTED_OUT_READ);
-    const user = userEvent.setup();
-    renderShell(bridge);
-
-    await user.click(await screen.findByTestId("notice-center-toggle"));
-    // The panel opened, so a missing notice means no notice — not a missed
-    // render.
-    expect(await screen.findByTestId("notice-center")).toBeTruthy();
-    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
-  });
-});
-
 // #567 / #579 review: set-aside draft recovery at the shell seams. The drafts
 // live in a module store keyed by workspace + path; the shell owns the two
 // integrations under test — path remapping on explorer renames, and the
@@ -16436,7 +16016,7 @@ describe("set-aside draft recovery", () => {
 // suspendPolling plumb) makes these fail.
 describe("workbench render cost", () => {
   it("a shell re-render with unchanged props re-renders neither tree rows nor the inspector", async () => {
-    const bridge = makeBridge(Promise.resolve(STORED_STATE));
+    const bridge = holdHistory(makeBridge(Promise.resolve(STORED_STATE)));
     vi.stubGlobal("dohcDesktop", bridge);
     // A FRESH element per render with identical prop values: rerendering the
     // same element reference lets React skip the subtree outright, which

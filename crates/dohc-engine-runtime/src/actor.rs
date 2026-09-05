@@ -1327,7 +1327,7 @@ enum Command {
     Snapshot {
         reply: oneshot::Sender<Result<StoreSnapshot, StorageError>>,
     },
-    BindShadowClone {
+    BindRoot {
         token: String,
         reply: oneshot::Sender<Result<bool, StorageError>>,
     },
@@ -3095,12 +3095,13 @@ impl ActorHandle {
             .map_err(RuntimeError::Storage)
     }
 
-    /// Stamp a fresh shadow database or verify an existing shadow binding on
-    /// the actor-owned connection before the workspace can accept writes.
-    pub async fn bind_shadow_clone(&self, token: String) -> Result<bool, RuntimeError> {
+    /// Stamp a fresh database with its root's binding token, or verify an
+    /// existing binding, on the actor-owned connection before the workspace
+    /// can accept writes.
+    pub async fn bind_root(&self, token: String) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::BindShadowClone { token, reply })
+            .send(Command::BindRoot { token, reply })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx
@@ -8136,8 +8137,8 @@ fn worker_main(
             Command::Snapshot { reply } => {
                 let _ = reply.send(snapshot(&store));
             }
-            Command::BindShadowClone { token, reply } => {
-                let _ = reply.send(store.bind_shadow_clone_token(&token));
+            Command::BindRoot { token, reply } => {
+                let _ = reply.send(store.bind_root_token(&token));
             }
             Command::RunUnits {
                 units,

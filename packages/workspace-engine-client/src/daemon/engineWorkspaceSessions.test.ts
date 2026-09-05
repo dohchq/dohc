@@ -1,7 +1,8 @@
 import {
+  lstat,
   mkdtemp,
   mkdir,
-  readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -190,11 +191,8 @@ describe("EngineWorkspaceSessions", () => {
     const client: EngineDaemonClient = {
       close: () => undefined,
       async sendRequest(request) {
-        const marker = await readFile(
-          join(rootPath, ".dohc", "engine", "SHADOW_CLONE"),
-          "utf8",
-        );
-        expect(marker).toMatch(/^[0-9a-f]{64}$/);
+        const engineDirectory = await lstat(join(rootPath, ".dohc", "engine"));
+        expect(engineDirectory.isDirectory()).toBe(true);
         opened = true;
         return {
           id: request.id,
@@ -213,35 +211,6 @@ describe("EngineWorkspaceSessions", () => {
       ),
     ).resolves.toBe("workspace-handle");
     expect(opened).toBe(true);
-  });
-
-  it("fails closed on a malformed existing shadow marker", async () => {
-    const rootPath = await tempRoot();
-    const markerDirectory = join(rootPath, ".dohc", "engine");
-    await mkdir(markerDirectory, { recursive: true });
-    await writeFile(join(markerDirectory, "SHADOW_CLONE"), "bad", "utf8");
-    let requests = 0;
-    const client: EngineDaemonClient = {
-      close: () => undefined,
-      async sendRequest(request) {
-        requests += 1;
-        return {
-          id: request.id,
-          result: { workspace: "workspace-handle" },
-        };
-      },
-    };
-    const sessions = new EngineWorkspaceSessions({
-      currentClient: () => client,
-    });
-
-    await expect(
-      sessions.run(
-        { workspaceId: "workspace", rootPath },
-        async (binding) => binding.workspace,
-      ),
-    ).rejects.toThrow("shadow marker is invalid");
-    expect(requests).toBe(0);
   });
 
   it("invalidates but does not replay a mutation after a transport failure", async () => {
@@ -367,9 +336,7 @@ describe("EngineWorkspaceSessions", () => {
           : "dohc could not start the engine for this workspace. A link is at .dohc/engine, which must be a real folder. Remove or rename that link. Then retry.",
       );
       expect(requests).toBe(0);
-      await expect(
-        readFile(join(outside, "SHADOW_CLONE"), "utf8"),
-      ).rejects.toMatchObject({ code: "ENOENT" });
+      expect(await readdir(outside)).toEqual([]);
     },
   );
 

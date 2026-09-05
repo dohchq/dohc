@@ -153,9 +153,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -406,9 +404,7 @@ test("an agent chat written by the CLI while the app runs arrives unread live", 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
+    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;

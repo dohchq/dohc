@@ -208,9 +208,11 @@ impl EngineStore {
         &self.database_path
     }
 
-    /// Bind a fresh store to a shadow marker, or verify an existing binding.
-    /// The actor calls this before exposing a shadow workspace for writes.
-    pub fn bind_shadow_clone_token(&mut self, token: &str) -> Result<bool, StorageError> {
+    /// Bind a fresh store to its root's token, or verify an existing binding.
+    /// The actor calls this before exposing a workspace for writes. The row
+    /// lives in the `shadow_clone` table until the baseline schema is
+    /// rewritten.
+    pub fn bind_root_token(&mut self, token: &str) -> Result<bool, StorageError> {
         if self.freshly_created {
             match self.write_with(&crate::NoFaults, |tx| -> Result<(), StorageError> {
                 tx.execute(

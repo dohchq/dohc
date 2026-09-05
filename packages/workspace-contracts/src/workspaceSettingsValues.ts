@@ -22,9 +22,6 @@ export const WORKSPACE_SETTINGS_DEFAULTS = {
   privacy: {
     confirmExternalLinks: true,
   },
-  experimental: {
-    workspaceEngineAlpha: true,
-  },
   files: {
     attachmentLocation: "per-document",
     attachmentFolderName: "assets",
