@@ -16,6 +16,7 @@ import {
   WorkspaceSearchOwner,
   type WorkspaceSearchEngineInput,
 } from "./workspaceSearchOwner";
+import { deferred } from "../testing/deferred";
 
 const roots: string[] = [];
 
@@ -28,14 +29,6 @@ async function makeRoot(): Promise<string> {
   roots.push(root);
   await mkdir(join(root, ".dohc"));
   return root;
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
 }
 
 interface FakeStart {

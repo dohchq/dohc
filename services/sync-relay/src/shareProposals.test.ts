@@ -1,15 +1,21 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
 import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
 import type { ProposedChange } from "./shareFilter";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  claimWorkspace as claim,
+  closeTestStorages,
+  createShare as mint,
+  json,
+  jsonBody,
+  request,
+  sha256,
+  testStorage,
+} from "./linkTestHelpers";
 
 // The proposal lane, driven through the real routes.
 //
@@ -23,26 +29,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 //   docs/in.md -> object-in inside the selector ["docs"]
 //   notes/out.md -> object-out outside it
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-relay-proposals-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -65,32 +52,27 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
   });
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
 const GRANTER = "granter";
 const RECIPIENT = "recipient";
 const OTHER = "other";
 const WORKSPACE = "workspace-a";
+
+async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
+  await claim(h, GRANTER, WORKSPACE);
+}
+
+async function createShare(
+  h: SyncRelayHandler,
+  access: "view" | "comment" | "edit",
+  options: { paths?: string[]; versionId?: string; recipient?: string } = {},
+): Promise<string> {
+  return mint(h, GRANTER, WORKSPACE, {
+    recipientUserId: options.recipient ?? RECIPIENT,
+    paths: options.paths ?? ["docs"],
+    access,
+    versionId: options.versionId,
+  });
+}
 
 interface OwnerOp {
   originSeq: number;
@@ -189,34 +171,6 @@ class Granter {
       .filter((op) => op.originId.startsWith(`share:${shareId}:`) && op.opKind === "moment.append")
       .map((op) => op.payload);
   }
-}
-
-async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
-  const response = await h(
-    request(GRANTER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })),
-  );
-  expect(response.status).toBe(200);
-}
-
-async function createShare(
-  h: SyncRelayHandler,
-  access: "view" | "comment" | "edit",
-  options: { paths?: string[]; versionId?: string; recipient?: string } = {},
-): Promise<string> {
-  const response = await h(
-    request(
-      GRANTER,
-      `/sync/${WORKSPACE}/shares`,
-      jsonBody({
-        recipientUserId: options.recipient ?? RECIPIENT,
-        paths: options.paths ?? ["docs"],
-        access,
-        versionId: options.versionId,
-      }),
-    ),
-  );
-  expect(response.status, await response.clone().text()).toBe(200);
-  return (await json(response)).shareId as string;
 }
 
 function change(overrides: Partial<ProposedChange> = {}): ProposedChange {

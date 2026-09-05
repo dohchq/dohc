@@ -1,15 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { CredentialSessionCache } from "./credentialSessionCache";
-
-function deferred<Value>() {
-  let resolve!: (value: Value) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<Value>((next, fail) => {
-    resolve = next;
-    reject = fail;
-  });
-  return { promise, reject, resolve };
-}
+import { deferred } from "../testing/deferred";
 
 describe("CredentialSessionCache", () => {
   it("reserves a generation before reading and commits only the newest refresh", async () => {

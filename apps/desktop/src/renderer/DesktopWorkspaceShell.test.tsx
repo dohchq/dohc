@@ -137,6 +137,7 @@ import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
 import { leafOf } from "./workbench/path-tree";
+import { deferred } from "../testing/deferred";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
 // derives its document key on every render, and every explorer surface names
@@ -316,16 +317,6 @@ for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
             toJSON: () => {},
           },
   });
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((r, fail) => {
-    resolve = r;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
 }
 
 function makeBridge(

@@ -26,6 +26,10 @@ import {
 // was spent on the burst budget and the window signal never existed to wait
 // for. Those tests now await the real became-healthy signal below.
 const WAIT = { timeout: 15_000 } as const;
+
+function probesSent(client: FakeClient | undefined): number {
+  return client?.requests.filter((request) => request.method === "engine.ping").length ?? 0;
+}
 vi.setConfig({ testTimeout: 20_000 });
 
 // The healthy window the restart-budget test configures; its wait is derived
@@ -958,9 +962,12 @@ describe("Rust engine daemon lifecycle", () => {
     }, 2);
     try {
       await lifecycle.start();
-      // Long enough for several expiries to pass and condemn it, if silence
-      // were still being measured by the probe's own reply.
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Several probes expire unanswered; had silence still been measured by
+      // the probe's own reply, the first expiry would have condemned it.
+      await vi.waitFor(
+        () => expect(probesSent(clients[0])).toBeGreaterThanOrEqual(4),
+        WAIT,
+      );
       expect(failures).toEqual([]);
       expect(clients).toHaveLength(1);
       expect(clients[0]?.closed).toBe(false);
@@ -1005,9 +1012,12 @@ describe("Rust engine daemon lifecycle", () => {
 
     try {
       await lifecycle.start();
-      // Room for several expiries to accumulate a wedge verdict, if the gaps
-      // were still being thrown away.
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // Several probes go by; had the gaps still been thrown away, their
+      // expiries would have accumulated a wedge verdict.
+      await vi.waitFor(
+        () => expect(probesSent(clients[0])).toBeGreaterThanOrEqual(4),
+        WAIT,
+      );
       expect(failures).toEqual([]);
       expect(clients).toHaveLength(1);
       expect(clients[0]?.closed).toBe(false);
@@ -1062,6 +1072,7 @@ describe("Rust engine daemon lifecycle", () => {
     // A probe can still be in flight when its generation dies. The replacement
     // must not inherit that silence.
     const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
     const failures: Error[] = [];
     const lifecycle = new EngineDaemonLifecycle({
       command: fakeBinary(),
@@ -1075,9 +1086,11 @@ describe("Rust engine daemon lifecycle", () => {
       maxPingExpiries: 1,
       launch: async (options) => {
         exits.push(options.onExit);
-        return new FakeClient(
+        const client = new FakeClient(
           exits.length === 1 ? silentPing : healthyPing,
         );
+        clients.push(client);
+        return client;
       },
       onFailure: (error) => failures.push(error),
     });
@@ -1088,8 +1101,12 @@ describe("Rust engine daemon lifecycle", () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       exits[0]?.(1, null);
       await vi.waitFor(() => expect(exits).toHaveLength(2), WAIT);
-      // Outlive the stale probe's expiry bound by a wide margin.
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      // The stale probe's expiry bound has passed once the replacement has
+      // answered probes of its own for longer than that bound.
+      await vi.waitFor(
+        () => expect(probesSent(clients[1])).toBeGreaterThanOrEqual(25),
+        WAIT,
+      );
       expect(failures.map((error) => error.message)).toEqual([
         "Rust engine daemon exited unexpectedly with code 1.",
       ]);

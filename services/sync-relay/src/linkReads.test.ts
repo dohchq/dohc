@@ -1,8 +1,4 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -19,7 +15,6 @@ import {
   LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
-import { linkSecret } from "./linkTestHelpers";
 import {
   filterOpForShare,
   hasValidShareMomentShape,
@@ -35,10 +30,21 @@ import {
 import {
   currentFileBlobByteLengthQuery,
   currentFileStateQuery,
-  openSyncRelayStorage,
   SHARED_BLOB_CANDIDATE_LIMIT,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  linkSecret,
+  closeTestStorage,
+  reopenTestStorage,
+  request,
+  sha256,
+  storagePath,
+  testStorage,
+} from "./linkTestHelpers";
 
 interface InspectionDatabase {
   close(): void;
@@ -72,24 +78,7 @@ type TestWorkspaceIdentity = {
   streamIdentity: string;
 };
 
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-const storagePaths = new WeakMap<SyncRelayStorage, string>();
-
-afterEach(async () => {
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function newStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-reads-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storagePaths.set(storage, dbPath);
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(
   storage: SyncRelayStorage,
@@ -134,29 +123,10 @@ function handler(
   return createSyncRelayHandler(handlerOptions);
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  headers.set("x-dohc-relay-client-ip", "192.0.2.20");
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
 function linkRequest(capability: string, path: string): Request {
   return request(null, path, {
     headers: { authorization: `LinkCapability ${capability}` },
   });
-}
-
-function jsonBody(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
 }
 
 class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
@@ -165,9 +135,6 @@ class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
   }
 }
 
-function sha256(content: string): string {
-  return createHash("sha256").update(content).digest("hex");
-}
 
 async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   const sha = sha256(content);
@@ -506,7 +473,7 @@ describe("LinkEgressRateLimiter", () => {
 
 describe("relay capability reads", () => {
   it("keeps simultaneous View and Comment grants bound to their own access", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const view = await seed(h, "view");
     const shareId = storage.getShareGrant(view.grantId)!.shareId;
@@ -569,7 +536,7 @@ describe("relay capability reads", () => {
   });
 
   it("projects only the selected current files from a fresh view capability", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
 
@@ -622,7 +589,7 @@ describe("relay capability reads", () => {
   });
 
   it("materializes the viewer CAS fold per version and uses the selected path index", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const acceptedContent = "accepted\n";
@@ -678,8 +645,7 @@ describe("relay capability reads", () => {
     foldLogOps(replayed, historical.ops as RelayOp[]);
     expect(filesFromAccumulator(replayed)).toEqual(current.files);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
+    const dbPath = storagePath(storage);
     const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
     try {
       const query = currentFileStateQuery(["docs"]);
@@ -719,7 +685,7 @@ describe("relay capability reads", () => {
   });
 
   it("preserves a write that reaches a path before a later fork snapshot chunk", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     expect(
       (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -788,19 +754,15 @@ describe("relay capability reads", () => {
     const forward = await json(
       await h(linkRequest(link.capability, "/sync/link/current")),
     );
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    const dbPath = storagePath(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
       "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
     ).run("current-files-seed-v1");
     legacy.close();
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
+    const reopened = reopenTestStorage(dbPath);
     const replayed = await json(
       await handler(reopened)(linkRequest(link.capability, "/sync/link/current")),
     );
@@ -824,7 +786,7 @@ describe("relay capability reads", () => {
   });
 
   it("refuses contradictory path aliases from current state and startup replay", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const initialLog = await json(
@@ -909,10 +871,8 @@ describe("relay capability reads", () => {
 
     await expectConsistentDenial(h);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    const dbPath = storagePath(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
@@ -920,16 +880,14 @@ describe("relay capability reads", () => {
     ).run("current-files-seed-v1");
     legacy.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
+    const reopened = reopenTestStorage(dbPath);
     await expectConsistentDenial(handler(reopened));
   });
 
   it.each(["path", "beforePath"] as const)(
     "refuses a contradictory visible %s alias from every accountless view",
     async (alias) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       const seeded = await seed(h);
       const initialLog = await json(
@@ -1003,10 +961,8 @@ describe("relay capability reads", () => {
       expect(sharedBlob.status).toBe(200);
       expect(await sharedBlob.text()).toBe("# shared\n");
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
+      const dbPath = storagePath(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1014,9 +970,7 @@ describe("relay capability reads", () => {
       ).run("current-files-seed-v1");
       legacy.close();
 
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
+      const reopened = reopenTestStorage(dbPath);
       const reopenedHandler = handler(reopened);
       const restartedCurrent = await json(
         await reopenedHandler(linkRequest(seeded.capability, "/sync/link/current")),
@@ -1038,7 +992,7 @@ describe("relay capability reads", () => {
   );
 
   it("refuses an all-visible cross-path write from every accountless view", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const initialLog = await json(
@@ -1112,10 +1066,8 @@ describe("relay capability reads", () => {
 
     await assertReadAgreement(h, forwardFiles);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    const dbPath = storagePath(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
@@ -1123,9 +1075,7 @@ describe("relay capability reads", () => {
     ).run("current-files-seed-v1");
     legacy.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
+    const reopened = reopenTestStorage(dbPath);
     await assertReadAgreement(handler(reopened));
   });
 
@@ -1137,7 +1087,7 @@ describe("relay capability reads", () => {
   ] as const)(
     "does not expose a historical blob from a moment with %s",
     async (_case, shape) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       const wholeVersion = shape === "missing-after-path";
       const versionId = wholeVersion ? "snapshot-malformed" : "main";
@@ -1288,7 +1238,7 @@ describe("relay capability reads", () => {
   ] as const)(
     "does not materialize a canonical current file from a noncanonical %s",
     async (_field, shape) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       expect(
         (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -1362,10 +1312,8 @@ describe("relay capability reads", () => {
 
       await assertNoInventedFile(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
+      const dbPath = storagePath(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1373,9 +1321,7 @@ describe("relay capability reads", () => {
       ).run("current-files-seed-v1");
       legacy.close();
 
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
+      const reopened = reopenTestStorage(dbPath);
       await assertNoInventedFile(handler(reopened));
     },
   );
@@ -1388,7 +1334,7 @@ describe("relay capability reads", () => {
   ] as const)(
     "refuses noncanonical viewer paths in a %s",
     async (_case, shape, paths, versionId) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       expect(
         (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -1481,10 +1427,8 @@ describe("relay capability reads", () => {
       expect(JSON.stringify(delta)).not.toContain(noncanonicalPath);
       await assertReadAgreement(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
+      const dbPath = storagePath(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1492,15 +1436,13 @@ describe("relay capability reads", () => {
       ).run("current-files-seed-v1");
       legacy.close();
 
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
+      const reopened = reopenTestStorage(dbPath);
       await assertReadAgreement(handler(reopened));
     },
   );
 
   it("applies the current-file cap after selector filtering and refuses overflow generically", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, { linkCurrentFileLimit: 1 });
     const seeded = await seed(h);
 
@@ -1531,7 +1473,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps current-state freshness equal to metadata after a selected delete", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     await appendMoments(h, [
@@ -1563,7 +1505,7 @@ describe("relay capability reads", () => {
   });
 
   it("revalidates the capability generation after reading current state", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     let revokeOnRead = false;
     let grantId = "";
     const storageWithRace = new Proxy(storage, {
@@ -1607,7 +1549,7 @@ describe("relay capability reads", () => {
   ] as const)(
     "serializes the fresh access after a same-generation narrowing during the %s read",
     async (_description, path, pauseAt) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       let narrowOnRead = false;
       let shareId = "";
       let grantId = "";
@@ -1674,7 +1616,7 @@ describe("relay capability reads", () => {
   );
 
   it("streams the accepted current fold once when reopening a pre-table database", async () => {
-    const originalStorage = await newStorage();
+    const originalStorage = await testStorage();
     const originalHandler = handler(originalStorage);
     const seeded = await seed(originalHandler);
     const acceptedContent = "accepted before migration\n";
@@ -1693,10 +1635,8 @@ describe("relay capability reads", () => {
         beforeContent: "# shared\n",
       }),
     ]);
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
+    const dbPath = storagePath(originalStorage);
+    closeTestStorage(originalStorage);
 
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
@@ -1737,14 +1677,12 @@ describe("relay capability reads", () => {
       });
     let reopened: SyncRelayStorage;
     try {
-      reopened = openSyncRelayStorage(dbPath);
+      reopened = reopenTestStorage(dbPath);
     } finally {
       prepareSpy.mockRestore();
     }
     expect(migrationAll).not.toHaveBeenCalled();
     expect(migrationIterate).toHaveBeenCalledOnce();
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
     const reopenedHandler = handler(reopened);
     const firstProjection = await json(
       await reopenedHandler(
@@ -1756,12 +1694,9 @@ describe("relay capability reads", () => {
       blobSha256: acceptedSha,
       contentKind: "text",
     }]);
-    reopened.close();
-    storages.splice(storages.indexOf(reopened), 1);
+    closeTestStorage(reopened);
 
-    const openedAgain = openSyncRelayStorage(dbPath);
-    storages.push(openedAgain);
-    storagePaths.set(openedAgain, dbPath);
+    const openedAgain = reopenTestStorage(dbPath);
     const secondProjection = await json(
       await handler(openedAgain)(
         linkRequest(seeded.capability, "/sync/link/current"),
@@ -1780,7 +1715,7 @@ describe("relay capability reads", () => {
   });
 
   it("backfills only rows above a preexisting epoch floor", async () => {
-    const originalStorage = await newStorage();
+    const originalStorage = await testStorage();
     const originalHandler = handler(originalStorage);
     const seeded = await seedThenRotate(originalHandler);
     const recreatedContent = "recreated before migration\n";
@@ -1797,10 +1732,8 @@ describe("relay capability reads", () => {
         identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
       },
     );
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
+    const dbPath = storagePath(originalStorage);
+    closeTestStorage(originalStorage);
 
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
@@ -1809,9 +1742,7 @@ describe("relay capability reads", () => {
     ).run("current-files-seed-v1");
     legacy.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
+    const reopened = reopenTestStorage(dbPath);
     const projection = await json(
       await handler(reopened)(
         linkRequest(seeded.capability, "/sync/link/current"),
@@ -1826,7 +1757,7 @@ describe("relay capability reads", () => {
   });
 
   it("does not update durable link usage on metadata, log, or blob reads", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     let now = 2_000;
     const h = handler(storage, { nowMs: () => now });
     const seeded = await seed(h);
@@ -1855,7 +1786,7 @@ describe("relay capability reads", () => {
   });
 
   it("bounds retained link blob bytes per grant and releases every stream charge", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const getBlob = vi.spyOn(storage, "getBlob");
     const h = handler(storage);
     const largeContent = "l".repeat(MAX_BLOB_BYTES);
@@ -1931,7 +1862,7 @@ describe("relay capability reads", () => {
   it("releases pre-stream blob admissions on every load failure", async () => {
     const cases = ["missing", "throwing", "length-mismatch", "rotation"] as const;
     for (const failure of cases) {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const targetContent = "t".repeat(4 * 1024 * 1024);
       const targetSha = sha256(targetContent);
       const rotatedSecret = "r".repeat(43);
@@ -2040,11 +1971,10 @@ describe("relay capability reads", () => {
   it.each([-1, MAX_BLOB_BYTES + 1, Number.MAX_SAFE_INTEGER + 1])(
     "refuses corrupt current blob byte length %s without loading content",
     async (byteLength) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       const seeded = await seed(h);
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
+      const dbPath = storagePath(storage);
       const inspection = new InspectionDatabaseSync(dbPath);
       try {
         inspection.prepare(
@@ -2073,7 +2003,7 @@ describe("relay capability reads", () => {
       const largeContent = "l".repeat(3 * chunkBytes);
       const exactRefundContent = "r".repeat(2 * chunkBytes);
       const finalByteContent = "f";
-      const storage = await newStorage();
+      const storage = await testStorage();
       const egress = new LinkEgressRateLimiter(largeContent.length, 0.000_001, 10);
       const h = handler(storage, {
         nowMs: () => 2_000,
@@ -2165,7 +2095,7 @@ describe("relay capability reads", () => {
     "settles emitted UTF-8 link JSON bytes after stream %s",
     async (interruption) => {
       const chunkBytes = 64 * 1024;
-      const storage = await newStorage();
+      const storage = await testStorage();
       const setupHandler = handler(storage);
       const seeded = await seed(setupHandler);
       const content = "streamed JSON 界\n";
@@ -2283,7 +2213,7 @@ describe("relay capability reads", () => {
 
   it("terminates same-grant JSON and blob streams together", async () => {
     const chunkBytes = 64 * 1024;
-    const storage = await newStorage();
+    const storage = await testStorage();
     const setupHandler = handler(storage);
     const seeded = await seed(setupHandler);
     const jsonContent = "mixed stream 界\n";
@@ -2490,7 +2420,7 @@ describe("relay capability reads", () => {
   ] as const)(
     "terminates an open link blob stream after %s without affecting another grant",
     async (_transitionName, transition) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
       expect(
@@ -2548,7 +2478,7 @@ describe("relay capability reads", () => {
   );
 
   it("preserves an open Comment link blob stream through View narrowing", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const content = `${"a".repeat(64 * 1024)}${"b".repeat(64 * 1024)}${"c".repeat(64 * 1024)}`;
     expect(
@@ -2632,7 +2562,7 @@ describe("relay capability reads", () => {
   it.each(["rotate", "retune"] as const)(
     "refuses %s when owner standing changes before commit without writes or terminated reads",
     async (operation) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       let ownershipAnswers: boolean[] | null = null;
       const ownershipStorage = new Proxy(storage, {
         get(target, property, receiver) {
@@ -2782,7 +2712,7 @@ describe("relay capability reads", () => {
     ["log", "/sync/link/log"],
     ["blob", `/sync/link/blobs/${sha256("missing")}`],
   ])("answers an invalid capability on the %s route with the generic 401 refusal", async (_name, path) => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const response = await handler(storage)(linkRequest(UNKNOWN_CAPABILITY, path));
 
     expect({ status: response.status, body: await response.text() }).toEqual({
@@ -2792,7 +2722,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps an unknown blob behind a valid capability at the generic 404", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const response = await h(
@@ -2806,7 +2736,7 @@ describe("relay capability reads", () => {
   });
 
   it("matches the view recipient file and blob boundary without its identity metadata", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const { capability, sharedSha, hiddenSha } = await seed(h, "view");
 
@@ -2862,7 +2792,7 @@ describe("relay capability reads", () => {
   });
 
   it("applies an accountless overwrite through the viewer fold", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const realPath = "docs/readme.md";
     const projectedPath = "readme.md";
@@ -2919,7 +2849,7 @@ describe("relay capability reads", () => {
   });
 
   it("projects a nested file into the accountless namespace without changing authenticated paths", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const realPath = "clients/acme/private/report.md";
     const projectedPath = "report.md";
@@ -2997,7 +2927,7 @@ describe("relay capability reads", () => {
   });
 
   it("projects a refused outward move as an accountless deletion", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const initialLog = await json(
@@ -3091,7 +3021,7 @@ describe("relay capability reads", () => {
   });
 
   it("uses an outward move as accountless freshness", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const updated = "# updated\n";
@@ -3119,7 +3049,7 @@ describe("relay capability reads", () => {
   });
 
   it("reports known-empty freshness for a never-written path share", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     expect(
       (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })))).status,
@@ -3156,7 +3086,7 @@ describe("relay capability reads", () => {
   });
 
   it("projects an inward move as an accountless arrival so current and replay converge", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const initialLog = await json(
@@ -3271,7 +3201,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps a nested folder's visible name as its accountless root", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const realRoot = "clients/acme/private/docs";
     const realPath = `${realRoot}/guides/start.md`;
@@ -3302,7 +3232,7 @@ describe("relay capability reads", () => {
   });
 
   it("disambiguates accountless roots with the same visible name", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const firstRoot = "clients/acme/private/docs";
     const secondRoot = "teams/blue/private/docs";
@@ -3342,7 +3272,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps accountless log pages to viewer artifact rows without changing authenticated logs", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view");
     expect(
@@ -3464,7 +3394,7 @@ describe("relay capability reads", () => {
   });
 
   it("fills one accountless page across unrelated raw pages", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const unrelatedRows = Array.from({ length: 1_500 }, (_, index) =>
@@ -3520,7 +3450,7 @@ describe("relay capability reads", () => {
   });
 
   it("continues an accountless page after the raw-row work bound", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const firstAdmitted = moment(3, "docs/before-bound.md", "# shared\n", 1_300);
@@ -3583,7 +3513,7 @@ describe("relay capability reads", () => {
   }, 20_000);
 
   it("keeps link log pages and freshness above the workspace epoch floor", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view", {}, {
       replicationEpoch: EPOCH_1,
@@ -3631,7 +3561,7 @@ describe("relay capability reads", () => {
   });
 
   it("serves only blobs established above the workspace epoch floor", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seedThenRotate(h);
 
@@ -3655,7 +3585,7 @@ describe("relay capability reads", () => {
   });
 
   it("recreates a pre-reset path from empty current state after epoch rotation", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seedThenRotate(h);
     const recreatedContent = "# recreated after reset\n";
@@ -3696,7 +3626,7 @@ describe("relay capability reads", () => {
   });
 
   it("refuses a path-shared blob after a later delete supersedes its file", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
 
@@ -3736,7 +3666,7 @@ describe("relay capability reads", () => {
   });
 
   it("serves only the replacement blob and keeps untouched files servable", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const replacement = "# replacement\n";
@@ -3787,7 +3717,7 @@ describe("relay capability reads", () => {
   });
 
   it("serves only the different object recreated at a selected path", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const replacement = "# recreated object\n";
@@ -3831,7 +3761,7 @@ describe("relay capability reads", () => {
   });
 
   it("refuses a blob after its file moves outside a path selector", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     await appendMoments(h, [
@@ -3856,7 +3786,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps a live main-version blob servable after the shared object is edited on a fork", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const forkContent = "# fork edit\n";
@@ -3885,7 +3815,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps a version share's pinned blob servable after the live file moves on", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view", {
       paths: [],
@@ -3912,7 +3842,7 @@ describe("relay capability reads", () => {
   it.each(["accountless", "authenticated"] as const)(
     "serves a selected pinned-version path blob after newer out-of-selector candidates on the %s route",
     async (route) => {
-      const storage = await newStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       const seeded = await seed(h, "view", {
         paths: ["docs"],
@@ -3955,7 +3885,7 @@ describe("relay capability reads", () => {
   );
 
   it("serves a version.create-only snapshot blob only through a selector that covers it", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view", {
       paths: ["docs"],
@@ -4026,7 +3956,7 @@ describe("relay capability reads", () => {
   });
 
   it("scopes path-share blob candidates before the cap without admitting prefix neighbors", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const docs2OnlyContent = "# docs2 only\n";
@@ -4076,7 +4006,7 @@ describe("relay capability reads", () => {
   });
 
   it("caps current-state blob candidates after stale objects are removed", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const editedContent = "# edited\n";
@@ -4140,7 +4070,7 @@ describe("relay capability reads", () => {
   });
 
   it("deduplicates and caps blob candidates when one file returns to earlier content", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     const alternateContent = "# alternate\n";
@@ -4201,7 +4131,7 @@ describe("relay capability reads", () => {
 
   it("makes revoked, rotated, expired, and unknown capability refusals byte-identical", async () => {
     let now = 2_000;
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, { nowMs: () => now });
     const first = await seed(h);
     const unknown = await capabilityRefusalBody(
@@ -4288,7 +4218,7 @@ describe("relay capability reads", () => {
 
   it("rechecks log and blob reads after storage work", async () => {
     for (const racedMethod of ["fetchLogPage", "getBlob"] as const) {
-      const target = await newStorage();
+      const target = await testStorage();
       let grantId = "";
       let armed = false;
       const raced = new Proxy(target, {
@@ -4325,7 +4255,7 @@ describe("relay capability reads", () => {
 
   it("reports unknown freshness when the first shared row is beyond the fallback page budget", async () => {
     const pageSize = 2;
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: pageSize,
     });
@@ -4354,7 +4284,7 @@ describe("relay capability reads", () => {
 
   it("serves a current blob without walking forward history", async () => {
     const pageSize = 2;
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: pageSize,
     });
@@ -4381,7 +4311,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps freshness and materialized blobs unchanged when the log fits the page budget", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkCapabilityReadFallbackPageSize: 2,
     });
@@ -4401,7 +4331,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps file-link freshness on the latest artifact operation when chat is newer", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view");
     await appendMoments(h, [
@@ -4461,7 +4391,7 @@ describe("relay capability reads", () => {
   });
 
   it("moves file-link freshness when a file write follows chat", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h, "view");
     await putBlob(h, "# updated\n");
@@ -4520,7 +4450,7 @@ describe("relay capability reads", () => {
   });
 
   it("matches the former full-scan freshness result on interleaved rows", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const seeded = await seed(h);
     expect(
@@ -4586,7 +4516,7 @@ describe("relay capability reads", () => {
   });
 
   it("rate-limits only after capability authentication", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     const seeded = await seed(h);
@@ -4598,7 +4528,7 @@ describe("relay capability reads", () => {
   });
 
   it("shares a grant read budget across capabilities minted by re-exchange", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
       linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
@@ -4623,7 +4553,7 @@ describe("relay capability reads", () => {
   });
 
   it("keeps grant read budgets independent for different grants", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
       linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
@@ -4637,7 +4567,7 @@ describe("relay capability reads", () => {
   });
 
   it("uses a separate read bucket for link log pages", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
       linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
@@ -4669,7 +4599,7 @@ describe("relay capability reads", () => {
 
   it("keeps total blob egress on the grant across rotation and refills it", async () => {
     let now = 2_000;
-    const storage = await newStorage();
+    const storage = await testStorage();
     const getBlob = vi.spyOn(storage, "getBlob");
     const h = handler(storage, {
       nowMs: () => now,
@@ -4723,7 +4653,7 @@ describe("relay capability reads", () => {
   });
 
   it("reserves exact metadata and log response bytes on the same grant", async () => {
-    const storage = await newStorage();
+    const storage = await testStorage();
     const budget = new LinkEgressRateLimiter(10_000, 1, 10);
     const reserve = vi.spyOn(budget, "reserve");
     const h = handler(storage, { linkGrantEgressRateLimiter: budget });
@@ -4761,7 +4691,7 @@ describe("relay capability reads", () => {
       vi.spyOn(grantLogLimiter, "allow"),
       vi.spyOn(egressLimiter, "reserve"),
     ];
-    const storage = await newStorage();
+    const storage = await testStorage();
     const h = handler(storage, {
       linkExchangeRateLimiter: exchangeLimiter,
       linkReadRateLimiter: readLimiter,

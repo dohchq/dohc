@@ -1,12 +1,23 @@
 // The seam share-links Phase 5 extends with the create-only collection grant
 // policy ("The create-only collection contract" in docs/plans/share-links.md):
 // the link-create surface, the public access levels, and the grant wire shape.
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  request,
+  testStorage,
+} from "./linkTestHelpers";
+
+// Lane D conformance: the create-only collection grant policy handed to the
+// share-links program ("The create-only collection contract" in
+// docs/plans/share-links.md). The policy is share-links Phase 5 work and does
+// not exist on the relay yet. The green tests pin the seam Phase 5 extends:
+// the link-create surface, the public access levels, and the grant wire
+// shape. The todo rows name the assertions the policy must pass; implement
+// them with the policy, in this file.
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -14,40 +25,10 @@ const WORKSPACE = "workspace-collection-grant";
 const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 const COLLECTION_PATH = "trips";
 
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-
-afterEach(async () => {
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-function jsonBody(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-function request(userId: string, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  headers.set("authorization", `Bearer user:${userId}`);
-  headers.set("x-dohc-relay-client-ip", "192.0.2.10");
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
+afterEach(closeTestStorages);
 
 async function newHandler(): Promise<SyncRelayHandler> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-collection-grant-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
+  const storage = await testStorage();
   let id = 0;
   return createSyncRelayHandler({
     storage,

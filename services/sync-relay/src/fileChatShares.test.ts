@@ -1,12 +1,21 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  claimWorkspace as claim,
+  closeTestStorages,
+  createShare as mint,
+  json,
+  jsonBody,
+  closeTestStorage,
+  reopenTestStorage,
+  request,
+  sha256,
+  storagePath,
+  testStorage,
+} from "./linkTestHelpers";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
@@ -38,28 +47,7 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
 //   notes/out.md -> object-out outside it
 // and two threads, one on each.
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs (Windows EBUSY otherwise).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<{ storage: SyncRelayStorage; dbPath: string }> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-relay-filechat-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storages.push(storage);
-  return { storage, dbPath };
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -79,31 +67,22 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
   });
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function sha256(text: string): string {
-  return createHash("sha256").update(text).digest("hex");
-}
-
 const GRANTER = "granter";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-a";
+
+async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
+  await claim(h, GRANTER, WORKSPACE);
+}
+
+async function createShare(
+  h: SyncRelayHandler,
+  access: "view" | "comment" | "edit",
+  paths: string[] = ["docs"],
+  versionId?: string,
+): Promise<string> {
+  return mint(h, GRANTER, WORKSPACE, { recipientUserId: RECIPIENT, paths, access, versionId });
+}
 
 interface OwnerOp {
   originSeq: number;
@@ -195,30 +174,6 @@ class OwnerLog {
   }
 }
 
-async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
-  const response = await h(
-    request(GRANTER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })),
-  );
-  expect(response.status).toBe(200);
-}
-
-async function createShare(
-  h: SyncRelayHandler,
-  access: "view" | "comment" | "edit",
-  paths: string[] = ["docs"],
-  versionId?: string,
-): Promise<string> {
-  const response = await h(
-    request(
-      GRANTER,
-      `/sync/${WORKSPACE}/shares`,
-      jsonBody({ recipientUserId: RECIPIENT, paths, access, versionId }),
-    ),
-  );
-  expect(response.status, await response.clone().text()).toBe(200);
-  return (await json(response)).shareId as string;
-}
-
 async function readShareLog(
   h: SyncRelayHandler,
   shareId: string,
@@ -253,7 +208,7 @@ async function seedWorkspace(h: SyncRelayHandler): Promise<OwnerLog> {
 
 describe("chat over a file share", () => {
   it("serves the in-selector thread as a path and leaks no sentinel from the outside one", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "view");
@@ -290,7 +245,7 @@ describe("chat over a file share", () => {
   });
 
   it("stops serving a file's threads the moment it is renamed out of the selector", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "view");
@@ -309,7 +264,7 @@ describe("chat over a file share", () => {
     // objectCurrentPath is a PRESENT-TENSE answer, so a thread created before
     // the rename starts serving with the file. Stated on purpose: this is the
     // same rule the moment lane already follows, read forwards.
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "view");
@@ -331,7 +286,7 @@ describe("chat over a file share", () => {
   });
 
   it("hides a deleted file's discussion", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "view");
@@ -345,7 +300,7 @@ describe("chat over a file share", () => {
   });
 
   it("accepts a comment recipient's own thread and message, and serves them back", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -431,7 +386,7 @@ describe("chat over a file share", () => {
   });
 
   it("rejects the whole batch when one op names a thread outside the selector", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -483,7 +438,7 @@ describe("chat over a file share", () => {
   });
 
   it("refuses a view recipient's append and lands nothing", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "view");
@@ -520,7 +475,7 @@ describe("chat over a file share", () => {
   });
 
   it("loses the revoke race inside the transaction, as the same generic 404", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -567,7 +522,8 @@ describe("chat over a file share", () => {
   });
 
   it("rechecks the active grant inside the append transaction", async () => {
-    const { storage, dbPath } = await testStorage();
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -639,7 +595,8 @@ describe("chat over a file share", () => {
     // the race — the same way a revoke does. Nothing in the relay narrows a
     // level today, so the case is reached the only way it can be: by tampering
     // with the stored row, which is the shape this defence exists for.
-    const { storage, dbPath } = await testStorage();
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -697,7 +654,6 @@ describe("chat over a file share", () => {
     expect(served.map((op) => op.payload.messageId)).not.toContain("m-tampered");
   });
 
-
   // P1 (review of bcdc31e0). A version share has NO paths, and
   // `pathVisibleThroughShare` reads an empty path list as "every tracked
   // path". For files that is bounded by the version check; chat has no
@@ -705,7 +661,7 @@ describe("chat over a file share", () => {
   // about every file on main — including files created long after the version
   // and never in it. Chat follows PATHS, and only paths.
   it("serves no chat at all through a version share, at any level", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
 
@@ -750,7 +706,7 @@ describe("chat over a file share", () => {
   // keeps flowing — in both directions — about a file the share no longer
   // covers.
   it("stops a RECIPIENT-created thread when its file is renamed out of the share", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -824,7 +780,7 @@ describe("chat over a file share", () => {
   // The same rule, one step further: a DELETED file takes its recipient
   // thread with it. The reverse lookup answers "no object here" for both.
   it("stops a RECIPIENT-created thread when its file is deleted", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -856,7 +812,6 @@ describe("chat over a file share", () => {
     expect(chatOps(await readShareLog(h, shareId))).toHaveLength(0);
   });
 
-
   // The asymmetry review probed for. A GRANTER's thread is bound by object, so
   // it follows its file anywhere inside the share. A RECIPIENT's thread named
   // its file by path, so an in-share rename used to kill it while the
@@ -865,7 +820,7 @@ describe("chat over a file share", () => {
   // The accept door converts the binding, so both are object-bound now and
   // both follow the file.
   it("keeps both threads on a file when it is renamed within the share", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -945,7 +900,7 @@ describe("chat over a file share", () => {
   // GRANTER's object id, never the recipient's path. This is what makes the
   // granter's own apply take the ordinary object lane.
   it("stores a recipient's create bound to the granter's object, not to a path", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -981,12 +936,11 @@ describe("chat over a file share", () => {
     ).toEqual({ kind: "object", objectId: "object-in" });
   });
 
-
   // A selector can name both dimensions. The paths-only rule must key on
   // "names no paths", not on "names a version" — otherwise a share of
   // docs/ pinned to a version would silently carry no conversation.
   it("carries chat on the paths a selector names, even when it also pins a version", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
 
@@ -1030,7 +984,7 @@ describe("chat over a file share", () => {
   // and the batch is refused whole rather than stored as a thread bound to
   // nothing.
   it("refuses the batch when the file leaves between the filter and the accept", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await seedWorkspace(h);
     const shareId = await createShare(h, "comment");
@@ -1080,7 +1034,7 @@ describe("chat over a file share", () => {
     // exactly that to decide reachability. The outside file has a real blob on
     // the relay and a thread of its own; a chat branch that exposed a hash
     // would make that blob fetchable through a share that covers neither.
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     const content = "the outside file's content";
@@ -1103,22 +1057,21 @@ describe("sync_relay_object_paths seeding", () => {
     // Every moment already in a relay's log predates this table. Without the
     // one-time scan, objectCurrentPath answers "never seen" for every file
     // shared before the deploy and the filter denies its chat forever.
-    const { storage, dbPath } = await testStorage();
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const h = handler(storage);
     await seedWorkspace(h);
     expect(storage.objectCurrentPath(WORKSPACE, "object-in")).toBe("docs/in.md");
 
     // Put the database back into its pre-#646 shape: the table gone and the
     // migration unrecorded, with the log untouched.
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    closeTestStorage(storage);
     const raw = new InspectionDatabaseSync(dbPath);
     raw.exec("DROP TABLE sync_relay_object_paths");
     raw.exec("DELETE FROM sync_relay_migrations WHERE migration_id = 'object-paths-seed-v1'");
     raw.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
+    const reopened = reopenTestStorage(dbPath);
     expect(
       reopened.objectCurrentPath(WORKSPACE, "object-in"),
       "without the seed, every file shared before this deploy denies its chat forever",
@@ -1134,7 +1087,7 @@ describe("sync_relay_object_paths seeding", () => {
   });
 
   it("lets the latest moment win, and never lets an older one move a path back", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     const log = await seedWorkspace(h);
     await log.append(log.rename("object-in", "docs/in.md", "docs/renamed.md"));
@@ -1149,7 +1102,8 @@ describe("sync_relay_object_paths seeding", () => {
 
 describe("sync_relay_version_snapshot_blobs seeding", () => {
   it("indexes existing version.create snapshot blobs once", async () => {
-    const { storage, dbPath } = await testStorage();
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const versionId = "snapshot-before-index";
     const snapshotContent = "# snapshot before index\n";
     const snapshotSha = sha256(snapshotContent);
@@ -1195,8 +1149,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
 
     // Put the database back into its pre-index shape while preserving the
     // version.create row that the original append path wrote.
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec(`
       DROP TABLE sync_relay_version_snapshot_blobs;
@@ -1205,8 +1158,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
     `);
     legacy.close();
 
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
+    const reopened = reopenTestStorage(dbPath);
     expect(
       reopened.listVersionCreateLogRowsByBlob({
         workspaceId: WORKSPACE,
@@ -1216,8 +1168,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
       "without the seed, an existing version.create snapshot blob stays undiscoverable",
     ).toHaveLength(1);
 
-    reopened.close();
-    storages.splice(storages.indexOf(reopened), 1);
+    closeTestStorage(reopened);
     const afterFirstOpen = new InspectionDatabaseSync(dbPath);
     const indexedAfterFirstOpen = afterFirstOpen
       .prepare("SELECT COUNT(*) AS count FROM sync_relay_version_snapshot_blobs")
@@ -1231,8 +1182,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
     expect(Number(indexedAfterFirstOpen?.count)).toBe(1);
     expect(Number(markersAfterFirstOpen?.count)).toBe(1);
 
-    const reopenedAgain = openSyncRelayStorage(dbPath);
-    storages.push(reopenedAgain);
+    const reopenedAgain = reopenTestStorage(dbPath);
     const afterSecondOpen = new InspectionDatabaseSync(dbPath);
     const indexedAfterSecondOpen = afterSecondOpen
       .prepare("SELECT COUNT(*) AS count FROM sync_relay_version_snapshot_blobs")
@@ -1323,7 +1273,7 @@ describe("the append gate accepts chat only", () => {
 
   for (const access of LEVELS) {
     it(`refuses a ${access} recipient's delete moment and lands nothing`, async () => {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       const shareId = await createShare(h, access);
@@ -1342,7 +1292,7 @@ describe("the append gate accepts chat only", () => {
     });
 
     it(`refuses a ${access} recipient's rename moment and lands nothing`, async () => {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       const shareId = await createShare(h, access);
@@ -1360,7 +1310,7 @@ describe("the append gate accepts chat only", () => {
     });
 
     it(`refuses a ${access} recipient's workspace.init and lands nothing`, async () => {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       const shareId = await createShare(h, access);
@@ -1377,7 +1327,7 @@ describe("the append gate accepts chat only", () => {
     });
 
     it(`refuses a ${access} recipient's version.create and lands nothing`, async () => {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       // A share pinned to a version still selects paths, so it still accepts
@@ -1400,7 +1350,7 @@ describe("the append gate accepts chat only", () => {
     });
 
     it(`still accepts a ${access} recipient's chat, unchanged`, async () => {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       const shareId = await createShare(h, access);
@@ -1455,7 +1405,7 @@ describe("the append gate accepts chat only", () => {
     // holds. Both levels answer with the identical status and body.
     const refusals: string[] = [];
     for (const access of LEVELS) {
-      const { storage } = await testStorage();
+      const storage = await testStorage();
       const h = handler(storage);
       await seedWorkspace(h);
       const shareId = await createShare(h, access);

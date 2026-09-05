@@ -7,18 +7,9 @@ import {
   type AutoUpdateController,
 } from "./electronUpdater";
 import { initialUpdateState, transition } from "./updateMachine";
+import { deferred } from "../testing/deferred";
 
 type Listener = (...args: unknown[]) => void;
-
-function deferred<T = unknown>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
 
 function fakeUpdater() {
   const listeners = new Map<string, Listener[]>();

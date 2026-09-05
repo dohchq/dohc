@@ -1,17 +1,23 @@
 import { createHmac } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
   LinkReadRateLimiter,
-  type ValidatedLinkCapability,
 } from "./linkSecurity";
-import { linkSecret } from "./linkTestHelpers";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  linkSecret,
+  closeTestStorage,
+  reopenTestStorage,
+  request,
+  storagePath,
+  testStorage,
+} from "./linkTestHelpers";
 
 const OWNER = "owner";
 const RECIPIENT = "recipient";
@@ -42,35 +48,13 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: new (path: string, options?: { readOnly?: boolean }) => SqliteDatabase;
 };
 
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
 const databases: SqliteDatabase[] = [];
 
 afterEach(async () => {
   for (const database of databases.splice(0)) database.close();
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+  await closeTestStorages();
   vi.restoreAllMocks();
 });
-
-function jsonBody(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
-}
-
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId !== null) headers.set("authorization", `Bearer user:${userId}`);
-  headers.set("x-dohc-relay-client-ip", "192.0.2.40");
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
 
 function hashLinkHandoffCode(code: string): string {
   return createHmac("sha256", LINK_KEY)
@@ -128,18 +112,6 @@ function handler(
   return createSyncRelayHandler(options);
 }
 
-async function newStorage(): Promise<{
-  storage: SyncRelayStorage;
-  dbPath: string;
-}> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-handoff-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storages.push(storage);
-  return { storage, dbPath };
-}
-
 function inspect(dbPath: string, readOnly = false): SqliteDatabase {
   const database = new DatabaseSync(dbPath, { readOnly });
   if (!readOnly) {
@@ -164,7 +136,8 @@ async function setup(
   overrides: HandlerOverrides = {},
   access: "view" | "comment" = "view",
 ): Promise<Setup> {
-  const { storage, dbPath } = await newStorage();
+  const storage = await testStorage();
+  const dbPath = storagePath(storage);
   const now = { value: 10_000 };
   const h = handler(storage, {
     ...overrides,
@@ -488,13 +461,9 @@ describe("single-use authenticated link handoff", () => {
     const minted = await mint(state);
     const codeHash = hashLinkHandoffCode(String(minted.code));
 
-    const storageIndex = storages.indexOf(state.storage);
-    expect(storageIndex).toBeGreaterThanOrEqual(0);
-    storages.splice(storageIndex, 1);
-    state.storage.close();
+    closeTestStorage(state.storage);
 
-    const reopened = openSyncRelayStorage(state.dbPath);
-    storages.push(reopened);
+    const reopened = reopenTestStorage(state.dbPath);
     const database = inspect(state.dbPath, true);
     expect(
       database

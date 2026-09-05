@@ -6,6 +6,7 @@ import {
   followDesktopUpdateState,
   useDesktopUpdateStateFeed,
 } from "./useDesktopUpdateStateFeed";
+import { deferred } from "../testing/deferred";
 
 const IDLE_UPDATE: UpdateStateEvent = {
   status: "idle",
@@ -25,14 +26,6 @@ const READY_UPDATE: UpdateStateEvent = {
   canInstall: true,
   version: "1.2.4",
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 afterEach(() => {
   cleanup();
