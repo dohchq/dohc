@@ -31,7 +31,6 @@ import {
   useCollectionWritesPaused,
   useCollectionWriteStatus,
 } from "./collections/recordFieldWrites";
-import { addSelectOption } from "./collections/schemaAuthoring";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
@@ -253,11 +252,10 @@ export function CollectionPage({
 
   // Schema authoring: fields and views change by rewriting the schema
   // through the authored write path (collections/schemaWrite). Returns a
-  // user-facing sentence on failure, null on success, so the dialogs and
-  // the in-cell option flow share one contract.
+  // user-facing sentence on failure, null on success, so both dialogs
+  // share one contract.
   const [fieldsOpen, setFieldsOpen] = useState(false);
   const [viewsOpen, setViewsOpen] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
   const applySchemaChange = useCallback(
     async (
       mutate: (schema: CollectionSchema) => CollectionSchema,
@@ -284,23 +282,25 @@ export function CollectionPage({
     [workspaceId, collectionPath, refreshDetails, store],
   );
 
-  // A typed select value not in the options yet: the option lands in the
-  // schema FIRST; the cell write is enqueued only after that write settles.
+  // A typed select value not in the options yet: the whole edit enters the
+  // global queue synchronously — before any schema IPC — so navigation and
+  // lineage gates see it. The queue writes the option to the schema FIRST,
+  // then the cell value; a preparation failure retains the edit for retry.
   const createOption = useCallback(
-    async (create: CollectionOptionCreate) => {
-      const failure = await applySchemaChange((schema) =>
-        addSelectOption(schema, create.field, create.option),
+    (create: CollectionOptionCreate) => {
+      enqueueCollectionFieldWrite(
+        workspaceId,
+        collectionPath,
+        {
+          recordId: create.recordId,
+          recordPath: create.recordPath,
+          field: create.field,
+          value: create.value,
+        },
+        create.option,
       );
-      setSchemaError(failure);
-      if (failure !== null) return;
-      enqueueCellChange({
-        recordId: create.recordId,
-        recordPath: create.recordPath,
-        field: create.field,
-        value: create.value,
-      });
     },
-    [applySchemaChange, enqueueCellChange],
+    [workspaceId, collectionPath],
   );
 
   // Relation fields target other collections; the list loads when the
@@ -436,10 +436,6 @@ export function CollectionPage({
         ) : writeError ? (
           <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
             {writeError}
-          </span>
-        ) : schemaError ? (
-          <span data-testid="collection-schema-error" className="truncate text-[11px] text-danger">
-            {schemaError}
           </span>
         ) : null}
         <SecondaryButton

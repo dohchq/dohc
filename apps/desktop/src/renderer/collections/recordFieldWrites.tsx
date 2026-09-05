@@ -3,6 +3,8 @@ import type { CollectionCellChange } from "@dohc/collection-views";
 import type { CollectionValue } from "@dohc/workspace-contracts";
 import { useEngineDoc } from "../collab/useEngineDoc";
 import { SecondaryButton } from "../ui/controls";
+import { addSelectOption } from "./schemaAuthoring";
+import { rewriteCollectionSchema } from "./schemaWrite";
 
 // The global host keeps accepted edits alive when navigation unmounts a page.
 // It writes through one live document at a time, preserving engine history.
@@ -38,17 +40,30 @@ export function frontmatterWriteValue(value: CollectionValue): unknown {
 
 /**
  * Applies a cell edit and holds its lease until the asynchronous save settles.
- * A persistent file lock releases the queue once the engine owns the edit.
+ * A `createOption` edit first writes its option to the collection's schema —
+ * under the queue's ownership, so lineage gates wait for the whole edit and a
+ * preparation failure retains it whole. A persistent file lock releases the
+ * queue once the engine owns the edit.
  */
 export function CollectionRecordFieldWrite({
   workspaceId,
+  collectionPath,
   change,
+  createOption,
+  onPrepared,
   onSettled,
   onHeldDurably,
   onFailed,
 }: {
   workspaceId: string;
+  collectionPath: string;
   change: CollectionCellChange;
+  // A select option the schema must contain before the cell value writes;
+  // undefined for a plain edit or once the schema write landed.
+  createOption?: string;
+  // The option's schema write landed: the queue clears it from the entry so
+  // a later failure's retry does not redo a landed schema write.
+  onPrepared: () => void;
   // The engine confirmed the save settled: the change is on disk.
   onSettled: () => void;
   // The settle committed but the file is locked: the engine holds the write
@@ -65,16 +80,54 @@ export function CollectionRecordFieldWrite({
   });
   const applied = useRef(false);
   const sawSaving = useRef(false);
+  const prepStarted = useRef(false);
+  const alive = useRef(true);
   const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(
     () => () => {
+      alive.current = false;
       if (lockedReport.current !== null) clearTimeout(lockedReport.current);
     },
     [],
   );
 
   useEffect(() => {
-    if (applied.current || docState.opening) return;
+    if (createOption === undefined || prepStarted.current) return;
+    prepStarted.current = true;
+    void rewriteCollectionSchema({
+      workspaceId,
+      collectionPath,
+      mutate: (schema) => addSelectOption(schema, change.field, createOption),
+    }).then((result) => {
+      // An unmounted writer's result must not settle a write it no longer
+      // owns: a retry may have re-queued this id under a fresh writer.
+      if (!alive.current) return;
+      if (result.status === "written") {
+        onPrepared();
+        return;
+      }
+      onFailed(
+        result.status === "conflict"
+          ? "This collection changed while you were editing. Try again."
+          : result.detail
+            ? `dohc could not update this collection. ${result.detail}`
+            : null,
+      );
+    });
+  }, [
+    workspaceId,
+    collectionPath,
+    change.field,
+    createOption,
+    onPrepared,
+    onFailed,
+  ]);
+
+  useEffect(() => {
+    // An unprepared option edit must not touch the record yet: its value is
+    // valid only once the schema write lands.
+    if (applied.current || createOption !== undefined || docState.opening)
+      return;
     if (!docState.available || !docState.doc) {
       // The open settled without a session (conflict, deletion, engine off).
       onFailed(null);
@@ -93,7 +146,14 @@ export function CollectionRecordFieldWrite({
         .getMap(FRONTMATTER_FIELD)
         .set(change.field, frontmatterWriteValue(change.value));
     });
-  }, [docState.opening, docState.available, docState.doc, change, onFailed]);
+  }, [
+    docState.opening,
+    docState.available,
+    docState.doc,
+    change,
+    createOption,
+    onFailed,
+  ]);
 
   useEffect(() => {
     if (!applied.current) return;
@@ -147,6 +207,10 @@ export type CollectionFieldWrite = {
   workspaceId: string;
   collectionPath: string;
   change: CollectionCellChange;
+  // A select option the collection's schema must gain before the cell value
+  // writes. Cleared when that schema write lands, so a retry after a later
+  // failure replays only what did not land. Undefined for a plain edit.
+  createOption?: string;
 };
 
 // A write that did NOT reach the engine, retained whole: the accepted value
@@ -222,11 +286,14 @@ function trimStatuses(): void {
 /**
  * Queues an edit, or retains it as a failure if a file operation paused edits.
  * A callback already in flight can arrive after its control was disabled.
+ * `createOption` hands the queue the whole option-create edit before any
+ * schema IPC: a paused workspace refuses it without starting a schema write.
  */
 export function enqueueCollectionFieldWrite(
   workspaceId: string,
   collectionPath: string,
   change: CollectionCellChange,
+  createOption?: string,
 ): boolean {
   nextWriteId += 1;
   const key = keyFor(workspaceId, collectionPath);
@@ -239,6 +306,7 @@ export function enqueueCollectionFieldWrite(
         workspaceId,
         collectionPath,
         change,
+        createOption,
         message: PAUSED_REFUSAL_MESSAGE,
       },
     ];
@@ -249,10 +317,23 @@ export function enqueueCollectionFieldWrite(
   }
   // A new write is a new attempt: clear the stale failure.
   statuses.set(key, { ...current, error: null });
-  queue = [...queue, { id: nextWriteId, workspaceId, collectionPath, change }];
+  queue = [
+    ...queue,
+    { id: nextWriteId, workspaceId, collectionPath, change, createOption },
+  ];
   trimStatuses();
   notify();
   return true;
+}
+
+// The head's option landed in the schema: drop it from the entry, so a later
+// failure's retry replays only the cell write. Late-callback safe: only the
+// current head's own id may clear it.
+function completeCollectionFieldWritePreparation(id: number): void {
+  const head = queue[0];
+  if (head?.id !== id || head.createOption === undefined) return;
+  queue = [{ ...head, createOption: undefined }, ...queue.slice(1)];
+  notify();
 }
 
 // The host's settle callbacks carry the head's id so a late or repeated
@@ -313,6 +394,7 @@ export function retryCollectionFieldWrite(id: number): void {
       workspaceId: failure.workspaceId,
       collectionPath: failure.collectionPath,
       change: failure.change,
+      createOption: failure.createOption,
     },
   ];
   notify();
@@ -572,7 +654,10 @@ export function CollectionFieldWriteHost() {
         <CollectionRecordFieldWrite
           key={head.id}
           workspaceId={head.workspaceId}
+          collectionPath={head.collectionPath}
           change={head.change}
+          createOption={head.createOption}
+          onPrepared={() => completeCollectionFieldWritePreparation(head.id)}
           onSettled={() => completeCollectionFieldWrite(head.id)}
           onHeldDurably={(message) =>
             holdCollectionFieldWriteDurably(head.id, message)

@@ -19,11 +19,15 @@ import { CollectionPage, DRAIN_RECORD_LIMIT } from "./CollectionPage";
 import {
   beginCollectionWriteOperation,
   CollectionFieldWriteHost,
+  collectionWriteFailures,
   CollectionRecordFieldWrite,
   FILE_LOCKED_REPORT_MS,
   frontmatterWriteValue,
+  hasPendingCollectionFieldWrites,
   resetCollectionFieldWritesForTests,
+  retryCollectionFieldWrite,
 } from "./collections/recordFieldWrites";
+import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
@@ -595,6 +599,126 @@ describe("collection authoring", () => {
       type: "select",
       options: ["Todo", "Later"],
     });
+  });
+
+  it("owns an accepted option edit before its schema write, so a lineage gate waits it out", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const write = bridge.writeWorkspaceText.getMockImplementation();
+    if (!write) throw new Error("write stub missing");
+    bridge.writeWorkspaceText.mockImplementationOnce(async (payload) => {
+      await gate;
+      return write(payload);
+    });
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByText("Todo"));
+    const addOption = screen.getByLabelText("Add option");
+    fireEvent.change(addOption, { target: { value: "Later" } });
+    fireEvent.keyDown(addOption, { key: "Enter" });
+
+    // The accepted edit is in the global queue before any schema IPC
+    // settles — the whole point: a version or path operation now sees it.
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+
+    let release: (() => void) | null = null;
+    let operation!: Promise<unknown>;
+    act(() => {
+      operation = beginCollectionLineageOperation("ws-1").then(
+        (r) => (release = r),
+      );
+    });
+    // Navigation unmounts the page (the host stays, as in the shell); the
+    // gate must keep waiting while the schema write is in flight, so the
+    // next lineage can never see this edit land on it.
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    await act(async () => {});
+    expect(release).toBeNull();
+    expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+
+    await act(async () => {
+      releaseWrite();
+    });
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
+    );
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    await act(async () => {
+      await operation;
+    });
+    expect(release).not.toBeNull();
+    act(() => release!());
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+  });
+
+  it("retains a rejected option edit after the page unmounts and retries it whole", async () => {
+    docMock.current = engineDocState({ available: false });
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    bridge.writeWorkspaceText.mockImplementationOnce(async () => {
+      throw new Error("Write stopped because this window changed workspaces.");
+    });
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByText("Todo"));
+    const addOption = screen.getByLabelText("Add option");
+    fireEvent.change(addOption, { target: { value: "Later" } });
+    fireEvent.keyDown(addOption, { key: "Enter" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+
+    // The rejection lands after navigation: the accepted value is retained
+    // whole — option included — not lost in an unmounted page's closure.
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    const failure = collectionWriteFailures()[0]!;
+    expect(failure.change.value).toBe("Later");
+    expect(failure.createOption).toBe("Later");
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+
+    // Retry replays the whole edit: the schema write did not land, so the
+    // option is recreated first, then the value reaches the record.
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(failure.id));
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
+    );
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
+      name: "status",
+      type: "select",
+      options: ["Todo", "Later"],
+    });
+    expect(collectionWriteFailures()).toHaveLength(0);
   });
 
   it("creates, renames, and deletes a view through schema rewrites", async () => {
@@ -1210,7 +1334,9 @@ describe("CollectionRecordFieldWrite", () => {
   function writerProps() {
     return {
       workspaceId: "ws-1",
+      collectionPath: "tasks",
       change: CHANGE,
+      onPrepared: vi.fn(),
       onSettled: vi.fn(),
       onHeldDurably: vi.fn(),
       onFailed: vi.fn(),

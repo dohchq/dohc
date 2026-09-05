@@ -52,6 +52,7 @@ function engineDocState(
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   docMock.current = null;
   resetCollectionFieldWritesForTests();
 });
@@ -245,6 +246,31 @@ describe("beginCollectionWriteOperation", () => {
     expect(collectionWriteFailures()).toHaveLength(0);
     settleHead(host, doc);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
+  });
+
+  it("refuses an option edit while paused without starting its schema write", () => {
+    // The schema bridge must stay silent: a refused edit may not begin IPC.
+    const readWorkspaceText = vi.fn();
+    const writeWorkspaceText = vi.fn();
+    vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    let guard!: ReturnType<typeof beginCollectionWriteOperation>;
+    act(() => {
+      guard = beginCollectionWriteOperation("ws-1");
+    });
+
+    let accepted = true;
+    act(() => {
+      accepted = enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE, "done");
+    });
+    expect(accepted).toBe(false);
+    expect(readWorkspaceText).not.toHaveBeenCalled();
+    expect(writeWorkspaceText).not.toHaveBeenCalled();
+    // The option rides the retained edit, so the retry after release can
+    // still create it in the schema.
+    expect(collectionWriteFailures()[0]?.createOption).toBe("done");
+    act(() => guard.release());
   });
 
   it("settles input queued before the pause and reports when it lands", async () => {
