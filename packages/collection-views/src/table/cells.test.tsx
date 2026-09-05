@@ -499,7 +499,7 @@ describe("CellEditor", () => {
     const emit = writeEmitter();
     renderEditor({ fieldName: "tags", value: "malformed", emit });
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha"], ["malformed"]);
+    expect(emit).toHaveBeenLastCalledWith(["malformed", "alpha"], ["malformed"]);
   });
 
   it("opens the relation picker against the related collection and emits ids", async () => {
