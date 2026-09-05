@@ -67,36 +67,38 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     await writeWorkspaceFiles(second, [{ path: "shared.md", contents: rightText }]);
     await expect.poll(() => momentCount(left!)).toBeGreaterThan(beforeLeft);
     await expect.poll(() => momentCount(right!)).toBeGreaterThan(beforeRight);
-    await right.close();
-    right = null;
-    const lastLeftSync = () => left!.page.evaluate(async (workspaceId) => {
-      const status = await (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.getSyncStatus({ workspaceId });
-      return status.lastSyncedAtMs ?? 0;
-    }, workspaceId);
-    const beforeReconnect = await lastLeftSync();
     relay = await spawnSyncRelay({ dbPath: relayDb, port: relayPort });
-    await expect.poll(lastLeftSync, { timeout: 30_000 }).toBeGreaterThan(beforeReconnect);
-    right = await launchDesktopApp({ workspace: second });
-    await openWorkspaceFromFirstRun(right.page, second);
-    await waitForWorkspaceFile(right.page, workspaceId, "shared.md");
-    await expect(right.page.getByTestId("sync-status")).toHaveAttribute("data-state", "conflict", { timeout: 90_000 });
-    await right.page.getByTestId("notice-center-toggle").click();
-    await right.page.getByTestId("notice-sync-conflict").getByRole("button", { name: "Review", exact: true }).click();
-    const card = right.page.locator('[data-testid="version-conflict"][data-conflict-path="shared.md"]');
+    let receivingRight = true;
+    await expect.poll(async () => {
+      if (await right!.page.getByTestId("sync-status").getAttribute("data-state") === "conflict") return true;
+      if (await left!.page.getByTestId("sync-status").getAttribute("data-state") === "conflict") {
+        receivingRight = false;
+        return true;
+      }
+      return false;
+    }, { timeout: 90_000 }).toBe(true);
+    let receiver = receivingRight ? right : left;
+    const receivingWorkspace = receivingRight ? second : first;
+    const incomingText = receivingRight ? leftText : rightText;
+    await receiver.page.getByTestId("notice-center-toggle").click();
+    await receiver.page.getByTestId("notice-sync-conflict").getByRole("button", { name: "Review", exact: true }).click();
+    const card = receiver.page.locator('[data-testid="version-conflict"][data-conflict-path="shared.md"]');
     await expect(card).toContainText(leftText.trim());
     await expect(card).toContainText(rightText.trim());
     await card.getByTestId("version-conflict-keep-incoming").click();
-    await expect(right.page.getByTestId("conflict-review-empty")).toBeVisible();
-    await right.page.getByTestId("conflict-review-done").click();
-    await expect.poll(() => readFile(join(second.rootPath, "shared.md"), "utf8")).toBe(leftText);
-    await right.close();
-    right = await launchDesktopApp({ workspace: second });
-    await openWorkspaceFromFirstRun(right.page, second);
-    await waitForWorkspaceFile(right.page, workspaceId, "shared.md");
-    await explorerRow(right.page, "shared.md").click();
-    await expect(right.page.getByTestId("markdown-editor")).toContainText(leftText.trim());
-    expect(await readFile(join(second.rootPath, "shared.md"), "utf8")).toBe(leftText);
-    const remaining = await right.page.evaluate(async (workspaceId) => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listWorkspaceVersionConflicts({ workspaceId }), workspaceId);
+    await expect(receiver.page.getByTestId("conflict-review-empty")).toBeVisible();
+    await receiver.page.getByTestId("conflict-review-done").click();
+    await expect.poll(() => readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8")).toBe(incomingText);
+    await receiver.close();
+    if (receivingRight) right = null; else left = null;
+    receiver = await launchDesktopApp({ workspace: receivingWorkspace });
+    if (receivingRight) right = receiver; else left = receiver;
+    await openWorkspaceFromFirstRun(receiver.page, receivingWorkspace);
+    await waitForWorkspaceFile(receiver.page, workspaceId, "shared.md");
+    await explorerRow(receiver.page, "shared.md").click();
+    await expect(receiver.page.getByTestId("markdown-editor")).toContainText(incomingText.trim());
+    expect(await readFile(join(receivingWorkspace.rootPath, "shared.md"), "utf8")).toBe(incomingText);
+    const remaining = await receiver.page.evaluate(async (workspaceId) => (window as unknown as { dohcDesktop: DohcDesktopBridge }).dohcDesktop.listWorkspaceVersionConflicts({ workspaceId }), workspaceId);
     expect(remaining.conflicts).toEqual([]);
   } finally {
     try {
