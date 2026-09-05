@@ -133,6 +133,16 @@ import {
   useAllOrphanedDrafts,
 } from "./orphanedDrafts";
 import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import {
+  CollectionFieldWriteHost,
+  abandonPendingCollectionFieldWrites,
+  collectionWriteFailures,
+  collectionWritesPaused,
+  discardCollectionFieldWrite,
+  enqueueCollectionFieldWrite,
+  hasPendingCollectionFieldWrites,
+  resetCollectionFieldWritesForTests,
+} from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
@@ -317,6 +327,14 @@ for (const method of ["getClientRects", "getBoundingClientRect"] as const) {
             toJSON: () => {},
           },
   });
+}
+
+// A record file's live document as the engine serves it: the frontmatter map
+// carries the record's id, which the write queue verifies before applying.
+function recordDocUpdate(recordId: string): Uint8Array {
+  const doc = new Y.Doc();
+  doc.getMap("frontmatter").set("id", recordId);
+  return Y.encodeStateAsUpdate(doc);
 }
 
 function makeBridge(
@@ -819,13 +837,19 @@ function renderShell(
   workspaces: Workspace[] = [workspace],
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
+  // The host rides outside the shell, exactly as main.tsx mounts it: the
+  // collection write queue must keep landing accepted edits while the keyed
+  // shell remounts.
   return render(
-    <DesktopWorkspaceShell
-      workspace={workspace}
-      workspaces={workspaces}
-      {...shellBootstrapProps(bridge)}
-      onSwitchWorkspace={() => {}}
-    />,
+    <>
+      <CollectionFieldWriteHost />
+      <DesktopWorkspaceShell
+        workspace={workspace}
+        workspaces={workspaces}
+        {...shellBootstrapProps(bridge)}
+        onSwitchWorkspace={() => {}}
+      />
+    </>,
   );
 }
 
@@ -1089,6 +1113,9 @@ afterEach(async () => {
   // The set-aside drafts live in a module store on purpose; tests
   // that seed it must not leak into each other.
   resetOrphanedDrafts();
+  // The collection write queue is module state on purpose too — a pending
+  // head left by one test must not open sessions inside the next.
+  resetCollectionFieldWritesForTests();
 });
 
 describe("plugin panel tabs", () => {
@@ -2074,6 +2101,13 @@ describe("global letter shortcut ownership", () => {
 });
 
 describe("collection folders", () => {
+  // The table virtualizer reads offsetWidth/offsetHeight, which jsdom reports
+  // as 0 — no row would render (CollectionPage.test.tsx precedent).
+  const offsetDescriptors = {
+    offsetHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight"),
+    offsetWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetWidth"),
+  };
+
   beforeEach(() => {
     // The file's module-level ResizeObserver stub is removed by the global
     // afterEach's unstubAllGlobals (plugin web app tabs precedent). The
@@ -2089,6 +2123,20 @@ describe("collection folders", () => {
     }
     vi.stubGlobal("ResizeObserver", ObserverStub);
     vi.stubGlobal("IntersectionObserver", ObserverStub);
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, "offsetWidth", {
+      configurable: true,
+      value: 900,
+    });
+  });
+
+  afterEach(() => {
+    for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
+      if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
+    }
   });
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {
@@ -2136,6 +2184,168 @@ describe("collection folders", () => {
       collectionPath: "tasks",
     });
   });
+
+  // The queue behind cell edits must outlive the page: the shell renders only
+  // a group's ACTIVE tab, so opening a file unmounts CollectionPage. An edit
+  // the cell already accepted must still reach its record's live document.
+  it("keeps a queued record edit when a file opens while the first save is pending", async () => {
+    const user = userEvent.setup();
+    const bridge = makeEngineBridge(Promise.resolve(null));
+    bridge.listWorkspaceFiles = vi.fn(async () => ({
+      files: [
+        { path: "tasks/one.md", kind: "file" as const },
+        { path: "tasks/two.md", kind: "file" as const },
+        { path: "notes.md", kind: "file" as const },
+      ],
+      folders: ["tasks"],
+    }));
+    bridge.listCollections = vi.fn(async () => ({
+      collections: [{ path: "tasks", status: "valid" as const, reasons: [] }],
+    }));
+    bridge.getCollection = vi.fn(async () => ({
+      path: "tasks",
+      status: "valid" as const,
+      reasons: [],
+      schema: {
+        name: "Tasks",
+        description: null,
+        fields: [
+          { name: "title", type: "text" as const },
+          { name: "done", type: "checkbox" as const },
+        ],
+        views: [],
+      },
+      recordCount: 2,
+    }));
+    const taskRecord = (id: string, title: string, path: string) => ({
+      id,
+      path,
+      conflicted: false,
+      values: [
+        {
+          field: "title",
+          value: title,
+          validation: { status: "valid" as const },
+          resolvedRelations: [],
+        },
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" as const },
+          resolvedRelations: [],
+        },
+      ],
+    });
+    bridge.queryCollectionRecords = vi.fn(async () => ({
+      collection: { path: "tasks", status: "valid" as const, reasons: [] },
+      records: [
+        taskRecord("rec-1", "One", "tasks/one.md"),
+        taskRecord("rec-2", "Two", "tasks/two.md"),
+      ],
+      groups: null,
+      nextCursor: null,
+    }));
+    const sessionsByPath = new Map<string, string>();
+    const updatesBySession = new Map<string, Uint8Array[]>();
+    const saveStateListeners = new Set<
+      (event: EngineYDocSaveStateEvent) => void
+    >();
+    const openEngineYDocSession = vi.fn(
+      async (payload: { path: string; sessionId: string }) => {
+        // Record files get live sessions; notes.md stays a plain editor.
+        if (!payload.path.startsWith("tasks/")) return { available: false };
+        sessionsByPath.set(payload.path, payload.sessionId);
+        return {
+          available: true,
+          initialUpdate: recordDocUpdate(
+            payload.path === "tasks/one.md" ? "rec-1" : "rec-2",
+          ),
+          lineageGeneration: 1,
+        };
+      },
+    );
+    const applyEngineYDocUpdate = vi.fn(
+      async (payload: { sessionId: string; update: Uint8Array }) => {
+        const applied = updatesBySession.get(payload.sessionId) ?? [];
+        applied.push(payload.update);
+        updatesBySession.set(payload.sessionId, applied);
+        return { accepted: true as const };
+      },
+    );
+    Object.assign(bridge, {
+      openEngineYDocSession,
+      applyEngineYDocUpdate,
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
+        },
+      ),
+    });
+    renderShell(bridge);
+
+    const row = await waitFor(() => {
+      const candidate = screen
+        .getAllByTestId("tree-row")
+        .find((entry) => entry.dataset.path === "tasks");
+      expect(candidate?.dataset.collection).toBe("true");
+      return candidate as HTMLElement;
+    });
+    await user.click(row);
+    const checkboxes = await screen.findAllByRole(
+      "checkbox",
+      {},
+      { timeout: 15_000 },
+    );
+    expect(checkboxes).toHaveLength(2);
+
+    // First edit: the record's session opens and the update is delivered, but
+    // the save never settles — the head write is still pending.
+    await user.click(checkboxes[0]!);
+    await waitFor(() => expect(sessionsByPath.has("tasks/one.md")).toBe(true));
+    await waitFor(() =>
+      expect(
+        updatesBySession.get(sessionsByPath.get("tasks/one.md")!)?.length ?? 0,
+      ).toBeGreaterThan(0),
+    );
+
+    // Second edit queues behind the pending head.
+    await user.click(screen.getAllByRole("checkbox")[1]!);
+
+    // Ordinary navigation: open a plain file; the collection page unmounts.
+    const fileRow = screen
+      .getAllByTestId("tree-row")
+      .find((entry) => entry.dataset.path === "notes.md")!;
+    await user.click(fileRow);
+    await screen.findByTestId("tab-notes.md");
+    await waitFor(() =>
+      expect(screen.queryByTestId("collection-page")).toBeNull(),
+    );
+
+    // The pending head settles only now, after the page is gone.
+    act(() => {
+      const sessionId = sessionsByPath.get("tasks/one.md")!;
+      for (const listener of [...saveStateListeners]) {
+        listener({ sessionId, state: "saved", seq: 1 });
+      }
+    });
+
+    // The second accepted edit still reaches its record's live document.
+    await waitFor(
+      () => expect(sessionsByPath.has("tasks/two.md")).toBe(true),
+      { timeout: 5_000 },
+    );
+    await waitFor(() => {
+      const updates =
+        updatesBySession.get(sessionsByPath.get("tasks/two.md")!) ?? [];
+      const probe = new Y.Doc();
+      for (const update of updates) Y.applyUpdate(probe, update);
+      expect(probe.getMap("frontmatter").get("done")).toBe(true);
+    });
+  }, 40_000);
 
   it("offers New collection from the palette for an engine-enabled writable workspace", async () => {
     const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
@@ -4161,6 +4371,418 @@ describe("workspace switch admission", () => {
     expect(bridge.getWorkspaceUiState).toHaveBeenCalledTimes(2);
     expect(bridge.getWorkspaceSettings).toHaveBeenCalledTimes(2);
     expect(bridge.openWorkspace).toHaveBeenCalledOnce();
+  });
+});
+
+describe("collection input during a version switch", () => {
+  it.each(["success", "failure"] as const)(
+    "retains late input after switch %s without crossing versions",
+    async (outcome) => {
+      const user = userEvent.setup();
+      const bridge = makeEngineBridge(Promise.resolve(null));
+      let activeVersionId = "main";
+      bridge.listWorkspaceVersions = vi.fn(async () => ({
+        versions: [
+          { id: "main", name: "Main", kind: "main" as const, createdAtMs: 0, canMergeIntoMain: false },
+          { id: "v2", name: "Draft two", kind: "named" as const, createdAtMs: 1, canMergeIntoMain: true },
+        ],
+        activeVersionId,
+      }));
+      const switching = deferred<SwitchWorkspaceVersionResult>();
+      bridge.switchWorkspaceVersion = vi.fn(() => switching.promise);
+      renderShell(bridge);
+      await user.click(await screen.findByTestId("version-menu-button"));
+      const target = (await screen.findAllByTestId("version-item")).find(
+        (item) => item.dataset.versionId === "v2",
+      );
+      await user.click(target!);
+      await waitFor(() => expect(bridge.switchWorkspaceVersion).toHaveBeenCalledOnce());
+      const change = { recordId: "rec-1", recordPath: "tasks/one.md", field: "status", value: "done" };
+      act(() => {
+        expect(enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", change)).toBe(false);
+      });
+      await act(async () => {
+        if (outcome === "success") {
+          activeVersionId = "v2";
+          switching.resolve({ activeVersionId, changedFileCount: 1 });
+        } else {
+          switching.reject(new Error("switch failed"));
+        }
+        await switching.promise.catch(() => undefined);
+      });
+      await waitFor(() => {
+        expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", outcome === "success");
+        if (outcome === "success") expect(screen.getByTestId("collection-write-copy")).toBeTruthy();
+      });
+      expect(collectionWriteFailures()[0]?.change).toEqual(change);
+    },
+  );
+});
+
+describe("workspace admission over collection writes", () => {
+  // Models main's authority the way engineYDocSessionIpc holds it: a record
+  // session opens only for the workspace `openWorkspace` last admitted. If
+  // the shell admits B while A's accepted write is still queued, the write's
+  // open lands after the revocation and fails — exactly the data loss the
+  // admission gate exists to prevent.
+  function admissionHarness() {
+    const admitted = { workspaceId: WORKSPACE.workspaceId };
+    const openGates = new Map<string, Promise<void>>();
+    const sessions = new Map<string, string>();
+    const saveListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
+    const openAvailability = { available: true };
+    const bridge = Object.assign(makeEngineBridge(Promise.resolve(null)), {
+      openWorkspace: vi.fn(async (payload: { workspaceId: string }) => {
+        admitted.workspaceId = payload.workspaceId;
+        return SYNC_STATUS;
+      }),
+      openEngineYDocSession: vi.fn(
+        async (payload: {
+          workspaceId: string;
+          path: string;
+          sessionId: string;
+        }) => {
+          await openGates.get(payload.path);
+          if (
+            !openAvailability.available ||
+            payload.workspaceId !== admitted.workspaceId
+          ) {
+            return { available: false };
+          }
+          sessions.set(payload.path, payload.sessionId);
+          return {
+            available: true,
+            initialUpdate: recordDocUpdate(RECORD_EDIT.recordId),
+            lineageGeneration: 1,
+          };
+        },
+      ),
+      applyEngineYDocUpdate: vi.fn(async () => ({ accepted: true as const })),
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveListeners.add(listener);
+          return () => saveListeners.delete(listener);
+        },
+      ),
+    });
+    const shell = (workspace: Workspace) => (
+      <>
+        <CollectionFieldWriteHost />
+        <DesktopWorkspaceShell
+          key={workspace.workspaceId}
+          workspace={workspace}
+          workspaces={[WORKSPACE, OTHER_WORKSPACE]}
+          {...shellBootstrapProps(bridge)}
+          onSwitchWorkspace={() => {}}
+        />
+      </>
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    return { bridge, openGates, sessions, saveListeners, openAvailability, shell };
+  }
+
+  const RECORD_EDIT = {
+    recordId: "rec-1",
+    recordPath: "tasks/one.md",
+    field: "done",
+    value: true,
+  };
+
+  it("keeps the destination workspace's queued edit when the previous workspace times out", async () => {
+    const harness = admissionHarness();
+    const oldOpen = deferred<void>();
+    const nextOpen = deferred<void>();
+    harness.openGates.set("tasks/one.md", oldOpen.promise);
+    harness.openGates.set("tasks/two.md", nextOpen.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+      enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", { ...RECORD_EDIT, recordPath: "tasks/two.md" });
+    });
+    await waitFor(() => expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([WORKSPACE.workspaceId]);
+      expect(hasPendingCollectionFieldWrites()).toBe(true);
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+      act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
+    await act(async () => { oldOpen.resolve(); nextOpen.resolve(); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => {
+      const sessionId = harness.sessions.get("tasks/two.md")!;
+      for (const listener of [...harness.saveListeners]) listener({ sessionId, state: "saved", seq: 1 });
+    });
+    await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+
+  it("keeps an applied-only stalled save visible until its engine acknowledgement admits B", async () => {
+    const harness = admissionHarness();
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => { enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(collectionWriteFailures()).toEqual([]);
+      const blocked = screen.getByTestId("workspace-open-failed");
+      expect(blocked.textContent).toContain("dohc has not confirmed this save yet. Keep dohc open until saving finishes.");
+      expect(screen.queryByTestId("collection-write-retry")).toBeNull();
+      expect(screen.queryByTestId("collection-write-discard")).toBeNull();
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+
+      await act(() => vi.advanceTimersByTimeAsync(20_000));
+      expect(screen.getByTestId("workspace-open-failed")).toBe(blocked);
+      expect(screen.queryByTestId("workspace-preparing")).toBeNull();
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+      await act(async () => {
+        const sessionId = harness.sessions.get("tasks/one.md")!;
+        for (const listener of [...harness.saveListeners]) {
+          listener({ sessionId, state: "saved", seq: 1 });
+        }
+      });
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledExactlyOnceWith({ workspaceId: OTHER_WORKSPACE.workspaceId });
+      expect(screen.queryByTestId("workspace-open-failed")).toBeNull();
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds B's open until A's queued collection write settles", async () => {
+    const harness = admissionHarness();
+    const gate = deferred<void>();
+    harness.openGates.set("tasks/one.md", gate.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
+    );
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await act(async () => {});
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // A's write lands: the session opens under A's still-current authority,
+    // the update stages, and the engine reports the save settled.
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() =>
+      expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled(),
+    );
+    act(() => {
+      const sessionId = harness.sessions.get("tasks/one.md")!;
+      for (const listener of [...harness.saveListeners]) {
+        listener({ sessionId, state: "saved", seq: 1 });
+      }
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    expect(collectionWriteFailures()).toEqual([]);
+  });
+
+  it("refuses admission over a retained failure until it is resolved", async () => {
+    const harness = admissionHarness();
+    harness.openAvailability.available = false;
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await screen.findByTestId("workspace-open-failed");
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // Resolving the failure re-runs admission without another click.
+    act(() => {
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+  });
+
+  it("blocks admission when A's write fails during the wait", async () => {
+    const harness = admissionHarness();
+    const gate = deferred<void>();
+    harness.openGates.set("tasks/one.md", gate.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() =>
+      expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
+    );
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled(),
+    );
+    harness.bridge.openWorkspace.mockClear();
+
+    view.rerender(harness.shell(OTHER_WORKSPACE));
+    await act(async () => {});
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    // The write's session open settles without a session: the write is
+    // retained, and admission must stop on it instead of proceeding.
+    harness.openAvailability.available = false;
+    await act(async () => {
+      gate.resolve();
+    });
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    await screen.findByTestId("workspace-open-failed");
+    expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+
+    act(() => {
+      discardCollectionFieldWrite(collectionWriteFailures()[0]!.id);
+    });
+    await waitFor(() =>
+      expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({
+        workspaceId: OTHER_WORKSPACE.workspaceId,
+      }),
+    );
+  });
+});
+
+describe("explorer operations over collection writes", () => {
+  const RECORD_EDIT = {
+    recordId: "rec-a",
+    recordPath: "a.md",
+    field: "done",
+    value: true,
+  };
+
+  async function beginRename(bridge: ReturnType<typeof makeBridge>) {
+    const user = userEvent.setup();
+    renderShell(bridge);
+    const row = (await screen.findAllByTestId("tree-row")).find(
+      (candidate) => candidate.dataset.path === "a.md",
+    )!;
+    await user.click(row);
+    await user.keyboard("{F2}");
+    const input = await screen.findByTestId("tree-edit-input");
+    await user.clear(input);
+    await user.type(input, "renamed.md{Enter}");
+    return user;
+  }
+
+  it("pauses cell edits across a rename and projects the retained edit", async () => {
+    const move = deferred<void>();
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move.promise),
+    });
+    await beginRename(bridge);
+    await waitFor(() =>
+      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
+    );
+    // The pause covers the pending IPC: a racing cell edit (an editor commit
+    // already in flight) is refused and retained, never queued against the
+    // path the move is changing.
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
+    let accepted = true;
+    act(() => {
+      accepted = enqueueCollectionFieldWrite(
+        WORKSPACE.workspaceId,
+        "tasks",
+        RECORD_EDIT,
+      );
+    });
+    expect(accepted).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(1);
+
+    await act(async () => {
+      move.resolve();
+      await move.promise;
+    });
+    await waitFor(() =>
+      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
+    );
+    // The retained edit follows the rename, like tabs and set-aside drafts.
+    expect(collectionWriteFailures()[0]!.change.recordPath).toBe("renamed.md");
+  });
+
+  it("releases the pause when the rename fails and keeps the old path", async () => {
+    let rejectMove!: (error: Error) => void;
+    const move = new Promise<void>((_resolve, reject) => {
+      rejectMove = reject;
+    });
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(() => move),
+    });
+    await beginRename(bridge);
+    await waitFor(() =>
+      expect(bridge.moveWorkspacePath).toHaveBeenCalledTimes(1),
+    );
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(true);
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+    });
+
+    await act(async () => {
+      rejectMove(new Error("rename failed"));
+      await move.catch(() => undefined);
+    });
+    await screen.findByTestId("explorer-error");
+    await waitFor(() =>
+      expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false),
+    );
+    // Nothing moved, so the retained edit keeps the path it was accepted on.
+    expect(collectionWriteFailures()[0]!.change.recordPath).toBe("a.md");
+  });
+
+  it("refuses a rename while a collection write failure is retained", async () => {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
+      moveWorkspacePath: vi.fn(async () => undefined),
+    });
+    // A retained failure with its accepted value, exactly as a stalled-queue
+    // abandonment leaves it.
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+      abandonPendingCollectionFieldWrites("This change did not save.");
+    });
+    expect(collectionWriteFailures()).toHaveLength(1);
+    await beginRename(bridge);
+    await screen.findByTestId("explorer-error");
+    expect(bridge.moveWorkspacePath).not.toHaveBeenCalled();
+    expect(collectionWritesPaused(WORKSPACE.workspaceId)).toBe(false);
   });
 });
 

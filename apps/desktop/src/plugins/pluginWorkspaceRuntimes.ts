@@ -183,6 +183,14 @@ export class PluginWorkspaceRuntimes<
   TWorkspace extends PluginWorkspaceIdentity,
 > {
   private readonly slots = new Map<string, RuntimeSlot>();
+  private readonly workspaces = new Map<string, TWorkspace>();
+  private engineRestart: {
+    ready: Promise<void>;
+    resume(): void;
+    fail(error: unknown): void;
+    stopped: Promise<void>;
+    workspaces: TWorkspace[];
+  } | undefined;
   private closed = false;
   private closePromise: Promise<void> | undefined;
 
@@ -202,6 +210,7 @@ export class PluginWorkspaceRuntimes<
     const workspaceRoot = normalizeAbsolutePath(workspace.rootPath);
 
     for (;;) {
+      if (this.engineRestart) await this.engineRestart.ready;
       this.assertOpen();
       const slot = this.slots.get(workspace.workspaceId);
       if (slot) {
@@ -248,6 +257,7 @@ export class PluginWorkspaceRuntimes<
           this.dependencies.onCleanupError?.(workspace.workspaceId, error),
       );
       this.slots.set(workspace.workspaceId, { kind: "live", record });
+      this.workspaces.set(workspace.workspaceId, workspace);
       for (const event of pendingStatus) {
         this.handlePipelineStatus(workspace.workspaceId, record, event);
       }
@@ -259,6 +269,60 @@ export class PluginWorkspaceRuntimes<
       }
       this.assertStillLive(workspace.workspaceId, record);
       return record;
+    }
+  }
+
+  /** Stop surviving hosts before a replacement engine can reclaim their work. */
+  prepareForEngineRestart(): Promise<void> {
+    if (this.engineRestart) return this.engineRestart.stopped;
+    const paused = Promise.withResolvers<void>();
+    const stopped = Promise.withResolvers<void>();
+    // The shared gate can fail before any caller starts waiting on it.
+    void paused.promise.catch(() => undefined);
+    void stopped.promise.catch(paused.reject);
+    const slots = [...this.slots.entries()];
+    this.engineRestart = {
+      ready: paused.promise,
+      resume: paused.resolve,
+      fail: paused.reject,
+      stopped: stopped.promise,
+      workspaces: slots.flatMap(([workspaceId, slot]) => {
+        const workspace = this.workspaces.get(workspaceId);
+        return slot.kind === "live" && workspace ? [workspace] : [];
+      }),
+    };
+    // Invalidate every executor before any host teardown can yield or emit status.
+    for (const [, slot] of slots) slot.record?.automations.stopForEngineRestart();
+    try {
+      const stops = slots.map(([workspaceId, slot]) =>
+        // Close admission now even if a workspace close is awaiting surface cleanup.
+        slot.kind === "live"
+          ? this.stop(workspaceId)
+          : slot.record?.pipeline.dispose() ?? Promise.resolve(),
+      );
+      void Promise.all(stops).then(() => stopped.resolve(), stopped.reject);
+    } catch (error) {
+      stopped.reject(error);
+    }
+    return stopped.promise;
+  }
+
+  failEngineRestart(error: unknown): void {
+    this.engineRestart?.fail(error);
+  }
+
+  /** Recreate registered executors only after the replacement engine is reachable. */
+  resumeAfterEngineRestart(): void {
+    const restart = this.engineRestart;
+    if (!restart) return;
+    this.engineRestart = undefined;
+    restart.resume();
+    if (this.closed) return;
+    for (const workspace of restart.workspaces) {
+      if (!this.dependencies.isOpen(workspace.workspaceId)) continue;
+      void this.ensure(workspace).catch((error: unknown) =>
+        this.dependencies.onCleanupError?.(workspace.workspaceId, error),
+      );
     }
   }
 
@@ -276,6 +340,7 @@ export class PluginWorkspaceRuntimes<
   close(beforeDispose: PluginWorkspaceCleanup = noCleanup): Promise<void> {
     if (this.closePromise) return this.closePromise;
     this.closed = true;
+    this.engineRestart?.resume();
     const {
       promise: cleanup,
       resolve: resolveCleanup,
@@ -374,6 +439,7 @@ export class PluginWorkspaceRuntimes<
     await slot.record?.dispose();
     if (this.slots.get(workspaceId) === slot) {
       this.slots.delete(workspaceId);
+      this.workspaces.delete(workspaceId);
     }
   }
 

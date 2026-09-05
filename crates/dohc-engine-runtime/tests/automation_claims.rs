@@ -514,6 +514,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let reclaimed = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             1_000,
             1_000,
@@ -560,6 +561,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
     let reclaimed = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             2_000,
             2_000,
@@ -667,6 +669,7 @@ async fn a_cancelled_token_short_circuits_every_automation_command_without_writi
     let error = handle
         .automation_reclaim_running(
             WS.to_owned(),
+            None,
             2,
             1_000,
             1_000,

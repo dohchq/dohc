@@ -102,7 +102,7 @@ afterEach(() => {
 async function openReview(conflicts: WorkspaceVersionConflict[]) {
   bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
   render(
-    <ConflictReviewDialog
+    <ConflictReviewDialog beginLineageOperation={async () => () => {}}
       workspaceId="ws-1"
       onWorkspaceStateChanged={() => {}}
       onClose={() => {}}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TableView } from "./TableView";
 import { indexedValue, makeRecord, makeSchema } from "../testSupport";
@@ -69,5 +69,61 @@ describe("TableView paging", () => {
       />,
     );
     expect(onNearEnd).toHaveBeenCalled();
+  });
+});
+
+describe("paused table editing", () => {
+  it("keeps a typed multi-select option mounted and disabled until editing resumes", () => {
+    const records = [makeRecord("rec-1", [indexedValue("tags", ["alpha"])])];
+    const schema = makeSchema([{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }]);
+    const onCellChange = vi.fn(() => 1);
+    const onCreateOption = vi.fn();
+    const table = (editingDisabled: boolean) => (
+      <TableView schema={schema} records={records} editingDisabled={editingDisabled}
+        onCellChange={onCellChange} onCreateOption={onCreateOption} />
+    );
+    const view = render(table(false));
+    fireEvent.click(screen.getByRole("button", { name: "alpha" }));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "delta" } });
+    view.rerender(table(true));
+    expect(screen.getByLabelText("Add option")).toBe(input);
+    expect(input.matches(":disabled")).toBe(true);
+    fireEvent.blur(input);
+    expect(onCreateOption).not.toHaveBeenCalled();
+    expect(onCellChange).not.toHaveBeenCalled();
+
+    view.rerender(table(false));
+    expect(screen.getByLabelText("Add option")).toBe(input);
+    expect(input.value).toBe("delta");
+    expect(input.matches(":disabled")).toBe(false);
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-1", recordPath: records[0]!.path, field: "tags", option: "delta",
+      value: ["alpha", "delta"], previousValues: [["alpha"]],
+    });
+  });
+
+  it("does not commit or close a text draft when pausing blurs its input", () => {
+    const records = [makeRecord("rec-1", [indexedValue("title", "Before")])];
+    const schema = makeSchema([{ name: "title", type: "text" }]);
+    const onCellChange = vi.fn(() => 1);
+    const table = (editingDisabled: boolean) => (
+      <TableView schema={schema} records={records} editingDisabled={editingDisabled} onCellChange={onCellChange} />
+    );
+    const view = render(table(false));
+    fireEvent.click(screen.getByRole("button", { name: "Before" }));
+    const input = screen.getByRole<HTMLInputElement>("textbox");
+    fireEvent.change(input, { target: { value: "Draft" } });
+    view.rerender(table(true));
+    fireEvent.blur(input);
+    expect(onCellChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox")).toBe(input);
+    view.rerender(table(false));
+    expect(input.value).toBe("Draft");
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCellChange).toHaveBeenCalledExactlyOnceWith({
+      recordId: "rec-1", recordPath: records[0]!.path, field: "title", value: "Draft",
+    });
   });
 });
