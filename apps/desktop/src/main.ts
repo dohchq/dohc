@@ -13129,7 +13129,13 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Every driver is plugin-contributed, and workspace open only warms the
+    // plugin runtime in the background. A probe that ran ahead of it would
+    // answer "no drivers" and the caller would cache that for its lifetime.
+    if (!sharedViewOf(workspace.workspaceId)) {
+      await pluginWorkspaceRuntimes.ensure(workspace);
+    }
     const sessions = await agentSessionManager();
     await sessions.probeDrivers(input.workspaceId);
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
