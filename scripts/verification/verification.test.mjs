@@ -1,11 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { buildEnvironment, directoryFingerprint, engineArtifactMatches, hashFile, repairOwnedEngineExecutable, sourceFingerprint } from "./build.mjs";
-import { changedFiles, selectedGates } from "./verify.mjs";
+import { changedFiles, postgres, selectedGates } from "./verify.mjs";
 import { repoRoot, run } from "./process.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 
@@ -92,6 +93,109 @@ test("gate selection includes the old path of committed, staged, and unstaged re
     git(["commit", "-m", "Move fixture outside code filters"]);
     assertRenameGates(changedFiles(base, false, root));
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a docs-only PR records clean provenance without code tools, while dirty heads and forced gates still fail", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-no-code-gate-"));
+  const git = (args) => execFileSync("git", [
+    "-c", `core.hooksPath=${join(root, "no-hooks")}`, "-c", "commit.gpgsign=false",
+    "-c", "user.name=Verification Fixture", "-c", "user.email=fixture@example.invalid", ...args,
+  ], { cwd: root, encoding: "utf8" }).trim();
+  try {
+    for (const file of [
+      "scripts/verification/verify.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
+      "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
+    ]) {
+      mkdirSync(dirname(join(root, file)), { recursive: true });
+      copyFileSync(join(repoRoot, file), join(root, file));
+    }
+    writeFileSync(join(root, ".gitignore"), ".agent-artifacts/\n");
+    writeFileSync(join(root, "package.json"), '{"type":"module"}\n');
+    writeFileSync(join(root, "apps/desktop/package.json"), '{}\n');
+    git(["init"]); git(["config", "core.logAllRefUpdates", "true"]);
+    git(["add", "."]); git(["commit", "-m", "Fixture base"]);
+    const base = git(["rev-parse", "HEAD"]);
+    mkdirSync(join(root, "docs"));
+    const document = join(root, "docs/guide.md");
+    writeFileSync(document, "Documentation only.\n");
+    git(["add", "."]); git(["commit", "-m", "Document the fixture"]);
+    const head = git(["rev-parse", "HEAD"]);
+    const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
+    const childScript = `
+      import childProcess from "node:child_process";
+      import { syncBuiltinESMExports } from "node:module";
+      const exec = childProcess.execFileSync;
+      childProcess.execFileSync = (command, ...args) => {
+        if (command !== "git") throw new Error("Unavailable code tool: " + command);
+        return exec(command, ...args);
+      };
+      childProcess.spawn = command => { throw new Error("Unavailable code tool: " + command); };
+      syncBuiltinESMExports();
+      const { verify } = await import("./scripts/verification/verify.mjs");
+      const report = await verify(process.argv.slice(1));
+      console.log(JSON.stringify(report));
+    `;
+    const invoke = (extra = []) => spawnSync(process.execPath, ["--input-type=module", "-e", childScript, "pr", "--base", base, ...extra], {
+      cwd: root, encoding: "utf8", timeout: 15_000,
+      env: { ...process.env, NODE_PATH: dirname(dirname(require.resolve("js-yaml/package.json"))) },
+    });
+    const clean = invoke();
+    assert.equal(clean.error, undefined);
+    assert.equal(clean.status, 0, clean.stderr);
+    const report = JSON.parse(clean.stdout.trim().split(/\r?\n/).at(-1));
+    assert.equal(report.verdict, "PASS");
+    assert.equal(report.commit, head);
+    assert.equal(report.provenance.status, "PASS");
+    assert.equal(report.dirty, false);
+    assert.deepEqual(report.gates, { rust: false, js: false });
+    assert.deepEqual(report.steps, []);
+    assert.equal(report.doctor, undefined);
+    assert.equal(report.build, undefined);
+    assert.match(report.reason, /No code gate applies/);
+
+    writeFileSync(document, "Dirty documentation.\n");
+    const dirty = invoke();
+    assert.notEqual(dirty.status, 0);
+    assert.match(dirty.stderr, /Commit the worktree/);
+    writeFileSync(document, "Documentation only.\n");
+    const forced = invoke(["--job", "rust"]);
+    assert.notEqual(forced.status, 0);
+    assert.match(forced.stderr, /Unavailable code tool: rustc/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("Postgres startup rejection cleans its created container and preserves startup and cleanup failures", async () => {
+  for (const cleanupFails of [false, true]) {
+    const startupError = new Error("docker run timed out after creating its container");
+    const calls = [];
+    const containers = new Set();
+    let ownedName;
+    const command = async (executable, args, options) => {
+      assert.equal(executable, "docker");
+      calls.push({ args, options });
+      if (args[0] === "run") {
+        ownedName = args[args.indexOf("--name") + 1];
+        containers.add(ownedName);
+        throw startupError;
+      }
+      assert.deepEqual(args, ["rm", "--force", ownedName]);
+      if (cleanupFails) throw new Error("Docker cleanup is unavailable");
+      containers.delete(ownedName);
+      return { stdout: ownedName };
+    };
+    await assert.rejects(postgres("unused-output", command), (error) => {
+      assert.equal(error, startupError);
+      if (cleanupFails) assert.match(error.cleanupError, /Could not remove verification Postgres.*Docker cleanup is unavailable/);
+      else assert.equal(error.cleanupError, undefined);
+      return true;
+    });
+    assert.match(ownedName, /^dohc-verify-[a-f0-9-]+$/);
+    assert.equal(calls.length, 2);
+    assert.equal(calls[1].options.timeoutMs, 30_000);
+    assert.match(calls[1].options.log, /postgres-stop\.log$/);
+    assert.equal(containers.has(ownedName), cleanupFails);
+  }
 });
 
 test("POSIX engine permission loss rejects unchanged bytes and repairs only owned artifacts", { skip: process.platform === "win32" }, () => {

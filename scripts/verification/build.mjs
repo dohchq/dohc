@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { acquireBuildSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
+import { stagedEsbuildExecutable } from "../../apps/desktop/scripts/stage-plugin-tools.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 
 export const receiptPath = join(repoRoot, ".dohc-dev/verification/build.json");
@@ -94,7 +95,8 @@ export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   try {
     return receipt?.[kind]?.source === sourceFingerprint(kind)
       && (kind === "engine" ? engineArtifactMatches(enginePath, receipt[kind].artifact)
-        : receipt[kind].artifact === artifactFingerprint(kind));
+        : receipt[kind].artifact === artifactFingerprint(kind)
+          && stagedEsbuildExecutable(join(repoRoot, "apps/desktop/resources/plugin-tools")));
   } catch (error) {
     if (error.code === "ENOENT") return false;
     throw error;
@@ -132,7 +134,7 @@ export async function withBuildBudget(action) {
     const free = freeDiskGb(repoRoot);
     if (free === null || free < budget.diskFloorGb) throw new Error(`Build needs ${budget.diskFloorGb} GB free; observed ${free ?? "unknown"}.`);
   }
-  const slot = budget ? await acquireBuildSlot(budget) : null;
+  const slot = budget ? await acquireBuildSlot({ ...budget, cooperativeCancellation: true }) : null;
   const env = buildEnvironment(budget?.jobs);
   try { return await action(env); }
   finally { slot?.release(); }

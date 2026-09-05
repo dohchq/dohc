@@ -122,6 +122,82 @@ test("released slots remove only their listeners and allow later interrupt clean
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("cooperative budget cancellation stops its child before releasing the slot and running caller finally", () => {
+  for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+    const root = slotRoot();
+    const childRecord = join(root, "child.json");
+    let childStopped = false;
+    try {
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import assert from "node:assert/strict";
+        import { existsSync, writeFileSync } from "node:fs";
+        import { join } from "node:path";
+        import { withBuildBudget } from ${JSON.stringify(new URL("verification/build.mjs", import.meta.url).href)};
+        import { run } from ${JSON.stringify(new URL("verification/process.mjs", import.meta.url).href)};
+        const root = process.argv[1];
+        const signal = process.argv[2];
+        const slot = join(root, "build-slot-1");
+        let child;
+        let heldAfterSignal = false;
+        let rejected = false;
+        try {
+          await withBuildBudget(env => run(process.execPath, ["-e", "setInterval(() => {}, 1000); console.log('child-ready');"], {
+            env,
+            onSpawn: spawned => {
+              child = spawned;
+              writeFileSync(join(root, "child.json"), JSON.stringify({ pid: child.pid }));
+              let output = "";
+              child.stdout.on("data", function ready(chunk) {
+                output += String(chunk);
+                if (!output.includes("child-ready")) return;
+                child.stdout.off("data", ready);
+                assert.equal(existsSync(slot), true);
+                process.emit(signal);
+                heldAfterSignal = existsSync(slot);
+              });
+            },
+          }));
+        } catch (error) {
+          assert.match(error.message, /interrupted/);
+          rejected = true;
+        } finally {
+          writeFileSync(join(root, "finally.json"), JSON.stringify({
+            rejected, heldAfterSignal, slotExists: existsSync(slot),
+            childStopped: Boolean(child && (child.exitCode !== null || child.signalCode !== null)),
+          }));
+        }
+      `, root, signal], {
+        encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: root, DOHC_GATE_DISK_FLOOR_GB: "0" },
+      });
+      const finallyPath = join(root, "finally.json");
+      const cleanup = existsSync(finallyPath) ? JSON.parse(readFileSync(finallyPath, "utf8")) : null;
+      childStopped = cleanup?.childStopped === true;
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, status, result.stderr);
+      assert.deepEqual(cleanup, { rejected: true, heldAfterSignal: true, slotExists: false, childStopped: true });
+      assert.equal(existsSync(join(root, "build-slot-1")), false);
+    } finally {
+      if (!childStopped && existsSync(childRecord)) {
+        const { pid } = JSON.parse(readFileSync(childRecord, "utf8"));
+        if (Number.isInteger(pid) && pid > 0) {
+          if (process.platform === "win32") {
+            const stopped = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
+            if (stopped.status !== 0) {
+              try { process.kill(pid, "SIGKILL"); }
+              catch (error) { if (error.code !== "ESRCH") throw error; }
+            }
+          } else {
+            try { process.kill(-pid, "SIGKILL"); }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+          }
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("acquire takes a free slot, writes its owner, and release frees it", async () => {
   const root = slotRoot();
   try {

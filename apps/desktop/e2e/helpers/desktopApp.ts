@@ -11,6 +11,7 @@ import { assertPrepared } from "../../../../scripts/verification/build.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
+import { closeElectronApplication } from "../../src/testing/closeElectronApplication";
 import type { TempWorkspace } from "./workspace";
 
 export interface DesktopLogEntry {
@@ -97,9 +98,11 @@ export async function launchDesktopApp(input: {
   const logs: DesktopLogEntry[] = [];
   const logPath = join(artifacts, "desktop.jsonl");
   await writeFile(logPath, "");
+  let logFailure: unknown;
   const record = (entry: DesktopLogEntry) => {
     logs.push(entry);
-    appendFileSync(logPath, JSON.stringify(entry) + "\n");
+    try { appendFileSync(logPath, JSON.stringify(entry) + "\n"); }
+    catch (error) { logFailure ??= error; }
   };
   const onStdoutData = (chunk: Buffer) => {
     record({ source: "main", level: "stdout", text: chunk.toString() });
@@ -151,88 +154,35 @@ export async function launchDesktopApp(input: {
       page,
       logs,
       close: async () => {
-        const abort = new AbortController();
         try {
           if (!page.isClosed()) {
             await page.screenshot({ path: join(artifacts, "last-screen.png"), timeout: 5000 }).catch(() => undefined);
           }
-          await Promise.race([
-            (async () => {
-              if (launchedApp.windows().length > 0) {
-                await launchedApp.close();
-              }
-            })().finally(() => abort.abort()),
-            forceCloseAfterTimeout(launchedProcess, abort.signal),
-          ]);
         } finally {
-          abort.abort();
-          launchedProcess.stdout?.off("data", onStdoutData);
-          launchedProcess.stderr?.off("data", onStderrData);
-          await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
+          try {
+            await closeElectronApplication(launchedApp, launchedProcess);
+          } finally {
+            launchedProcess.stdout?.off("data", onStdoutData);
+            launchedProcess.stderr?.off("data", onStderrData);
+            await test.info().attach("desktop logs", { path: logPath, contentType: "application/x-ndjson" });
+            if (logFailure) throw new Error("Desktop log recording failed.", { cause: logFailure });
+          }
         }
       },
     };
   } catch (error) {
-    await writeFile(join(artifacts, "launch-error.txt"), String(error));
-    if (app) {
-      await app.close().catch(() => undefined);
+    try {
+      await writeFile(join(artifacts, "launch-error.txt"), String(error)).catch(() => undefined);
+    } finally {
+      try {
+        if (app && processHandle) await closeElectronApplication(app, processHandle);
+      } catch (cleanupError) {
+        console.error("Failed-launch cleanup:", cleanupError);
+      } finally {
+        processHandle?.stdout?.off("data", onStdoutData);
+        processHandle?.stderr?.off("data", onStderrData);
+      }
     }
-    processHandle?.stdout?.off("data", onStdoutData);
-    processHandle?.stderr?.off("data", onStderrData);
     throw error;
-  }
-}
-
-function processIsRunning(processHandle: ElectronProcess): boolean {
-  return processHandle.exitCode === null && processHandle.signalCode === null;
-}
-
-async function waitForProcessExit(
-  processHandle: ElectronProcess,
-  timeoutMs: number,
-): Promise<boolean> {
-  if (!processIsRunning(processHandle)) return true;
-  return await new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      processHandle.off("exit", onExit);
-      resolve(false);
-    }, timeoutMs);
-    function onExit() {
-      clearTimeout(timer);
-      resolve(true);
-    }
-    processHandle.once("exit", onExit);
-    if (processHandle.exitCode !== null || processHandle.signalCode !== null) {
-      processHandle.off("exit", onExit);
-      onExit();
-    }
-  });
-}
-
-async function forceCloseAfterTimeout(
-  processHandle: ElectronProcess,
-  signal: AbortSignal,
-): Promise<void> {
-  await new Promise<void>((resolve) => {
-    if (signal.aborted) {
-      resolve();
-      return;
-    }
-    const timer = setTimeout(resolve, 5_000);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        resolve();
-      },
-      { once: true },
-    );
-  });
-  if (signal.aborted) return;
-  if (!processIsRunning(processHandle)) return;
-  processHandle.kill("SIGTERM");
-  if (!(await waitForProcessExit(processHandle, 1_000))) {
-    processHandle.kill("SIGKILL");
-    await waitForProcessExit(processHandle, 1_000);
   }
 }

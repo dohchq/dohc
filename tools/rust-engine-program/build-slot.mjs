@@ -261,7 +261,7 @@ export function reclaimStaleSlots({ root, slots, staleMs }) {
   }
 }
 
-function claimSlot(dir, name, heartbeatMs) {
+function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
   const ownerPath = join(dir, "owner.json");
   const ownerRecord = JSON.stringify({
     pid: process.pid,
@@ -306,17 +306,23 @@ function claimSlot(dir, name, heartbeatMs) {
       // process is dead and the heartbeat goes stale.
     }
   };
-  function onSigint() {
+  function interrupt(code) {
+    if (cooperativeCancellation) {
+      process.exitCode = code;
+      return;
+    }
     release();
-    process.exit(130);
+    process.exit(code);
+  }
+  function onSigint() {
+    interrupt(130);
   }
   function onSigterm() {
-    release();
-    process.exit(143);
+    interrupt(143);
   }
   process.once("exit", release);
-  // Signal death skips 'exit' listeners; release first so an interrupted gate
-  // frees its slot instead of parking it for the 30-minute reclaim window.
+  // Standalone gates release before exiting. Cooperative callers retain the
+  // slot until their child cleanup finishes and finally releases it.
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
   return { name, dir, release };
@@ -326,6 +332,8 @@ function claimSlot(dir, name, heartbeatMs) {
  * Take a build slot, waiting (and reclaiming dead owners) until one frees.
  * Resolves to `{ name, dir, release }`; `release` is idempotent and also runs
  * on process exit. Throws when `waitMs` elapses with every slot held.
+ * With cooperativeCancellation, the caller handles child termination and
+ * releases the slot in finally; signals set a nonzero exit code without exiting.
  */
 export async function acquireBuildSlot({
   root,
@@ -334,6 +342,7 @@ export async function acquireBuildSlot({
   pollMs = 15_000,
   staleMs = 30 * 60_000,
   heartbeatMs = 60_000,
+  cooperativeCancellation = false,
 }) {
   mkdirSync(root, { recursive: true });
   const deadline = Date.now() + waitMs;
@@ -347,7 +356,7 @@ export async function acquireBuildSlot({
         if (error.code === "EEXIST") continue; // Held.
         throw error; // EACCES etc. is a fault, not contention.
       }
-      return claimSlot(dir, `build-slot-${i}`, heartbeatMs);
+      return claimSlot(dir, `build-slot-${i}`, heartbeatMs, cooperativeCancellation);
     }
     if (reclaimStaleSlots({ root, slots, staleMs }) > 0) continue;
     if (!denied) {
