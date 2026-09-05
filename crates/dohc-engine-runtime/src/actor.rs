@@ -40,30 +40,30 @@ use dohc_engine_collab::{
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
-    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationFailure, AutomationSettle,
-    BinaryHead, BinaryWriteResult, CaptureIngest, CaptureIngestBatchContext, CaptureIngestBinary,
-    CaptureIngestBinaryResult, CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult,
-    CaptureSecret, CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary,
-    ChatAgentReadState, ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel,
-    ChatChannelKind, ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState,
-    ChatFileMention, ChatFollow, ChatMention, ChatMessage, ChatMessagePage,
-    ChatProjectionFileAccess, ChatReaction, ChatThread, ChatThreadProjection, ChatThreadReadState,
-    CollectionAdoptionCandidate, CollectionDetails, CollectionListPage,
-    CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage, CollectionQuery,
-    CollectionQueryResult, CollectionRecordDetails, CollectionRelationCleanupCandidate,
-    CompareTextFileVersions, CreateFileThread, CreateNamedVersion, DeleteResult, DeleteTextFile,
-    DispatchClaim, DispatchRecovery, DomainError, InbandBinary, InbandSecret, InbandText,
-    LinkedChatStore, ListMomentsQuery, MentionCursor, MergeTextFileFromVersion,
-    MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow, ProjectedWriteText,
-    RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision, ResolveTextConflict,
-    ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink, SaveBookmark,
-    SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore, SecretMomentPage,
-    SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite, SecretWriteResult, SendMessage,
-    SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, StartChannelThread, TextConflict,
-    TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage, VersionRecord,
-    VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult, WriteText,
-    apply_secret_file_from_version_with, binary_delete_job_id, binary_rename_delete_job_id,
-    binary_rename_write_job_id, binary_rollback_job_identity,
+    AgentRunRecord, AgentUnreadThreadRow, AutomationClaim, AutomationClaimAttempt,
+    AutomationFailure, AutomationSettle, BinaryHead, BinaryWriteResult, CaptureIngest,
+    CaptureIngestBatchContext, CaptureIngestBinary, CaptureIngestBinaryResult,
+    CaptureManifestSeedEntry, CaptureRetire, CaptureRetireResult, CaptureSecret,
+    CaptureSecretRetire, ChangeAttribution, ChannelThreadSummary, ChatAgentReadState,
+    ChatAttachment, ChatBookmark, ChatBookmarkTransition, ChatChannel, ChatChannelKind,
+    ChatChannelSummary, ChatDecision, ChatFeedPage, ChatFeedReadState, ChatFileMention, ChatFollow,
+    ChatMention, ChatMessage, ChatMessagePage, ChatProjectionFileAccess, ChatReaction, ChatThread,
+    ChatThreadProjection, ChatThreadReadState, CollectionAdoptionCandidate, CollectionDetails,
+    CollectionListPage, CollectionPendingAdoptionCursor, CollectionPendingAdoptionPage,
+    CollectionQuery, CollectionQueryResult, CollectionRecordDetails,
+    CollectionRelationCleanupCandidate, CompareTextFileVersions, CreateFileThread,
+    CreateNamedVersion, DeleteResult, DeleteTextFile, DispatchClaim, DispatchRecovery, DomainError,
+    InbandBinary, InbandSecret, InbandText, LinkedChatStore, ListMomentsQuery, MentionCursor,
+    MergeTextFileFromVersion, MergeTextFileResult, MomentPage, MomentRecord, PendingBookmarkRow,
+    ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision,
+    ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink,
+    SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
+    SecretMomentPage, SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite,
+    SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata,
+    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread,
+    VersionFileChangePage, VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary,
+    WriteResult, WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
     capture_secret_retire_with, collection_record_id_mismatch_in_tx,
@@ -2292,6 +2292,7 @@ enum Command {
     },
     AutomationReclaimRunning {
         workspace_id: String,
+        attempts: Option<Vec<AutomationClaimAttempt>>,
         max_attempts: i64,
         stale_before_ms: i64,
         now_ms: i64,
@@ -2302,6 +2303,10 @@ enum Command {
     AutomationFailures {
         workspace_id: String,
         reply: oneshot::Sender<Result<Vec<AutomationFailure>, RuntimeError>>,
+    },
+    AutomationRunningAttempts {
+        workspace_id: String,
+        reply: oneshot::Sender<Result<Vec<AutomationClaimAttempt>, RuntimeError>>,
     },
     Relay {
         transport: DeferredRelayTransport,
@@ -5902,9 +5907,11 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn automation_reclaim_running(
         &self,
         workspace_id: String,
+        attempts: Option<Vec<AutomationClaimAttempt>>,
         max_attempts: i64,
         stale_before_ms: i64,
         now_ms: i64,
@@ -5915,11 +5922,27 @@ impl ActorHandle {
         self.tx
             .send(Command::AutomationReclaimRunning {
                 workspace_id,
+                attempts,
                 max_attempts,
                 stale_before_ms,
                 now_ms,
                 faults,
                 token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn automation_running_attempts(
+        &self,
+        workspace_id: String,
+    ) -> Result<Vec<AutomationClaimAttempt>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::AutomationRunningAttempts {
+                workspace_id,
                 reply,
             })
             .await
@@ -10008,6 +10031,7 @@ fn worker_main(
             }
             Command::AutomationReclaimRunning {
                 workspace_id,
+                attempts,
                 max_attempts,
                 stale_before_ms,
                 now_ms,
@@ -10021,6 +10045,7 @@ fn worker_main(
                     dohc_engine_domain::reclaim_running_automations(
                         &mut store,
                         &workspace_id,
+                        attempts.as_deref(),
                         max_attempts,
                         stale_before_ms,
                         now_ms,
@@ -10036,6 +10061,15 @@ fn worker_main(
             } => {
                 let outcome = dohc_engine_domain::list_automation_failures(&store, &workspace_id)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::AutomationRunningAttempts {
+                workspace_id,
+                reply,
+            } => {
+                let outcome =
+                    dohc_engine_domain::list_running_automation_attempts(&store, &workspace_id)
+                        .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::SearchPage {
@@ -16445,5 +16479,65 @@ mod capture_secret_root_guard_tests {
                 ..
             })
         ));
+    }
+}
+
+#[cfg(test)]
+mod rollback_identity_tests {
+    use super::*;
+    use dohc_engine_testkit::ScratchDir;
+
+    fn pending_write(job_id: &str, workspace_id: &str) -> MaterializationJob {
+        MaterializationJob {
+            job_id: job_id.to_owned(),
+            workspace_id: workspace_id.to_owned(),
+            target_path: "asset.bin".to_owned(),
+            content_sha256: hex_sha256(b"asset"),
+            operation: MaterializationOperation::Write,
+            preimage: Preimage::Absent,
+            target_generation: 1,
+            status: JobStatus::Pending,
+            created_at_ms: 1,
+        }
+    }
+
+    /// Only the encoded prefix marks a rollback job. One that carries the
+    /// prefix but does not decode, or decodes to another workspace, fails
+    /// closed as `Some(false)`: never `None` (the ordinary replay path) and
+    /// never `Some(true)`.
+    #[test]
+    fn undecodable_or_foreign_rollback_identities_fail_closed() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let db = scratch.engine_db_path().expect("engine database path");
+        let store = EngineStore::open(&db, 1).expect("open store");
+
+        let bare = pending_write("rollback-restore_target", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &bare).expect("bare prefix"),
+            None,
+            "a caller-chosen id that merely starts with the word is an ordinary job."
+        );
+
+        let truncated = pending_write("rollback-restore_\u{1f}4:ws-a", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &truncated).expect("truncated"),
+            Some(false),
+            "a rollback id that stops mid-encoding is refused."
+        );
+
+        let foreign_id = binary_rollback_job_identity("ws-b", "main", "moment-1");
+        let foreign = pending_write(&foreign_id, "ws-b");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &foreign).expect("foreign"),
+            Some(false),
+            "a rollback minted for another workspace never matches this one."
+        );
+
+        let ordinary = pending_write("write-mat_ordinary", "ws-a");
+        assert_eq!(
+            rollback_job_matches_active(&store, "ws-a", &ordinary).expect("ordinary"),
+            None,
+            "a non-rollback job takes the ordinary replay path."
+        );
     }
 }

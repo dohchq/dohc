@@ -1111,6 +1111,9 @@ function createPluginWorkspaceRuntimeParts(
                 currentPipeline.ensureStarted(pluginId, commandAuthority),
               ),
           );
+          if (!automations.activeRun({ claimId: params.claimId, pluginId })) {
+            return { ok: true as const };
+          }
           await host.runAutomation(pluginId, params);
           return { ok: true as const };
         },
@@ -13589,6 +13592,7 @@ function testEngineRestartOverrides(): {
 }
 
 async function startRustEngineDaemon(): Promise<boolean> {
+  const restartingPluginRuntimes = new Set<PluginWorkspaceRuntimes<CreatedWorkspace>>();
   // Everything, including resolving the binary path, runs inside the try: a
   // throw while building the options would otherwise reject this whenReady
   // callback and leave the user with no dialog, on the one path whose job is
@@ -13602,6 +13606,11 @@ async function startRustEngineDaemon(): Promise<boolean> {
         resourcesPath: process.resourcesPath,
       }),
       onFailure: (error, terminal) => {
+        if (terminal) {
+          for (const runtimes of restartingPluginRuntimes) {
+            runtimes.failEngineRestart(error);
+          }
+        }
         // The supervisor's diagnostic is for us: it names engine.ping, probe
         // counts and wedge budgets, which tell a developer or an agent exactly
         // which limit was hit. It goes to the log in full.
@@ -13624,12 +13633,27 @@ async function startRustEngineDaemon(): Promise<boolean> {
           );
         }
       },
+      beforePublish: async () => {
+        await Promise.all(workspaceAuthorities.workspaceIds().map((workspaceId) =>
+          workspaceAuthorities.withAuthority(workspaceId, (lease) => {
+            const runtimes = lease.state.pluginRuntimes;
+            restartingPluginRuntimes.add(runtimes);
+            return runtimes.prepareForEngineRestart();
+          }),
+        ));
+      },
       // A capture event can die with the previous daemon's transport after its
       // moment committed; the replacement never re-emits it (its baseline finds
       // disk and manifest agreeing). One repaint per healthy launch closes that
       // staleness window. Scope-free: the lost event could have belonged to
       // any open workspace.
-      onLaunch: () => notifyRenderer(),
+      onLaunch: () => {
+        for (const runtimes of restartingPluginRuntimes) {
+          runtimes.resumeAfterEngineRestart();
+        }
+        restartingPluginRuntimes.clear();
+        notifyRenderer();
+      },
     });
     await rustEngineDaemon.start();
     // The daemon owns capture: its capture.momentRecorded events are the only
@@ -13677,6 +13701,9 @@ async function startRustEngineDaemon(): Promise<boolean> {
     logLaunchMarksOnce();
     return true;
   } catch (error) {
+    for (const runtimes of restartingPluginRuntimes) {
+      runtimes.failEngineRestart(error);
+    }
     const message =
       error instanceof Error ? error.message : "Unknown Rust engine startup error.";
     console.error("[desktop] Rust engine daemon failed to start:", error);

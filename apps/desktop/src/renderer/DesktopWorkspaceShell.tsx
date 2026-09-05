@@ -99,6 +99,17 @@ import {
 } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import {
+  abandonPendingCollectionFieldWrites,
+  advanceCollectionWriteLineage,
+  COLLECTION_WRITE_STALL_MS,
+  collectionWriteFailures,
+  remapCollectionFieldWritePaths,
+  settleCollectionFieldWrites,
+  useCollectionWritesBlockingAdmission,
+  useCollectionWriteLineage,
+} from "./collections/recordFieldWrites";
+import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -118,7 +129,7 @@ import {
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
-import { Explorer } from "./workbench/Explorer";
+import { Explorer, type TreeChangeOperation } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { indexFileListing } from "./workbench/file-listing-index";
 import {
@@ -869,7 +880,10 @@ export function EngineMomentDiffPage({
 }: {
   workspaceId: string;
   tabPath: string;
-  onBeforeRestore: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs — held across the restore IPC so no cell
+  // edit lands between the drain and the lineage change.
+  onBeforeRestore: () => Promise<() => void>;
   onOpenFile: (path: string) => void;
   onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
@@ -946,12 +960,14 @@ export function EngineMomentDiffPage({
     restoreInFlight.current = true;
     const token = liveToken.current;
     setRestoreState({ status: "undoing" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await onBeforeRestore();
+      releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({
         workspaceId,
         momentId: target,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -962,7 +978,6 @@ export function EngineMomentDiffPage({
             : "Undid the restore. This was recorded in history.",
       });
       setUndoMomentId(null);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({
@@ -971,6 +986,7 @@ export function EngineMomentDiffPage({
           error instanceof Error ? error.message : "Could not undo this restore.",
       });
     } finally {
+      releaseOperation?.();
       restoreInFlight.current = false;
     }
   }, [onBeforeRestore, onRestored, restoreBusy, undoMomentId, workspaceId]);
@@ -1059,12 +1075,14 @@ export function EngineMomentDiffPage({
     const token = liveToken.current;
     setConfirmRestoreOpen(false);
     setRestoreState({ status: "restoring" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await onBeforeRestore();
+      releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({
         workspaceId,
         momentId: moment.id,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -1075,7 +1093,6 @@ export function EngineMomentDiffPage({
             : "Restored the earlier state. Undo restore is available here.",
       });
       setUndoMomentId(result.restoredMomentId);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({
@@ -1084,6 +1101,7 @@ export function EngineMomentDiffPage({
           error instanceof Error ? error.message : "Could not restore this file.",
       });
     } finally {
+      releaseOperation?.();
       restoreInFlight.current = false;
     }
   };
@@ -1820,25 +1838,42 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
-  // Version and restore operations are workspace-wide, so every mounted
-  // draft must settle before the workspace lineage changes.
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
-  const beginDraftOperation = useCallback(async (): Promise<DraftFlush> => {
+  const workspaceId = props.workspace.workspaceId;
+  const collectionLineage = useCollectionWriteLineage(workspaceId);
+  // Version switches, merges, and moment restores are workspace-wide lineage
+  // changes: every mounted draft and queued collection write must settle
+  // first, and no cell edit may be accepted while the change is in flight.
+  // The caller holds the returned release across its IPCs.
+  const beginLineageOperation = useCallback(
+    () => beginCollectionLineageOperation(workspaceId, flushStableDrafts),
+    [flushStableDrafts, workspaceId],
+  );
+  const beginDraftOperation = useCallback(async (): Promise<TreeChangeOperation> => {
     const scope = { flushes: new Set<DraftFlush>() };
     for (const registration of mountedEditorsRef.current.values()) {
       if (registration.flush) scope.flushes.add(registration.flush);
     }
     draftOperationScopesRef.current.add(scope);
 
+    // A queued collection cell write names its record by PATH, which the
+    // caller's move is about to change. The gate pauses new cell acceptance
+    // for the whole operation and drains the queue — flushing drafts only
+    // settles mounted editors — and refuses the operation over a retained
+    // failure, whose retry would otherwise land on the vacated path.
+    let releaseCollectionWrites: () => void;
     try {
-      await flushStableDrafts();
+      releaseCollectionWrites = await beginCollectionLineageOperation(
+        workspaceId,
+        flushStableDrafts,
+      );
     } catch (error) {
       draftOperationScopesRef.current.delete(scope);
       throw error;
     }
 
     let settlement: Promise<void> | null = null;
-    return (options?: DraftFlushOptions) => {
+    const settle = (options?: DraftFlushOptions) => {
       if (settlement) return settlement;
       settlement = (async () => {
         const drained = new Set<DraftFlush>();
@@ -1869,9 +1904,9 @@ export function DesktopWorkspaceShell(props: {
       })();
       return settlement;
     };
-  }, [flushStableDrafts]);
+    return { settle, release: releaseCollectionWrites };
+  }, [flushStableDrafts, workspaceId]);
 
-  const workspaceId = props.workspace.workspaceId;
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
   // both happened; there is no separate admission IPC. Exact-session bootstrap
@@ -1953,6 +1988,9 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // Admission stopped on pending writes or retained failures from another
+    // workspace. Resolving the last blocker retries the open without a click.
+    blockedOnCollectionWrites?: boolean;
   } | null>(null);
   const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
   const workspaceOpenFailure =
@@ -1960,6 +1998,17 @@ export function DesktopWorkspaceShell(props: {
     workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration
       ? workspaceOpenFailedFor
       : null;
+  // Admission must wait for ANOTHER workspace's accepted writes: they still
+  // need that workspace's renderer session, which `openWorkspace` revokes.
+  // This workspace's own failures never block its admission.
+  const admissionBlockedOnWrites = useCollectionWritesBlockingAdmission(workspaceId);
+  useEffect(() => {
+    if (!workspaceOpenFailure?.blockedOnCollectionWrites) return;
+    if (admissionBlockedOnWrites) return;
+    // Pending saves, schema mutations, and retained failures have all cleared.
+    setWorkspaceOpenFailedFor(null);
+    setWorkspaceOpenAttempt((attempt) => attempt + 1);
+  }, [admissionBlockedOnWrites, workspaceOpenFailure]);
   // Set-aside recovery markers: every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
   // knowable for all of them. Deliberately not part of
@@ -3431,7 +3480,10 @@ export function DesktopWorkspaceShell(props: {
   // which is why this is not a list of the shell's own flags.
   const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
-    (activeVersionId?: string) => {
+    (activeVersionId?: string, lineageChanged = true) => {
+      if (lineageChanged) {
+        advanceCollectionWriteLineage(workspaceId);
+      }
       setVersionEpoch((epoch) => epoch + 1);
       // A version switch changes which timeline is true, and the boundary is
       // only worth anything before the answers it has to judge arrive.
@@ -3998,6 +4050,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {
+      advanceCollectionWriteLineage(workspaceId);
       void refreshFiles().catch((error) =>
         reportShellError("Could not refresh workspace files.", error),
       );
@@ -4005,7 +4058,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Could not refresh history.", error),
       );
     },
-    [refreshFiles, refreshHistory, reportShellError],
+    [refreshFiles, refreshHistory, reportShellError, workspaceId],
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
@@ -4342,6 +4395,14 @@ export function DesktopWorkspaceShell(props: {
       // as tabs and pins — a rename must not strand the
       // notice on the old path while the tab remaps to the new one.
       remapOrphanedDraftPaths(workspaceId, (path) =>
+        projectTreePath(path, changes),
+      );
+      // Collection writes key their record and collection by path too. This
+      // runs while the operation still holds the cell-edit pause, so a
+      // retained write's retry targets the record where the move put it. A
+      // deleted path keeps the write at its original path, where the retry
+      // fails and the value stays retained for the user to discard.
+      remapCollectionFieldWritePaths(workspaceId, (path) =>
         projectTreePath(path, changes),
       );
       const current = wbRef.current;
@@ -4928,6 +4989,43 @@ export function DesktopWorkspaceShell(props: {
     // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
+      // Admission revokes the PREVIOUS workspace's renderer session, and a
+      // queued collection cell write still needs it to open its record
+      // (engineYDocSessionIpc rejects opens for a non-current workspace).
+      // Those accepted writes land first; this workspace's own writes are
+      // untouched by its admission and do not hold it up.
+      const settled = await settleCollectionFieldWrites(workspaceId, {
+        stallMs: COLLECTION_WRITE_STALL_MS,
+      });
+      if (cancelled) return;
+      if (settled.stalled) {
+        // Unapplied input from other workspaces becomes retained failures.
+        // Applied writes remain owned until the engine confirms their save.
+        abandonPendingCollectionFieldWrites(
+          "dohc could not finish saving this change. Retry it, or discard the unsaved change.",
+          workspaceId,
+        );
+      }
+      if (settled.stalled || settled.failed > 0) {
+        // Admission would strand these writes' retries. The failure surface
+        // shows blocked instead of a spinner, and resolving the failures
+        // (or Try again) reruns this effect.
+        const retainedFailures = collectionWriteFailures().filter(
+          (failure) => failure.workspaceId !== workspaceId,
+        ).length;
+        setWorkspaceOpenFailedFor({
+          workspaceId,
+          selectionGeneration: workspaceSelectionGeneration,
+          message:
+            retainedFailures === 0
+              ? "dohc has not confirmed this save yet. Keep dohc open until saving finishes."
+              : retainedFailures === 1
+                ? "A collection change in another workspace has not saved. Retry or discard it to continue."
+                : "Collection changes in another workspace have not saved. Retry or discard them to continue.",
+          blockedOnCollectionWrites: true,
+        });
+        return;
+      }
       let status: SyncStatusResult;
       try {
         status = await bridge().openWorkspace({ workspaceId });
@@ -6394,7 +6492,7 @@ export function DesktopWorkspaceShell(props: {
                 <VersionMenu
                   workspaceId={workspaceId}
                   activeTabDirty={anyTabDirty}
-                  flushActiveDraft={flushActiveDraft}
+                  beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
                   onError={(message) => setShellError({ message, retry: null })}
@@ -6426,7 +6524,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               state={tryState}
               activeTabDirty={anyTabDirty}
-              flushActiveDraft={flushActiveDraft}
+              beginLineageOperation={beginLineageOperation}
               onOpenCompare={openVersionCompareTab}
               onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
               onDismissed={onTryReviewDismissed}
@@ -6553,7 +6651,7 @@ export function DesktopWorkspaceShell(props: {
                 <EngineMomentDiffPage
                   workspaceId={workspaceId}
                   tabPath={tabPath ?? ""}
-                  onBeforeRestore={flushActiveDraft}
+                  onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
                   onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
@@ -6751,7 +6849,7 @@ export function DesktopWorkspaceShell(props: {
               groupCollectionPath ? (
                 <Suspense fallback={<PanelLoading label="collection" />}>
                   <LazyCollectionPage
-                    key={tabPath}
+                    key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
@@ -7215,6 +7313,7 @@ export function DesktopWorkspaceShell(props: {
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
+          beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
         />

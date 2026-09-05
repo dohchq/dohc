@@ -32,6 +32,16 @@ function probesSent(client: FakeClient | undefined): number {
 }
 vi.setConfig({ testTimeout: 20_000 });
 
+function deferred() {
+  let resolve!: () => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 // The healthy window the restart-budget test configures; its wait is derived
 // from this so the two can never drift apart.
 const HEALTHY_RESET_MS = 20;
@@ -268,6 +278,137 @@ describe("Rust engine daemon lifecycle", () => {
     } finally {
       await lifecycle.stop();
     }
+  });
+
+  it("keeps the replacement client unavailable until previous hosts have stopped", async () => {
+    const retiring = deferred();
+    const retired = deferred();
+    const published = deferred();
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
+    let publications = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      sleep: async () => undefined,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const client = new FakeClient();
+        clients.push(client);
+        return client;
+      },
+      beforePublish: async () => {
+        if (clients.length === 1) return;
+        retiring.resolve();
+        await retired.promise;
+      },
+      onLaunch: () => {
+        if (++publications === 2) published.resolve();
+      },
+    });
+    try {
+      await lifecycle.start();
+      exits[0]?.(1, null);
+      await retiring.promise;
+      expect(() => lifecycle.currentClient()).toThrow("not available");
+      expect(publications).toBe(1);
+      retired.resolve();
+      await published.promise;
+      expect(lifecycle.currentClient()).toBe(clients[1]);
+    } finally {
+      retired.resolve();
+      await lifecycle.stop();
+    }
+  });
+
+  it("does not publish a generation that exits during retirement, and retries the barrier", async () => {
+    const retiring = deferred();
+    const retired = deferred();
+    const published = deferred();
+    const exits: EngineClientSpawnOptions["onExit"][] = [];
+    const clients: FakeClient[] = [];
+    let barriers = 0;
+    let publications = 0;
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      sleep: async () => undefined,
+      maxRestarts: 2,
+      launch: async (options) => {
+        exits.push(options.onExit);
+        const client = new FakeClient();
+        clients.push(client);
+        return client;
+      },
+      beforePublish: async () => {
+        if (++barriers === 2) {
+          retiring.resolve();
+          await retired.promise;
+        }
+      },
+      onLaunch: () => {
+        if (++publications === 2) published.resolve();
+      },
+    });
+    try {
+      await lifecycle.start();
+      exits[0]?.(1, null);
+      await retiring.promise;
+      exits[1]?.(1, null);
+      retired.resolve();
+      await published.promise;
+      expect(barriers).toBe(3);
+      expect(publications).toBe(2);
+      expect(clients[1]?.closed).toBe(true);
+      expect(lifecycle.currentClient()).toBe(clients[2]);
+    } finally {
+      retired.resolve();
+      await lifecycle.stop();
+    }
+  });
+
+  it("fails publication when retiring the previous hosts fails", async () => {
+    const failure = new Error("plugin host teardown failed");
+    const client = new FakeClient();
+    const onLaunch = vi.fn();
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+      beforePublish: async () => { throw failure; },
+      onLaunch,
+    });
+    try {
+      await expect(lifecycle.start()).rejects.toBe(failure);
+      expect(client.closed).toBe(true);
+      expect(onLaunch).not.toHaveBeenCalled();
+      expect(() => lifecycle.currentClient()).toThrow("not available");
+    } finally {
+      await lifecycle.stop();
+    }
+  });
+
+  it("stops without waiting for retirement and observes its later rejection", async () => {
+    const retiring = deferred();
+    const retired = deferred();
+    const client = new FakeClient();
+    const onLaunch = vi.fn();
+    const lifecycle = new EngineDaemonLifecycle({
+      command: fakeBinary(),
+      launch: async () => client,
+      beforePublish: async () => {
+        retiring.resolve();
+        await retired.promise;
+      },
+      onLaunch,
+    });
+    const starting = lifecycle.start();
+    await retiring.promise;
+    const stopping = lifecycle.stop();
+    expect(client.closed).toBe(true);
+    expect(() => lifecycle.currentClient()).toThrow("not available");
+    await stopping;
+    await starting;
+    expect(onLaunch).not.toHaveBeenCalled();
+    retired.reject(new Error("retirement failed after shutdown"));
+    await Promise.resolve();
   });
 
   it("fails loudly before launch when the configured binary is missing", async () => {

@@ -8,6 +8,13 @@ import {
 } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import {
+  COLLECTION_WRITE_STALL_MS,
+  abandonPendingCollectionFieldWrites,
+  collectionWriteFailures,
+  hasPendingCollectionFieldWrites,
+  settleCollectionFieldWrites,
+} from "./collections/recordFieldWrites";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 import { trapModalTabKey } from "./modalFocus";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
@@ -31,6 +38,7 @@ type PendingUnload = {
   resume: () => Promise<boolean>;
 };
 let pendingUnload: PendingUnload | null = null;
+let exitRequest = 0;
 
 // The mounted guard registers its dialog opener here so the decide-first
 // paths (update install) can warn without triggering the destructive call.
@@ -39,6 +47,7 @@ let openRecoveryWarning:
   | null = null;
 
 export function requestGuardedReload(): void {
+  exitRequest += 1;
   const attempt: PendingUnload = {
     kind: "reload",
     resume: () =>
@@ -65,8 +74,15 @@ export function requestGuardedReload(): void {
 // instead of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
+  const request = ++exitRequest;
+  if (hasUnsettledCollectionWrites() && !(await settleCollectionWritesForExit())) {
+    return null;
+  }
+  if (request !== exitRequest) return null;
   if (atRiskOrphanedDraftIds().length === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
+    if (request !== exitRequest) return null;
+    if (!result.accepted && hasUnsettledCollectionWrites()) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
     // aside after this renderer's own check. That refusal
     // is a recovery decision, not an install failure, and the direct branch
@@ -104,11 +120,65 @@ function resumeExit(kind: "update" | "quit"): Promise<boolean> {
     );
 }
 
+function hasUnsettledCollectionWrites(): boolean {
+  return hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
+}
+
+async function settleCollectionWritesForExit(): Promise<boolean> {
+  const settled = await settleCollectionFieldWrites(undefined, {
+    stallMs: COLLECTION_WRITE_STALL_MS,
+  });
+  if (settled.stalled) {
+    abandonPendingCollectionFieldWrites(
+      "dohc could not finish saving this change. Retry it before closing, or discard the unsaved change.",
+    );
+  }
+  return !settled.stalled && settled.failed === 0;
+}
+
+// One drain serves every unload attempt it overlaps: a second beforeunload
+// while writes are still landing hands its intent to the drain in flight
+// instead of racing a second resume against the first.
+let pendingWritesDrain: { pending: PendingUnload | null; request: number } | null = null;
+
+function holdUnloadForCollectionWrites(pending: PendingUnload | null): void {
+  if (pendingWritesDrain) {
+    pendingWritesDrain.pending = pending;
+    pendingWritesDrain.request = exitRequest;
+    return;
+  }
+  const drain = { pending, request: exitRequest };
+  pendingWritesDrain = drain;
+  void (async () => {
+    const settled = await settleCollectionWritesForExit();
+    if (pendingWritesDrain !== drain) return;
+    pendingWritesDrain = null;
+    if (!settled || drain.request !== exitRequest) return;
+    const claimed = drain.pending;
+    if (claimed) pendingUnload = claimed;
+    const resume =
+      claimed?.resume ??
+      (() => {
+        window.close();
+        return Promise.resolve(true);
+      });
+    void resume().then((unloading) => {
+      // A resume that failed without unloading must not label a later,
+      // unrelated close (`requestGuardedReload` precedent).
+      if (!unloading && claimed && pendingUnload === claimed) {
+        pendingUnload = null;
+      }
+    });
+  })();
+}
+
 // Test seam: this module's state is deliberately app-run scoped, so suites
 // reset it between tests instead of leaking an unclaimed intent into the next
 // one.
 export function resetGuardedExits(): void {
+  exitRequest += 1;
   pendingUnload = null;
+  pendingWritesDrain = null;
 }
 
 // The install's own exit runs through beforeunload like any other unload, and
@@ -120,7 +190,19 @@ export function resetGuardedExits(): void {
 // one-shot and already spent by the time beforeunload can fire, and main has
 // pre-approved the quit it started. A plain window.close() would also strand
 // the staged installer on macOS, where closing a window does not quit.
-function beginInstall(): Promise<UpdateActionResult> {
+async function beginInstall(): Promise<UpdateActionResult> {
+  const request = exitRequest;
+  for (;;) {
+    const result = await attemptInstall();
+    if (result.accepted || !hasUnsettledCollectionWrites()) return result;
+    if (request !== exitRequest) return result;
+    // Main can observe an edit accepted after the renderer's first drain.
+    // A refused install has not consumed the updater's one-shot latch.
+    if (!(await settleCollectionWritesForExit()) || request !== exitRequest) return result;
+  }
+}
+
+function attemptInstall(): Promise<UpdateActionResult> {
   const attempt: PendingUnload = {
     kind: "update",
     resume: () => resumeExit("update"),
@@ -251,10 +333,21 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   };
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      exitRequest += 1;
       // Consumed either way: if this unload proceeds the slot dies with the
       // page, and if it is blocked the dialog now owns the answer.
       const pending = pendingUnload;
       pendingUnload = null;
+      if (hasUnsettledCollectionWrites()) {
+        // An accepted collection cell edit has not reached its record yet.
+        // Stop the unload, land the queue, then rerun EXACTLY the requested
+        // action — whose own beforeunload re-checks the drafts. The draft
+        // approval is NOT consumed here: this is the same attempt, resumed.
+        event.preventDefault();
+        void bridge().holdQuit();
+        holdUnloadForCollectionWrites(pending);
+        return;
+      }
       if (!hasUnapprovedDrafts()) {
         // One-shot: an approval is consumed by the unload it
         // permits — never a later, unrelated close.
@@ -295,7 +388,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       (requestId) => {
         void bridge().answerRecoveryCheck({
           requestId,
-          blocked: hasUnapprovedDrafts(),
+          blocked: hasUnapprovedDrafts() || hasUnsettledCollectionWrites(),
         });
       },
     );
@@ -303,6 +396,15 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // resume when nothing is at stake, hold when the dialog takes over — so
     // main's hung-renderer fail-safe never fires for a live renderer.
     const unsubscribeQuit = bridge().onQuitRequested(() => {
+      exitRequest += 1;
+      if (hasUnsettledCollectionWrites()) {
+        void bridge().holdQuit();
+        holdUnloadForCollectionWrites({
+          kind: "quit",
+          resume: () => resumeExit("quit"),
+        });
+        return;
+      }
       if (!hasUnapprovedDrafts()) {
         // Claim the intent before resuming. Answering
         // clear does not end the story: a queued reopen can still capture a
@@ -422,8 +524,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     rearmGuard,
                     BYPASS_REARM_MS,
                   );
+                  const request = exitRequest;
                   void resume().then((unloading) => {
-                    if (unloading) return;
+                    if (unloading || request !== exitRequest) return;
                     // The action did not unload. When a draft this approval
                     // never covered is why — the boundary re-check refuses an
                     // install for it — the user gets the decision back, now

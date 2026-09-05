@@ -9,11 +9,22 @@ import {
   within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as Y from "yjs";
+import type { EngineYDocSaveStateEvent } from "../ipc/channels";
+import { disposeEngineDocLeasesForTests } from "./collab/useEngineDoc";
+import {
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
+  enqueueCollectionFieldWrite,
+  resetCollectionFieldWritesForTests,
+} from "./collections/recordFieldWrites";
 import { AppErrorBoundary } from "./ErrorBoundary";
 import { Overlay } from "./Overlay";
 import {
   RecoveryCloseGuard,
+  requestGuardedReload,
   requestGuardedUpdateInstall,
   resetGuardedExits,
 } from "./RecoveryCloseGuard";
@@ -72,13 +83,17 @@ beforeEach(() => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
   cleanup();
   resetGuardedExits();
+  await disposeEngineDocLeasesForTests();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   vi.clearAllMocks();
   resetOrphanedDrafts();
+  // The collection write queue is module state on purpose — a pending head
+  // left by one test must not hold the next test's unload.
+  resetCollectionFieldWritesForTests();
 });
 
 // #567 / #579 review r4+r5: a set-aside draft that storage cannot keep lives
@@ -1046,6 +1061,17 @@ describe("RecoveryCloseGuard with working storage", () => {
 // the reload it offers must still be announced.
 describe("main.tsx composition", () => {
   it("restores stored recoveries and keeps the close guard alive above a crashed root", async () => {
+    let mountedRoot: Root | null = null;
+    vi.doMock("react-dom/client", async (importOriginal) => {
+      const actual = await importOriginal<typeof import("react-dom/client")>();
+      return {
+        ...actual,
+        createRoot: (...args: Parameters<typeof actual.createRoot>) => {
+          mountedRoot = actual.createRoot(...args);
+          return mountedRoot;
+        },
+      };
+    });
     vi.doMock("./DesktopRoot", () => ({
       DesktopRoot: (): never => {
         throw new Error("boom");
@@ -1115,7 +1141,419 @@ describe("main.tsx composition", () => {
       restored.result.current.map((row) => `${row.path}:${row.persisted}`),
     ).toContain("notes/a.md:true");
     restored.unmount();
+    act(() => mountedRoot?.unmount());
     container.remove();
     vi.doUnmock("./DesktopRoot");
+    vi.doUnmock("react-dom/client");
+  });
+});
+
+// An accepted collection cell edit travels through a queue in renderer
+// memory (recordFieldWrites) to its record's live document. Every unload —
+// close, reload, native quit, update restart — destroys that memory, so the
+// guard must land the queue first and then rerun EXACTLY the requested
+// action. main.tsx mounts the host beside the guard; these tests mirror that
+// composition.
+describe("RecoveryCloseGuard with pending collection writes", () => {
+  const CHANGE_ONE = {
+    recordId: "rec-1",
+    recordPath: "tasks/one.md",
+    field: "done",
+    value: true,
+  };
+  const CHANGE_TWO = {
+    recordId: "rec-2",
+    recordPath: "tasks/two.md",
+    field: "done",
+    value: false,
+  };
+
+  // The real queue and the real writer, over a controllable engine: opens
+  // succeed (or are deferred), and a save settles only when a test emits its
+  // "saved" event — exactly how a pending write looks at an unload boundary.
+  function stubWriteBridge(overrides: Record<string, unknown> = {}) {
+    const sessionsByPath = new Map<string, string>();
+    const applied = vi.fn(async (_payload: { sessionId: string; seq: number }) => ({
+      accepted: true as const,
+    }));
+    const saveStateListeners = new Set<
+      (event: EngineYDocSaveStateEvent) => void
+    >();
+    stubBridge({
+      openEngineYDocSession: vi.fn(
+        async (payload: { path: string; sessionId: string }) => {
+          sessionsByPath.set(payload.path, payload.sessionId);
+          const doc = new Y.Doc();
+          doc.getMap("frontmatter").set("id", payload.path === "tasks/one.md" ? "rec-1" : "rec-2");
+          return {
+            available: true,
+            initialUpdate: Y.encodeStateAsUpdate(doc),
+            lineageGeneration: 1,
+          };
+        },
+      ),
+      applyEngineYDocUpdate: applied,
+      closeEngineYDocSession: vi.fn(async () => undefined),
+      onEngineYDocRemoteUpdate: vi.fn(() => () => undefined),
+      onEngineYDocLineageReplacement: vi.fn(() => () => undefined),
+      onEngineYDocSaveState: vi.fn(
+        (listener: (event: EngineYDocSaveStateEvent) => void) => {
+          saveStateListeners.add(listener);
+          return () => saveStateListeners.delete(listener);
+        },
+      ),
+      ...overrides,
+    });
+    const settleSave = (path: string) => {
+      act(() => {
+        const sessionId = sessionsByPath.get(path);
+        expect(sessionId).toBeTruthy();
+        const seq = Math.max(
+          ...applied.mock.calls
+            .filter(([payload]) => payload.sessionId === sessionId)
+            .map(([payload]) => payload.seq),
+        );
+        expect(seq).toBeGreaterThan(0);
+        for (const listener of [...saveStateListeners]) {
+          listener({ sessionId: sessionId!, state: "saved", seq });
+        }
+      });
+    };
+    const awaitStaged = (path: string) =>
+      waitFor(() => {
+        const sessionId = sessionsByPath.get(path);
+        expect(sessionId).toBeTruthy();
+        expect(
+          applied.mock.calls.some(([payload]) => payload.sessionId === sessionId),
+        ).toBe(true);
+      });
+    return { settleSave, awaitStaged };
+  }
+
+  function renderGuardWithHost() {
+    return render(
+      <RecoveryCloseGuard>
+        <CollectionFieldWriteHost />
+      </RecoveryCloseGuard>,
+    );
+  }
+
+  function dispatchUnload(): Event {
+    const event = new Event("beforeunload", { cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  it("a close waits for the whole queued tail, then closes on its own", async () => {
+    const { settleSave, awaitStaged } = stubWriteBridge();
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_TWO);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    // MUTATION (write hold): drop the pending-writes branch from
+    // onBeforeUnload. The close proceeds here and the queued tail dies with
+    // the renderer.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    // No drafts are at stake, so no dialog: the guard is waiting, not asking.
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    settleSave("tasks/one.md");
+    // The head settled, but the TAIL is still queued: the close stays held.
+    await awaitStaged("tasks/two.md");
+    expect(closeSpy).not.toHaveBeenCalled();
+    settleSave("tasks/two.md");
+    await waitFor(() => expect(closeSpy).toHaveBeenCalled());
+    closeSpy.mockRestore();
+  });
+
+  it("a blocked reload resumes as a reload once the write lands", async () => {
+    const reloadRenderer = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({ reloadRenderer });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    requestGuardedReload();
+    expect(reloadRenderer).toHaveBeenCalledTimes(1);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    settleSave("tasks/one.md");
+    // MUTATION (retain the action): resume with window.close() instead of
+    // the claimed intent. The user asked to RELOAD and gets an exit.
+    await waitFor(() => expect(reloadRenderer).toHaveBeenCalledTimes(2));
+    expect(closeSpy).not.toHaveBeenCalled();
+    closeSpy.mockRestore();
+  });
+
+  it("a native quit blocked by a pending write resumes as the quit", async () => {
+    let requestQuit: (() => void) | null = null;
+    const resumeQuit = vi.fn(async () => undefined);
+    const holdQuit = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({
+      onQuitRequested: (listener: () => void) => {
+        requestQuit = listener;
+        return () => undefined;
+      },
+      resumeQuit,
+      holdQuit,
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    act(() => requestQuit!());
+    expect(holdQuit).toHaveBeenCalled();
+    expect(resumeQuit).not.toHaveBeenCalled();
+
+    settleSave("tasks/one.md");
+    await waitFor(() => expect(resumeQuit).toHaveBeenCalledTimes(1));
+    // The resumed quit's own unload finds nothing left to hold.
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+  });
+
+  it("an update restart lands the write before starting the one-shot install", async () => {
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    const resumeQuit = vi.fn(async () => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({
+      installUpdate,
+      resumeQuit,
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const installing = requestGuardedUpdateInstall();
+    expect(installUpdate).not.toHaveBeenCalled();
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(resumeQuit).not.toHaveBeenCalled();
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+  });
+
+  it("drains an edit accepted during main's install check and retries the same restart", async () => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
+    renderGuardWithHost();
+    const installing = requestGuardedUpdateInstall();
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(2);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+  });
+
+  it.each([false, true])("a newer reload supersedes an install retry drain (confirmed: %s)", async (confirmed) => {
+    let refuse!: (result: { accepted: false }) => void;
+    const refused = new Promise<{ accepted: false }>((resolve) => { refuse = resolve; });
+    const installUpdate = vi.fn().mockReturnValueOnce(refused).mockResolvedValue({ accepted: true });
+    const reloadRenderer = vi.fn(async () => { dispatchUnload(); });
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate, reloadRenderer });
+    if (confirmed) captureOrphanedDraft("ws-1", "old.md", "Before restart");
+    renderGuardWithHost();
+    let installing: Promise<unknown>;
+    if (confirmed) {
+      expect(await requestGuardedUpdateInstall()).toBeNull();
+      await userEvent.click(await screen.findByTestId("recovery-close-anyway"));
+      installing = Promise.resolve();
+    } else {
+      installing = requestGuardedUpdateInstall();
+    }
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    await act(async () => { refuse({ accepted: false }); await refused; });
+    act(() => {
+      captureOrphanedDraft("ws-1", "new.md", "During restart");
+      requestGuardedReload();
+    });
+    settleSave("tasks/one.md");
+    await installing;
+    await waitFor(() => expect(screen.getByTestId("recovery-close-anyway").textContent).toBe("Reload anyway"));
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it("a write that fails while the unload waits keeps the app open", async () => {
+    let resolveOpen: ((result: { available: false }) => void) | null = null;
+    const open = new Promise<{ available: false }>((resolve) => {
+      resolveOpen = resolve;
+    });
+    stubWriteBridge({
+      openEngineYDocSession: vi.fn(() => open),
+    });
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+
+    // The record's open settles without a session: the write FAILS while the
+    // close waits. Exiting now would destroy the only surface that can show
+    // the failure, so the close stays stopped.
+    // MUTATION (failure gate): resume regardless of `failed`. The renderer
+    // exits over an error the user never saw.
+    await act(async () => {
+      resolveOpen!({ available: false });
+      await open;
+    });
+    await screen.findByTestId("collection-write-failure");
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(closeSpy).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole("button", { name: "Discard unsaved change" }));
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+    closeSpy.mockRestore();
+  });
+
+  it("an earlier failure blocks close, native recovery approval, and update installation", async () => {
+    let checkRecovery: ((requestId: string) => void) | null = null;
+    const answerRecoveryCheck = vi.fn(async () => undefined);
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    stubWriteBridge({
+      openEngineYDocSession: vi.fn(async () => ({ available: false })),
+      onRecoveryCheckRequested: (listener: (requestId: string) => void) => {
+        checkRecovery = listener;
+        return () => undefined;
+      },
+      answerRecoveryCheck,
+      installUpdate,
+    });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await screen.findByTestId("collection-write-failure");
+
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    act(() => checkRecovery!("collection-recovery-check"));
+    expect(answerRecoveryCheck).toHaveBeenCalledWith({
+      requestId: "collection-recovery-check",
+      blocked: true,
+    });
+    expect(await requestGuardedUpdateInstall()).toBeNull();
+    expect(installUpdate).not.toHaveBeenCalled();
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+  });
+
+  it.each(["close", "quit"] as const)(
+    "a later %s replaces an update waiting for collection saves",
+    async (kind) => {
+      let requestQuit: (() => void) | null = null;
+      const installUpdate = vi.fn(async () => ({ accepted: true }));
+      const resumeQuit = vi.fn(async () => undefined);
+      const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+      const { settleSave, awaitStaged } = stubWriteBridge({
+        installUpdate,
+        resumeQuit,
+        onQuitRequested: (listener: () => void) => {
+          requestQuit = listener;
+          return () => undefined;
+        },
+      });
+      renderGuardWithHost();
+      act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+      await awaitStaged("tasks/one.md");
+      const installing = requestGuardedUpdateInstall();
+      if (kind === "close") expect(dispatchUnload().defaultPrevented).toBe(true);
+      else act(() => requestQuit!());
+      settleSave("tasks/one.md");
+      expect(await installing).toBeNull();
+      await waitFor(() => expect(kind === "close" ? closeSpy : resumeQuit).toHaveBeenCalledTimes(1));
+      expect(installUpdate).not.toHaveBeenCalled();
+    },
+  );
+
+  it("a later update replaces a close waiting for collection saves", async () => {
+    const installUpdate = vi.fn(async () => ({ accepted: true }));
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    const { settleSave, awaitStaged } = stubWriteBridge({ installUpdate });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await awaitStaged("tasks/one.md");
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    const installing = requestGuardedUpdateInstall();
+    settleSave("tasks/one.md");
+    expect(await installing).toEqual({ accepted: true });
+    expect(installUpdate).toHaveBeenCalledTimes(1);
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("a stalled save keeps its input and blocks exit until explicit discard", async () => {
+    let resolveOpen!: (result: { available: false }) => void;
+    const open = new Promise<{ available: false }>((resolve) => { resolveOpen = resolve; });
+    const openEngineYDocSession = vi.fn(() => open);
+    const closeSpy = vi.spyOn(window, "close").mockImplementation(() => undefined);
+    stubWriteBridge({ openEngineYDocSession });
+    renderGuardWithHost();
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE); });
+    await waitFor(() => expect(openEngineYDocSession).toHaveBeenCalled());
+    vi.useFakeTimers();
+    try {
+      expect(dispatchUnload().defaultPrevented).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE_ONE);
+      expect(screen.getByTestId("collection-write-failure").textContent)
+        .toContain("could not finish saving");
+      expect(dispatchUnload().defaultPrevented).toBe(true);
+      expect(closeSpy).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      await act(async () => { resolveOpen({ available: false }); await open; });
+    }
+    await userEvent.click(screen.getByRole("button", { name: "Discard unsaved change" }));
+    expect(dispatchUnload().defaultPrevented).toBe(false);
+    expect(closeSpy).not.toHaveBeenCalled();
+  });
+
+  it("the drafts warning still follows once the writes have landed", async () => {
+    const { settleSave, awaitStaged } = stubWriteBridge();
+    captureOrphanedDraft("ws-1", "a.md", "Kept!");
+    renderGuardWithHost();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE_ONE);
+    });
+    await awaitStaged("tasks/one.md");
+
+    const closeSpy = vi
+      .spyOn(window, "close")
+      .mockImplementation(() => undefined);
+    // Writes first, silently: the guard is waiting, not asking, and the
+    // draft decision belongs to the resumed attempt's own beforeunload.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    expect(screen.queryByTestId("recovery-close-warning")).toBeNull();
+
+    settleSave("tasks/one.md");
+    await waitFor(() => expect(closeSpy).toHaveBeenCalled());
+    // The resumed close now meets the unapproved draft and asks, exactly as
+    // it would have without the write.
+    expect(dispatchUnload().defaultPrevented).toBe(true);
+    await screen.findByTestId("recovery-close-warning");
+    closeSpy.mockRestore();
   });
 });
