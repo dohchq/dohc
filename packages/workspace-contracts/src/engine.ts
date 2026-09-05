@@ -281,7 +281,7 @@ export type SyncReplicationOpKind =
   | "chat.attachment.add"
   // WS-MU-C2: an emoji reaction on a chat message. A set-membership CRDT keyed
   // by (messageId, emoji, authorId) — add/remove COMMUTE and re-apply is a
-  // no-op. It rides the SAME 0P chat replication transport as the other chat
+  // no-op. It rides the same 0P chat replication transport as the other chat
   // kinds (blob-free). See ChatReactionSetPayload.
   | "chat.reaction.set"
   // Receiver-owned personal Feed state. These ops ride the owner's ordinary
@@ -289,8 +289,8 @@ export type SyncReplicationOpKind =
   // shares; the shared-channel allowlist must never serve them.
   | "chat.follow.set"
   | "chat.feed.read.set"
-  // WS-G2-C1: a Yjs CRDT update for a rich-doc object. UNLIKE moment.append it
-  // is a COMMUTATIVE delta — apply carries NO head-check and opens NO P0D
+  // WS-G2-C1: a Yjs CRDT update for a rich-doc object. Unlike moment.append it
+  // is a commutative delta — apply carries NO head-check and opens NO P0D
   // conflict (Yjs guarantees convergence). See YDocUpdatePayload.
   | "ydoc.update";
 
@@ -471,7 +471,7 @@ export interface SecretVersionForkPayload {
 }
 
 export interface ChatChannelCreatePayload {
-  // Origin-local channel id; NOT a cross-machine identity (peers mint their
+  // Origin-local channel id; not a cross-machine identity (peers mint their
   // own local ids). Cross-machine identity is wireId below.
   channelId: string;
   name: string;
@@ -479,7 +479,7 @@ export interface ChatChannelCreatePayload {
   kind: ChatChannelKind;
   createdAtMs: number;
   // Stable cross-machine channel identity (0P-A gate fix). Same wireId means
-  // same channel; same slug with a DIFFERENT wireId stays a distinct channel
+  // same channel; same slug with a different wireId stays a distinct channel
   // (the importer suffixes its local slug). The auto-created "general"
   // channel uses a well-known constant wireId so independently-created
   // generals converge. Absent only in payloads journaled before wire ids
@@ -507,9 +507,9 @@ export interface ChatMessageAppendPayload {
   authorDisplayName: string;
   // WS-MU-C0 verified authorship: the OPAQUE Better Auth user id of the sender,
   // never a raw email (PII must not enter the replicated CRDT). Present only for
-  // a signed-in send; the relay VERIFIES `authorUserId === actor.userId` before
+  // a signed-in send; the relay verifies `authorUserId === actor.userId` before
   // admitting the op to the replication log, so it is the durable, spoofing-
-  // resistant "who said this". Solo/signed-out sends OMIT it — the op is then
+  // resistant "who said this". Solo/signed-out sends omit it — the op is then
   // byte-identical to the pre-MU-C0 shape and `authorDisplayName` (display-only,
   // never used for identity/authz) still renders. See the design's "Authenticated
   // authorship" section.
@@ -551,18 +551,18 @@ export interface ChatAttachmentAddPayload {
  * observed register per `(messageId, emoji, authorId)` CELL.
  *
  * CRDT semantics — LWW-per-cell (last-writer-wins register per cell). Each cell
- * holds the winning op by a TOTAL order on `(atMs, then remove-wins on tie)`.
+ * holds the winning op by a total order on `(atMs, then remove-wins on tie)`.
  * Apply keeps the op maximizing that order, so:
- * - COMMUTATIVE: max over a total order is arrival-order independent — applying
- *   the same set of ops in ANY interleaving (across incremental sync passes,
+ * - Commutative: max over a total order is arrival-order independent — applying
+ *   the same set of ops in any interleaving (across incremental sync passes,
  *   not just within one merged pass) yields the same winner.
- * - IDEMPOTENT: re-applying an op is never strictly newer than the value it
+ * - Idempotent: re-applying an op is never strictly newer than the value it
  *   already produced, so it is a no-op.
  * Different authors never share a cell (distinct rows), so cross-user
  * add/remove never conflict. This is the same "convergence by op semantics, not
  * by head check" property `ydoc.update` relies on — no conflict row, no before
  * guard. Chosen over the plan's op-order 2P-set because LWW converges under
- * arbitrary ARRIVAL order, which the two-store fuzz gate exercises.
+ * arbitrary arrival order, which the two-store fuzz gate exercises.
  *
  * Forward-compat (MU-C0 verified authorship): `authorId` is the field the relay
  * later stamps/verifies as `actor.userId`. Solo it is the local user identity
@@ -614,14 +614,14 @@ export interface ChatFeedReadSetPayload {
 // REMOTE replicated ydoc.update apply.
 //
 // When applyReplicationOp routes a remote update into a live in-memory Y.Doc, it
-// applies it with THIS origin (`Y.applyUpdate(liveDoc, update, origin)`). Today
+// applies it with this origin (`Y.applyUpdate(liveDoc, update, origin)`). Today
 // the engine driver has no doc.on("update") observer, so nothing double-journals.
-// But the G2-C-2 editor provider WILL observe doc.on("update", (u, origin) => …)
-// to journal LOCAL edits — and it MUST ignore any update whose
+// But the G2-C-2 editor provider will observe doc.on("update", (u, origin) => …)
+// to journal LOCAL edits — and it must ignore any update whose
 // `origin === REMOTE_YDOC_APPLY_ORIGIN`. That update is a remote op the store
 // already persisted, journaled, and acked via applyReplicationOp; re-journaling
 // it under the local origin would push it back to every peer (an echo storm).
-// Local/editor edits carry a null or editor origin and ARE journaled; remote
+// Local/editor edits carry a null or editor origin and are journaled; remote
 // applies carry this reserved symbol and are NOT.
 export const REMOTE_YDOC_APPLY_ORIGIN: unique symbol = Symbol(
   "dohc.remoteYDocApplyOrigin",
@@ -650,7 +650,7 @@ export type YDocReplicationContentKind = "richdoc" | "plaintext" | "scene";
 
 /**
  * WS-G2-C1 — one Yjs CRDT update for a rich-doc object, riding the multi-origin
- * op log as a COMMUTATIVE op (0P sync design "ydoc.update"). The `updateBlob`
+ * op log as a commutative op (0P sync design "ydoc.update"). The `updateBlob`
  * is a `Y.encodeStateAsUpdate`/incremental-`update` byte string, content-
  * addressed into `binary_blobs` and shipped over the identical blob-have/
  * blob-put transport moment.append's binary blobs use — no new route.
@@ -822,7 +822,7 @@ export interface VersionedTextDeleteResult {
 // engine.db (currently the WS-G2-B Y.Doc driver). Intentionally structural (no
 // node:sqlite dependency in contracts): a prepared-statement runner plus raw
 // exec, matching the DatabaseSync surface the store already uses. The task runs
-// INSIDE the store's single BEGIN IMMEDIATE transaction, so it must NOT issue
+// inside the store's single BEGIN IMMEDIATE transaction, so it must not issue
 // its own BEGIN/COMMIT/ROLLBACK — throwing rolls the whole lane transaction back.
 export interface EngineWriteLaneStatement {
   all(...params: unknown[]): Array<Record<string, unknown>>;
@@ -842,9 +842,9 @@ export interface EngineWriteLaneConnection {
  * authorization boundary.
  */
 export interface VersionedTextStore {
-  // WS-G2-B single-writer safety: run `task` on the store's SAME SQLite
+  // WS-G2-B single-writer safety: run `task` on the store's same SQLite
   // connection, serialized through the store's write queue and wrapped in one
-  // BEGIN IMMEDIATE transaction. The Y.Doc engine driver routes ALL its
+  // BEGIN IMMEDIATE transaction. The Y.Doc engine driver routes all its
   // engine.db writes through here so a settle (writeTextFile) and a Y.Doc
   // update-append can never hold two concurrent in-process write transactions —
   // node:sqlite busy-waits block the JS thread, so two same-process writers on
@@ -905,9 +905,9 @@ export interface VersionedTextStore {
     momentId?: VersionedTextMomentId;
   }): Promise<VersionedTextWriteResult>;
   // WS-G2-C1 non-journaling projection write. Materializes a rich doc's settled
-  // markdown (a local moment + searchable snapshot) WITHOUT journaling a
-  // moment.append replication op. A Y.Doc-driven object replicates SOLELY
-  // through the commutative ydoc.update op stream; if its projection ALSO
+  // markdown (a local moment + searchable snapshot) without journaling a
+  // moment.append replication op. A Y.Doc-driven object replicates solely
+  // through the commutative ydoc.update op stream; if its projection also
   // journaled moment.append, two peers' independent settles would collide into
   // a P0D conflict on markdown the CRDT already reconciled. Optional (like
   // runInEngineWriteLane) so partial mocks typecheck; the Y.Doc driver requires
@@ -960,14 +960,14 @@ export interface VersionedTextStore {
   }): Promise<VersionedTextMergeResult>;
   // One page of the engine's whole-version comparison (`versions.compareFiles`):
   // every path that differs between the two versions, metadata only, in path
-  // order. Texts are hydrated per path by the caller that needs them (#562).
+  // order. Texts are hydrated per path by the caller that needs them.
   compareVersionFilesPage(input: {
     workspaceId: WorkspaceId;
     sourceVersionId: VersionId;
     targetVersionId: VersionId;
     afterPath?: string;
   }): Promise<VersionFileChangeEntryPage>;
-  // Page-shaped on purpose (#562): the engine pages `conflicts.list` under a
+  // Page-shaped on purpose: the engine pages `conflicts.list` under a
   // byte budget, and a drain here is what let one caller undo that. A caller
   // that needs every row loops pages; most callers need one.
   listTextConflicts(input: {
@@ -1010,7 +1010,6 @@ export interface VersionedTextStore {
     versionId: VersionId;
     path: string;
     mutationMomentId: VersionedTextMomentId;
-    legacyBeforeText?: string;
   }): Promise<void>;
   getObject(input: {
     workspaceId: WorkspaceId;
@@ -1031,7 +1030,7 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
-  // THE peer-op entry point (0P-A). Behavior both stores must agree on:
+  // The peer-op entry point (0P-A). Behavior both stores must agree on:
   // - Idempotent on duplicates: originSeq at or below the origin's acked
   //   high-water mark, or already present in replication_log, applies nothing
   //   and returns status "skipped".
@@ -1042,7 +1041,7 @@ export interface VersionedTextStore {
   //   sync conflict (counted in conflictsOpened); the local live file is
   //   untouched.
   // - The op journals into replication_log and advances the origin's acked
-  //   seq in the SAME transaction as its state mutation.
+  //   seq in the same transaction as its state mutation.
   applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   // Releases the underlying database handle after in-flight writes drain.
   // Callers that own a store (workspace teardown, app quit) must close it so
@@ -1053,8 +1052,8 @@ export interface VersionedTextStore {
 export interface VersionedTextStoreOptions {
   nowMs?: () => number;
   createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
-  // "quick" (default) runs PRAGMA quick_check on open; "full" runs the
-  // O(entire-database) PRAGMA integrity_check for diagnostics.
+  // "quick" (default) runs pragma quick_check on open; "full" runs the
+  // O(entire-database) pragma integrity_check for diagnostics.
   integrityCheck?: "quick" | "full";
 }
 
@@ -1191,7 +1190,7 @@ export type ChatThreadId = string;
 export type ChatMessageId = string;
 export type ChatChannelId = string;
 
-// PR 12 (WS-E): a DM is a private channel subtype. Single-user alpha ships the
+// A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
 
@@ -1250,9 +1249,9 @@ export interface ChatChannelSummary extends ChatChannel {
 }
 
 // Per-thread monotonic read cursor (the spec's ThreadReadState, simplified to
-// ONE local human actor for the single-user alpha). `lastReadSequence` counts
+// one local human actor for the single-user alpha). `lastReadSequence` counts
 // messages read from the start of the thread; `revision` is server-owned and
-// bumps on every APPLIED advance — callers may CAS on it but never write it.
+// bumps on every applied advance — callers may CAS on it but never write it.
 export interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
@@ -1379,7 +1378,7 @@ export interface ChatReactionAuthor {
   displayName: string;
 }
 
-// One reaction CELL as the store returns it. `listReactions` returns only
+// One reaction cell as the store returns it. `listReactions` returns only
 // active ("added") cells for display; `setReaction` returns the resolved cell
 // after the LWW upsert (whose `state` reflects the winning op). The UI groups
 // active reactions by (messageId, emoji) into pills with a count and the
@@ -1482,7 +1481,7 @@ export interface LinkedChatProjection {
 }
 
 export interface LinkedChatStore {
-  // Creates a FILE-LINKED thread. linkedFile is REQUIRED (exactly-one-owner
+  // Creates a FILE-LINKED thread. linkedFile is required (exactly-one-owner
   // at creation): an ownerless thread would be readable and indexed but
   // unreachable by navigation. Channel threads go through startChannelThread.
   createThread(input: {
@@ -1522,7 +1521,7 @@ export interface LinkedChatStore {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
   }): Promise<ChatChannelId | null>;
-  // The fast composer path: thread + first message land in ONE transaction so
+  // The fast composer path: thread + first message land in one transaction so
   // a failed send can never strand an empty thread. Title is optional — an
   // untitled thread displays its first-message snippet (the anti-forum rule).
   startChannelThread(input: {
@@ -1531,7 +1530,7 @@ export interface LinkedChatStore {
     title?: string;
     author: ChatActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
-    // supplies it ONLY when signed in; the journaled message.append then carries
+    // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
     origin?: "cli";
@@ -1574,7 +1573,7 @@ export interface LinkedChatStore {
     threadId: ChatThreadId;
     author: ChatActor;
     // WS-MU-C0: the sender's OPAQUE relay user id (Better Auth user id). Caller
-    // supplies it ONLY when signed in; the journaled message.append then carries
+    // supplies it only when signed in; the journaled message.append then carries
     // it for relay verification. Omit for solo (byte-identical to today).
     authorUserId?: string;
     parentMessageId?: ChatMessageId;
@@ -1645,7 +1644,7 @@ export interface LinkedChatStore {
     replicationAuthorId?: string;
     state: ChatReactionState;
   }): Promise<ChatReaction>;
-  // Every ACTIVE ("added") reaction in a thread, oldest-first per cell. The UI
+  // Every active ("added") reaction in a thread, oldest-first per cell. The UI
   // groups by (messageId, emoji). Tombstones are never returned.
   listReactions(input: {
     workspaceId: WorkspaceId;
@@ -1930,7 +1929,7 @@ export interface VersionFileChange {
   currentText?: string;
   // Source-side text (the compared version); absent when the file was deleted.
   incomingText?: string;
-  // True for secret-backed files (PR 08): the change is reported
+  // True for secret-backed files: the change is reported
   // metadata-only — protected contents never ride a comparison, so
   // currentText/incomingText are always absent when this is set.
   protected?: boolean;
@@ -1939,10 +1938,10 @@ export interface VersionFileChange {
   binary?: boolean;
 }
 
-// --- Secret-backed files (PR 08) -------------------------------------------
+// --- Secret-backed files -------------------------------------------
 //
 // Secret-classified paths (the classifyEngineFilePath floor — policy can
-// never unmark them) are versioned by a dedicated driver that stores ONLY
+// never unmark them) are versioned by a dedicated driver that stores only
 // AES-256-GCM ciphertext in engine.db. Moments are metadata-only: they have
 // no plaintext field at all, by construction. The single plaintext exit is
 // materializeSecretFile, used exclusively by dohc's own disk materialization
@@ -2067,7 +2066,7 @@ export interface SecretFileStore {
     toVersionId: VersionId;
   }): Promise<void>;
   // Metadata-only comparison of two versions' secret files (statuses are
-  // relative to the target). Page-shaped like every other listing (#562): the
+  // relative to the target). Page-shaped like every other listing: the
   // engine pages this on the wire, and a drain here is what put every
   // remaining protected row on one compare page.
   compareSecretFileVersions(input: {
@@ -2088,7 +2087,7 @@ export interface SecretFileStore {
     path: string;
     metadata: ActorNeutralWriteMetadata;
   }): Promise<SecretFileWriteOutcome>;
-  // Returns the file to its state BEFORE the given moment by copying the
+  // Returns the file to its state before the given moment by copying the
   // prior ciphertext forward as a new moment (history is never rewritten,
   // plaintext is never produced).
   restoreSecretFileToBeforeMoment(input: {
@@ -2096,7 +2095,7 @@ export interface SecretFileStore {
     momentId: string;
     metadata: ActorNeutralWriteMetadata;
   }): Promise<SecretFileRestoreOutcome>;
-  // THE single authorized plaintext accessor. Only dohc's own disk
+  // The single authorized plaintext accessor. Only dohc's own disk
   // materialization flows (version switch/merge/restore) may call this.
   materializeSecretFile(input: {
     workspaceId: WorkspaceId;

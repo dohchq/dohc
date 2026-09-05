@@ -1,7 +1,7 @@
-// Harvest real Y.Doc fixtures from a COPY of a dogfood engine.db.
+// Harvest real Y.Doc fixtures from a copy of a dogfood engine.db.
 //
-// SAFETY: this script must only ever be pointed at a COPY (engine.db +
-// -wal/-shm copied together); it refuses paths that RESOLVE (symlinks,
+// SAFETY: this script must only ever be pointed at a copy (engine.db +
+// -wal/-shm copied together); it refuses paths that resolve (symlinks,
 // junctions, 8.3 short names) to a live workspace layout
 // (.dohc/engine/engine.db) and opens read-only regardless. Harvested
 // fixtures can contain personal content: they land in
@@ -33,8 +33,8 @@ if (!dbPath) {
   process.exit(1);
 }
 // realpathSync.NATIVE first: the live-DB refusal must see through symlinks,
-// junctions, AND Windows 8.3 short-name aliases (DOHC~1). The JS
-// implementation (fs.realpathSync) resolves links but does NOT expand 8.3
+// junctions, and Windows 8.3 short-name aliases (DOHC~1). The JS
+// implementation (fs.realpathSync) resolves links but does not expand 8.3
 // aliases; only the native GetFinalPathNameByHandle path does.
 let realPath;
 try {
@@ -50,7 +50,7 @@ if (/[\\/]\.dohc[\\/]engine[\\/]engine\.db$/i.test(realPath)) {
   process.exit(1);
 }
 
-// Validate the source BEFORE touching the existing fixture corpus: a typo or
+// Validate the source before touching the existing fixture corpus: a typo or
 // corrupt copy must not destroy the previous harvested fixtures. Stage into a
 // temp sibling dir and swap in only after a fully successful harvest.
 const fixturesRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "fixtures");

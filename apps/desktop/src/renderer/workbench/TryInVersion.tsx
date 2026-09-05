@@ -81,14 +81,17 @@ export function TryInVersionReviewCard(props: {
   workspaceId: string;
   state: TryInVersionRunState;
   activeTabDirty: boolean;
-  flushActiveDraft: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs — held across the version IPCs so no
+  // cell edit lands between the drain and the lineage change.
+  beginLineageOperation: () => Promise<() => void>;
   onOpenCompare: (versionId: string) => void;
-  // Pass the version that is active NOW when this operation set it. The
+  // Pass the version that is active now when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
   // Omit it only when the operation did not change the active version, or
   // when it failed and nobody knows what stuck.
-  onWorkspaceStateChanged: (activeVersionId?: string) => void;
+  onWorkspaceStateChanged: (activeVersionId?: string, lineageChanged?: boolean) => void;
   onDismissed: () => void;
 }) {
   const { workspaceId, state } = props;
@@ -130,19 +133,20 @@ export function TryInVersionReviewCard(props: {
     const token = ++liveToken.current;
     setBusy("back-to-main");
     setInlineError(null);
-    // Which version this call has PROVEN active, for the shell's boundary.
+    // Which version this call has proven active, for the shell's boundary.
     // Undefined until the switch settles, because until then a failure leaves
     // nobody knowing what stuck.
     let landedOn: string | undefined;
-    // Did the switch IPC start? The failure path keys on this (#579 review,
-    // r7 + r11): main settles and closes live Y.Doc sessions before it sets
+    // Did the switch IPC start? The failure path keys on this: main settles
+    // and closes live Y.Doc sessions before it sets
     // the active version, so a switch that failed mid-way needs the
-    // announcement — but a failure BEFORE it (the pre-switch flush, the
+    // announcement — but a failure before it (the pre-switch flush, the
     // version lookup) changed nothing, and announcing would reopen the
     // document and set its still-editable draft aside on the same version.
     let switchIssued = false;
+    let releaseOperation: (() => void) | null = null;
     try {
-      await props.flushActiveDraft();
+      releaseOperation = await props.beginLineageOperation();
       if (token !== liveToken.current) return;
       const versions = await bridge().listWorkspaceVersions({ workspaceId });
       if (token !== liveToken.current) return;
@@ -158,7 +162,8 @@ export function TryInVersionReviewCard(props: {
       // another awaited IPC, and an old-version history answer landing during
       // it would meet a boundary that has not been set.
       landedOn = main.id;
-      props.onWorkspaceStateChanged(landedOn);
+      if (switchIssued) props.onWorkspaceStateChanged(landedOn);
+      else props.onWorkspaceStateChanged(landedOn, false);
       await bridge().dismissTryInVersionReview({ workspaceId });
       if (token !== liveToken.current) return;
       props.onDismissed();
@@ -166,11 +171,11 @@ export function TryInVersionReviewCard(props: {
       if (token !== liveToken.current) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
       // Make the shell reflect reality — but only the reality this call may
-      // have CHANGED, and only ONCE (#579 review, r11 + r15).
+      // have changed, and only ONCE.
       //
-      // Already announced: the dismissal failed AFTER the announcement, which
+      // Already announced: the dismissal failed after the announcement, which
       // does not un-know where the workspace landed. Announcing again bumps
-      // the version epoch a SECOND time, and that same-version reopen would
+      // the version epoch a second time, and that same-version reopen would
       // set aside a draft the user typed while the dismissal hung — pulling
       // it out of the save pipeline for a failure that has nothing to do with
       // the version.
@@ -180,6 +185,7 @@ export function TryInVersionReviewCard(props: {
       // Mid-switch: the shell has to ask where it landed.
       props.onWorkspaceStateChanged(undefined);
     } finally {
+      releaseOperation?.();
       if (token === liveToken.current) setBusy(null);
     }
   }, [props, workspaceId]);
@@ -320,7 +326,7 @@ export function TryInVersionReviewCard(props: {
           workspaceId={workspaceId}
           source={mergeSource}
           activeTabDirty={props.activeTabDirty}
-          flushActiveDraft={props.flushActiveDraft}
+          beginLineageOperation={props.beginLineageOperation}
           onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           onOutcome={(outcome) => {
             // After a completed merge, return to Main so the folder shows the

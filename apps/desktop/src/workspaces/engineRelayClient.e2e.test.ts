@@ -212,7 +212,7 @@ describe("EngineRelayClient real daemon", () => {
         expect(pulled.fetched).toBeGreaterThan(0);
         expect(
           await channelIds(receiver.sessions, workspaceId, receiverRoot),
-          "MUTATION: fetched counts are insufficient unless the second replica materializes the channel",
+          "fetched counts are insufficient unless the second replica materializes the channel",
         ).toContain("relay-e2e-channel");
 
         // `closeAll()` is a ONE-WAY door: it clears `acceptingRuns`, which
@@ -225,7 +225,7 @@ describe("EngineRelayClient real daemon", () => {
         // non-terminal closeWorkspace().
         //
         // Scope, stated honestly: this re-opens the workspace against the
-        // SAME running daemon, so it proves the pull survives a session
+        // same running daemon, so it proves the pull survives a session
         // close/re-open, not that it survives a process restart. Restarting
         // the daemon would prove more, but EngineDaemonLifecycle.stop() is
         // itself terminal ("already stopping"), so that needs a second

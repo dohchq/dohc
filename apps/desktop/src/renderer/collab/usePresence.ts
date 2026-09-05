@@ -9,7 +9,7 @@ import {
 
 // MU-C1 — the React binding for channel/doc presence + typing.
 //
-// It is DORMANT for solo/offline: with `enabled === false` (or no transport)
+// It is dormant for solo/offline: with `enabled === false` (or no transport)
 // it constructs no channel, opens no poll, and returns an empty presence — the
 // same "build nothing for solo" posture as the engine co-editing hook.
 //
@@ -24,7 +24,7 @@ interface PresenceLocalState {
 }
 
 interface UsePresenceInput {
-  // collaborationEnabled (signedIn && relayConnected) AND a resolvable scope.
+  // collaborationEnabled (signedIn && relayConnected) and a resolvable scope.
   enabled: boolean;
   // The relay-backed (or test) transport, or null when collaboration is off.
   transport: PresenceTransport | null;
@@ -41,7 +41,7 @@ interface UsePresenceInput {
 }
 
 export interface PresenceResult {
-  // Peers OTHER than this client (self is filtered out by clientId).
+  // Peers other than this client (self is filtered out by clientId).
   others: PresencePeer[];
   // Display names of others currently typing.
   typingNames: string[];
@@ -51,11 +51,11 @@ export interface PresenceResult {
   // presence calls once it completes (#742 P2-E: leaving a DM ends its share,
   // and an ended-scope transport rejects the leave the effect cleanup would
   // otherwise send later — the peer would then read as present until the
-  // relay's TTL). Await this BEFORE that action. A no-op if presence was
+  // relay's TTL). Await this before that action. A no-op if presence was
   // never active (channelRef is null) or already stopped.
   leave: () => Promise<void>;
-  // Re-arms presence with a fresh channel (#742 P2, round 3): call this if
-  // the action `leave()` was preparing for did NOT go through — leave()
+  // Re-arms presence with a fresh channel: call this if
+  // the action `leave()` was preparing for did not go through — leave()
   // already stopped the old channel, so without this the client stays
   // invisible to peers until it navigates elsewhere and back. A no-op if the
   // scope is not currently active (nothing to re-arm).
@@ -73,7 +73,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
   const typingIdleMs = input.typingIdleMs ?? 5_000;
   const [peers, setPeers] = useState<PresencePeer[]>(EMPTY_PEERS);
   // Bumped by restart() to force the channel effect below to tear down (a
-  // no-op — it is already stopped) and stand up a FRESH channel (#742 P2,
+  // no-op — it is already stopped) and stand up a fresh channel (#742 P2,
   // round 3), without needing any of the scope inputs to actually change.
   const [restartGeneration, setRestartGeneration] = useState(0);
   // Monotonic per-channel token; only the newest channel may repaint.
@@ -139,7 +139,7 @@ export function usePresence(input: UsePresenceInput): PresenceResult {
         clearTimeout(typingTimerRef.current);
         typingTimerRef.current = null;
       }
-      // Publish only on the false<->true EDGE: a keystroke while already
+      // Publish only on the false<->true edge: a keystroke while already
       // typing refreshes the idle timer below but must not republish the same
       // state on every character (the heartbeat re-sends it anyway).
       const changed = typing !== typingRef.current;

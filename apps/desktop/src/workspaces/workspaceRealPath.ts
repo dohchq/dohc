@@ -5,12 +5,12 @@ import {
   type RealTarget,
 } from "@dohc/workspace-core/realPath";
 
-// The desktop's guards read a path as SPELLED, then prove only that it stays
-// INSIDE the workspace root. An in-workspace symlink answers that yes: a
-// containment check stops an escape OUT of the root and says nothing about
-// landing in a reserved area (#667). So every main-process site that decides
-// authority or classification from a path asks THIS, on the path's real
-// location, using the shared rule the MCP surface uses (#638).
+// The desktop's guards read a path as spelled, then prove only that it stays
+// inside the workspace root. An in-workspace symlink answers that yes: a
+// containment check stops an escape out of the root and says nothing about
+// landing in a reserved area. So every main-process site that decides
+// authority or classification from a path asks this, on the path's real
+// location, using the shared rule the MCP surface uses.
 //
 // `label` names the operation in the user's nouns ("File path", "Move
 // destination"), and `spelled` is the path as the caller named it, so a refusal
@@ -22,7 +22,7 @@ import {
 // one no rule was applied to.
 export async function assertResolvedWorkspacePath(input: {
   // The root the reservation is relative to. `.dohc` means the workspace's
-  // own metadata dir, so a share mount passes ITS root, not the host's.
+  // own metadata dir, so a share mount passes its root, not the host's.
   rootPath: string;
   absolutePath: string;
   spelled: string;

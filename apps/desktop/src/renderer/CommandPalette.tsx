@@ -17,7 +17,7 @@ export function CommandPalette(props: {
   testId?: string;
   placeholder?: string;
   ariaLabel?: string;
-  // Optional ranking seam (Phase E5.0): Quick Open passes its prepared path
+  // Optional ranking seam: Quick Open passes its prepared path
   // ranker. Default palettes keep the simple substring filter.
   rank?: (query: string, commands: Command[]) => Command[];
 }) {

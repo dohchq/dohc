@@ -7,7 +7,7 @@ import { classifyEngineFilePath } from "./enginePathFloor";
 // The relay applies it when it creates a selector (`validateShareSelector` in
 // services/sync-relay/src/shareFilter.ts). Every recipient surface that reads
 // a selector back — the relay's share metadata response, and the desktop's own
-// registry record — must apply the SAME rule, because a version-bearing
+// registry record — must apply the same rule, because a version-bearing
 // selector with no paths grants the whole tracked workspace. A version id the
 // relay would never have issued (empty, padded, or unbounded) must therefore
 // never be read as one, or damage becomes the widest grant there is.
@@ -29,7 +29,7 @@ export const MAX_SHARE_VERSION_ID_CHARS = 128;
 /**
  * Whether `value` is a version id the relay could have issued: a non-empty,
  * untrimmed-free string within the budget above. `null` and `undefined` are
- * NOT version ids — a selector that follows main carries no version, and
+ * not version ids — a selector that follows main carries no version, and
  * callers must handle that state explicitly rather than through this check.
  */
 export function isValidShareVersionId(value: unknown): value is string {
@@ -53,7 +53,7 @@ export function isValidShareVersionId(value: unknown): value is string {
  * The length cap lives here too, so the minting side and every reading side
  * agree on one number instead of two that can drift.
  *
- * Every surface that reads a selector BACK applies this, for the same reason
+ * Every surface that reads a selector back applies this, for the same reason
  * the version rule lives here: a reader that accepts more than the writer
  * issues will accept damage, and `""` is the path-shaped version of the empty
  * version id that got through once already.
@@ -93,7 +93,7 @@ export function isShareablePath(value: unknown): value is string {
 }
 
 /**
- * The file-share access levels (issue #646, S7), in the order the UI offers
+ * The file-share access levels, in the order the UI offers
  * them. `view` is the narrowest.
  *
  * The chat-channel selector's own binary `access` is a different field on a

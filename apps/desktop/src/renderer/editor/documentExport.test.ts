@@ -84,11 +84,11 @@ describe("buildStandaloneDocumentHtml", () => {
   });
 
   // EXPORT IMAGE CONTRACT (documentExport.ts): an exported document may only
-  // reference images at or below its OWN folder. The editor can serve a
+  // reference images at or below its own folder. The editor can serve a
   // workspace-relative src over dohc-file:// because it knows the document's
   // place in the workspace; an export has no such base — it is opened from
   // wherever the user saved it, or (for PDF) from a throwaway temp dir that
-  // printToPDF loads over file://. So a `../` src, which is legitimate INSIDE
+  // printToPDF loads over file://. So a `../` src, which is legitimate inside
   // the workspace (global-folder attachments), must not survive into the
   // exported artifact, where it would point at the real filesystem.
   describe("image srcs", () => {

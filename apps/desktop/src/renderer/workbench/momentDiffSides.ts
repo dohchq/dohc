@@ -1,6 +1,6 @@
 import type { EngineMomentDetailRecord } from "../../ipc/bridgeContract";
 
-/// What the diff page can show for one moment, decided PER SIDE.
+/// What the diff page can show for one moment, decided per SIDE.
 ///
 /// A moment can change a file's kind, and then its two sides disagree. Keying
 /// the page on one record-level kind throws the other side away: a text->binary

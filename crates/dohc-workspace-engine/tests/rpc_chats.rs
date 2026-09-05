@@ -151,8 +151,6 @@ async fn chats_feed_list_personal_refuses_limit_above_cap() {
     let handle = open_workspace(&transport, &scratch, 1, "feed-limit-cap").await;
     let mut id = 1;
 
-    // MUTATION: clamp an over-cap feed limit at the RPC boundary -> the caller
-    // gets a successful, semantically different page instead of invalid input.
     let error = call_error(
         &transport,
         &handle,
@@ -245,8 +243,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
         json!({ "threadId": "thread" }),
     )
     .await;
-    // MUTATION: omitting needsDecision from the strict DTO/domain input -> the opening decision is absent over DOP1.
-    assert_eq!(decisions["decisions"][0]["state"], json!("open"));
+    assert_eq!(
+        decisions["decisions"][0]["state"],
+        json!("open"),
+        "omitting needsDecision from the strict DTO/domain input -> the opening decision is absent over DOP1."
+    );
 
     let resolved = call_with_idempotency(
         &transport,
@@ -262,8 +263,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
         }),
     )
     .await;
-    // MUTATION: requiring the resolver row to exist -> a valid head-check-free resolver is rejected.
-    assert_eq!(resolved["resolvedByMessageId"], json!("not-present-yet"));
+    assert_eq!(
+        resolved["resolvedByMessageId"],
+        json!("not-present-yet"),
+        "requiring the resolver row to exist -> a valid head-check-free resolver is rejected."
+    );
     let malformed = call_error_with_idempotency(
         &transport,
         &handle,
@@ -278,8 +282,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
         }),
     )
     .await;
-    // MUTATION: mapping malformed resolver input to state-corrupt -> wire code becomes INTERNAL.
-    assert_eq!(malformed.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        malformed.code,
+        ErrorCode::InvalidParams,
+        "mapping malformed resolver input to state-corrupt -> wire code becomes INTERNAL."
+    );
     assert_eq!(malformed.message, "invalid-message-body");
 
     let reaction = call_with_idempotency(
@@ -345,8 +352,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
         }),
     )
     .await;
-    // MUTATION: routing an unknown wire literal through persisted-row decoding -> caller input is mislabeled INTERNAL.
-    assert_eq!(invalid_state.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        invalid_state.code,
+        ErrorCode::InvalidParams,
+        "routing an unknown wire literal through persisted-row decoding -> caller input is mislabeled INTERNAL."
+    );
     assert_eq!(invalid_state.message, "invalid-parameters");
     let reactions = call(
         &transport,
@@ -383,8 +393,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
         json!({ "ownerUserId": "viewer", "limit": 10 }),
     )
     .await;
-    // MUTATION: serializing the parked `reactions: []` placeholder -> active feed reactions vanish at the wire boundary.
-    assert_eq!(feed["items"][0]["reactions"][0]["emoji"], json!("👍"));
+    assert_eq!(
+        feed["items"][0]["reactions"][0]["emoji"],
+        json!("👍"),
+        "serializing the parked `reactions: []` placeholder -> active feed reactions vanish at the wire boundary."
+    );
 
     call(
         &transport,
@@ -431,8 +444,11 @@ async fn reactions_decisions_and_personal_feed_hydrate_over_rpc() {
     )
     .await;
     let summary = &second_page["threads"][0];
-    // MUTATION: shipping a prefix-only channel list or omitting the full aggregate -> older page/full opening reaction is unavailable.
-    assert_eq!(summary["thread"]["id"], json!("thread"));
+    assert_eq!(
+        summary["thread"]["id"],
+        json!("thread"),
+        "shipping a prefix-only channel list or omitting the full aggregate -> older page/full opening reaction is unavailable."
+    );
     assert_eq!(summary["messageCount"], json!(1));
     assert_eq!(summary["openDecisionCount"], json!(0));
     assert_eq!(
@@ -516,10 +532,10 @@ async fn reactions_and_decisions_accept_the_max_page_limit() {
         json!({ "threadId": "thread", "pageLimit": 500 }),
     )
     .await;
-    // MUTATION: keeping the domain probe cap at 500 rejects the RPC's 501-row probe.
     assert_eq!(
         decisions["decisions"].as_array().expect("decisions").len(),
-        1
+        1,
+        "keeping the domain probe cap at 500 rejects the RPC's 501-row probe.",
     );
     assert_eq!(
         reactions["reactions"].as_array().expect("reactions").len(),
@@ -600,8 +616,11 @@ async fn negative_reaction_cursor_boundary_round_trips() {
         json!({ "threadId": "thread", "pageLimit": 1, "cursor": cursor }),
     )
     .await;
-    // MUTATION: restore the cursor.first nonnegative guard -> the second request refuses.
-    assert_eq!(first["reactions"][0]["atMs"], json!(-10));
+    assert_eq!(
+        first["reactions"][0]["atMs"],
+        json!(-10),
+        "restore the cursor.first nonnegative guard -> the second request refuses."
+    );
     assert_eq!(first["reactions"][0]["author"]["displayName"], json!(""));
     assert_eq!(second["reactions"][0]["atMs"], json!(-9));
     assert!(second["nextCursor"].is_null());
@@ -662,9 +681,11 @@ async fn single_oversize_row_fails_instead_of_truncating() {
         json!({ "channelId": "channel", "pageLimit": 1 }),
     )
     .await;
-    // MUTATION: treating the first oversize row as a normal byte-budget cut
-    // returns an empty/truncated page instead of a stable refusal.
-    assert_eq!(error.code, ErrorCode::LimitExceeded);
+    assert_eq!(
+        error.code,
+        ErrorCode::LimitExceeded,
+        "treating the first oversize row as a normal byte-budget cut returns an empty/truncated page instead of a stable refusal."
+    );
     assert_eq!(error.message, "row-exceeds-wire-limit");
 }
 
@@ -688,7 +709,6 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
         }),
     )
     .await;
-    // MUTATION: omit linked owner hydration -> canonical Thread loses its stable file identity.
     assert_eq!(
         thread,
         json!({
@@ -702,7 +722,8 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
                 "pathHint": "notes/file.md",
                 "linkedAtMs": 20,
             }
-        })
+        }),
+        "omit linked owner hydration -> canonical Thread loses its stable file identity.",
     );
     let sent = call(
         &transport,
@@ -726,10 +747,10 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
         }),
     )
     .await;
-    // MUTATION: omit authoritative attachment hydration from send -> result is incomplete.
     assert_eq!(
         sent["attachments"].as_array().expect("attachments").len(),
-        1
+        1,
+        "omit authoritative attachment hydration from send -> result is incomplete.",
     );
     assert_eq!(sent["id"], json!("message-1"));
     let attachments = call(
@@ -759,13 +780,13 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
         }),
     )
     .await;
-    // MUTATION: hydrate only the selected attachment -> nested message attachment list is empty.
     assert_eq!(
         mentions["mentions"][0]["message"]["attachments"]
             .as_array()
             .expect("hydrated attachments")
             .len(),
-        1
+        1,
+        "hydrate only the selected attachment -> nested message attachment list is empty.",
     );
     call(
         &transport,
@@ -789,14 +810,13 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
         json!({ "ownerUserId": "feed-viewer", "limit": 10 }),
     )
     .await;
-    // MUTATION: route Feed through the legacy slim serializers -> both of
-    // these authoritative B2 fields disappear.
     assert_eq!(
         feed["items"][0]["message"]["attachments"]
             .as_array()
             .expect("feed message attachments")
             .len(),
-        1
+        1,
+        "route Feed through the legacy slim serializers -> both of these authoritative B2 fields disappear.",
     );
     assert_eq!(
         feed["items"][0]["thread"]["linkedFile"],
@@ -892,21 +912,24 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
             break;
         }
     }
-    // MUTATION: omit the logical 2,000 cap -> the oldest selected row is exposed.
-    assert_eq!(mentions.len(), 2_000);
+    assert_eq!(
+        mentions.len(),
+        2_000,
+        "omit the logical 2,000 cap -> the oldest selected row is exposed."
+    );
     assert_eq!(mentions[0]["message"]["id"], json!("message-2000"));
     assert!(
         mentions
             .iter()
             .all(|mention| mention["message"]["id"] != json!("message-0000"))
     );
-    // MUTATION: hydrate only matching attachments -> the newest message loses its other target.
     assert_eq!(
         mentions[0]["message"]["attachments"]
             .as_array()
             .expect("all attachments")
             .len(),
-        2
+        2,
+        "hydrate only matching attachments -> the newest message loses its other target.",
     );
 }
 
@@ -957,7 +980,6 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         json!({ "handle": "AGENT", "unreadByAgentOnly": false, "pageLimit": 10 }),
     )
     .await;
-    // MUTATION: handing out the workspace before backfill makes this first read empty.
     assert_eq!(
         mentions,
         json!({
@@ -969,7 +991,8 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
                 "createdAtMs": 20
             }],
             "nextCursor": null
-        })
+        }),
+        "handing out the workspace before backfill makes this first read empty.",
     );
     for (query, normalized) in [
         ("AGENT.OPS_V2...", "agent.ops_v2"),
@@ -983,8 +1006,11 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
             json!({ "handle": query, "unreadByAgentOnly": false, "pageLimit": 10 }),
         )
         .await;
-        // MUTATION: retain the narrow ASCII alphanumeric/hyphen validator -> this indexed row is unqueryable.
-        assert_eq!(mentions["mentions"][0]["handle"], json!(normalized));
+        assert_eq!(
+            mentions["mentions"][0]["handle"],
+            json!(normalized),
+            "retain the narrow ASCII alphanumeric/hyphen validator -> this indexed row is unqueryable."
+        );
         assert_eq!(mentions["mentions"][0]["messageId"], json!("message"));
     }
     let first = call(
@@ -1003,8 +1029,11 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         json!({}),
     )
     .await;
-    // MUTATION: scan-before-backfill or a non-idempotent ledger changes this pair.
-    assert_eq!((first, retry), (json!(1), json!(0)));
+    assert_eq!(
+        (first, retry),
+        (json!(1), json!(0)),
+        "scan-before-backfill or a non-idempotent ledger changes this pair."
+    );
 
     call(&transport, &handle, &mut id, "workspace.close", json!({})).await;
     let conn = rusqlite::Connection::open(&db_path).expect("open closed engine db");
@@ -1026,14 +1055,12 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
         json!({ "handle": "raw", "unreadByAgentOnly": false, "pageLimit": 10 }),
     )
     .await;
-    // MUTATION: drop or ignore the durable completion marker -> the second
-    // open reparses this raw fixture row and hides the write-time-indexing
-    // invariant by making it visible.
     assert!(
         raw_mentions["mentions"]
             .as_array()
             .expect("raw mentions")
-            .is_empty()
+            .is_empty(),
+        "drop or ignore the durable completion marker -> the second open reparses this raw fixture row and hides the write-time-indexing invariant by making it visible.",
     );
 }
 
@@ -1094,8 +1121,11 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
     // mark is a NO-OP — the thread stays unread-but-unmarkable exactly like the
     // oracle. The read/serialization chain must still accept the signed
     // coordinate the daemon reads back (no state-corrupt).
-    // MUTATION: advance onto the negative coordinate -> the no-op assertions fail.
-    assert_eq!(state["lastReadCreatedAtMs"], json!(0));
+    assert_eq!(
+        state["lastReadCreatedAtMs"],
+        json!(0),
+        "advance onto the negative coordinate -> the no-op assertions fail."
+    );
     assert_eq!(state["lastReadMessageId"], json!(""));
     assert_eq!(state["revision"], json!(0));
 }
@@ -1325,8 +1355,6 @@ async fn persisted_chat_identities_are_normalized() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn second_service_cannot_attach_to_a_live_workspace_actor() {
-    // MUTATION: accept `created_actor == false` in workspace.open -> the
-    // second service receives a handle to the first service's actor.
     let scratch = ScratchDir::new().expect("scratch");
     let first_transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let second_transport = InProcessTransport::new(Arc::new(EngineService::new()));
@@ -1920,7 +1948,7 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         500
     );
 
-    // BYTE budget, not just row count: a handful of wire-legal 63 KiB
+    // Byte budget, not just row count: a handful of wire-legal 63 KiB
     // bodies must cut the page long before 500 rows — otherwise a framed
     // response exceeds the 1 MiB DOP1 limit and the thread becomes
     // unreadable (the InProcessTransport harness never encodes frames, so
@@ -3223,7 +3251,7 @@ async fn malformed_ready_generation_and_null_claim_metadata_are_rejected() {
     let bookmark_id = bookmark["bookmarkId"].as_str().expect("id").to_owned();
 
     // A generation above JS Number.MAX_SAFE_INTEGER is a malformed coordinate
-    // and must REFUSE like the failed/stale transitions, not read as merely
+    // and must refuse like the failed/stale transitions, not read as merely
     // stale. Mutation check: restore the bare `generation < 1` floor in
     // `mark_bookmark_ready` — the call then succeeds with applied:false and
     // this refusal assertion fails.
@@ -3272,7 +3300,7 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
     let handle = open_workspace(&transport, &scratch, 1, "rpc-chat-r16").await;
     let mut id = 10;
 
-    // Reserved wire ids refuse on the ENSURE paths exactly like create.
+    // Reserved wire ids refuse on the ensure paths exactly like create.
     // Mutation check: drop the reserved guard from ensure_well_known_channel
     // — both refusals below fail.
     for (method, reserved) in [
@@ -3290,7 +3318,7 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
         assert_eq!(error.code, ErrorCode::InvalidParams);
     }
 
-    // follows.list: omitted state returns ALL rows (tombstones included),
+    // follows.list: omitted state returns all rows (tombstones included),
     // a state filter narrows, an invalid state refuses. Mutation check:
     // parse ChatOwnerParams again (or restore the hardcoded
     // state='following' SQL) — the tombstone and filter assertions fail.
@@ -3403,9 +3431,10 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
         json!({ "ownerUserId": "owner-1" }),
     )
     .await;
-    // MUTATION: restore the RPC-B `{bookmarks,truncated}` response -> the
-    // cursor-page contract exposes the removed field and omits nextCursor.
-    assert!(pending.get("truncated").is_none());
+    assert!(
+        pending.get("truncated").is_none(),
+        "restore the RPC-B `{{bookmarks,truncated}}` response -> the cursor-page contract exposes the removed field and omits nextCursor."
+    );
     assert_eq!(pending["nextCursor"], Value::Null);
     assert_eq!(pending["bookmarks"].as_array().expect("pending").len(), 1);
     assert_eq!(pending["bookmarks"][0]["bookmarkId"], json!(&bookmark_id));
@@ -3426,9 +3455,11 @@ async fn reshaped_chat_arms_page_by_cursor_and_refuse_reserved_ids() {
         json!({ "ownerUserId": "owner-1", "bookmarkId": &bookmark_id }),
     )
     .await;
-    // MUTATION: wrap `find` in the old `{bookmark: ...}` object -> consumers
-    // no longer receive the design's direct `Bookmark | null` result.
-    assert_eq!(found["bookmarkId"], json!(&bookmark_id));
+    assert_eq!(
+        found["bookmarkId"],
+        json!(&bookmark_id),
+        "wrap `find` in the old `{{bookmark: ...}}` object -> consumers no longer receive the design's direct `Bookmark | null` result."
+    );
     let missing = call(
         &transport,
         &handle,
@@ -3650,8 +3681,11 @@ async fn page_adapter_drains_without_overlap_or_omission() {
             break;
         }
     }
-    // MUTATION: use inclusive/offset pagination -> rows overlap or disappear.
-    assert_eq!(ids, ["old", "a", "b"]);
+    assert_eq!(
+        ids,
+        ["old", "a", "b"],
+        "use inclusive/offset pagination -> rows overlap or disappear."
+    );
 
     let invalid_cursor = call_error(
         &transport,
@@ -3689,10 +3723,10 @@ async fn unknown_fields_and_null_optionals_are_rejected() {
         json!({ "threadId": "thread", "paused": true, "reason": null }),
     )
     .await;
-    // MUTATION: remove deny_unknown/non-null optional decoders -> malformed calls enter domain.
     assert_eq!(
         (unknown.code, null_optional.code),
-        (ErrorCode::InvalidParams, ErrorCode::InvalidParams)
+        (ErrorCode::InvalidParams, ErrorCode::InvalidParams),
+        "remove deny_unknown/non-null optional decoders -> malformed calls enter domain.",
     );
 }
 
@@ -3710,8 +3744,11 @@ async fn workspace_handle_overrides_a_spoofed_workspace_identity() {
         json!({ "workspaceId": "foreign" }),
     )
     .await;
-    // MUTATION: trust a params workspace id -> caller can select foreign rows.
-    assert_eq!(spoofed.code, ErrorCode::InvalidParams);
+    assert_eq!(
+        spoofed.code,
+        ErrorCode::InvalidParams,
+        "trust a params workspace id -> caller can select foreign rows."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4012,8 +4049,11 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         json!({ "threadId": "thread", "reason": "stop" }),
     )
     .await;
-    // MUTATION: omit any Phase 2/3 registration or return legacy nullable fields -> roundtrip differs/fails.
-    assert_eq!((requeued, failed_pending), (json!(true), json!(1)));
+    assert_eq!(
+        (requeued, failed_pending),
+        (json!(true), json!(1)),
+        "omit any Phase 2/3 registration or return legacy nullable fields -> roundtrip differs/fails."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -4136,10 +4176,10 @@ async fn thread_projection_over_wire_limit_fails_without_partial_text() {
         json!({ "threadId": "thread-cap" }),
     )
     .await;
-    // MUTATION: truncate instead of refusing -> this call succeeds with partial Markdown.
     assert_eq!(
         (error.code, error.message.as_str()),
-        (ErrorCode::LimitExceeded, "projection-exceeds-inband-limit")
+        (ErrorCode::LimitExceeded, "projection-exceeds-inband-limit"),
+        "truncate instead of refusing -> this call succeeds with partial Markdown.",
     );
 }
 
@@ -4279,9 +4319,11 @@ async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() 
         json!({ "query": "needle", "limit": 50_000 }),
     )
     .await;
-    // MUTATION: return the 50,000 queried rows directly -> the response exceeds
-    // the control-frame contract instead of telling the CLI to full-scan.
-    assert_eq!(saturated["saturated"], json!(true));
+    assert_eq!(
+        saturated["saturated"],
+        json!(true),
+        "return the 50,000 queried rows directly -> the response exceeds the control-frame contract instead of telling the CLI to full-scan."
+    );
     let results = saturated["results"].as_array().expect("candidate array");
     assert!(!results.is_empty());
     assert!(results.len() < 50_000);
@@ -4345,15 +4387,14 @@ async fn unread_file_thread_arm_coalesces_missing_state_and_tracks_mutations() {
         json!({}),
     )
     .await;
-    // MUTATION: use an inner read-state join or omit COALESCE(..., 0) -> this
-    // unread thread with no read-state row disappears.
     assert_eq!(
         absent_state,
         json!([{
             "threadId": "unread-file",
             "messageCount": 2,
             "lastReadSequence": 0,
-        }])
+        }]),
+        "use an inner read-state join or omit COALESCE(..., 0) -> this unread thread with no read-state row disappears.",
     );
 
     call(

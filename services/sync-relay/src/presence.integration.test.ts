@@ -5,16 +5,16 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-// Two DIFFERENT clients over a REAL relay child process (the SYNC_RELAY_TEST_AUTH
+// Two different clients over a real relay child process (the SYNC_RELAY_TEST_AUTH
 // bearer seam), proving the ephemeral awareness transport end to end: client A
 // sees client B come online + type, and B leaving clears B for A — all with no
 // durable log write.
 
-// The teardown can need the full 5s SIGTERM grace per child AND up to 5.5s of
+// The teardown can need the full 5s SIGTERM grace per child and up to 5.5s of
 // linear rm() backoff (100+200+…+1000) once SQLite handles are still busy — over
 // vitest's stock 10s hook budget before filesystem overhead. Leaving it at the
 // default would fail teardown with a generic hook timeout in exactly the
-// contention the retries exist for: a deadline outside its container again (#372).
+// contention the retries exist for: a deadline outside its container again.
 vi.setConfig({ hookTimeout: 30_000 });
 
 let roots: string[] = [];
@@ -74,8 +74,8 @@ async function spawnRelay(dbPath: string): Promise<string> {
     const timeout = setTimeout(
       () => reject(new Error(`relay did not report a port\n${stdout}\n${stderr}`)),
       // 45s, not 15s. This spawns `node --import tsx/esm src/main.ts`, which
-      // COMPILES on startup — under load that measured 12-15s. THIS is the
-      // deadline that failed the #372 presence flakes; not any waiter budget and
+      // compiles on startup — under load that measured 12-15s. This is the
+      // deadline that failed the presence flakes; not any waiter budget and
       // not the `it` budget, neither of which the failing test even reached. The
       // enclosing budgets are 90s, which contains this.
       45_000,
@@ -211,7 +211,7 @@ async function appendChannelCreate(
 }
 
 // Append a real chat.thread.create to the owner's log, binding a thread to a
-// channel wire id. The relay's forge-resistant resolver reads THIS op to decide
+// channel wire id. The relay's forge-resistant resolver reads this op to decide
 // whether a `chat:thread:<threadId>` presence topic is bound to a granted
 // channel — so a thread topic is only authorized once such a binding exists.
 async function appendThreadCreate(
@@ -277,7 +277,7 @@ describe("two-client presence over a real relay child", () => {
     const relayRoot = await tempDir();
     const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
 
-    // A and B are the SAME workspace owner across two devices/tabs (both
+    // A and B are the same workspace owner across two devices/tabs (both
     // authorized by workspaceIsOwnedBy). Distinct clientIds => two entries.
     const ws = "workspace-presence";
     await claimWorkspace(baseUrl, "owner", ws);
@@ -311,7 +311,7 @@ describe("two-client presence over a real relay child", () => {
     expect(afterLeave.peers.map((p) => p.clientId)).toEqual(["A"]);
   }, 90_000);
 
-  it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on ONE shared-channel presence scope via the wireId topic", async () => {
+  it("converges an OWNER (workspace scope) and a PARTICIPANT (share scope) on one shared-channel presence scope via the wireId topic", async () => {
     const relayRoot = await tempDir();
     const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
 
@@ -332,9 +332,9 @@ describe("two-client presence over a real relay child", () => {
     });
     expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
 
-    // PARTICIPANT publishes via the SHARE route on the SAME wireId topic. The
+    // PARTICIPANT publishes via the SHARE route on the same wireId topic. The
     // relay maps the share to the granter's workspace, so this lands in the
-    // owner's scope — the participant's own response ALREADY shows both peers.
+    // owner's scope — the participant's own response already shows both peers.
     const memberView = await sharePublish(baseUrl, "member", shareId, wireId, {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },
@@ -348,7 +348,7 @@ describe("two-client presence over a real relay child", () => {
     expect(member?.userId).toBe("member");
     expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
 
-    // STRANGER denial: a fully-authenticated non-participant is refused share
+    // Stranger denial: a fully-authenticated non-participant is refused share
     // presence byte-identically to a share that never existed (no oracle).
     const absent = await sharePresenceRaw(baseUrl, "stranger", "never-existed", wireId, {
       clientId: "x",
@@ -362,7 +362,7 @@ describe("two-client presence over a real relay child", () => {
     expect(afterProbe.peers.map((p) => p.userId).sort()).toEqual(["member", "owner"]);
   }, 90_000);
 
-  it("converges owner + participant on a THREAD topic bound to the granted channel, and isolates other/unknown threads", async () => {
+  it("converges owner + participant on a thread topic bound to the granted channel, and isolates other/unknown threads", async () => {
     const relayRoot = await tempDir();
     const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
 
@@ -373,11 +373,11 @@ describe("two-client presence over a real relay child", () => {
     await appendChannelCreate(baseUrl, "owner", ownerWs, 0, grantedWire);
     await appendChannelCreate(baseUrl, "owner", ownerWs, 1, otherWire);
     // Real thread bindings in the owner's own log: `thread-in` -> the granted
-    // channel, `thread-out` -> a DIFFERENT (ungranted) channel. `thread-unknown`
+    // channel, `thread-out` -> a different (ungranted) channel. `thread-unknown`
     // is left unbound (no chat.thread.create at all).
     await appendThreadCreate(baseUrl, "owner", ownerWs, 2, "thread-in", grantedWire);
     await appendThreadCreate(baseUrl, "owner", ownerWs, 3, "thread-out", otherWire);
-    // Owner grants ONLY the general channel to the participant.
+    // Owner grants only the general channel to the participant.
     const shareId = await createChatShare(baseUrl, "owner", ownerWs, "member", grantedWire);
 
     const threadTopic = "chat:thread:thread-in";
@@ -388,9 +388,9 @@ describe("two-client presence over a real relay child", () => {
     });
     expect(ownerView.map((p) => p.clientId)).toEqual(["owner-1"]);
 
-    // PARTICIPANT publishes via the SHARE route on the SAME thread topic. The
+    // PARTICIPANT publishes via the SHARE route on the same thread topic. The
     // gate admits it because thread-in binds to the granted channel; the relay
-    // maps the share to the granter's workspace, so both land in ONE scope.
+    // maps the share to the granter's workspace, so both land in one scope.
     const memberView = await sharePublish(baseUrl, "member", shareId, threadTopic, {
       clientId: "member-1",
       state: { displayName: "Member", typing: true },
@@ -403,7 +403,7 @@ describe("two-client presence over a real relay child", () => {
     expect(member?.userId).toBe("member");
     expect(member?.state).toMatchObject({ displayName: "Member", typing: true });
 
-    // ISOLATION — a thread bound to a DIFFERENT channel is refused byte-identical
+    // ISOLATION — a thread bound to a different channel is refused byte-identical
     // to a share that never existed (no oracle that the thread even exists).
     const absent = await sharePresenceRaw(baseUrl, "member", "never-existed", threadTopic, {
       clientId: "x",
@@ -458,7 +458,7 @@ describe("two-client presence over a real relay child", () => {
     await publish(baseUrl, "owner", ws, "general", { clientId: "A", state: {} });
     const current = await poll(baseUrl, "owner", ws, "general", 0, 0);
 
-    // Park a long-poll over a REAL socket, then tear the socket down. The
+    // Park a long-poll over a real socket, then tear the socket down. The
     // node adapter must propagate the disconnect into the fetch Request's
     // AbortSignal so the hub releases the parked waiter — long before the
     // 20s hold would have expired.
@@ -471,11 +471,11 @@ describe("two-client presence over a real relay child", () => {
     ).catch(() => undefined);
     await waitForWaiters(baseUrl, 1);
     controller.abort(); // client vanishes mid-park
-    // Observe the release BEFORE awaiting `parked`: awaiting first absorbs the whole
+    // Observe the release before awaiting `parked`: awaiting first absorbs the whole
     // hold, after which zero waiters is guaranteed however the release happened.
     await waitForWaiters(baseUrl, 0);
     // Then attribute it to the abort, measured from the PARK. A budget merely
-    // "below the hold" is NOT enough — it starts at the abort, so once the first
+    // "below the hold" is not enough — it starts at the abort, so once the first
     // wait costs >5s the hold expires inside it and a broken abort goes green
     // (verified: deleting the abort and sleeping 6s passed in 22.3s). Elapsed from
     // the park is sound whatever the timings do.
@@ -492,11 +492,11 @@ async function waitForWaiters(
   budgetMs = 25_000,
 ): Promise<void> {
   // 10s lost the race under contention — this polls a real relay child over HTTP,
-  // so it is wall-clock bound (#372). 25s by default, and the callers raise their
+  // so it is wall-clock bound. 25s by default, and the callers raise their
   // own `it` budget to contain a slow spawn plus two of these waits; a deadline
   // longer than its test budget would be killed before its diagnostic fires.
   //
-  // Callers proving something happened BEFORE a server-side timeout must pass a
+  // Callers proving something happened before a server-side timeout must pass a
   // budget shorter than that timeout — see the disconnect test.
   const deadline = Date.now() + budgetMs;
   let last: unknown;

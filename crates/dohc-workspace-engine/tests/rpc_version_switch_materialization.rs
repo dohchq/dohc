@@ -131,8 +131,6 @@ async fn switch_to(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_versions_rewrites_different_plaintext() {
-    // MUTATION: restore the database-only versions.setActive handler and the
-    // final assertion observes "main".
     let (scratch, transport, handle, workspace_id) = fixture("plaintext").await;
     write_text(&transport, &handle, 2, "main", "notes.md", "main").await;
     std::fs::write(scratch.path().join("notes.md"), "main").expect("seed disk");
@@ -245,8 +243,6 @@ async fn ordinary_binary_write_after_switch_is_not_superseded_by_switch_timestam
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_versions_rewrites_different_secret() {
-    // MUTATION: restore the database-only versions.setActive handler and .env
-    // remains the main version's plaintext.
     let (scratch, transport, handle, workspace_id) = fixture("secret").await;
     call(
         &transport,
@@ -298,8 +294,6 @@ async fn switching_versions_rewrites_different_secret() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn version_fork_replays_pending_secret_write_before_capture_scan() {
-    // MUTATION: remove the fence-time pending-materialization replay and the
-    // forced scan captures MODE=old back over the committed MODE=new API tip.
     let (scratch, transport, handle, workspace_id) = fixture("pending-secret-before-fork").await;
     call(
         &transport,
@@ -441,8 +435,6 @@ async fn capture_suppresses_a_secret_write_materialized_by_version_switch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switching_deletes_path_missing_from_target() {
-    // MUTATION: restore the database-only versions.setActive handler and the
-    // previous version's file remains on disk.
     let (scratch, transport, handle, workspace_id) = fixture("delete").await;
     write_text(&transport, &handle, 2, "main", "retired.md", "main").await;
     std::fs::write(scratch.path().join("retired.md"), "main").expect("seed disk");
@@ -521,9 +513,6 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     // own surface: after a switch driven entirely through RPC, the closed
     // database holds no secret plaintext in either form.
     //
-    // MUTATION: leave the decrypted plaintext behind as a stray blob in
-    // `plan_secret_switch` (`put_binary_blob(tx, plaintext.as_bytes())`) and the
-    // scan finds it while every other assertion here still passes.
     let main_marker = "MARKER_1c6a94fe_RPC_MAIN";
     let feature_marker = "MARKER_78b2de50_RPC_FEATURE";
     let main_text = format!("PASSWORD={main_marker}\n");
@@ -583,7 +572,7 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     );
 
     let database = scratch.path().join(".dohc/engine/engine.db");
-    // The WAL is part of the evidence, so the scan runs BEFORE the close: closing
+    // The WAL is part of the evidence, so the scan runs before the close: closing
     // the last connection checkpoints the WAL into the main file and normally
     // deletes it, and plaintext that reached a WAL page and was later overwritten
     // would be gone before this could look. `assert_scanned_wal` fails if that
@@ -593,7 +582,7 @@ async fn plaintext_never_leaks_across_an_rpc_version_switch() {
     scan.assert_secret_plaintext_absent(&feature_text);
     scan.assert_absent_in_every_form("main marker", main_marker);
     scan.assert_absent_in_every_form("feature marker", feature_marker);
-    // Positive control: both stored ciphertexts ARE in the scanned bytes.
+    // Positive control: both stored ciphertexts are in the scanned bytes.
     scan.assert_stored_ciphertext_scanned(&database);
     scan.assert_scanned_wal();
 

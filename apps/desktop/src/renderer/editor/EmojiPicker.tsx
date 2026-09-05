@@ -48,7 +48,7 @@ export function applyEmojiPick(view: PickerView, from: number, entry: EmojiEntry
   view.focus();
 }
 
-/** PURE: fuzzy-rank EMOJI_DATA against a query, matching on shortcode
+/** Pure: fuzzy-rank EMOJI_DATA against a query, matching on shortcode
  *  (preferred) then keywords. Lower score = better match. Exported for
  *  direct unit testing of the ranking without rendering the picker. */
 export function rankEmoji(query: string, entries: ReadonlyArray<EmojiEntry> = EMOJI_DATA) {

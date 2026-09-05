@@ -13,7 +13,7 @@ import {
 // half runs off a serial queue, so a newer snapshot can be captured while an
 // earlier projection is still pending. This file pins what happens then.
 //
-// The projection is mocked twice over: the IMPORT is gated, so every snapshot
+// The projection is mocked twice over: the import is gated, so every snapshot
 // in a burst is captured before any refinement can run, and each PROJECTION
 // call is countable, so one of them can fail while the others succeed. Both
 // levers need a module this file has never resolved — hence its own file.
@@ -147,7 +147,7 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
   const consoleError = vi
     .spyOn(console, "error")
     .mockImplementation(() => undefined);
-  // Held for the whole burst, so BOTH edits are captured before any
+  // Held for the whole burst, so both edits are captured before any
   // refinement runs — the order this defect needs, and the order a user
   // typing through a refused session produces.
   const release = armProjectionGate();
@@ -183,10 +183,7 @@ it("refines the newest refused snapshot, not the one each edit queued", async ()
     { timeout: 10_000 },
   );
 
-  // MUTATION: project the bytes each refinement was queued with instead of the
-  // newest ones — the first edit's Markdown lands last, and the second edit is
-  // gone from the only copy of it that exists.
-  expect(screen.getByTestId("draft").textContent).toContain("edit-1");
+  expect(screen.getByTestId("draft").textContent, "project the bytes each refinement was queued with instead of the newest ones — the first edit's Markdown lands last, and the second edit is gone from the only copy of it that exists.").toContain("edit-1");
   expect(screen.getByTestId("draft").textContent).toContain("edit-2");
   expect(screen.getByTestId("draft-count").textContent).toBe("1");
   consoleError.mockRestore();

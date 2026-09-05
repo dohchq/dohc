@@ -1,13 +1,12 @@
-//! The Rust side of the E-shard capture DIFFERENTIAL: replay the shared
-//! fixtures against the REAL daemon (workspace.open → autonomous capture →
-//! capture.flush → workspace.close) and compare normalized per-path state
-//! against the goldens the TypeScript oracle emitted
-//! (`apps/desktop/src/workspaces/captureOracleGoldens.test.ts`).
+//! The capture differential: replay the shared fixtures against the real
+//! daemon (workspace.open → autonomous capture → capture.flush →
+//! workspace.close) and compare normalized per-path state against the frozen
+//! goldens the TypeScript oracle emitted.
 //!
 //! Projection rules mirror the TS emitter exactly: ids/timestamps excluded;
 //! text = { text, sha256(utf8), byteLength }; binary = { sha256, byteLength };
 //! secret = { byteLength } only; absence carries `everTracked` (any
-//! moments/secret_moments rows) so RETIRED and NEVER-TRACKED stay distinct.
+//! moments/secret_moments rows) so retired and NEVER-TRACKED stay distinct.
 //!
 //! Fixtures are DISK-DRIVEN only — the ratified delta: TS `writeIfChanged`
 //! ignores `metadata_origin` (safe there because the desktop materializes API
@@ -161,7 +160,7 @@ fn apply_to_disk(root: &Path, step: &Step) {
 }
 
 /// The state one applied step must become visible as, so steps cannot
-/// coalesce (a write must be OBSERVED before its delete lands).
+/// coalesce (a write must be observed before its delete lands).
 fn expected_after(step: &Step) -> Projection {
     match step.op.as_str() {
         "delete" => Projection {
@@ -230,7 +229,7 @@ fn hex(bytes: &[u8]) -> String {
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
 type RawProjection = (bool, Option<u64>, Option<(String, Option<String>)>);
 
-/// Project one path from the persisted engine.db — the SAME source a fresh
+/// Project one path from the persisted engine.db — the same source a fresh
 /// process would read, mirroring the TS emitter's projection exactly.
 fn project_path(db: &Path, path: &str) -> Projection {
     use rusqlite::OptionalExtension;
@@ -318,7 +317,7 @@ fn project_path(db: &Path, path: &str) -> Projection {
     }
 }
 
-/// Drive one step to VISIBILITY: flush until the persisted projection shows
+/// Drive one step to visibility: flush until the persisted projection shows
 /// the step's effect. The only nondeterminism is the watcher noticing the
 /// disk write; once it has, one settled flush suffices — no blind sleeps.
 async fn drive_step_to_visibility(
@@ -353,7 +352,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
     let fixtures: Fixtures = serde_json::from_str(FIXTURES).expect("fixtures parse");
     let goldens: Goldens = serde_json::from_str(GOLDENS).expect("goldens parse");
 
-    // === The freeze, enforced HERE rather than described in a document. ===
+    // === The freeze, enforced here rather than described in a document. ===
     //
     // R16 deletes the TypeScript oracle that produced these goldens. After that
     // the only implementation able to regenerate them is the daemon this test
@@ -399,7 +398,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
          capture-goldens.provenance.md."
     );
 
-    // Scenario IDENTITIES, not counts. Equal lengths prove nothing: delete one
+    // Scenario identities, not counts. Equal lengths prove nothing: delete one
     // fixture scenario and duplicate another and both sides still read 10, while
     // the loop resolves the duplicate twice and the deleted scenario's golden is
     // never read.

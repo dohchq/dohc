@@ -1,6 +1,6 @@
 //! RPC-A acceptance: the read surface (versions/moments/text-list/binary/
 //! secrets) end to end through the transport, against state produced by the
-//! REAL write paths (RPC writes + autonomous capture) — never by seeding the
+//! real write paths (RPC writes + autonomous capture) — never by seeding the
 //! DB directly, so the RPCs are proven against the daemon's own semantics.
 
 use dohc_engine_protocol::{
@@ -141,8 +141,11 @@ async fn secret_state_probe_tracks_workspace_wide_protected_rows() {
         json!({ "workspaceId": WORKSPACE_ID }),
     )
     .await;
-    // MUTATION: invert or hard-code either probe result and this pair fails.
-    assert_eq!(populated, json!(true));
+    assert_eq!(
+        populated,
+        json!(true),
+        "invert or hard-code either probe result and this pair fails."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -506,9 +509,11 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         json!({ "versionId": "main", "path": "%2eenv" }),
     )
     .await;
-    // MUTATION: classify normalized but key by the verbatim spelling -> this
-    // becomes null and recreates the alias/clobber split.
-    assert_eq!(disguised["text"], json!("TOKEN=rpc-read"));
+    assert_eq!(
+        disguised["text"],
+        json!("TOKEN=rpc-read"),
+        "classify normalized but key by the verbatim spelling -> this becomes null and recreates the alias/clobber split."
+    );
     id += 1;
     let absent = call(
         &transport,
@@ -533,7 +538,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
     .await;
     assert_eq!(big["text"], json!(big_secret));
 
-    // FAIL CLOSED: live secret state with a MISSING key file is
+    // Fail closed: live secret state with a missing key file is
     // corrupt/misrestored — materialize must error, never read as empty.
     std::fs::remove_file(
         scratch
@@ -588,7 +593,6 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
         .expect("fresh open");
     let fresh_handle: WorkspaceHandle =
         serde_json::from_value(opened.result["workspace"].clone()).expect("fresh handle");
-    // MUTATION: synthesize main or map WorkspaceNotFound to state-corrupt -> this is not null.
     let active = call(
         &transport,
         &fresh_handle,

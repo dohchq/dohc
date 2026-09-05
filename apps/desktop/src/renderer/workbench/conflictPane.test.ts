@@ -62,14 +62,14 @@ describe("conflictPreview", () => {
       CONFLICT_PREVIEW_MAX_LINES * (16 + breakUnits),
     );
     expect(preview.hiddenChars).toBeGreaterThan(0);
-    // CRLF must cost ONE line, not two. Counting each half separately would
+    // CRLF must cost one line, not two. Counting each half separately would
     // halve the window for every Windows document.
     expect(preview.text.endsWith(lineBreak)).toBe(true);
   });
 
-  // The other side of that measurement. A character that only SOFT wraps is
+  // The other side of that measurement. A character that only soft wraps is
   // not a line box, so a body full of them is one line to the line window and
-  // the CHARACTER window is what holds it. Bounded either way — and cutting
+  // the character window is what holds it. Bounded either way — and cutting
   // these at the line window would have shown far less of the file than it
   // safely could.
   it.each([
@@ -105,7 +105,7 @@ describe("conflictPreview", () => {
     // window has no boundary to fall back to and must cut inside it.
     //
     // The leading "x" pushes every pair onto an odd index, so the window
-    // lands INSIDE one. Without the guard the preview would end on the
+    // lands inside one. Without the guard the preview would end on the
     // leading half.
     const body = `x${"🌱".repeat(CONFLICT_PREVIEW_MAX_CHARS)}`;
     const preview = conflictPreview(body, 1);

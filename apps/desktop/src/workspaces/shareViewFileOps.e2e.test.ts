@@ -44,7 +44,7 @@ import {
 } from "./workspaceAssets";
 import { createFile, movePath } from "./workspaceFiles";
 
-// The four remaining writes a share view admits (#802), driven the way
+// The four remaining writes a share view admits, driven the way
 // `shareViewTextWrite.e2e.test.ts` drives the text save.
 //
 // "The recipient can send this change" is not a UI state: it is a moment in
@@ -474,7 +474,7 @@ function storeFailingAt(
 }
 
 // The move RPC answers when the filesystem changed; the store row settles
-// through the capture pipeline afterwards, so an instant read can see BOTH
+// through the capture pipeline afterwards, so an instant read can see both
 // case-variants of one entry. Poll for the settled listing — a refused
 // rename never reaches it and fails showing the store's actual state.
 function waitForStorePaths(
@@ -653,7 +653,7 @@ describe("share-view file operations through the real store", () => {
       expect(await storePaths(view)).toEqual(["docs/added.md", "docs/note.md"]);
       expect(
         replicationLogRows(view.rootPath),
-        "MUTATION: a create that only writes the file is a change the submit lane cannot see",
+        "a create that only writes the file is a change the submit lane cannot see",
       ).toBeGreaterThan(journalBefore);
       await expect(
         readFile(join(view.rootPath, "docs", "added.md"), "utf8"),
@@ -722,11 +722,11 @@ describe("share-view file operations through the real store", () => {
             initialText: "# overwritten\n",
           }),
         ),
-        "MUTATION: a create reports success for a path occupied only by the recipient's own file",
+        "a create reports success for a path occupied only by the recipient's own file",
       ).rejects.toThrow(/already exists/);
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
-        "MUTATION: a create that journals over an occupied path destroys the recipient's own file",
+        "a create that journals over an occupied path destroys the recipient's own file",
       ).resolves.toBe("mine\n");
       expect(replicationLogRows(view.rootPath)).toBe(journalBefore);
     },
@@ -751,7 +751,7 @@ describe("share-view file operations through the real store", () => {
       expect(path).toBe("docs/renamed.md");
       expect(
         await storePaths(view),
-        "MUTATION: a rename that only moves the file leaves the store naming the old path",
+        "a rename that only moves the file leaves the store naming the old path",
       ).toEqual(["docs/renamed.md"]);
       expect(replicationLogRows(view.rootPath)).toBeGreaterThan(journalBefore);
       await expect(
@@ -839,7 +839,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         captureStartedBeforeProjection,
-        "MUTATION: removing the mutation's lifecycle lock lets capture observe the renamed store before its projection",
+        "removing the mutation's lifecycle lock lets capture observe the renamed store before its projection",
       ).toBe(false);
       expect(captured).toEqual({
         capturedPaths: 0,
@@ -866,7 +866,7 @@ describe("share-view file operations through the real store", () => {
         .map((moment) => moment.operation);
       expect(
         destinationMoments,
-        "MUTATION: capture in the rename gap journals a delete on top of the destination",
+        "capture in the rename gap journals a delete on top of the destination",
       ).toEqual(["rename"]);
     },
     60_000,
@@ -889,7 +889,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         await storePaths(view),
-        "MUTATION: renaming only the directory leaves every file under it naming the old path",
+        "renaming only the directory leaves every file under it naming the old path",
       ).toEqual(["docs/roadmap/one.md", "docs/roadmap/two.md"]);
       expect(await readdir(join(view.rootPath, "docs"))).toEqual(["roadmap"]);
       await expect(
@@ -899,7 +899,7 @@ describe("share-view file operations through the real store", () => {
     60_000,
   );
 
-  // THE PROJECTION IS NOT DOHC'S TO SPEND (sweep of #806, blockers 1-4).
+  // THE PROJECTION IS NOT DOHC'S TO spend (sweep of #806, blockers 1-4).
   //
   // A share view's folder holds two kinds of file: the projection of the
   // store, which dohc rewrites freely, and whatever the recipient put there
@@ -923,7 +923,7 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/note.md",
           toPath: "docs/mine.md",
         }),
-        "MUTATION: a rename that asks only the store overwrites the recipient's own file",
+        "a rename that asks only the store overwrites the recipient's own file",
       ).rejects.toThrow(/already exists/);
 
       await expect(
@@ -958,7 +958,7 @@ describe("share-view file operations through the real store", () => {
       await waitForStorePaths(
         view,
         ["docs/Note.md"],
-        "MUTATION: an occupied-name check without the case carve-out refuses a rename that only changes case",
+        "an occupied-name check without the case carve-out refuses a rename that only changes case",
       );
       await expect(
         readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
@@ -970,8 +970,8 @@ describe("share-view file operations through the real store", () => {
   // CASE IDENTITY IS THE FILESYSTEM'S ANSWER, NEVER A STRING'S (delta pass of
   // #806, findings 1, 2 and 9).
   //
-  // On a case-insensitive filesystem `docs/Plans` and `docs/plans` are ONE
-  // directory, and `Note.md` and `note.md` are ONE file. Every place this
+  // On a case-insensitive filesystem `docs/Plans` and `docs/plans` are one
+  // directory, and `Note.md` and `note.md` are one file. Every place this
   // module asked "same entry?" or "name taken?" with a string comparison got
   // the wrong answer there, and two of them answered by destroying data. The
   // three below are the shapes that were measured; they run on every platform
@@ -999,14 +999,14 @@ describe("share-view file operations through the real store", () => {
       );
       expect(
         await readdir(join(view.rootPath, "docs")),
-        "MUTATION: a case-only folder rename changes the store spelling but leaves the old directory spelling on disk",
+        "a case-only folder rename changes the store spelling but leaves the old directory spelling on disk",
       ).toEqual(["plans"]);
       // The cleanup that removes an emptied source folder must not run when
-      // the source and the destination are the SAME folder: it would remove
+      // the source and the destination are the same folder: it would remove
       // the files this rename just put there.
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "one.md"), "utf8"),
-        "MUTATION: a case-only folder rename deletes everything it just moved",
+        "a case-only folder rename deletes everything it just moved",
       ).resolves.toBe("one\n");
       await expect(
         readFile(join(view.rootPath, "docs", "plans", "two.md"), "utf8"),
@@ -1038,7 +1038,7 @@ describe("share-view file operations through the real store", () => {
       // as safe, and a name set built from `readdir` strings is not.
       await expect(
         readFile(join(view.rootPath, "docs", "Note.md"), "utf8"),
-        "MUTATION: an import that compares names as strings overwrites a file whose name differs only in case",
+        "an import that compares names as strings overwrites a file whose name differs only in case",
       ).resolves.toBe("granter\n");
       // WHERE the import landed differs by platform — `note (2).md` where the
       // filesystem folds case, `note.md` where it does not — so this asserts
@@ -1085,7 +1085,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         outcome,
-        "MUTATION: exact-case store lookup accepts a second engine path for the same physical name",
+        "exact-case store lookup accepts a second engine path for the same physical name",
       ).toEqual({ imported: ["docs/note (2).md"], skipped: 0 });
       expect(await storePaths(view)).toEqual([
         "docs/Note.md",
@@ -1119,7 +1119,7 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
         }),
-        "MUTATION: a move screens only the folder it leaves, and merges into one holding files the store never had",
+        "a move screens only the folder it leaves, and merges into one holding files the store never had",
       ).rejects.toThrow(/not part of this shared view/);
 
       await expect(
@@ -1145,7 +1145,7 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
         }),
-        "MUTATION: a folder move merges into an existing canonical folder",
+        "a folder move merges into an existing canonical folder",
       ).rejects.toThrow(/already exists/);
 
       expect(await storePaths(view)).toEqual([
@@ -1176,7 +1176,7 @@ describe("share-view file operations through the real store", () => {
         "utf8",
       );
 
-      // The EXACT sentence, not a fragment every refusal in this module
+      // The exact sentence, not a fragment every refusal in this module
       // shares: a scan that returned nothing would raise the "nothing to move"
       // refusal, which also contains that fragment, and this test could not
       // tell the two apart.
@@ -1186,7 +1186,7 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
         }),
-        "MUTATION: moving a folder removes it whole, destroying the files under it the store never held",
+        "moving a folder removes it whole, destroying the files under it the store never held",
       ).rejects.toThrow(
         "docs/plans holds 1 file that is not part of this shared view: docs/plans/mine.md. Move it out of the folder first.",
       );
@@ -1222,7 +1222,7 @@ describe("share-view file operations through the real store", () => {
           ...scope(view),
           relativePath: "docs/plans",
         }),
-        "MUTATION: deleting a folder removes it whole, destroying the files under it the store never held",
+        "deleting a folder removes it whole, destroying the files under it the store never held",
       ).rejects.toThrow(
         "docs/plans holds 1 file that is not part of this shared view: docs/plans/mine.md. Move it out of the folder first.",
       );
@@ -1266,7 +1266,7 @@ describe("share-view file operations through the real store", () => {
           shareViewStore: () => late.store,
           relativePath: "docs/notes.md",
         }),
-        "MUTATION: deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
+        "deleting over a directory that replaced a tracked file recursively removes the directory and everything in it",
       ).rejects.toThrow(
         "dohc did not delete docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
       );
@@ -1275,7 +1275,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
-        "MUTATION: the recipient-owned directory must survive a refused delete",
+        "the recipient-owned directory must survive a refused delete",
       ).toBe(true);
       await expect(
         readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
@@ -1283,7 +1283,7 @@ describe("share-view file operations through the real store", () => {
       expect(await storePaths(view)).toEqual(["docs/notes.md"]);
       await expect(
         readPendingMaterializationPaths(view.rootPath),
-        "MUTATION: a refused delete that still marked the path pending leaves recovery believing a materialization is owed",
+        "a refused delete that still marked the path pending leaves recovery believing a materialization is owed",
       ).resolves.toEqual(new Set());
     },
     60_000,
@@ -1318,7 +1318,7 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/notes.md",
           toPath: "docs/renamed.md",
         }),
-        "MUTATION: renaming over a directory that replaced a tracked file recursively removes the directory and everything in it",
+        "renaming over a directory that replaced a tracked file recursively removes the directory and everything in it",
       ).rejects.toThrow(
         "dohc did not rename docs/notes.md. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry.",
       );
@@ -1327,7 +1327,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         (await lstat(join(view.rootPath, "docs", "notes.md"))).isDirectory(),
-        "MUTATION: the recipient-owned directory must survive a refused rename",
+        "the recipient-owned directory must survive a refused rename",
       ).toBe(true);
       await expect(
         readFile(join(view.rootPath, "docs", "notes.md", "inside.txt"), "utf8"),
@@ -1338,7 +1338,7 @@ describe("share-view file operations through the real store", () => {
       );
       await expect(
         readPendingMaterializationPaths(view.rootPath),
-        "MUTATION: a refused rename that still marked the path pending leaves recovery believing a materialization is owed",
+        "a refused rename that still marked the path pending leaves recovery believing a materialization is owed",
       ).resolves.toEqual(new Set());
     },
     60_000,
@@ -1364,14 +1364,14 @@ describe("share-view file operations through the real store", () => {
           ...scope(view),
           relativePath: "docs/notes.md",
         }),
-        "MUTATION: deleting over a symlink that replaced a tracked file follows it and destroys what it points at",
+        "deleting over a symlink that replaced a tracked file follows it and destroys what it points at",
       ).rejects.toThrow(
         "dohc did not send your changes. docs/notes.md replaces a tracked file with a folder or another entry. Restore the file or move the conflicting entry. Fix this file, then send your changes again.",
       );
 
       expect(
         (await lstat(join(view.rootPath, "docs", "notes.md"))).isSymbolicLink(),
-        "MUTATION: the symlink must survive a refused delete",
+        "the symlink must survive a refused delete",
       ).toBe(true);
       await expect(readFile(outside, "utf8")).resolves.toBe("recipient file\n");
       expect(await storePaths(view)).toEqual(["docs/notes.md"]);
@@ -1382,11 +1382,11 @@ describe("share-view file operations through the real store", () => {
     60_000,
   );
 
-  // #861's escape: the earlier pins replace a tracked LEAF with something
+  // the escape: the earlier pins replace a tracked LEAF with something
   // else, which the per-leaf lstat catches directly. A tracked FOLDER has no
   // leaf of its own — only the files under it are tracked — so a symlink
   // standing in for the FOLDER itself needs its own check. Without it, a
-  // RENAME materializes each leaf as its own delete, and each one resolves
+  // rename materializes each leaf as its own delete, and each one resolves
   // through the link (an ancestor symlink, not the final component held
   // back) — landing `rm` on files at the link's target and destroying the
   // RECIPIENT's own content there, not the ones the store lost. (A delete
@@ -1422,14 +1422,14 @@ describe("share-view file operations through the real store", () => {
           fromPath: "docs/plans",
           toPath: "docs/roadmap",
         }),
-        "MUTATION: renaming a folder a symlink replaced follows the link per leaf and destroys the recipient's files at its target",
+        "renaming a folder a symlink replaced follows the link per leaf and destroys the recipient's files at its target",
       ).rejects.toThrow(
         "dohc did not rename docs/plans. docs/plans replaces this shared folder with a link or another entry. Restore the folder or move the conflicting entry.",
       );
 
       expect(
         (await lstat(join(view.rootPath, "docs", "plans"))).isSymbolicLink(),
-        "MUTATION: the symlink standing in for the folder must survive a refused rename",
+        "the symlink standing in for the folder must survive a refused rename",
       ).toBe(true);
       await expect(readFile(join(linkTarget, "one.md"), "utf8")).resolves.toBe(
         "recipient one\n",
@@ -1469,7 +1469,7 @@ describe("share-view file operations through the real store", () => {
           ...scope(view),
           relativePath: "docs/plans",
         }),
-        "MUTATION: a refusal that lists every file is unreadable at the size a real folder reaches",
+        "a refusal that lists every file is unreadable at the size a real folder reaches",
       ).rejects.toThrow(
         "docs/plans holds 5 files that are not part of this shared view: docs/plans/a.md, docs/plans/b.md, docs/plans/c.md, and 2 more. Move them out of the folder first.",
       );
@@ -1509,11 +1509,11 @@ describe("share-view file operations through the real store", () => {
       expect(path).toBe("docs/renamed.png");
       expect(
         await storePaths(view),
-        "MUTATION: a binary file the store lists as text is dropped from a folder scan entirely",
+        "a binary file the store lists as text is dropped from a folder scan entirely",
       ).toEqual(["docs/renamed.png"]);
       await expect(
         readFile(join(view.rootPath, "docs", "renamed.png")),
-        "MUTATION: materializing a renamed binary through readTextFile lands an empty or corrupt file",
+        "materializing a renamed binary through readTextFile lands an empty or corrupt file",
       ).resolves.toEqual(bytes);
     },
     60_000,
@@ -1542,7 +1542,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         await storePaths(view),
-        "MUTATION: a failure part way through leaves half a folder renamed, and every one of those halves is proposable",
+        "a failure part way through leaves half a folder renamed, and every one of those halves is proposable",
       ).toEqual([
         "docs/plans/five.md",
         "docs/plans/four.md",
@@ -1575,7 +1575,7 @@ describe("share-view file operations through the real store", () => {
       ]);
       // Paths move in sorted order — four, one, three, two — so calls 1-3 are
       // the forward renames that land, call 4 is the one that fails, and calls
-      // 5-7 are the put-backs in reverse. Failing call 6 strands the MIDDLE
+      // 5-7 are the put-backs in reverse. Failing call 6 strands the middle
       // put-back: the two around it must still run.
       await expect(
         applyShareViewPathMove({
@@ -1585,7 +1585,7 @@ describe("share-view file operations through the real store", () => {
           shareViewStore: () =>
             storeFailingAt(view.store, "renameTextFile", 4, 6),
         }),
-        "MUTATION: a put-back that abandons the list at the first failure strands every file after it too",
+        "a put-back that abandons the list at the first failure strands every file after it too",
       ).rejects.toThrow("docs/roadmap/one.md is not at docs/plans/one.md");
 
       // Exactly one file is stranded; the put-backs on either side of the
@@ -1623,12 +1623,12 @@ describe("share-view file operations through the real store", () => {
 
       // A delete cannot be put back, so the rule is the other one: what
       // happened is visible. Files go in path order — one, three, two — so the
-      // THIRD call is the one that fails, and its file stays on both sides
+      // third call is the one that fails, and its file stays on both sides
       // while the two before it are gone from both.
       expect(await storePaths(view)).toEqual(["docs/plans/two.md"]);
       expect(
         await exists(join(view.rootPath, "docs", "plans", "one.md")),
-        "MUTATION: a delete that fails part way leaves the projection holding files the store no longer has",
+        "a delete that fails part way leaves the projection holding files the store no longer has",
       ).toBe(false);
       expect(
         await exists(join(view.rootPath, "docs", "plans", "three.md")),
@@ -1663,7 +1663,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         outcome,
-        "MUTATION: an unscreened drag-in writes a directory into the share view's store",
+        "an unscreened drag-in writes a directory into the share view's store",
       ).toEqual({
         imported: ["docs/dropped.md"],
         skipped: 1,
@@ -1694,7 +1694,7 @@ describe("share-view file operations through the real store", () => {
       expect(result).toEqual({ trashed: false });
       expect(
         await storePaths(view),
-        "MUTATION: a delete that only removes the file leaves the store still holding it",
+        "a delete that only removes the file leaves the store still holding it",
       ).toEqual(["docs/keep.md"]);
       expect(replicationLogRows(view.rootPath)).toBeGreaterThan(journalBefore);
       expect(await exists(join(view.rootPath, "docs", "note.md"))).toBe(false);
@@ -1719,7 +1719,7 @@ describe("share-view file operations through the real store", () => {
           ...scope(view),
           relativePath: "docs/mine.md",
         }),
-        "MUTATION: deleting a path the store never had removes a file the granter can never be told about",
+        "deleting a path the store never had removes a file the granter can never be told about",
       ).rejects.toThrow(/not part of this shared view/);
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
@@ -1756,7 +1756,7 @@ describe("share-view file operations through the real store", () => {
 
       expect(
         await storePaths(view),
-        "MUTATION: deleting only the directory leaves every file under it in the store",
+        "deleting only the directory leaves every file under it in the store",
       ).toEqual(["docs/keep.md"]);
       expect(await readdir(join(view.rootPath, "docs"))).toEqual(["keep.md"]);
     },
@@ -1809,16 +1809,16 @@ describe("share-view file operations through the real store", () => {
       ]);
       await expect(
         readFile(join(view.rootPath, "docs", "mine.md"), "utf8"),
-        "MUTATION: an import that only asks the store overwrites the recipient's own file",
+        "an import that only asks the store overwrites the recipient's own file",
       ).resolves.toBe("mine\n");
       expect(
         outcome.skipped,
-        "MUTATION: a source the engine cannot own is counted as imported",
+        "a source the engine cannot own is counted as imported",
       ).toBe(1);
       const paths = await storePaths(view);
       expect(
         paths,
-        "MUTATION: the received-share watcher journals a recipient-owned collision file",
+        "the received-share watcher journals a recipient-owned collision file",
       ).not.toContain("docs/mine.md");
       expect(paths).toEqual([
         "docs/added.md",
@@ -1829,14 +1829,14 @@ describe("share-view file operations through the real store", () => {
       ]);
       expect(
         replicationLogRows(view.rootPath),
-        "MUTATION: an import that only copies files is a change the submit lane cannot see",
+        "an import that only copies files is a change the submit lane cannot see",
       ).toBeGreaterThan(journalBefore);
       await expect(
         readFile(join(view.rootPath, "docs", "note (2).md"), "utf8"),
       ).resolves.toBe("collides\n");
       await expect(
         readFile(join(view.rootPath, "docs", "note.md"), "utf8"),
-        "MUTATION: an import that overwrites replaces the granter's file with the recipient's",
+        "an import that overwrites replaces the granter's file with the recipient's",
       ).resolves.toBe("granter\n");
       await expect(
         readFile(join(view.rootPath, "docs", "picture.png")),
@@ -1918,7 +1918,7 @@ describe("share-view file operations through the real store", () => {
           screenAgainstRoots: null,
           targetDir: "docs/target",
         }),
-        "MUTATION: disk probing refuses a visible canonical folder whose projection was deleted out of app",
+        "disk probing refuses a visible canonical folder whose projection was deleted out of app",
       ).resolves.toEqual({ imported: ["docs/target/added.md"], skipped: 0 });
 
       expect(await storePaths(view)).toEqual([
@@ -1951,7 +1951,7 @@ describe("share-view file operations through the real store", () => {
       ).resolves.toBe("hello\n");
       expect(
         await storePaths(workspace),
-        "MUTATION: an ordinary workspace writing engine-direct journals every change twice — once here, once from the watcher",
+        "an ordinary workspace writing engine-direct journals every change twice — once here, once from the watcher",
       ).toEqual(before);
     },
     60_000,

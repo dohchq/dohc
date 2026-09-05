@@ -364,7 +364,7 @@ fn truncated_test_request_body_returns_unexpected_eof_without_panicking() {
     sender.join().expect("sender");
     assert!(
         outcome.is_ok(),
-        "MUTATION: slicing to content-length panics instead of returning a read error"
+        "slicing to content-length panics instead of returning a read error"
     );
     let error = outcome
         .expect("read must not panic")
@@ -1637,7 +1637,7 @@ async fn newer_pull_token_supersedes_the_older_token_for_the_same_scope() {
     .await;
     assert_eq!(
         committed["committed"], true,
-        "MUTATION: keeping every issued token permits stale cursor commits and leaks abandoned entries"
+        "keeping every issued token permits stale cursor commits and leaks abandoned entries"
     );
 }
 
@@ -1985,7 +1985,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     assert_eq!(pulled["refusals"][0]["opKind"], "moment.append");
     assert_eq!(
         pulled["refusals"][0]["code"], "share-boundary-violation",
-        "MUTATION: dropping refusals from the wire leaves the client a bare count: {}",
+        "dropping refusals from the wire leaves the client a bare count: {}",
         pulled["refusals"]
     );
     assert!(
@@ -2048,14 +2048,14 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
 }
 
 /// Four wire states a permissive parser would let through, all refused
-/// BEFORE the relay is called, so a pull that enforces no containment cannot
+/// before the relay is called, so a pull that enforces no containment cannot
 /// be requested at all:
 ///
 /// 1. `grantedSelector` absent.
 /// 2. `grantedSelector` explicitly `null` — what a permissive `Option` would
 ///    read as absent while looking declared.
-/// 3. `access` absent (#646).
-/// 4. `access` naming a level this process cannot read (#646).
+/// 3. `access` absent.
+/// 4. `access` naming a level this process cannot read.
 ///
 /// A grant whose level cannot be read is not a narrower grant, it is an
 /// unreadable one — see `ShareAccess::parse`.
@@ -2090,12 +2090,12 @@ async fn share_view_pull_refuses_an_unreadable_granted_selector() {
                 request(id, "share.view.pull", Some(handle.clone()), params.clone()),
             )
             .await
-            .expect_err("MUTATION: an unscoped share view pull is accepted");
+            .expect_err("an unscoped share view pull is accepted");
         assert_eq!(error.code, ErrorCode::InvalidParams, "{params}");
     }
     assert!(
         relay.state.lock().expect("relay state").requests.is_empty(),
-        "MUTATION: the pull reaches the relay before the selector is required"
+        "the pull reaches the relay before the selector is required"
     );
 }
 
@@ -2242,7 +2242,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
             }),
         ));
 
-    // A body that does not hash to the sha its op named is REPAIRABLE at the
+    // A body that does not hash to the sha its op named is repairable at the
     // relay, so the pull stops rather than committing past content that is
     // still coming. The retry below is the recovery, and it works because the
     // cursor never moved.

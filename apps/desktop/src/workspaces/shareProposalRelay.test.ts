@@ -12,8 +12,8 @@ import {
   withdrawShareProposal,
 } from "./shareProposalRelay";
 
-// #646 PR3. These pin the granter's review surface against a relay that
-// answers with something OTHER than what the wire contract states. A review
+// These pin the granter's review surface against a relay that
+// answers with something other than what the wire contract states. A review
 // row built from a half-read response tells the granter it is accepting one
 // change while the relay holds another, and accepting writes to the
 // granter's own workspace — so every parse here refuses rather than softens.
@@ -102,7 +102,7 @@ describe("listShareProposals", () => {
     ]);
   });
 
-  // This route serves what the granter still has to ANSWER, so a sender it
+  // This route serves what the granter still has to answer, so a sender it
   // could not name is stated rather than invented — and the row stays
   // reviewable either way.
   it("states a sender the relay could not name", async () => {
@@ -118,7 +118,7 @@ describe("listShareProposals", () => {
       const { relay } = relayAnswering({ proposals: [{ ...SUMMARY, ops }] });
       await expect(
         listShareProposals({ relay, workspaceId: "workspace-a" }),
-        `MUTATION: a softened count read renders a review size nobody stated (${String(ops)})`,
+        `a softened count read renders a review size nobody stated (${String(ops)})`,
       ).rejects.toThrow(/ops is not a non-negative integer/u);
     }
   });
@@ -142,7 +142,7 @@ describe("listShareProposals", () => {
   });
 });
 
-// ONE proposal, opened. This is where the op rows are read, so this is where
+// One proposal, opened. This is where the op rows are read, so this is where
 // their strictness is proved.
 describe("readShareProposal", () => {
   const read = (relay: Parameters<typeof readShareProposal>[0]["relay"]) =>
@@ -164,7 +164,7 @@ describe("readShareProposal", () => {
     expect(proposal.ops[0]?.afterByteLength).toBe(12);
   });
 
-  // The relay answering about ANOTHER proposal would put one sender's changes
+  // The relay answering about another proposal would put one sender's changes
   // under another sender's name.
   it("refuses a proposal answered for a different id", async () => {
     const { relay } = relayAnswering({
@@ -172,7 +172,7 @@ describe("readShareProposal", () => {
     });
     await expect(
       read(relay),
-      "MUTATION: trusting the answered id shows one sender's changes under another's name",
+      "trusting the answered id shows one sender's changes under another's name",
     ).rejects.toThrow(/proposal answered proposal-9 for proposal-1/u);
   });
 
@@ -183,7 +183,7 @@ describe("readShareProposal", () => {
 
     await expect(
       read(relay),
-      "MUTATION: a softened drift read hides that the granter's copy moved",
+      "a softened drift read hides that the granter's copy moved",
     ).rejects.toThrow(/drifted is not a boolean/u);
   });
 
@@ -212,7 +212,7 @@ describe("readShareProposal", () => {
   });
 });
 
-// The lazy review's content door. It names ONE op, and what comes back must be
+// The lazy review's content door. It names one op, and what comes back must be
 // that op.
 describe("readShareProposalOp", () => {
   const readOp = (
@@ -247,7 +247,7 @@ describe("readShareProposalOp", () => {
 
     await expect(
       readOp(relay),
-      "MUTATION: trusting the answered index shows one file's content under another file's row",
+      "trusting the answered index shows one file's content under another file's row",
     ).rejects.toThrow(/proposal op answered index 4 for 3/u);
   });
 

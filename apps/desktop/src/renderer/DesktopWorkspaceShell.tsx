@@ -99,6 +99,17 @@ import {
 } from "./FileInspector";
 import { NewFileDialog } from "./NewFileDialog";
 import { NewCollectionDialog } from "./collections/NewCollectionDialog";
+import {
+  abandonPendingCollectionFieldWrites,
+  advanceCollectionWriteLineage,
+  COLLECTION_WRITE_STALL_MS,
+  collectionWriteFailures,
+  remapCollectionFieldWritePaths,
+  settleCollectionFieldWrites,
+  useCollectionWritesBlockingAdmission,
+  useCollectionWriteLineage,
+} from "./collections/recordFieldWrites";
+import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import { OpenSharedView } from "./OpenSharedView";
 import { Overlay } from "./Overlay";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
@@ -118,7 +129,7 @@ import {
 import { ActivityBar, activityViewLabel } from "./workbench/ActivityBar";
 import { EditorTabs } from "./workbench/EditorTabs";
 import { EditorGroupLayout } from "./workbench/EditorGroupLayout";
-import { Explorer } from "./workbench/Explorer";
+import { Explorer, type TreeChangeOperation } from "./workbench/Explorer";
 import { projectTreePath, type PendingTreeChange } from "./workbench/file-tree-optimistic";
 import { indexFileListing } from "./workbench/file-listing-index";
 import {
@@ -259,7 +270,7 @@ import { createFirstSiteFiles } from "./workbench/createFirstSite";
 // What a removed mount does to path-keyed UI state.
 //
 // A folder that went takes its tabs, pins and drafts with it — the same
-// reprojection an Explorer folder delete makes. A folder that STAYED must
+// reprojection an Explorer folder delete makes. A folder that stayed must
 // take nothing: record cleanup left the files exactly where they were, and
 // projecting a delete over them would discard state for files the user still
 // has open.
@@ -305,7 +316,7 @@ export function goneMountProjections(input: {
 
 // The one closing line a manual "Refresh shares" leaves behind.
 //
-// ONE line, because a second call replaces the first: damage reported before
+// One line, because a second call replaces the first: damage reported before
 // the summary was overwritten by it, and the user saw only "Shares
 // refreshed", which is exactly the wrong half. Damage is carried INTO the
 // summary, and the instruction that fixes it survives.
@@ -367,8 +378,8 @@ function chatsFocusMessageId(nav: ChatsNav | null): string | undefined {
 
 // Two questions about one navigation, deliberately different.
 //
-// Did the user LEAVE the conversation? That scopes drafts: a draft belongs to
-// the conversation it was typed in, so a jump WITHIN that conversation must
+// Did the user leave the conversation? That scopes drafts: a draft belongs to
+// the conversation it was typed in, so a jump within that conversation must
 // not discard it.
 export function chatsNavigationLeavesConversation(
   current: ChatsNav | null,
@@ -392,15 +403,15 @@ export function chatsNavigationChangesDestination(
   );
 }
 
-// What the history-off placeholder may claim (#542). The placeholder renders
+// What the history-off placeholder may claim. The placeholder renders
 // whenever the renderer's own capability read says the surface does not
-// exist, but that read must not SPEAK: whether changes are recorded is
+// exist, but that read must not speak: whether changes are recorded is
 // main's answer (syncStatus, from the one open-time read that decided the
 // recorder), and a cause is named only when that status established it. The
 // renderer's read failing — or not having answered yet — proves nothing:
 // main's read may have started the recorder, and "not being recorded" would
-// then be a false privacy assurance (#483's second failure mode).
-// Each cause is ONE line, per the empty-state recipe (copy.md): what is
+// then be a false privacy assurance (the second failure mode).
+// Each cause is one line, per the empty-state recipe (copy.md): what is
 // missing, then the next step its surface really has.
 function historyOffPlaceholderCopy(
   syncStatus: SyncStatusResult | null,
@@ -417,7 +428,7 @@ function historyOffPlaceholderCopy(
       : "A shared view records no history. Refresh the shared view to get the latest shared changes.";
   }
   if (syncStatus?.historyRecordingUnavailable) {
-    // #505: a failure, not a decision — same copy as the notice center.
+    // A failure, not a decision — same copy as the notice center.
     return "dohc could not start recording history for this workspace. Your files still save normally. Restart dohc to try again.";
   }
   // Main has not said recording is off. It may be recording right now, so
@@ -428,17 +439,17 @@ function historyOffPlaceholderCopy(
 }
 
 // What a persisted version-compare tab may claim when the version surface is
-// off and the workspace is not a shared view (#626). Same rule as
+// off and the workspace is not a shared view. Same rule as
 // `historyOffPlaceholderCopy` above, and one rule of its own: **a capability
 // flag is not a count**. `historyRecordingUnavailable` says the recorder
-// could not be BUILT this session; versions created before it can still be on
+// could not be built this session; versions created before it can still be on
 // disk and reachable after the restart this copy prescribes. "You have no
 // versions" is a claim about durable data, and dohc does not make one it has
 // not established. Every line here says what dohc cannot do now, and none of
 // them says what does not exist.
 export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.historyRecordingUnavailable) {
-    // #505: a failure, not a decision, and not an emptiness.
+    // A failure, not a decision, and not an emptiness.
     return "dohc could not open versions for this workspace. Your files still save normally. Restart dohc to try again.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
@@ -447,16 +458,16 @@ export function versionCompareOffCopy(syncStatus: SyncStatusResult | null): stri
 }
 
 // What the Chats surfaces may claim when main's capture cannot serve them and
-// the workspace is not a shared view (#628). Same two rules as the copy above:
+// the workspace is not a shared view. Same two rules as the copy above:
 // only main's status names a cause, and a capability flag is not a count —
 // chats live on disk and outlive a session whose capture failed to build.
 //
-// One function for the panel AND the tab, because the next step is the same on
+// One function for the panel and the tab, because the next step is the same on
 // both: the panel has no tab to close, and restarting is what re-runs the
 // capture build either way.
 export function chatsOffCopy(syncStatus: SyncStatusResult | null): string {
   if (syncStatus?.historyRecordingUnavailable) {
-    // #505: a failure, not a decision, and not an emptiness.
+    // A failure, not a decision, and not an emptiness.
     return "dohc could not open chats for this workspace. Your files still save normally. Restart dohc to try again.";
   }
   // Main has not said anything is wrong, so the renderer's own read failing
@@ -738,7 +749,7 @@ const LazyCollectionPage = lazy(() =>
   import("./CollectionPage").then((mod) => ({ default: mod.CollectionPage })),
 );
 
-// Every folder above a path — expanded when a create/open must REVEAL it.
+// Every folder above a path — expanded when a create/open must reveal it.
 function ancestorDirs(path: string): string[] {
   const segments = path.split("/");
   return segments.slice(0, -1).map((_, i) => segments.slice(0, i + 1).join("/"));
@@ -825,8 +836,8 @@ function hasEditorFocus(state: WorkbenchState, focus: EditorFocus): boolean {
 
 // Engine history diff page (PR 0M-5, flagged workspaces): one MOMENT's
 // before/after through the shared unified-diff rendering, with engine-routed
-// restore. Restore returns the file to its state BEFORE this moment and
-// records a forward "Restored <file>" moment; undo restores to before THAT
+// restore. Restore returns the file to its state before this moment and
+// records a forward "Restored <file>" moment; undo restores to before that
 // moment — history is never rewritten.
 export function EngineMomentDiffPage({
   workspaceId,
@@ -839,7 +850,10 @@ export function EngineMomentDiffPage({
 }: {
   workspaceId: string;
   tabPath: string;
-  onBeforeRestore: () => Promise<void>;
+  // Settles drafts and queued collection writes, and pauses new cell edits
+  // until the returned release runs — held across the restore IPC so no cell
+  // edit lands between the drain and the lineage change.
+  onBeforeRestore: () => Promise<() => void>;
   onOpenFile: (path: string) => void;
   onPathResolved: (momentId: string, path: string) => void;
   registerActiveUndo: (handler: ActiveUndoHandler | null) => void;
@@ -897,7 +911,7 @@ export function EngineMomentDiffPage({
 
   const moment = state.status === "ready" ? state.moment : null;
   // The diff is the expensive part of this page, and a moment's bodies never
-  // change while its tab is open. Build it ONCE per moment: it used to run
+  // change while its tab is open. Build it once per moment: it used to run
   // twice per render — once for the counts, once for the lines — and a
   // hydrated 10 MiB body cost seconds each time.
   const prepared = useMemo(() => {
@@ -916,12 +930,14 @@ export function EngineMomentDiffPage({
     restoreInFlight.current = true;
     const token = liveToken.current;
     setRestoreState({ status: "undoing" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await onBeforeRestore();
+      releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({
         workspaceId,
         momentId: target,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -932,7 +948,6 @@ export function EngineMomentDiffPage({
             : "Undid the restore. This was recorded in history.",
       });
       setUndoMomentId(null);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({
@@ -941,6 +956,7 @@ export function EngineMomentDiffPage({
           error instanceof Error ? error.message : "Could not undo this restore.",
       });
     } finally {
+      releaseOperation?.();
       restoreInFlight.current = false;
     }
   }, [onBeforeRestore, onRestored, restoreBusy, undoMomentId, workspaceId]);
@@ -992,11 +1008,11 @@ export function EngineMomentDiffPage({
     );
   }
 
-  // Secret-backed file moment (PR 08): metadata-only — no diff exists, the
+  // Secret-backed file moment: metadata-only — no diff exists, the
   // body shows "Contents are protected" instead. Restore still works (it
   // rides the encrypted path end to end).
   const isProtected = moment.protected === true;
-  // Each side presents by its OWN kind (see momentDiffSides).
+  // Each side presents by its own kind (see momentDiffSides).
   const {
     beforeIsBinary,
     afterIsBinary,
@@ -1005,7 +1021,7 @@ export function EngineMomentDiffPage({
     byteLength: binaryByteLength,
   } = prepared.sides;
   const counts = isProtected || bytesOnly ? null : prepared.diff.counts;
-  // Restore returns the BEFORE state, so its wording follows that side.
+  // Restore returns the before state, so its wording follows that side.
   const restoreDetail = createdFile
     ? "This change created the file, so restoring removes it from the folder. It stays in history and you can undo."
     : isProtected
@@ -1013,7 +1029,7 @@ export function EngineMomentDiffPage({
       : beforeIsBinary
         ? "The binary file will be returned byte-for-byte to how it was before this change."
       : "The file will be returned to how it was before this change.";
-  // Restoring a create moment REMOVES the file ("deleted"): no open-file
+  // Restoring a create moment removes the file ("deleted"): no open-file
   // affordances for a file that is no longer in the folder (mirrors the
   // legacy HistoryDiffPage guard).
   const canOpenFile =
@@ -1029,12 +1045,14 @@ export function EngineMomentDiffPage({
     const token = liveToken.current;
     setConfirmRestoreOpen(false);
     setRestoreState({ status: "restoring" });
+    let releaseOperation: (() => void) | null = null;
     try {
-      await onBeforeRestore();
+      releaseOperation = await onBeforeRestore();
       const result = await bridge().restoreEngineMomentFile({
         workspaceId,
         momentId: moment.id,
       });
+      onRestored();
       if (token !== liveToken.current) return;
       setRestoreState({
         status: "restored",
@@ -1045,7 +1063,6 @@ export function EngineMomentDiffPage({
             : "Restored the earlier state. Undo restore is available here.",
       });
       setUndoMomentId(result.restoredMomentId);
-      onRestored();
     } catch (error) {
       if (token !== liveToken.current) return;
       setRestoreState({
@@ -1054,6 +1071,7 @@ export function EngineMomentDiffPage({
           error instanceof Error ? error.message : "Could not restore this file.",
       });
     } finally {
+      releaseOperation?.();
       restoreInFlight.current = false;
     }
   };
@@ -1267,7 +1285,7 @@ export function EngineMomentDiffPage({
 }
 
 // Which surface the right-hand Chats panel shows: every workspace chat
-// (channels, DMs, file threads) or the ACTIVE file's chats. Runtime-only.
+// (channels, DMs, file threads) or the active file's chats. Runtime-only.
 type ChatsPanelTab = "all" | "file";
 
 const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
@@ -1277,7 +1295,7 @@ const CHATS_PANEL_TAB_LABELS: Record<ChatsPanelTab, string> = {
 const CHATS_KEYBOARD_RESIZE_STEP = 16;
 const CHATS_KEYBOARD_RESIZE_PAGE_STEP = CHATS_KEYBOARD_RESIZE_STEP * 8;
 // Every workspace this machine owns offers both. A shared view offers the
-// file tab only: it has no workspace-wide chat listing, by design (#646).
+// file tab only: it has no workspace-wide chat listing, by design.
 
 // The right-hand Chats panel — dohc's secondary sidebar (VS Code grammar:
 // toggleable, resizable, persistent width, gone entirely while hidden).
@@ -1512,7 +1530,7 @@ export function DesktopWorkspaceShell(props: {
   // but restored-tab reconciliation must wait for an independent disk walk.
   const [filesRevalidated, setFilesRevalidated] = useState(false);
   const [folders, setFolders] = useState<string[]>([]);
-  // Main's single answer to "does anything record here" (#542): when the
+  // Main's single answer to "does anything record here": when the
   // open-time decision produced no recorder (a shared view or a failed
   // capture build), every engine-history call can only error,
   // whatever the renderer's own capability read said.
@@ -1522,15 +1540,15 @@ export function DesktopWorkspaceShell(props: {
         status?.historyRecordingUnavailable ||
         status?.engineStoreRefused,
     );
-  // Whether main's capture decision for THIS workspace has landed. The
+  // Whether main's capture decision for this workspace has landed. The
   // surfaces that call on mount need it, and no reading of the status can
   // supply it:
   //
-  // - `statusSaysNoRecorder(null)` is false, so a MISSING status reads as a
-  //   recorder (#620's first fix attempt).
+  // - `statusSaysNoRecorder(null)` is false, so a missing status reads as a
+  //   recorder (the first fix attempt).
   // - Main registers the workspace's activity entry before it awaits the
   //   capture build, with the recorder fields at their "nothing is wrong"
-  //   defaults (`workspaceActivity.ts`). So a PRESENT status reads as a
+  //   defaults (`workspaceActivity.ts`). So a present status reads as a
   //   recorder too, while the build is still running.
   //
   // Both are the same mistake: a default read as an answer. `openWorkspace`
@@ -1551,7 +1569,7 @@ export function DesktopWorkspaceShell(props: {
   // gets a live presence transport (connected + relayUrl) or stays dormant.
   const [cloudStatus, setCloudStatus] = useState<CloudStatusResult | null>(null);
   // Stable per-session client id so this device's own presence entry is
-  // identifiable and filtered out of "others". Lazily minted ONCE — a fresh id
+  // identifiable and filtered out of "others". Lazily minted once — a fresh id
   // per render would churn the presence channel.
   const [presenceClientId] = useState(() => crypto.randomUUID());
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -1567,7 +1585,7 @@ export function DesktopWorkspaceShell(props: {
   const [agentRunStatus, setAgentRunStatus] = useState<AgentRunStatusResult | null>(null);
   const agentSetupRequestRef = useRef(0);
   const bootstrapAgentStatusRead = useRef<Promise<AgentRunStatusResult> | null>(null);
-  // Relay-share dialog target (PR 18): paths, or a version.
+  // Relay-share dialog target: paths, or a version.
   const [shareTarget, setShareTarget] = useState<RelayShareTarget | null>(null);
   const [openShareOpen, setOpenShareOpen] = useState(false);
   const handoffStatus = props.handoffStatus ?? { status: "idle" as const };
@@ -1790,25 +1808,42 @@ export function DesktopWorkspaceShell(props: {
     },
     [],
   );
-  // Version and restore operations are workspace-wide, so every mounted
-  // draft must settle before the workspace lineage changes.
   const flushActiveDraft = useCallback(() => flushStableDrafts(), [flushStableDrafts]);
-  const beginDraftOperation = useCallback(async (): Promise<DraftFlush> => {
+  const workspaceId = props.workspace.workspaceId;
+  const collectionLineage = useCollectionWriteLineage(workspaceId);
+  // Version switches, merges, and moment restores are workspace-wide lineage
+  // changes: every mounted draft and queued collection write must settle
+  // first, and no cell edit may be accepted while the change is in flight.
+  // The caller holds the returned release across its IPCs.
+  const beginLineageOperation = useCallback(
+    () => beginCollectionLineageOperation(workspaceId, flushStableDrafts),
+    [flushStableDrafts, workspaceId],
+  );
+  const beginDraftOperation = useCallback(async (): Promise<TreeChangeOperation> => {
     const scope = { flushes: new Set<DraftFlush>() };
     for (const registration of mountedEditorsRef.current.values()) {
       if (registration.flush) scope.flushes.add(registration.flush);
     }
     draftOperationScopesRef.current.add(scope);
 
+    // A queued collection cell write names its record by PATH, which the
+    // caller's move is about to change. The gate pauses new cell acceptance
+    // for the whole operation and drains the queue — flushing drafts only
+    // settles mounted editors — and refuses the operation over a retained
+    // failure, whose retry would otherwise land on the vacated path.
+    let releaseCollectionWrites: () => void;
     try {
-      await flushStableDrafts();
+      releaseCollectionWrites = await beginCollectionLineageOperation(
+        workspaceId,
+        flushStableDrafts,
+      );
     } catch (error) {
       draftOperationScopesRef.current.delete(scope);
       throw error;
     }
 
     let settlement: Promise<void> | null = null;
-    return (options?: DraftFlushOptions) => {
+    const settle = (options?: DraftFlushOptions) => {
       if (settlement) return settlement;
       settlement = (async () => {
         const drained = new Set<DraftFlush>();
@@ -1839,9 +1874,9 @@ export function DesktopWorkspaceShell(props: {
       })();
       return settlement;
     };
-  }, [flushStableDrafts]);
+    return { settle, release: releaseCollectionWrites };
+  }, [flushStableDrafts, workspaceId]);
 
-  const workspaceId = props.workspace.workspaceId;
   // `openWorkspace` installs main's exact renderer session before it waits
   // for watcher readiness. Its response is the renderer's existing proof that
   // both happened; there is no separate admission IPC. Exact-session bootstrap
@@ -1923,6 +1958,9 @@ export function DesktopWorkspaceShell(props: {
     workspaceId: string;
     selectionGeneration: number;
     message: string;
+    // Admission stopped on pending writes or retained failures from another
+    // workspace. Resolving the last blocker retries the open without a click.
+    blockedOnCollectionWrites?: boolean;
   } | null>(null);
   const [workspaceOpenAttempt, setWorkspaceOpenAttempt] = useState(0);
   const workspaceOpenFailure =
@@ -1930,11 +1968,22 @@ export function DesktopWorkspaceShell(props: {
     workspaceOpenFailedFor.selectionGeneration === workspaceSelectionGeneration
       ? workspaceOpenFailedFor
       : null;
-  // Set-aside recovery markers (#567): every path holding a draft marks its
+  // Admission must wait for ANOTHER workspace's accepted writes: they still
+  // need that workspace's renderer session, which `openWorkspace` revokes.
+  // This workspace's own failures never block its admission.
+  const admissionBlockedOnWrites = useCollectionWritesBlockingAdmission(workspaceId);
+  useEffect(() => {
+    if (!workspaceOpenFailure?.blockedOnCollectionWrites) return;
+    if (admissionBlockedOnWrites) return;
+    // Pending saves, schema mutations, and retained failures have all cleared.
+    setWorkspaceOpenFailedFor(null);
+    setWorkspaceOpenAttempt((attempt) => attempt + 1);
+  }, [admissionBlockedOnWrites, workspaceOpenFailure]);
+  // Set-aside recovery markers: every path holding a draft marks its
   // tab and Open Editors row — inactive tabs included, because the store is
-  // knowable for all of them (#579 review, r4). Deliberately NOT part of
-  // activeTabDirty, which drives save-first machinery that cannot save these
-  // (#579 review, P2). The store outlives tabs and version switches, so no
+  // knowable for all of them. Deliberately not part of
+  // activeTabDirty, which drives save-first machinery that cannot save these.
+  // The store outlives tabs and version switches, so no
   // save-first prompt is owed.
   const recoveryPaths = useOrphanedDraftPaths(workspaceId);
   // The global recovery list (the close dialog, above this shell) labels
@@ -1984,7 +2033,7 @@ export function DesktopWorkspaceShell(props: {
   }, [refreshCloudStatus]);
   // The session signal reaches the SHELL too: cloudStatus derives the
   // presence collaboration, so a sign-out must tear the old account's
-  // presence down NOW — dropping the status rebuilds the collaboration
+  // presence down now — dropping the status rebuilds the collaboration
   // dormant and aborts its long poll — not when some later refresh notices.
   // The token bump also stops a stale connected response from repainting;
   // the refresh then reports the new session's truth.
@@ -1996,7 +2045,7 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [refreshCloudStatus]);
 
-  // The presence collaboration for the ACTIVE workspace, rebuilt per workspace
+  // The presence collaboration for the active workspace, rebuilt per workspace
   // (keyed by workspaceId) so a switch tears the old transport down and aborts
   // its in-flight poll — dormant (null) when signed out / no relay.
   const chatCollaboration = useMemo(
@@ -2130,7 +2179,7 @@ export function DesktopWorkspaceShell(props: {
     ? null
     : focusedTabPath;
 
-  // A clicked search result: open the file AND land at the line. The target
+  // A clicked search result: open the file and land at the line. The target
   // is consumed (cleared) by the inspector once a mounted view applied it.
   const [searchScrollTarget, setSearchScrollTarget] = useState<
     (ScrollTarget & { groupId: string }) | null
@@ -2207,10 +2256,10 @@ export function DesktopWorkspaceShell(props: {
 
   // Restore per-workspace workbench state from .dohc/ui-state.json. Defaults
   // render immediately (launch budgets key off shell visibility); the stored
-  // state MERGES when the IPC resolves: it applies only if the user touched
-  // NOTHING in the meantime — a pre-load user action wins (and gets an
+  // state merges when the IPC resolves: it applies only if the user touched
+  // nothing in the meantime — a pre-load user action wins (and gets an
   // immediate write, since wb may never change again to arm the debounced
-  // one). The touched flag is a ref set SYNCHRONOUSLY inside every workbench
+  // one). The touched flag is a ref set synchronously inside every workbench
   // mutation (mutateWb below): comparing committed state against defaults
   // would race React's commit — a queued-but-uncommitted user action would
   // read as "untouched" and the stored state would clobber it. Writes stay
@@ -2236,7 +2285,7 @@ export function DesktopWorkspaceShell(props: {
     () => new Set<string>(),
   );
 
-  // THE one mutation seam for workbench state: every user-driven transition
+  // The one mutation seam for workbench state: every user-driven transition
   // routes through here so the touched flag is set before React even queues
   // the update. Loading stored state is the only setWb that bypasses this.
   const mutateWb = useCallback(
@@ -2266,8 +2315,8 @@ export function DesktopWorkspaceShell(props: {
 
   // A details tab that followed a rename only tracks that rename in
   // memory — nothing else ever hears about it. A later tab switch remounts
-  // the page, whose tracking reseeds from THIS tab's own virtual path,
-  // still naming the ORIGINAL, now-vacated directory. The same remap
+  // the page, whose tracking reseeds from this tab's own virtual path,
+  // still naming the original, now-vacated directory. The same remap
   // onExplorerPathsChanged already applies for a file rename retargets the
   // tab's own path here too, so a remount reads the directory the plugin
   // actually renamed to, not the one it left.
@@ -2322,7 +2371,7 @@ export function DesktopWorkspaceShell(props: {
       ? selectedPluginViewState.title
       : "Plugin view");
 
-  // An uninstalled plugin leaves no selection behind. Only a LOADED list can
+  // An uninstalled plugin leaves no selection behind. Only a loaded list can
   // say a plugin is gone — before it lands, the selection stands, so a restart
   // never loses the view the user left open.
   useEffect(() => {
@@ -2465,27 +2514,27 @@ export function DesktopWorkspaceShell(props: {
     };
   }, [workspaceId]);
 
-  // The close warning for set-aside drafts lives ABOVE the error boundary
-  // (RecoveryCloseGuard in main.tsx, #579 review r5) — a guard here would
+  // The close warning for set-aside drafts lives above the error boundary
+  // (RecoveryCloseGuard in main.tsx) — a guard here would
   // unmount with a crashed shell and the crash screen's reload would destroy
   // the drafts unannounced.
 
   // Latest-wins: fourteen call sites issue listings — mount, the watcher,
   // imports, restores, the share pull — and they can resolve out of order. An
-  // older snapshot committing last would show a stale tree AND make the
+  // older snapshot committing last would show a stale tree and make the
   // reconciliation below read a live file as deleted.
   //
-  // Supersession is decided when a response COMMITS, not when it is issued. A
+  // Supersession is decided when a response commits, not when it is issued. A
   // newer request that is merely in flight has not answered anything yet, and
   // if it fails it never will: dropping this answer for it would leave the
   // explorer empty after a failed refresh, with nothing to retry it. So an
   // older answer fills an unanswered UI, and the newer one supersedes it when
-  // it lands. Only an answer OLDER than what is already displayed is dropped.
+  // it lands. Only an answer older than what is already displayed is dropped.
   const filesRequest = useRef(0);
   const committedFilesRequest = useRef(0);
   // How many listings are still in flight, and a bump each time that reaches
   // zero. The destructive close waits for quiet, not for a particular id: a
-  // request that FAILS never commits, so keying off "newest issued" would
+  // request that fails never commits, so keying off "newest issued" would
   // block the close for as long as the app ran.
   const pendingFilesRequests = useRef(0);
   // The newest request that FAILED. A failure is not an answer, so it cannot
@@ -2543,7 +2592,7 @@ export function DesktopWorkspaceShell(props: {
   // twice on open — once at mount, once after refreshShareView pulls the
   // changed paths — and consuming whichever landed first would either miss a
   // remote delete or judge the tabs against a pre-pull snapshot. Only the
-  // RESTORED paths are eligible (see pruneMissingRestoredTabs), so a listing
+  // restored paths are eligible (see pruneMissingRestoredTabs), so a listing
   // that raced a create can never close a tab opened this session.
   //
   // Both inputs are dependencies because either can arrive first: a listing
@@ -2565,10 +2614,10 @@ export function DesktopWorkspaceShell(props: {
     // a file back and the listing that would have shown it is the one that
     // failed. Closing on the older snapshot would then close a tab whose file
     // exists. Waiting costs a delay; closing costs the user their tab, so the
-    // close waits for a success issued AFTER the failure. Not a deadlock: the
+    // close waits for a success issued after the failure. Not a deadlock: the
     // next successful listing re-enables it.
     if (committedFilesRequest.current <= failedFilesRequest.current) return;
-    // A DIRTY tab is never closed. Closing it unmounts the keyed inspector
+    // A dirty tab is never closed. Closing it unmounts the keyed inspector
     // mid-draft, whose cleanup flushes best-effort to a path that no longer
     // exists; the write fails, the failure is swallowed, and the draft is
     // gone with no error and no way back. Waiting costs nothing: this re-runs
@@ -2592,7 +2641,7 @@ export function DesktopWorkspaceShell(props: {
       // check and lands its destination on top of the tab we just activated.
       invalidateDmNavigation(dmNavigationRequest);
     }
-    // Activating a neighbour remounts the keyed inspector — that is an OPEN
+    // Activating a neighbour remounts the keyed inspector — that is an open
     // (closeFileTab idiom). Without the mark, the inspector's mount measure
     // brackets whatever stale mark came before it.
     for (const groupId of groupsOpeningFiles) {
@@ -2742,7 +2791,7 @@ export function DesktopWorkspaceShell(props: {
   // all wait on one per-workspace settings read below; the read landing is
   // what releases them.
   //
-  // The answer is kept WITH the workspace it answered for, so "no answer yet"
+  // The answer is kept with the workspace it answered for, so "no answer yet"
   // and "answered off" are never the same state — a bare `false` cannot say
   // which, and the surfaces below must not state a capability from a read
   // that has not happened. A read for another workspace is discarded here
@@ -2755,15 +2804,15 @@ export function DesktopWorkspaceShell(props: {
   const engineReadForWorkspace =
     engineRead?.workspaceId === workspaceId ? engineRead : null;
   const engineEnabled = engineReadForWorkspace?.enabled ?? false;
-  // A shared view has no engine history surface regardless of that read
-  // (#540): it materializes no settings file, so the default flag reads ON —
+  // A shared view has no engine history surface regardless of that read:
+  // it materializes no settings file, so the default flag reads ON —
   // but the share's open deliberately installed no capture, and every
   // engine-moments call could only error. Capability identity comes from
   // main's registry summary. This gates the HISTORY surface and, below, the
-  // VERSIONS surface (#589) and CHATS (#615), for the same reason and from
+  // versions surface and CHATS, for the same reason and from
   // the same fact.
   const isShareView = Boolean(props.workspace.shareView);
-  // Collection folders (Phase 2 views): the engine's collections.list result,
+  // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
   // collection folder to its views. Latest-wins request watermark, same as
   // the file listing; a failure quietly keeps the last known set — the engine
@@ -2805,9 +2854,9 @@ export function DesktopWorkspaceShell(props: {
   } | null>(null);
   const [engineHistoryLoadingMore, setEngineHistoryLoadingMore] = useState(false);
   // Why there is no page. A null timeline is not "no changes": it is also a
-  // first read still in flight, a read that FAILED, and a page dropped as
+  // first read still in flight, a read that failed, and a page dropped as
   // stale and asked again. "No changes yet" is an assertion about the
-  // WORKSPACE, so only a read that answered may reach it (#593) — this says
+  // WORKSPACE, so only a read that answered may reach it — this says
   // whether the newest read answered at all.
   const [engineHistoryReadState, setEngineHistoryReadState] = useState<
     "loading" | "failed" | "updating"
@@ -2816,42 +2865,42 @@ export function DesktopWorkspaceShell(props: {
   // unloadable: an older read failing while a newer one is still in flight
   // has settled nothing. Kept apart from the committed-page watermark on
   // purpose — a failure must not supersede the page lane, because an older
-  // read that still succeeds is the only answer anyone has (#507).
+  // read that still succeeds is the only answer anyone has.
   const newestHistoryRefresh = useRef(0);
   // Liveness token for the engine history loads (bumped on unmount): a slow
   // response for one workspace must never repaint another.
   const engineHistoryToken = useRef(0);
-  // The newest request whose answer is DISPLAYED — the same commit-time
+  // The newest request whose answer is displayed — the same commit-time
   // watermark the file listing above uses, for the same reason. A request that
-  // is merely in flight has answered nothing, and one that FAILS never will,
+  // is merely in flight has answered nothing, and one that fails never will,
   // so superseding on ISSUE threw away the only answer there was and left the
   // timeline stale until some later event refreshed it. Only an answer older
   // than what is already displayed is dropped.
   const committedEngineHistoryToken = useRef(0);
   // A pagination in flight, or 0. Its page is fetched from a cursor into the
-  // DISPLAYED timeline, so an older refresh must not reset the timeline under
+  // displayed timeline, so an older refresh must not reset the timeline under
   // it — the append would land against a cursor that no longer describes what
-  // is on screen. Cleared when the pagination settles, so a FAILED one stops
+  // is on screen. Cleared when the pagination settles, so a failed one stops
   // holding anything back.
   const pendingEngineHistoryPage = useRef(0);
   // A refresh that was blocked by that pagination, held until it settles.
-  // Blocked is not refuted: the pagination may FAIL, and then this is again
+  // Blocked is not refuted: the pagination may fail, and then this is again
   // the only answer anyone has. Dropping it at resolve time would be the very
-  // bug the watermark exists to fix, one interleaving over (#507).
+  // bug the watermark exists to fix, one interleaving over.
   const blockedEngineHistoryRefresh = useRef<{
     token: number;
     activeVersionId: string;
     commit: () => void;
   } | null>(null);
-  // The sync, agent, and try snapshots ride the refresh response but are NOT
+  // The sync, agent, and try snapshots ride the refresh response but are not
   // the timeline: no pagination competes for them, so they apply as soon as
-  // they arrive. Each is its OWN lane with its own watermark, because a local
+  // they arrive. Each is its own lane with its own watermark, because a local
   // write only ever knows about the lane it wrote — dismissing a review says
   // nothing about sync state, and rejecting all three would strand a status
   // bar that has no other source (the dismiss emits no activity event).
   //
   // Each lane owns its state, so a write that names no request cannot be
-  // written at all (#636). The history page is not one of these: it carries
+  // written at all. The history page is not one of these: it carries
   // its own admission rules — version staleness, a pagination that may hold it
   // — and the refresh returns it, so it is judged where those rules live.
   const [syncStatus, syncStatusLane] = useSnapshotLane<SyncStatusResult | null>(
@@ -2882,15 +2931,15 @@ export function DesktopWorkspaceShell(props: {
     engineHistoryToken,
     null,
   );
-  // The version the DISPLAYED timeline describes, so a pagination can prove
+  // The version the displayed timeline describes, so a pagination can prove
   // its page extends the same timeline it is appending to.
   const committedEngineVersionId = useRef<string | null>(null);
-  // The newest authoritative statement of WHICH version is active, and the
+  // The newest authoritative statement of which version is active, and the
   // request that carried it. The engine stamps every history answer with the
   // version it served, and a version-state change asks for it directly; both
   // are the same kind of fact, ordered by the same issue counter, so the newer
   // one wins. The active version is tracked here rather than inferred from the
-  // displayed page because a user can switch versions before the FIRST page
+  // displayed page because a user can switch versions before the first page
   // commits — then there is no displayed version to name, and the old-version
   // answer used to paint over the version they had switched to.
   const activeEngineVersion = useRef<{ token: number; versionId: string | null }>({
@@ -2902,8 +2951,8 @@ export function DesktopWorkspaceShell(props: {
       activeEngineVersion.current = { token, versionId };
     }
   }, []);
-  // Staleness is one question: does this answer describe a version that a NEWER
-  // statement has already replaced? An answer ISSUED after that statement can
+  // Staleness is one question: does this answer describe a version that a newer
+  // statement has already replaced? An answer issued after that statement can
   // never be stale — the engine served it after the switch — which is what
   // keeps a valid new-version refresh that raced the switch event.
   const engineHistoryAnswerIsStale = useCallback(
@@ -2913,8 +2962,8 @@ export function DesktopWorkspaceShell(props: {
     [],
   );
   // The retraction both version paths need. A version statement can arrive
-  // AFTER the page it contradicts is already on screen, and #502's guard only
-  // stops a bad answer from being ADMITTED — nothing takes back a page
+  // after the page it contradicts is already on screen, and the guard only
+  // stops a bad answer from being admitted — nothing takes back a page
   // admitted legitimately before the switch. A committed page the newest
   // statement contradicts describes a timeline nobody is on, so drop it and
   // let the surface say it does not know. Reports whether it dropped, because
@@ -2952,7 +3001,7 @@ export function DesktopWorkspaceShell(props: {
   // Which surface the right-hand Chats panel shows (all chats vs the active
   // file's). Runtime-only — not persisted.
   const [chatsPanelTab, setChatsPanelTab] = useState<ChatsPanelTab>("all");
-  // A shared view offers the "This file" tab only (#646 PR2), so the panel
+  // A shared view offers the "This file" tab only, so the panel
   // opens there whatever the runtime state carried in from another workspace.
   const chatsPanelActiveTab: ChatsPanelTab = isShareView ? "file" : chatsPanelTab;
   const [searchChatTarget, setSearchChatTarget] = useState<{
@@ -2967,15 +3016,15 @@ export function DesktopWorkspaceShell(props: {
   }, [tryStateLane]);
   // Settings reports the agent lane two different ways, and only one of them
   // is the user acting. Starting or ending a run is a local write, newer than
-  // every request in flight. Merely OBSERVING that the run changed under the
+  // every request in flight. Merely observing that the run changed under the
   // rendered label is not: that reading came from its own request, which may
-  // have been issued BEFORE a refresh the shell is still waiting on — and
+  // have been issued before a refresh the shell is still waiting on — and
   // superseding on it would throw away the newer answer. A run observed alive
   // just before it ended would then leave the indicator running forever.
   //
   // So an observation is not written at all. It carries no request token, and
-  // arrival order is not ordering: once each lane commits when its OWN read
-  // lands, a refresh answer can commit BEFORE the observation arrives, and an
+  // arrival order is not ordering: once each lane commits when its own read
+  // lands, a refresh answer can commit before the observation arrives, and an
   // untimed write would then paint over an answer that is newer than it. The
   // observation asks this lane's own reader instead — one tokened read, judged
   // by the same rule as every other answer, and issued after the observation,
@@ -3012,7 +3061,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshHistory = useCallback(async () => {
-    // Nothing to refresh before main's capture decision lands (#637). Any
+    // Nothing to refresh before main's capture decision lands. Any
     // workspace's activity event calls this, so "the open effect has
     // resolved" does not bound it — and in that window both answers below are
     // wrong. The engine branch would ask for moments main is about to refuse,
@@ -3022,8 +3071,8 @@ export function DesktopWorkspaceShell(props: {
     // decision and the status it decided together, so nothing is lost by
     // waiting for it.
     if (captureDecidedRef.current !== workspaceId) return;
-    // The engine fetch runs only when main's status agrees a recorder exists
-    // (#542): after a failed capture build the renderer's own read still
+    // The engine fetch runs only when main's status agrees a recorder exists:
+    // after a failed capture build the renderer's own read still
     // says engine-on, and every listEngineMoments call would error.
     const token = ++engineHistoryToken.current;
     newestHistoryRefresh.current = token;
@@ -3039,8 +3088,8 @@ export function DesktopWorkspaceShell(props: {
       // Four reads ride one refresh, and they answer four different
       // questions. One batch made every answer hostage to the worst of them:
       // a try-state failure discarded a history page the engine had already
-      // served, and the timeline then said it could not load (#610). An
-      // aggregate await is hostage to the SLOWEST of them the same way — a
+      // served, and the timeline then said it could not load. An
+      // aggregate await is hostage to the slowest of them the same way — a
       // sibling that never settles would hold a failed history read in
       // "Loading history..." forever, with no failure and no Try again.
       // So the reads are issued together and handled apart: each lane
@@ -3171,7 +3220,7 @@ export function DesktopWorkspaceShell(props: {
     // the engine branch's reads: this refresh answers the very lanes the
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
-    // newer status (#636).
+    // newer status.
     const statusRead = bridge().getSyncStatus({ workspaceId });
     const agentRead = readAgentStatusForHistory();
     const askAgain = () => {
@@ -3219,7 +3268,7 @@ export function DesktopWorkspaceShell(props: {
     // so they can neither interleave into a mixed timeline nor discard each
     // other for merely existing.
     const token = ++engineHistoryToken.current;
-    // The version this page belongs to: the one the DISPLAYED timeline shows,
+    // The version this page belongs to: the one the displayed timeline shows,
     // because that is the timeline the cursor points into.
     const pageVersionId = committedEngineVersionId.current;
     pendingEngineHistoryPage.current = token;
@@ -3235,10 +3284,10 @@ export function DesktopWorkspaceShell(props: {
       // retry; this expected progress result is never a global error.
       if ("status" in page) return;
       // The committed-answer rule, applied to this page as well: display it
-      // unless a NEWER answer already took the timeline. Superseding on issue
-      // here let a newer refresh that merely FAILED throw this page away.
+      // unless a newer answer already took the timeline. Superseding on issue
+      // here let a newer refresh that merely failed throw this page away.
       // Same two questions as the refresh, plus one an append owes: the page
-      // must describe the SAME version as the timeline it extends.
+      // must describe the same version as the timeline it extends.
       const stale = engineHistoryAnswerIsStale(token, page.activeVersionId);
       if (!stale) noteActiveEngineVersion(token, page.activeVersionId);
       if (
@@ -3279,7 +3328,7 @@ export function DesktopWorkspaceShell(props: {
       // pending slot, the refresh it blocked, and the button. A pagination
       // superseded by a newer one releases nothing — that newer one owns all
       // three now, so nothing is left stuck either way. The held answer is
-      // judged HERE, by the same two questions every answer faces, so a
+      // judged here, by the same two questions every answer faces, so a
       // version switch in between drops it and a merge that never changed the
       // version does not.
       if (pendingEngineHistoryPage.current === token) {
@@ -3300,12 +3349,12 @@ export function DesktopWorkspaceShell(props: {
 
   // Whether this workspace has engine-backed surfaces AT ALL — history,
   // versions and chats (PR 0M-4). Unflagged workspaces render none of them,
-  // and neither does a shared view (#589, #615, #621): it materializes no
+  // and neither does a shared view: it materializes no
   // settings file, so the read below returns the default ON while its open
   // deliberately installed no capture. Both halves are synchronous registry
   // facts, so this value never waits on anything.
   const engineSurfacesExist = engineEnabled && !isShareView;
-  // Chats is the one exception (#646 PR2). A share view still installs no
+  // Chats is the one exception. A share view still installs no
   // capture, so history and versions stay gone — but main now answers chat
   // from the SHARE scope instead of a capture, so the Chats panel opens. Only
   // its "This file" tab: the per-file surface answers for a file the share
@@ -3315,13 +3364,13 @@ export function DesktopWorkspaceShell(props: {
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here", and it overrides the
   // renderer's own engine read: after a failed capture build that read still
-  // says engine-on for a perfectly NORMAL workspace, and every version, chat
-  // and moment call is refused (#620, #628, #637). It can only override it
-  // once main has DECIDED, which is what `captureDecided` carries — a status
+  // says engine-on for a perfectly normal workspace, and every version, chat
+  // and moment call is refused. It can only override it
+  // once main has decided, which is what `captureDecided` carries — a status
   // that has not been decided sits at its "nothing is wrong" defaults, and
   // reading those as an answer is how this gate was wrong twice.
   //
-  // THE capture capability. Everything that calls through
+  // The capture capability. Everything that calls through
   // `requireEngineCapture` reads this one value — the version selector, the
   // Try-in-version banner and review card, the shell's version fetch, the
   // persisted compare and moment-diff tabs, the Chats panel and tab, the
@@ -3329,12 +3378,12 @@ export function DesktopWorkspaceShell(props: {
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
   //
-  // BOTH reads, because a surface that states a capability must have both
+  // Both reads, because a surface that states a capability must have both
   // answers. Main's open resolves immediately for a workspace it already
   // retains, so a healthy workspace re-entered mid-session reaches the
   // decision while the settings read is still in flight — `engineEnabled`
   // still holds its "no answer" false, and every branch below would state an
-  // unavailability that main never reported (#637, codex r2).
+  // unavailability that main never reported.
   const captureDecided =
     captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
   const captureAvailable =
@@ -3358,8 +3407,8 @@ export function DesktopWorkspaceShell(props: {
       },
       onError: () => {
         // Settings unavailable hides the engine surfaces, never a broken
-        // shell. Capability only, fail-closed (#329): what the placeholder
-        // then SAYS comes from main's status.
+        // shell. Capability only, fail-closed: what the placeholder then
+        // says comes from main's status.
         //
         // It is still an ANSWER. Recording it is what releases the surfaces
         // below from their load state; a failure held as "pending" would
@@ -3394,16 +3443,19 @@ export function DesktopWorkspaceShell(props: {
   // which is why this is not a list of the shell's own flags.
   const overlayOpen = useGuestBlockingUi();
   const onVersionWorkspaceStateChanged = useCallback(
-    (activeVersionId?: string) => {
+    (activeVersionId?: string, lineageChanged = true) => {
+      if (lineageChanged) {
+        advanceCollectionWriteLineage(workspaceId);
+      }
       setVersionEpoch((epoch) => epoch + 1);
-      // A version switch changes WHICH timeline is true, and the boundary is
-      // only worth anything BEFORE the answers it has to judge arrive.
+      // A version switch changes which timeline is true, and the boundary is
+      // only worth anything before the answers it has to judge arrive.
       // Rejecting everything in flight by token was too blunt: main notifies
-      // the renderer BEFORE the switch invoke resolves, so a perfectly valid
+      // the renderer before the switch invoke resolves, so a perfectly valid
       // NEW-version refresh can be issued before this runs, and rejecting it
       // left the panel on the old version whenever the refresh below failed.
       // Naming the version instead fixes that — but a version this callback
-      // has to AWAIT is not a boundary at all: an old answer landing first
+      // has to await is not a boundary at all: an old answer landing first
       // reads a guard that knows nothing, commits, and the late lookup cannot
       // retract it.
       //
@@ -3421,14 +3473,14 @@ export function DesktopWorkspaceShell(props: {
         noteActiveEngineVersion(versionToken, activeVersionId);
         // The page on screen belongs to the version the user just left, and
         // the refresh below is the only thing that would replace it — so a
-        // refresh that FAILS used to leave the timeline naming a version
-        // nobody is on (#594). Retract it here instead. A merge or a
+        // refresh that fails used to leave the timeline naming a version
+        // nobody is on. Retract it here instead. A merge or a
         // conflict resolution names the version the page already describes,
         // so nothing is dropped for them.
         dropContradictedEngineHistory();
       } else if (
-        // The capture gate again, off the MIRRORS for the same reason
-        // refreshHistory uses them (#620): this callback also runs from the
+        // The capture gate again, off the mirrors for the same reason
+        // refreshHistory uses them: this callback also runs from the
         // conflict review dialog, which the notice center opens with no
         // version surface on screen. Not asking leaves the previous statement
         // standing — what the catch below already does. Same clauses as
@@ -3449,8 +3501,8 @@ export function DesktopWorkspaceShell(props: {
           .then(({ activeVersionId: active }) => {
             noteActiveEngineVersion(versionToken, active);
             // A boundary that arrives after the answers it must judge is not
-            // a boundary (#555): while this lookup was in flight, an answer
-            // issued BEFORE it could commit against a guard that still named
+            // a boundary: while this lookup was in flight, an answer
+            // issued before it could commit against a guard that still named
             // the version the user left. So the committed page faces the
             // same staleness question every arriving answer faces, now that
             // the statement it was missing exists. This lookup settled long
@@ -3483,7 +3535,7 @@ export function DesktopWorkspaceShell(props: {
       workspaceId,
     ],
   );
-  // One import seam for the dialog flow AND the OS drag-in flow (the latter
+  // One import seam for the dialog flow and the OS drag-in flow (the latter
   // passes the preload-resolved absolute paths; see the trust-delta note on
   // ImportWorkspaceFilesPayload). targetDir aims the import at a folder ("" /
   // absent = root) — the drop target, or the folder whose context menu ran
@@ -3540,15 +3592,15 @@ export function DesktopWorkspaceShell(props: {
   );
 
 
-  // THE one way a file opens (tree click, quick-open, tab activation): marks
+  // The one way a file opens (tree click, quick-open, tab activation): marks
   // file-open-start — file views measure open latency from here — then opens
   // or re-activates the tab. The inspector mounts keyed by the active tab, so
-  // every activation is a fresh read + measure. Mark ONLY when the open
+  // every activation is a fresh read + measure. Mark only when the open
   // actually changes something (activeTab moves or a tab is added): a no-op
   // click on the already-active row/tab/overflow item triggers no remount, so
-  // marking would leave a stale file-open-start that corrupts the NEXT
+  // marking would leave a stale file-open-start that corrupts the next
   // measure. The transition is computed from wbRef (synced post-commit) and
-  // the mark fires once, OUTSIDE the functional updater — updaters must stay
+  // the mark fires once, outside the functional updater — updaters must stay
   // side-effect-free (StrictMode/concurrent replays would re-fire them).
   const openFile = useCallback(
     (
@@ -3731,7 +3783,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openVirtualTab],
   );
-  // A collection folder opens as its views (Phase 2): one tab per collection,
+  // A collection folder opens as its views: one tab per collection,
   // keyed by the folder path, through the same virtual-tab path as every
   // other dohc surface — MAX_OPEN_TABS refusal included.
   const openCollectionTab = useCallback(
@@ -3768,7 +3820,7 @@ export function DesktopWorkspaceShell(props: {
   const onChatsThreadStarted = useCallback(() => {
     setChatsThreadRevision((current) => current + 1);
   }, []);
-  // THE one write of the chat destination: the ref the panel reads, the state
+  // The one write of the chat destination: the ref the panel reads, the state
   // the navigator highlights, and the cancellation that choosing a different
   // conversation implies. Both writers below open-coded these two lines, which
   // is why the invalidation kept being missed one caller at a time — a chat
@@ -3858,7 +3910,7 @@ export function DesktopWorkspaceShell(props: {
     },
     [openChatsNavInTab, workspaceId],
   );
-  // The ONE way a chat thread lands in the Chats panel (search hits, file
+  // The one way a chat thread lands in the Chats panel (search hits, file
   // mentions without channel metadata, and the Chats view "Files" grouping
   // all route here): hand the known thread to the panel's consume-once seam,
   // switch to "This file", and force the panel visible.
@@ -3867,7 +3919,7 @@ export function DesktopWorkspaceShell(props: {
       thread: { id: string; title: string; createdAtMs: number; updatedAtMs: number },
       focusMessageId?: string,
     ) => {
-      // The user picked a DIFFERENT chat destination. The panel is not the
+      // The user picked a different chat destination. The panel is not the
       // editor, so no tab moves and the check in mutateWb cannot see this —
       // but a pending DM answering late would open the Chats TAB over the
       // thread they just chose.
@@ -3961,6 +4013,7 @@ export function DesktopWorkspaceShell(props: {
   );
   const refreshAfterHistoryRestore = useCallback(
     () => {
+      advanceCollectionWriteLineage(workspaceId);
       void refreshFiles().catch((error) =>
         reportShellError("Could not refresh workspace files.", error),
       );
@@ -3968,7 +4021,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Could not refresh history.", error),
       );
     },
-    [refreshFiles, refreshHistory, reportShellError],
+    [refreshFiles, refreshHistory, reportShellError, workspaceId],
   );
   const activateEditorTab = useCallback(
     (groupId: string, path: string) => {
@@ -4295,16 +4348,24 @@ export function DesktopWorkspaceShell(props: {
   );
 
   // Successful explorer moves/deletes re-project every path-keyed slice
-  // (tabs, activeTab, pins, expansion) BEFORE the watcher refresh lands, so
+  // (tabs, activeTab, pins, expansion) before the watcher refresh lands, so
   // a rename never leaves a dead tab pointing at the old path. If the remap
   // changes which inspector is mounted, that is an open — re-mark
   // file-open-start (closeFileTab idiom) so the next measure stays honest.
   const onExplorerPathsChanged = useCallback(
     (changes: PendingTreeChange[]) => {
       // Set-aside drafts key by path, so recovery follows the same projection
-      // as tabs and pins (#579 review, P1) — a rename must not strand the
+      // as tabs and pins — a rename must not strand the
       // notice on the old path while the tab remaps to the new one.
       remapOrphanedDraftPaths(workspaceId, (path) =>
+        projectTreePath(path, changes),
+      );
+      // Collection writes key their record and collection by path too. This
+      // runs while the operation still holds the cell-edit pause, so a
+      // retained write's retry targets the record where the move put it. A
+      // deleted path keeps the write at its original path, where the retry
+      // fails and the value stays retained for the user to discard.
+      remapCollectionFieldWritePaths(workspaceId, (path) =>
         projectTreePath(path, changes),
       );
       const current = wbRef.current;
@@ -4322,17 +4383,17 @@ export function DesktopWorkspaceShell(props: {
   );
 
   // Share mounts: the registry is loaded once at boot, so the shell owns a
-  // LIVE copy of this workspace's mounts — reloaded after every mount /
+  // live copy of this workspace's mounts — reloaded after every mount /
   // unmount / refresh — otherwise the poll gate and unmount lookups would
-  // run against a stale boot-time snapshot (gpt-5.6-sol P1).
+  // run against a stale boot-time snapshot.
   const [shareMounts, setShareMounts] = useState(
     workspaceShareMounts,
   );
   // Bumped whenever a share pull changed files: mounted content has no host
   // history, so the open-file refresh key needs its own signal or an open
-  // mounted tab keeps showing pre-pull content (codex P2).
+  // mounted tab keeps showing pre-pull content.
   const [mountContentEpoch, setMountContentEpoch] = useState(0);
-  // Ref mirror so reloads diff against the CURRENT set without making the
+  // Ref mirror so reloads diff against the current set without making the
   // state updater side-effectful (StrictMode replays updaters).
   const shareMountsRef = useRef(shareMounts);
   shareMountsRef.current = shareMounts;
@@ -4424,7 +4485,7 @@ export function DesktopWorkspaceShell(props: {
         reportShellError("Couldn't remove the share.", error);
         return;
       }
-      // Reproject tabs/pins exactly like a folder delete — but ONLY when the
+      // Reproject tabs/pins exactly like a folder delete — but only when the
       // folder actually went. When removal could clean up the record alone,
       // the files are still on disk, and projecting a delete would throw away
       // path-keyed state (tabs, pins, drafts) for files the user still has.
@@ -4461,7 +4522,7 @@ export function DesktopWorkspaceShell(props: {
 
   // Reveal-then-create: the inline editbox lives in the explorer view, so
   // make that view visible first (never setView — re-selecting the active
-  // view TOGGLES the panel).
+  // view toggles the panel).
   const requestExplorerCreate = useCallback(
     (kind: "file" | "folder") => {
       mutateWb((state) => ({ ...state, activeView: "explorer", sidebarVisible: true }));
@@ -4616,8 +4677,8 @@ export function DesktopWorkspaceShell(props: {
   }, [reportShellError]);
   const installDesktopUpdate = useCallback(async () => {
     try {
-      // Through the guard (#579 review, r8 + r10): with set-aside drafts
-      // present the recovery dialog opens INSTEAD of the one-shot install.
+      // Through the guard: with set-aside drafts
+      // present the recovery dialog opens instead of the one-shot install.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       if (!result.accepted) {
@@ -4891,6 +4952,43 @@ export function DesktopWorkspaceShell(props: {
     // as every other read of that lane.
     const token = ++engineHistoryToken.current;
     void (async () => {
+      // Admission revokes the PREVIOUS workspace's renderer session, and a
+      // queued collection cell write still needs it to open its record
+      // (engineYDocSessionIpc rejects opens for a non-current workspace).
+      // Those accepted writes land first; this workspace's own writes are
+      // untouched by its admission and do not hold it up.
+      const settled = await settleCollectionFieldWrites(workspaceId, {
+        stallMs: COLLECTION_WRITE_STALL_MS,
+      });
+      if (cancelled) return;
+      if (settled.stalled) {
+        // Unapplied input from other workspaces becomes retained failures.
+        // Applied writes remain owned until the engine confirms their save.
+        abandonPendingCollectionFieldWrites(
+          "dohc could not finish saving this change. Retry it, or discard the unsaved change.",
+          workspaceId,
+        );
+      }
+      if (settled.stalled || settled.failed > 0) {
+        // Admission would strand these writes' retries. The failure surface
+        // shows blocked instead of a spinner, and resolving the failures
+        // (or Try again) reruns this effect.
+        const retainedFailures = collectionWriteFailures().filter(
+          (failure) => failure.workspaceId !== workspaceId,
+        ).length;
+        setWorkspaceOpenFailedFor({
+          workspaceId,
+          selectionGeneration: workspaceSelectionGeneration,
+          message:
+            retainedFailures === 0
+              ? "dohc has not confirmed this save yet. Keep dohc open until saving finishes."
+              : retainedFailures === 1
+                ? "A collection change in another workspace has not saved. Retry or discard it to continue."
+                : "Collection changes in another workspace have not saved. Retry or discard them to continue.",
+          blockedOnCollectionWrites: true,
+        });
+        return;
+      }
       let status: SyncStatusResult;
       try {
         status = await bridge().openWorkspace({ workspaceId });
@@ -4910,10 +5008,10 @@ export function DesktopWorkspaceShell(props: {
       // Main answers after the safe startup boundary: either a complete
       // baseline or a proven large fresh import. This is the moment the
       // decision exists, and the status committed beside it is the first one
-      // that describes that decided workspace (#626). The two commit
+      // that describes that decided workspace. The two commit
       // together, so "decided" never runs ahead of what it decided.
       // The lane may refuse this status, and the decision still stands: what
-      // outranks it is a NEWER status, which describes a workspace at least
+      // outranks it is a newer status, which describes a workspace at least
       // as decided as this one.
       syncStatusLane.commit(token, status);
       setCaptureDecidedFor(workspaceId);
@@ -4961,7 +5059,7 @@ export function DesktopWorkspaceShell(props: {
     if (!workspaceIsReady) return;
     // Trailing-edge coalescing (D2#8): main emits one activity event per
     // settled batch, and a burst (an import, an agent writing many files)
-    // used to issue a listing + four history reads PER event. One refresh
+    // used to issue a listing + four history reads per event. One refresh
     // after the burst quiets answers them all — refreshFiles's committed-
     // request watermark and refreshHistory's tokened lanes are latest-wins,
     // so the coalesced (newest) refresh can never lose to a dropped one.
@@ -5117,7 +5215,7 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [props.onSwitchWorkspace, reportShellError]);
 
-  // THE command registry: the palette renders it and the application menu
+  // The command registry: the palette renders it and the application menu
   // routes through it (onMenuCommand below) — one definition per action.
   const commands = useMemo<Command[]>(
     () => [
@@ -5201,9 +5299,9 @@ export function DesktopWorkspaceShell(props: {
           ]
         : []),
       // The Chats panel exists for workspace-engine-flagged workspaces and
-      // for shared views (#646 PR2) — no surface, no command. A workspace
+      // for shared views — no surface, no command. A workspace
       // whose capture cannot serve chats keeps the command: the panel is
-      // still there, stating what dohc cannot do (#628).
+      // still there, stating what dohc cannot do.
       ...(chatsSurfaceExists
         ? [
             {
@@ -5350,13 +5448,13 @@ export function DesktopWorkspaceShell(props: {
     });
   }, [commands]);
 
-  // Read-only shared view (PR 18): the workspace was received through a
+  // Read-only shared view: the workspace was received through a
   // share grant. It refreshes on open and on demand, and every edit surface
   // is disabled with honest copy. Declared before the history timeline: the
   // shared-view placeholder's next step depends on whether the share is
   // still live (#540 — Refresh exists only while it is).
   const shareView = props.workspace.shareView ?? null;
-  // The stored grant could not be read (#646). The marker still stands — a
+  // The stored grant could not be read. The marker still stands — a
   // share view must never present as an ordinary workspace — but there is no
   // grant to pull with, so the refresh is skipped rather than failed, and the
   // banner says so instead of showing a level nobody can read.
@@ -5370,7 +5468,7 @@ export function DesktopWorkspaceShell(props: {
     !shareViewEnded &&
     shareView?.access === "comment" &&
     shareView?.genericChatWritable === true;
-  // Whether this share grants DOCUMENT writes (#646 PR3a), read the same way
+  // Whether this share grants DOCUMENT writes, read the same way
   // and for the same reason: positive recognition only, so `view`, an absent
   // level, and a damaged grant all stay read-only. An ended share grants
   // nothing either — its recipient can no longer send anything back, so an
@@ -5395,7 +5493,7 @@ export function DesktopWorkspaceShell(props: {
   // missing, and a restart must not either.
   //
   // The record is re-read after every refresh rather than taken from the boot
-  // snapshot in props: the recorder writes DURING the pull, so a refusal that
+  // snapshot in props: the recorder writes during the pull, so a refusal that
   // happens while this shell is mounted would otherwise wait for a remount.
   // Latest-wins token, the same guard reloadShareMounts uses.
   const bootSkipped = props.workspace.shareView?.skippedOps ?? null;
@@ -5504,7 +5602,7 @@ export function DesktopWorkspaceShell(props: {
     } catch (error) {
       reportShellError("Couldn't refresh the shared view.", error);
     } finally {
-      // AFTER the listing and after a FAILURE, deliberately. Refusals are
+      // After the listing and after a FAILURE, deliberately. Refusals are
       // recorded page by page before each cursor commit, so a refresh that
       // died on a later page still left durable evidence behind — reading it
       // only on the success path would keep that invisible until a lucky
@@ -5523,9 +5621,9 @@ export function DesktopWorkspaceShell(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [workspaceId, workspaceIsReady]);
 
-  // ---- The recipient's own submitted changes (#646 PR3a) ----
+  // ---- The recipient's own submitted changes ----
   // A submission exists only from Send changes: there is no draft at the
-  // relay, so this reads what was SENT, never what is unsent.
+  // relay, so this reads what was sent, never what is unsent.
   const [myShareChange, setMyShareChange] = useState<MyShareChangeRow | null>(null);
   const [shareChangesSubmitting, setShareChangesSubmitting] = useState(false);
   // Set by a submit that found nothing to send. Cleared by the next submit,
@@ -5566,7 +5664,7 @@ export function DesktopWorkspaceShell(props: {
     setMyShareChange(null);
     setShareChangesEmpty(false);
     setShareChangesSkipped(null);
-    // Read for ANY share view, not only one that can still send: changes
+    // Read for any share view, not only one that can still send: changes
     // already sent stay withdrawable after a downgrade, and a surface that
     // stopped reading them would hide the only way back.
     if (!isShareView) return;
@@ -5575,7 +5673,7 @@ export function DesktopWorkspaceShell(props: {
   const sendShareChanges = useCallback(async () => {
     const token = myShareChangeToken.current;
     // The newest token this call owns. The reload below takes a fresh one, and
-    // the cleanup has to compare against THAT — comparing against the token
+    // the cleanup has to compare against that — comparing against the token
     // this call started with finds it stale every time and leaves the control
     // reading "Sending…" for ever.
     let owned = token;
@@ -5641,8 +5739,8 @@ export function DesktopWorkspaceShell(props: {
     [workspaceId, reloadMyShareChanges],
   );
 
-  // ---- The granter's side of the same lane (#646 PR3a) ----
-  // Changes recipients sent to THIS workspace. One notice per submission, and
+  // ---- The granter's side of the same lane ----
+  // Changes recipients sent to this workspace. One notice per submission, and
   // the review dialog each notice opens.
   const [shareProposals, setShareProposals] = useState<readonly ShareProposalRow[]>([]);
   const [reviewProposalId, setReviewProposalId] = useState<string | null>(null);
@@ -5662,10 +5760,10 @@ export function DesktopWorkspaceShell(props: {
   // one pull on open, then a slow poll. Manual refresh stays available in the
   // explorer context menu.
   //
-  // Both sides of a share ride this ONE cadence. A recipient's mounts change
+  // Both sides of a share ride this one cadence. A recipient's mounts change
   // when the granter changes them, and a granter's waiting changes arrive at
   // the relay — and neither reaches this machine as workspace activity,
-  // because a proposal is deliberately not in anyone's log (#646 PR3a). A
+  // because a proposal is deliberately not in anyone's log. A
   // timer of its own would poll the same relay twice on two schedules.
   //
   // A share view holds someone else's files, so it is never the granter who
@@ -5697,13 +5795,13 @@ export function DesktopWorkspaceShell(props: {
     [shareProposals],
   );
 
-  // ONE history timeline element, rendered by the side panel's History view
+  // One history timeline element, rendered by the side panel's History view
   // and the history tab — the engine page state is root-owned (never a
   // second subscription). A workspace with no history source (retirement
   // Phase C removed the legacy recorder) gets a placeholder instead of an
-  // empty list, and what that placeholder CLAIMS comes from main's status —
+  // empty list, and what that placeholder claims comes from main's status —
   // or, for a shared view, the registry capability and the share's live
-  // state — never from the renderer's own capability read (#542).
+  // state — never from the renderer's own capability read.
   const historyOffCopy = historyOffPlaceholderCopy(
     syncStatus,
     shareView
@@ -5711,14 +5809,14 @@ export function DesktopWorkspaceShell(props: {
       : null,
   );
   // The rail needs no capture-decision clause of its own, unlike the surfaces
-  // that call on mount (#637). Only `refreshHistory` and the open effect
+  // that call on mount. Only `refreshHistory` and the open effect
   // commit a status, and both now answer after the decision, so a null status
   // is exactly the undecided window — and it lands in the branch below with
   // no page to show, which is already a load state. Adding the clause here
   // would render the same thing from a second place.
   const historyTimeline =
     engineSurfacesExist && !statusSaysNoRecorder(syncStatus) ? (
-    // The timeline renders only when a read ANSWERED (#593). Flattening a
+    // The timeline renders only when a read ANSWERED. Flattening a
     // null page into an empty list told the user a workspace with real
     // history had no changes, whenever a read was in flight or had failed.
     engineHistory ? (
@@ -5782,7 +5880,7 @@ export function DesktopWorkspaceShell(props: {
   );
   // Open-file refresh: history growth re-reads the active file. The floor
   // keeps the counter monotonic within the session even when the timeline is
-  // dropped and re-fetched (#555) — a cache-buster that revisits a value can
+  // dropped and re-fetched — a cache-buster that revisits a value can
   // suppress a needed re-read. Opted-out workspaces have no history growth
   // to react to. (Max-tracking a ref during render is idempotent, so a
   // repeated render commits the same value.)
@@ -6017,7 +6115,7 @@ export function DesktopWorkspaceShell(props: {
                 ? "dohc can't read what this share grants. Open the share again to restore it."
                 : shareViewDocumentsWritable
                   ? // Edit gets its own sentence from #646 PR3a. It states
-                    // the whole right, including the half that is NOT a
+                    // the whole right, including the half that is not a
                     // right: the granter's files change only when the
                     // granter accepts.
                     `Shared view from ${shareGranterName}. Edit these files and send your changes for ${shareGranterName} to accept.`
@@ -6057,7 +6155,7 @@ export function DesktopWorkspaceShell(props: {
                           .dismissShareSkips({
                             workspaceId,
                             // The generation on screen. A refusal recorded
-                            // since this render is NOT acknowledged by this
+                            // since this render is not acknowledged by this
                             // click.
                             generation: shown.generation,
                           })
@@ -6078,7 +6176,7 @@ export function DesktopWorkspaceShell(props: {
                 ),
               )
             : null}
-          {/* Changes already SENT, and the way to take them back (#646
+          {/* Changes already sent, and the way to take them back (#646
               PR3a). Deliberately not behind the level: a granter can narrow
               the share while changes wait, and a reverse path a downgrade
               removes is not a reverse path — it would strand work in front of
@@ -6141,7 +6239,7 @@ export function DesktopWorkspaceShell(props: {
                   You have no changes to send yet.
                 </span>
               ) : null}
-              {/* What the submit did NOT take. Both are things the recipient
+              {/* What the submit did not take. Both are things the recipient
                   would otherwise discover by their work simply not arriving. */}
               {shareChangesSkipped !== null ? (
                 <span
@@ -6150,7 +6248,7 @@ export function DesktopWorkspaceShell(props: {
                   data-more-pending={shareChangesSkipped.morePending || undefined}
                   className="min-w-0 truncate text-[11px] text-warning"
                 >
-                  {/* BOTH facts, when both are true. An either/or line drops
+                  {/* Both facts, when both are true. An either/or line drops
                       "more pending" exactly when a submit was largest — the
                       case the count exists to report. */}
                   {[
@@ -6357,7 +6455,7 @@ export function DesktopWorkspaceShell(props: {
                 <VersionMenu
                   workspaceId={workspaceId}
                   activeTabDirty={anyTabDirty}
-                  flushActiveDraft={flushActiveDraft}
+                  beginLineageOperation={beginLineageOperation}
                   onOpenCompare={openVersionCompareTab}
                   onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
                   onError={(message) => setShellError({ message, retry: null })}
@@ -6371,7 +6469,7 @@ export function DesktopWorkspaceShell(props: {
                             versionName: version.name,
                           }),
                       })}
-                  // versionEpoch bumps whenever ANY surface changed version
+                  // versionEpoch bumps whenever any surface changed version
                   // state (the 0N-2 review card switches back to Main outside
                   // this menu) — the selector re-reads instead of going stale.
                   refreshKey={versionEpoch}
@@ -6389,7 +6487,7 @@ export function DesktopWorkspaceShell(props: {
               workspaceId={workspaceId}
               state={tryState}
               activeTabDirty={anyTabDirty}
-              flushActiveDraft={flushActiveDraft}
+              beginLineageOperation={beginLineageOperation}
               onOpenCompare={openVersionCompareTab}
               onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
               onDismissed={onTryReviewDismissed}
@@ -6472,17 +6570,17 @@ export function DesktopWorkspaceShell(props: {
                 {historyTimeline}
               </div>
             ) : isMomentDiffTabPath(tabPath) ? (
-              // A persisted moment-diff tab reads THE capture capability,
+              // A persisted moment-diff tab reads the capture capability,
               // like every other surface main's capture serves. Gating it on
               // the share fact alone left the failed-build cause open: the
               // page still mounted, called readEngineMoment and fell into its
-              // own error state (#637).
+              // own error state.
               !captureAvailable ? (
                 isShareView ? (
-                  // A persisted moment-diff tab on a shared view (#621).
+                  // A persisted moment-diff tab on a shared view.
                   // Virtual tabs survive restore, so this tab outlives the
                   // History surface that opened it — and that surface no
-                  // longer exists here (#540). The page would ask main for a
+                  // longer exists here. The page would ask main for a
                   // moment a shared view has none of. It states the same
                   // capability the History placeholder states, and the tab
                   // stays closeable.
@@ -6496,8 +6594,8 @@ export function DesktopWorkspaceShell(props: {
                 ) : !captureDecided ? (
                   // Main has not decided yet. The tab must not mount the page
                   // and must not state a capability either: neither read the
-                  // shell has done proves anything about what main recorded
-                  // (#542), so this window gets a load state, not a claim.
+                  // shell has done proves anything about what main recorded,
+                  // so this window gets a load state, not a claim.
                   <PanelLoading label="history" />
                 ) : (
                   // Main decided, and the answer was no recorder — or the
@@ -6516,7 +6614,7 @@ export function DesktopWorkspaceShell(props: {
                 <EngineMomentDiffPage
                   workspaceId={workspaceId}
                   tabPath={tabPath ?? ""}
-                  onBeforeRestore={flushActiveDraft}
+                  onBeforeRestore={beginLineageOperation}
                   onOpenFile={openFile}
                   onPathResolved={rememberMomentDiffPath}
                   registerActiveUndo={editorCallbacks?.registerActiveUndo ?? (() => undefined)}
@@ -6524,7 +6622,7 @@ export function DesktopWorkspaceShell(props: {
                 />
               )
             ) : isVersionCompareTabPath(tabPath) ? (
-              // A persisted compare tab reads THE version capability, like
+              // A persisted compare tab reads the version capability, like
               // every other version entry point. Gating it on the share fact
               // alone left the whole #620 cause open: on a workspace whose
               // capture build failed the page still mounted, called
@@ -6532,7 +6630,7 @@ export function DesktopWorkspaceShell(props: {
               // "Could not compare with Main."
               !captureAvailable ? (
                 isShareView ? (
-                  // A persisted compare tab on a shared view (#589). The page
+                  // A persisted compare tab on a shared view. The page
                   // asks main for the versions, and a shared view has none —
                   // the same refusal the selector used to raise as a danger
                   // banner. The tab stays closeable and states the capability.
@@ -6546,8 +6644,8 @@ export function DesktopWorkspaceShell(props: {
                 ) : !captureDecided ? (
                   // Main has not decided yet. The tab must not mount the page
                   // and must not state a capability either: neither read the
-                  // shell has done proves anything about what main recorded
-                  // (#542), so this window gets a load state, not a claim.
+                  // shell has done proves anything about what main recorded,
+                  // so this window gets a load state, not a claim.
                   <PanelLoading label="versions" />
                 ) : (
                   // Main decided, and the answer was no recorder — or the
@@ -6563,7 +6661,7 @@ export function DesktopWorkspaceShell(props: {
                 )
               ) : (
                 <VersionComparePage
-                  // Remount per version AND per state change so the diff
+                  // Remount per version and per state change so the diff
                   // always reflects the latest disk/engine state.
                   key={`${tabPath}:${versionEpoch}`}
                   workspaceId={workspaceId}
@@ -6580,10 +6678,10 @@ export function DesktopWorkspaceShell(props: {
                   />
                 </Suspense>
               ) : isShareView ? (
-                // A persisted Chats tab on a shared view (#615). The
+                // A persisted Chats tab on a shared view. The
                 // neighbouring line blamed the Settings flag, and a share
                 // never touched it. #646 PR2 changed what is true here: a
-                // shared view HAS chat now, per file, and this tab is the
+                // shared view has chat now, per file, and this tab is the
                 // workspace-wide listing it still does not get — so the copy
                 // states the capability the reader does have and points at
                 // the surface that answers.
@@ -6595,13 +6693,13 @@ export function DesktopWorkspaceShell(props: {
                   about it.
                 </div>
               ) : !captureDecided ? (
-                // Main has not decided yet — a load state, not a claim (#542).
+                // Main has not decided yet — a load state, not a claim.
                 <PanelLoading label="Chats" />
               ) : (
                 // Main decided, and the answer was no capture: the engine flag
                 // is off, the settings file is unreadable, or the capture
                 // build failed. The line that used to stand here blamed the
-                // flag for all three (#628).
+                // flag for all three.
                 <div
                   data-testid="chats-page-off"
                   className="flex min-h-0 flex-1 items-center justify-center px-4 text-center text-sm text-muted"
@@ -6714,7 +6812,7 @@ export function DesktopWorkspaceShell(props: {
               groupCollectionPath ? (
                 <Suspense fallback={<PanelLoading label="collection" />}>
                   <LazyCollectionPage
-                    key={tabPath}
+                    key={`${tabPath}:${collectionLineage}`}
                     workspaceId={workspaceId}
                     collectionPath={groupCollectionPath}
                     activeViewName={wb.collectionViews[groupCollectionPath] ?? null}
@@ -6751,17 +6849,17 @@ export function DesktopWorkspaceShell(props: {
                 workspaceId={workspaceId}
                 path={tabPath}
                 fileOpenStartMark={fileOpenStartMark(editorGroup.id)}
-                // History growth, version switches, AND share-mount pulls all
+                // History growth, version switches, and share-mount pulls all
                 // re-read the open file (every counter only ever increases).
                 refreshKey={historyRefreshCounter + versionEpoch + mountContentEpoch}
                 // G2-C-3: the engine editor re-binds to the new version's Y.Doc
-                // lineage ONLY on an active-version change — versionEpoch alone,
-                // NOT history growth (which must not churn the live session).
+                // lineage only on an active-version change — versionEpoch alone,
+                // not history growth (which must not churn the live session).
                 engineVersionKey={versionEpoch}
                 onOpenPath={openPathWithHeading}
                 onOpenChatMention={openChatMention}
                 // The linked-mentions panel asks main for chat mentions, which
-                // is a Chats call like any other (#615) — same gate as the
+                // is a Chats call like any other — same gate as the
                 // panel, the tab and the graph's toggle.
                 chatMentionsAvailable={captureAvailable}
                 drawingCollaboration={chatCollaboration}
@@ -6876,14 +6974,14 @@ export function DesktopWorkspaceShell(props: {
               {!captureAvailable && !isShareView ? (
                 // Main's capture cannot serve chats here, so mounting either
                 // view below would issue calls it refuses and show the
-                // refusal as an error (#628). Chats is a persistent sidebar
+                // refusal as an error. Chats is a persistent sidebar
                 // rather than a tab, so the panel stays where the user left
                 // it — and states the fact, with the one next step that can
-                // change it. Before the decision it states nothing (#542).
+                // change it. Before the decision it states nothing.
                 //
                 // A shared view needs no capture and waits for no decision:
                 // main answers its per-file chat from the share scope, and
-                // its only tab is the file tab (#646 PR2).
+                // its only tab is the file tab.
                 !captureDecided ? (
                   <PanelLoading label="Chats" />
                 ) : (
@@ -7178,6 +7276,7 @@ export function DesktopWorkspaceShell(props: {
       {conflictReviewOpen ? (
         <ConflictReviewDialog
           workspaceId={workspaceId}
+          beginLineageOperation={beginLineageOperation}
           onWorkspaceStateChanged={onVersionWorkspaceStateChanged}
           onClose={() => setConflictReviewOpen(false)}
         />
@@ -7196,7 +7295,7 @@ export function DesktopWorkspaceShell(props: {
             workspaceId={workspaceId}
             workspacePath={props.workspace.rootPath}
             sharedView={isShareView}
-            // Main's own decision, not the renderer's settings read (#542):
+            // Main's own decision, not the renderer's settings read:
             // only main knows whether a recorder exists for this session, and
             // a failed capture build leaves none.
             sessionRecorderOn={
@@ -7207,7 +7306,7 @@ export function DesktopWorkspaceShell(props: {
             onAgentActiveChange={onSettingsAgentActiveChange}
             onWorkspaceFilesChanged={(outcome) => {
               // A Settings removal that left its folder behind reports the
-              // share id here, BEFORE the reload below sees the record
+              // share id here, before the reload below sees the record
               // vanish — otherwise that reload projects a folder delete over
               // files that are still on disk.
               if (outcome?.folderLeftShareId) {

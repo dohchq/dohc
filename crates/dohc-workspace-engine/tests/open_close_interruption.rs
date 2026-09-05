@@ -1,6 +1,6 @@
 //! An interrupted workspace.open or workspace.close must never strand the
 //! engine.db so that the same caller's retry refuses with "workspace database
-//! is already attached" (#908, #913).
+//! is already attached".
 //!
 //! The daemon dispatcher drops a handler future on deadline expiry or cancel,
 //! so every await in the open and close paths is a point where the request
@@ -172,7 +172,7 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
 
     let mut seed = 0x9e3779b97f4a7c15_u64;
     for iteration in 0..150_u32 {
-        // Phase 1: an open whose future is dropped mid-flight, like a
+        // An open whose future is dropped mid-flight, like a
         // deadline-expired wire request.
         let open_harness = Arc::clone(&harness);
         let open_root = root_t.clone();
@@ -191,7 +191,7 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             Err(_) => None,
         };
 
-        // Phase 2: the caller retries; the retry must always land.
+        // The caller retries; the retry must always land.
         let handle = open_until_success(
             &harness,
             &root_t,
@@ -210,14 +210,14 @@ async fn an_interrupted_open_or_close_never_strands_the_workspace_db() {
             .await;
         }
 
-        // Phase 3: a close whose future is dropped mid-flight.
+        // A close whose future is dropped mid-flight.
         let close_harness = Arc::clone(&harness);
         let racing_close = tokio::spawn(async move { close_harness.close(handle).await });
         tokio::time::sleep(std::time::Duration::from_micros(lcg(&mut seed) % 60_000)).await;
         racing_close.abort();
         let _ = racing_close.await;
 
-        // Phase 4: reopen after the aborted close, then settle clean.
+        // Reopen after the aborted close, then settle clean.
         let reopened = open_until_success(
             &harness,
             &root_t,

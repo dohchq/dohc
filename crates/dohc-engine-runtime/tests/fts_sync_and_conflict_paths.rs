@@ -651,10 +651,10 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     supervisor.close(&db).expect("close reopened actor");
 }
 
-/// A path resolved onto BYTES must stop answering searches for the text it
+/// A path resolved onto bytes must stop answering searches for the text it
 /// used to hold. Clicking such a hit would open a binary file.
 ///
-/// The guarantee is the search READER's, not this resolve path's: the index
+/// The guarantee is the search reader's, not this resolve path's: the index
 /// freezes the stale row and `search::query::live_head_is_binary` drops the
 /// candidate. This pins that the new binary-resolve path leaves a head that
 /// filter recognizes -- a resolution that wrote its bytes under a head the

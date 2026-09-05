@@ -1,18 +1,17 @@
-//! [`VersionedTextStore`]: the versioning domain over the CAL-1 storage core.
+//! [`VersionedTextStore`]: the versioning domain over the storage core.
 //!
 //! It borrows the actor's single [`EngineStore`] and composes its versioning
 //! SQL through the storage seams — reads via [`EngineStore::read_with`], every
-//! compound mutation via [`EngineStore::write_with`] so the domain write, its
-//! replication-journal entry, and any idempotency-ledger row commit in ONE
-//! transaction (plan §Storage and recovery model; PORTING.md §9). Storage owns
+//! compound mutation via [`EngineStore::write_with`] so the domain write and
+//! any idempotency-ledger row commit in one transaction. Storage owns
 //! the connection, open ritual, transaction boundary, and the crash-injection
 //! fault seam; the domain owns what a version/moment/fork/restore *means*.
 //!
 //! Validation (existence, name conflicts, duplicate moment ids) runs as reads
-//! BEFORE `BEGIN IMMEDIATE`. That is sound here precisely because of the
+//! before `BEGIN IMMEDIATE`. That is sound here precisely because of the
 //! single-writer invariant the runtime enforces (one writer thread per store):
 //! no concurrent writer can invalidate a check between the read and the
-//! transaction (`STATE_OWNERSHIP.tsv` `sqlite-conn-versioned-text`).
+//! transaction.
 
 use crate::conflicts::{
     WriteBinaryFile, binary_delete_job_id, binary_rename_delete_job_id, binary_rename_write_job_id,
@@ -46,7 +45,7 @@ pub const MAX_AUTHOR_FIELD_BYTES: usize = MAX_IDENTIFIER_BYTES;
 pub const MAX_AUTHOR_JSON_BYTES: usize = 10 * 1024;
 
 /// The in-band content cap every capped read binds into its SQL and every
-/// RPC references — ONE definition, so the query guard and the wire
+/// RPC references — one definition, so the query guard and the wire
 /// contract can never drift apart.
 pub const INBAND_CONTENT_CAP_BYTES: usize = 48 * 1024;
 
@@ -186,7 +185,7 @@ impl<'a> VersionedTextStore<'a> {
         committed(outcome)
     }
 
-    /// Autonomous BINARY capture ingest: same derived-id scheme and
+    /// Autonomous binary capture ingest: same derived-id scheme and
     /// idempotency posture as [`VersionedTextStore::capture_ingest`], but the
     /// content persists as a BINHEAD binary head (moment + snapshot with
     /// `content_kind = 'binary'`) and NO materialization job is enqueued —
@@ -381,12 +380,6 @@ impl<'a> VersionedTextStore<'a> {
             .map_err(DomainError::sql_persist)?;
             crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
             tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'moment.append', ?2)",
-                params![before.object_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
-            tx.execute(
                 "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
                  AND path = ?3 AND object_id = ?4",
                 params![ws, input.version_id, input.from_path, before.object_id],
@@ -466,20 +459,11 @@ impl<'a> VersionedTextStore<'a> {
         let input = &normalized_input;
 
         let (author_kind, author_json) = hash_author_fields(input.author_json.as_deref());
-        // legacy_before_text determines the restored snapshot when the moment
-        // carries no stored preimage — a different legacy text is a different
-        // rollback, never a replay.
-        let (legacy_kind, legacy_text): (&[u8], &[u8]) = match &input.legacy_before_text {
-            Some(text) => (b"some", text.as_bytes()),
-            None => (b"none", b""),
-        };
         let payload_hash = hash_fields(&[
             input.workspace_id.as_bytes(),
             input.version_id.as_bytes(),
             input.path.as_bytes(),
             input.mutation_moment_id.as_bytes(),
-            legacy_kind,
-            legacy_text,
             input.metadata_origin.as_bytes(),
             author_kind,
             author_json,
@@ -576,7 +560,7 @@ impl<'a> VersionedTextStore<'a> {
             )
             .map_err(DomainError::sql_persist)?;
             // Cancel every pending disk intent produced by the moment being
-            // removed. This is deliberately NOT active-version-gated: a job was
+            // removed. This is deliberately not active-version-gated: a job was
             // enqueued while this version was active and can otherwise replay
             // after another version becomes active. Match the moment generation,
             // path, and content so a malformed same-id row is never swept.
@@ -632,8 +616,8 @@ impl<'a> VersionedTextStore<'a> {
                 }
             }
 
-            // A completed binary delete/rename already changed DISK, so
-            // cancelling the original PENDING intent is insufficient. Commit
+            // A completed binary delete/rename already changed disk, so
+            // cancelling the original pending intent is insufficient. Commit
             // the inverse intent beside the restored DB head. These jobs are
             // durable even when the version is currently inactive; the
             // runtime executes them only while their restored state is active,
@@ -668,9 +652,9 @@ impl<'a> VersionedTextStore<'a> {
                 )?;
             }
 
-            // Reconcile DISK with an active-version rolled-back binary WRITE:
-            //   * a PENDING job does NOT prove disk is clean — the materializer
-            //     can crash AFTER the atomic rename lands but BEFORE marking the
+            // Reconcile disk with an active-version rolled-back binary write:
+            //   * a pending job does not prove disk is clean — the materializer
+            //     can crash after the atomic rename lands but before marking the
             //     job complete (`MaterializeAfterRenameBeforeComplete`), leaving
             //     the written bytes ON DISK with a still-pending job. So always
             //     enqueue the compensating restore (delete for a first write, else
@@ -866,12 +850,6 @@ impl<'a> VersionedTextStore<'a> {
                 ws,
                 restore_generation,
             )?;
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id,op_kind,created_at_ms) \
-                 VALUES (?1,'moment.append',?2)",
-                params![prep.moment.object_id, prep.moment.recorded_at_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             if restored.is_some() {
                 tx.execute(
                     "UPDATE snapshots SET latest_moment_id=?1,metadata_origin=?2, \
@@ -939,7 +917,7 @@ impl<'a> VersionedTextStore<'a> {
     /// closed (`VersionNotFound`) on an unknown version so a bad version never
     /// looks like a missing file (`versions-read-text-file` contract).
     ///
-    /// FAIL-CLOSED ON BINARY: a live binary head at `path` is NOT text, so this
+    /// FAIL-CLOSED ON BINARY: a live binary head at `path` is not text, so this
     /// text-only surface returns [`DomainError::BinaryHeadNotText`] rather than
     /// projecting it as an empty [`TextSnapshot`]. Serving a binary head as a
     /// blank text document would invite a silent overwrite and hide the real
@@ -969,7 +947,7 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// Read the BINARY head at `path`: the stored sha plus the blob bytes.
+    /// Read the binary head at `path`: the stored sha plus the blob bytes.
     /// `Ok(None)` when the path has no head; a TEXT head is refused the same
     /// way a binary head is refused by [`Self::read_text`] — the caller asked
     /// the wrong question, and silently returning empty bytes would hide it.
@@ -1239,7 +1217,7 @@ impl<'a> VersionedTextStore<'a> {
             let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "binary head without a binary sha",
             })?;
-            // Fail closed like get_binary_blob does: the RECORDED length
+            // Fail closed like get_binary_blob does: the recorded length
             // must match the stored bytes, and the row must exist — for an
             // over-cap read this is the only storage access that runs, so
             // it carries the integrity check itself.
@@ -1270,7 +1248,7 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// Read a text head with the body hydrated ONLY under `cap` bytes —
+    /// Read a text head with the body hydrated only under `cap` bytes —
     /// the byte length always returns. One query, one actor turn: no
     /// window where a concurrent write can grow the body between a size
     /// probe and the load, and an over-cap body never leaves SQLite.
@@ -1377,7 +1355,7 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// Read a binary head with the bytes hydrated ONLY under `cap` — the
+    /// Read a binary head with the bytes hydrated only under `cap` — the
     /// recorded byte length (integrity-checked against the stored bytes)
     /// always returns. One query, one actor turn, same rationale as
     /// [`Self::read_text_inband`].
@@ -1406,7 +1384,7 @@ impl<'a> VersionedTextStore<'a> {
             let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
                 reason: "binary head without a binary sha",
             })?;
-            // BOTH guards in the hydration CASE: a corrupt row whose
+            // Both guards in the hydration CASE: a corrupt row whose
             // recorded length lies small must not smuggle big bytes into
             // memory before the integrity check rejects it.
             let row: Option<(i64, i64, Option<Vec<u8>>)> = conn
@@ -1429,7 +1407,7 @@ impl<'a> VersionedTextStore<'a> {
                     reason: "binary blob length does not match its bytes",
                 });
             }
-            // Bytes that will be SERVED are re-hashed (get_binary_blob
+            // Bytes that will be served are re-hashed (get_binary_blob
             // parity): bit-rot or tampering that preserves the length must
             // fail closed, never ship under the original content address.
             // Under-cap only — hashing <=48 KiB is trivial.
@@ -1827,7 +1805,7 @@ impl<'a> VersionedTextStore<'a> {
     /// and path aliases and recording durable `fork_base_snapshots`
     /// (`versions-create-named-version`). Journals a `version.create` op. The
     /// fork point is the latest NON-`sync_record_only` moment, so a peer
-    /// divergence marker can never become the fork point (`PORTING.md` §1).
+    /// divergence marker can never become the fork point.
     pub fn create_named_version(
         &mut self,
         input: &CreateNamedVersion,
@@ -1947,18 +1925,11 @@ impl<'a> VersionedTextStore<'a> {
                 params![ws, input.new_version_id, input.from_version_id],
             )
             .map_err(DomainError::sql_persist)?;
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'version.create', ?2)",
-                params![input.new_version_id, input.now_ms],
-            )
-            .map_err(DomainError::sql_persist)?;
             crate::secrets::fork_version_in_tx(
                 tx,
                 ws,
                 &input.from_version_id,
                 &input.new_version_id,
-                input.now_ms,
             )?;
             record_request(tx, input.request_id.as_deref(), &payload_hash, 0, input.now_ms)?;
             after(tx, &record)?;
@@ -2065,9 +2036,11 @@ struct RollbackPrep {
     before: Option<SnapshotRecord>,
 }
 
+/// `moments.before_present`. A replicated moment whose payload carries no
+/// `before` is `Unrecorded`; it cannot be rolled back.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MomentBeforeState {
-    LegacyUnset,
+    Unrecorded,
     Absent,
     Present,
 }
@@ -2075,7 +2048,7 @@ enum MomentBeforeState {
 impl MomentBeforeState {
     fn from_db(value: i64) -> Result<Self, DomainError> {
         match value {
-            0 => Ok(MomentBeforeState::LegacyUnset),
+            0 => Ok(MomentBeforeState::Unrecorded),
             1 => Ok(MomentBeforeState::Absent),
             2 => Ok(MomentBeforeState::Present),
             _ => Err(DomainError::StateCorrupt {
@@ -2523,7 +2496,7 @@ where
             &resolved.object_id,
         )?
     };
-    // OWNERSHIP: capture only overwrites heads written with ITS OWN origin.
+    // OWNERSHIP: capture only overwrites heads written with its own origin.
     // A head that arrived by another route (RPC, replication) may have no
     // disk counterpart at all, so letting disk bytes overwrite it would
     // silently revert that write.
@@ -2538,7 +2511,7 @@ where
         && before.content_kind == "text"
         && before.blob_sha256.as_deref() == Some(content_sha256.as_str())
     {
-        // A CLAIMED dedupe transfers ownership: capture observed the disk
+        // A claimed dedupe transfers ownership: capture observed the disk
         // transition and the content already matches, so the head becomes
         // capture-owned. Without this the head would stay foreign forever
         // and later disk-driven retires would be refused.
@@ -2569,7 +2542,7 @@ where
 
     // TS `writeIfChanged` parity: an explicit pass summary (a reconcile)
     // always wins; otherwise a binary-tracked path whose bytes round-trip as
-    // UTF-8 again gets the honest transition label, and a PLAIN live text
+    // UTF-8 again gets the honest transition label, and a plain live text
     // update carries NO summary (the renderer's copy for null is
     // "Edited <basename>").
     let metadata_summary = match &input.metadata_summary {
@@ -2627,10 +2600,9 @@ where
         now_ms: input.now_ms,
         request_id: None,
     })?;
-    let result = write_normalized_text_in_tx_with_journal(
+    let result = write_normalized_text_in_tx(
         tx,
         write,
-        true,
         false,
         Some(PreparedTextWrite {
             object_id: resolved.object_id.clone(),
@@ -2832,7 +2804,7 @@ pub fn capture_retire_in_tx(
 /// determined by this value: capture only ever overwrites or retires heads
 /// it wrote itself.
 ///
-/// RESERVED: `normalized_write_input` — which EVERY plaintext write path
+/// Reserved: `normalized_write_input` — which every plaintext write path
 /// runs, including `write_text_in_tx` behind the RPC surface — rejects this
 /// origin, so a caller cannot forge capture ownership and have its own
 /// content retired by a disk-driven pass. Only the capture primitives in
@@ -2980,11 +2952,11 @@ where
                     reason: "snapshot points at a missing moment",
                 },
             )?;
-            // The head's bytes are VERIFIED on disk right now, so record the
+            // The head's bytes are verified on disk right now, so record the
             // head generation as materialized (upsert: the creating write's
             // own job may still be pending — its content is this same sha —
             // and flipping it complete both records reality and lets the
-            // staleness gate supersede any OLDER pending job that could
+            // staleness gate supersede any older pending job that could
             // otherwise regress disk behind the confirmed head).
             dohc_engine_storage::record_completed_job(
                 tx,
@@ -3090,9 +3062,9 @@ where
         }
         .into());
     }
-    // Disk ALREADY holds these bytes, so record the materialization as a
-    // COMPLETED job (never runnable). The marker is what the materializer's
-    // staleness gate reads: an OLDER still-pending job for this path — whose
+    // Disk already holds these bytes, so record the materialization as a
+    // completed job (never runnable). The marker is what the materializer's
+    // staleness gate reads: an older still-pending job for this path — whose
     // preimage may match the very bytes just captured — is superseded instead
     // of later running and regressing disk behind this head.
     dohc_engine_storage::record_completed_job(
@@ -3125,7 +3097,7 @@ where
 }
 
 /// One rehydration-seed entry for the files-layer scan manifest: the path,
-/// the CAPTURED content's byte size, and its lowercase-hex sha256 in the
+/// the captured content's byte size, and its lowercase-hex sha256 in the
 /// scanner's own terms (text = the blob bytes, binary = the binary blob).
 /// Secrets carry a sentinel sha (plaintext hashes are deliberately never
 /// stored), so a reopened workspace re-offers each secret once and the
@@ -3143,7 +3115,7 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 
 /// Every CAPTURE-ORIGIN path in `version_id` with its content identity, for
 /// seeding a fresh files-layer manifest on workspace (re)open. Without this
-/// seed the baseline scan diffs against EMPTY and can never emit a Retire
+/// seed the baseline scan diffs against empty and can never emit a Retire
 /// for a file deleted while the daemon was down — the stale captured head
 /// would stay readable forever (`ReconcileController::rehydrated`'s
 /// documented follow-up: the rehydration SOURCE lives above the files
@@ -3153,7 +3125,7 @@ pub const SECRET_SEED_SENTINEL_SHA: &str = "rehydrated-secret";
 /// believes is on disk. Content that arrived any other way (an RPC
 /// `versionedText.write`, a replication/sync apply) may legitimately have
 /// no disk counterpart yet, and seeding it would make the next baseline
-/// scan diff it as "removed" and RETIRE it — capture deleting content it
+/// scan diff it as "removed" and retire it — capture deleting content it
 /// never owned.
 ///
 /// Matching pending rollback deletes are emitted as transient last-known-disk
@@ -3298,7 +3270,7 @@ pub fn capture_manifest_seed(
         }
         // Same capture-ownership rule for the encrypted store: a tip written
         // by the API or replication may legitimately have no plaintext on
-        // disk, and seeding it would make the baseline diff RETIRE it. Keyed
+        // disk, and seeding it would make the baseline diff retire it. Keyed
         // on the engine-stamped `capture_owned` column, never on the
         // caller-supplied origin string.
         let mut secrets = conn
@@ -3364,23 +3336,12 @@ pub fn write_text_in_tx(
     tx: &Transaction<'_>,
     input: &WriteText,
 ) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, true, false)
+    let input = normalized_write_input(input.into())?;
+    write_normalized_text_in_tx(tx, input, false, None)
 }
 
-/// Apply a text write inside a caller-owned compound replication transaction.
-/// The compound operation owns the relay-visible moment shadow, so this seam
-/// deliberately skips the legacy payload-free diagnostic journal row.
-pub(crate) fn write_text_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &WriteText,
-) -> Result<WriteResult, DomainError> {
-    write_text_in_tx_with_journal(tx, input, false, false)
-}
-
-/// Apply a projected text write without appending `moment.append` to the
-/// replication journal. A Y.Doc settle has already durably recorded the CRDT
-/// edits that produced this projection, so journaling the derived markdown a
-/// second time would create a competing replication mutation.
+/// Apply a projected text write. A Y.Doc settle has already durably recorded
+/// the CRDT edits that produced this projection.
 #[doc(hidden)]
 pub fn write_projected_text_in_tx<'a>(
     tx: &Transaction<'_>,
@@ -3388,26 +3349,15 @@ pub fn write_projected_text_in_tx<'a>(
 ) -> Result<WriteResult, DomainError> {
     // allow_preallocated_object: the live Y.Doc seed pre-creates the
     // file_objects row (FK parent for the marker) before any snapshot or
-    // alias exists — the settle that follows is binding ITS OWN object,
+    // alias exists — the settle that follows is binding its own object,
     // not colliding with another.
     let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, false, true, None)
+    write_normalized_text_in_tx(tx, input, true, None)
 }
 
-fn write_text_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &WriteText,
-    journal: bool,
-    allow_preallocated_object: bool,
-) -> Result<WriteResult, DomainError> {
-    let input = normalized_write_input(input.into())?;
-    write_normalized_text_in_tx_with_journal(tx, input, journal, allow_preallocated_object, None)
-}
-
-fn write_normalized_text_in_tx_with_journal(
+fn write_normalized_text_in_tx(
     tx: &Transaction<'_>,
     input: ProjectedWriteText<'_>,
-    journal: bool,
     allow_preallocated_object: bool,
     prepared: Option<PreparedTextWrite>,
 ) -> Result<WriteResult, DomainError> {
@@ -3470,7 +3420,7 @@ fn write_normalized_text_in_tx_with_journal(
             return write_result_from_moment(tx, ws, existing, true);
         }
         // The oracle's contract: a caller-supplied moment id reused with
-        // DIFFERENT content is duplicate-moment-id (the exact-match arm above
+        // different content is duplicate-moment-id (the exact-match arm above
         // is the idempotent replay; only requestId reuse maps to mismatch).
         return Err(DomainError::DuplicateMomentId);
     }
@@ -3624,14 +3574,6 @@ fn write_normalized_text_in_tx_with_journal(
         ],
     )
     .map_err(DomainError::sql_persist)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![object_id, input.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     record_request(
         tx,
         input.request_id,
@@ -3842,7 +3784,7 @@ pub fn write_binary_in_tx(
             metadata_summary: input.metadata_summary.clone(),
             metadata_correlation_id: input.metadata_correlation_id.clone(),
             author_json: input.author_json.clone(),
-            // ACTIVE version only: disk mirrors the active version, so a
+            // Active version only: disk mirrors the active version, so a
             // non-active write must not enqueue a job — the open-time replay
             // would land another version's bytes for the capture baseline to
             // ingest into the active head.
@@ -3946,10 +3888,10 @@ fn reconstruct_binary_write(
     })
 }
 
-/// The ONE locked implementation of autonomous capture's object/alias
+/// The one locked implementation of autonomous capture's object/alias
 /// resolution, shared by the text and binary primitives so the length-framed,
 /// security-sensitive id scheme can never silently diverge between them:
-/// reuse a live alias; else derive the framed object id and reuse it ONLY when
+/// reuse a live alias; else derive the framed object id and reuse it only when
 /// it has no live alias anywhere; else mint an order-disambiguated id, with
 /// that reserved order returned so the caller can pin it against the moment
 /// the write actually persists. A freshly inserted object record is returned
@@ -4226,29 +4168,11 @@ fn snapshot_content_from_moment_side(
     }
 }
 
-/// Apply an R05 text delete inside a caller-owned compound transaction.
+/// Apply a text delete inside a caller-owned compound transaction.
 #[doc(hidden)]
 pub fn delete_text_in_tx(
     tx: &Transaction<'_>,
     input: &DeleteTextFile,
-) -> Result<DeleteResult, DomainError> {
-    delete_text_in_tx_with_journal(tx, input, true)
-}
-
-/// Apply a text delete inside a caller-owned compound replication transaction.
-/// The compound operation owns the relay-visible moment shadow, so this seam
-/// deliberately skips the legacy payload-free diagnostic journal row.
-pub(crate) fn delete_text_in_tx_without_diagnostic_journal(
-    tx: &Transaction<'_>,
-    input: &DeleteTextFile,
-) -> Result<DeleteResult, DomainError> {
-    delete_text_in_tx_with_journal(tx, input, false)
-}
-
-fn delete_text_in_tx_with_journal(
-    tx: &Transaction<'_>,
-    input: &DeleteTextFile,
-    journal: bool,
 ) -> Result<DeleteResult, DomainError> {
     let normalized_input = normalized_delete_input(input)?;
     let input = &normalized_input;
@@ -4326,14 +4250,6 @@ fn delete_text_in_tx_with_journal(
     )
     .map_err(DomainError::sql_persist)?;
     crate::collections::index_historical_record_owner_moment_in_tx(tx, ws, moment_order)?;
-    if journal {
-        tx.execute(
-            "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-             VALUES (?1, 'moment.append', ?2)",
-            params![before.object_id, input.now_ms],
-        )
-        .map_err(DomainError::sql_persist)?;
-    }
     tx.execute(
         "DELETE FROM path_aliases WHERE workspace_id = ?1 AND version_id = ?2 \
          AND path = ?3 AND object_id = ?4",
@@ -4345,11 +4261,11 @@ fn delete_text_in_tx_with_journal(
         params![ws, input.version_id, before.object_id],
     )
     .map_err(DomainError::sql_persist)?;
-    // #739: must run in this SAME transaction as the path_aliases removal
+    // Must run in this same transaction as the path_aliases removal
     // above — see `cancel_pending_jobs_for_path` for why. Materialization
-    // jobs carry no version identity — they mirror the ACTIVE version's
+    // jobs carry no version identity — they mirror the active version's
     // working tree only, the same gate `enqueue_binary_delete` applies to
-    // its own job — so an INACTIVE version's delete must not touch them: a
+    // its own job — so an inactive version's delete must not touch them: a
     // named version deleting its own `note.md` must never cancel a pending
     // job that belongs to `main`'s `note.md` of the same name.
     if version_is_active(tx, ws, &input.version_id)? {
@@ -4492,7 +4408,7 @@ fn committed<T>(outcome: TxnOutcome<T>) -> Result<T, DomainError> {
 
 /// Validates a required caller-minted write identifier: non-empty and inside
 /// the engine-wide length bound, so no route can store one an answer could not
-/// then carry (#654). The identifiers a caller may leave empty take
+/// then carry. The identifiers a caller may leave empty take
 /// [`bounded_identifier`] instead.
 pub(crate) fn validate_identifier(value: &str, field: &'static str) -> Result<(), DomainError> {
     if value.is_empty() {
@@ -4582,7 +4498,7 @@ pub(crate) fn validate_moment_metadata(
     Ok(())
 }
 
-/// Minimal path floor for the calibration slice. This is NOT the full
+/// Minimal path floor for the calibration slice. This is not the full
 /// `validateUserWritePath` parity — normalization (NFC, forward-slash),
 /// percent-decoding, and the complete reserved-name set are owned by the
 /// `dohc-engine-files` path-floor shard. It rejects the high-value cases so a
@@ -4655,7 +4571,7 @@ pub fn validate_addressable_plaintext_path(path: &str) -> Result<String, DomainE
 
 fn validate_text(text: &str) -> Result<(), DomainError> {
     if text.len() > MAX_TEXT_BYTES {
-        // Name the cap, not just the fact of it (#656). "text exceeds the
+        // Name the cap, not just the fact of it. "text exceeds the
         // size cap" told a caller nothing it could act on: which cap, how
         // large, in what unit, and by how much it overshot were all missing.
         // The sync side already reports this same limit as
@@ -4729,7 +4645,7 @@ pub(crate) fn moment_exists(
     Ok(found.is_some())
 }
 
-/// Whether an object owns ANY binding (a path alias in any version or a
+/// Whether an object owns any binding (a path alias in any version or a
 /// snapshot row). A bare row with none is a Y.Doc seed preallocation.
 fn object_has_any_binding(
     tx: &Transaction<'_>,
@@ -4876,13 +4792,13 @@ fn latest_moment_order(
 }
 
 /// The fork point: the latest materialized moment **belonging to the source
-/// version** (`versionedTextStore.ts:4877-4884` — "it never touched THIS
+/// version** (`versionedTextStore.ts:4877-4884` — "it never touched this
 /// version's snapshots, so it must never become the fork point"). Scoping to
 /// `version_id` is load-bearing: the global-latest moment can belong to a
 /// sibling fork, and using it would record a merge base that never described
 /// this version's state. `sync_record_only` marker rows (a peer-divergence
-/// record) are excluded — a materialized moment is NULL or `0` (PORTING.md §1;
-/// the `= 0` arm is latent until a sync shard writes 0).
+/// record) are excluded — a materialized moment is NULL or `0` (the `= 0`
+/// arm is latent until sync writes 0).
 fn latest_materialized_moment_id(
     conn: &Connection,
     workspace_id: &str,
@@ -4900,7 +4816,7 @@ fn latest_materialized_moment_id(
     .map_err(DomainError::sql_corrupt)
 }
 
-/// The snapshot row WITHOUT the text join — the in-band reads resolve
+/// The snapshot row without the text join — the in-band reads resolve
 /// heads through this so an over-cap body is never copied out of SQLite
 /// by the head lookup itself.
 struct SnapshotMeta {
@@ -4966,15 +4882,15 @@ fn get_snapshot(
     row.transpose()
 }
 
-/// Enqueue the compensating materialization job that restores DISK to the
+/// Enqueue the compensating materialization job that restores disk to the
 /// rolled-back-to state after a binary write whose original job already reached
-/// disk (COMPLETE) or was preserved-both (CONFLICT). Mirrors the text write/
+/// disk (complete) or was preserved-both (CONFLICT). Mirrors the text write/
 /// resolve path (`enqueue_write`/`enqueue_delete`): content bytes live in
 /// `binary_blobs` (what the materializer reads) and the job carries the current
 /// store-global mutation generation so the newest-wins gate cannot discard an
 /// active restore behind a later completed job from another lineage.
 ///
-/// The preimage is the WRITTEN bytes (`written_sha256`): the compensator only
+/// The preimage is the written bytes (`written_sha256`): the compensator only
 /// acts if disk still holds exactly what the rolled-back write put there, so an
 /// external edit after materialization is preserved (conflict), never clobbered.
 fn enqueue_binary_rollback_restore(
@@ -4992,7 +4908,7 @@ fn enqueue_binary_rollback_restore(
     );
     let preimage = Preimage::Present(written_sha256.to_owned());
     match before {
-        // First write: the rolled-back-to state is ABSENT → delete the file.
+        // First write: the rolled-back-to state is absent → delete the file.
         // `content_sha256` must reference an existing `binary_blobs` row (FK); the
         // written bytes still qualify and are unused by a delete job.
         None => enqueue_delete_job(
@@ -5008,7 +4924,7 @@ fn enqueue_binary_rollback_restore(
             },
         )
         .map_err(DomainError::from)?,
-        // Overwrite: restore the PREVIOUS content. Text lives in `blobs`; copy its
+        // Overwrite: restore the previous content. Text lives in `blobs`; copy its
         // bytes into `binary_blobs` (mirroring `enqueue_write`) and materialize
         // that sha. A previous binary head's bytes are already in `binary_blobs`.
         Some(before) => {
@@ -5547,39 +5463,8 @@ fn resolve_rollback_before(
     if before_state == MomentBeforeState::Absent {
         return Ok(None);
     }
-
-    let previous = previous_object_moment_for_rollback(conn, input, moment)?;
-
-    if let Some(legacy_before_text) = &input.legacy_before_text {
-        validate_text(legacy_before_text)?;
-        let previous = previous
-            .filter(|candidate| candidate.operation != MomentOp::Delete)
-            .ok_or(DomainError::InvalidInput {
-                reason: "legacy mutation has no earlier snapshot to restore",
-            })?;
-        let path = if moment.operation == MomentOp::Rename {
-            previous.path.clone()
-        } else {
-            input.path.clone()
-        };
-        return Ok(Some(SnapshotRecord {
-            workspace_id: input.workspace_id.clone(),
-            version_id: input.version_id.clone(),
-            object_id: moment.object_id.clone(),
-            path,
-            text: legacy_before_text.clone(),
-            blob_sha256: Some(text_blob_sha256(legacy_before_text)),
-            content_kind: "text".to_owned(),
-            binary_sha256: None,
-            updated_at_ms: previous.recorded_at_ms,
-            latest_moment_id: previous.moment_id,
-            metadata_origin: previous.metadata_origin,
-            metadata_summary: previous.metadata_summary,
-            metadata_correlation_id: previous.metadata_correlation_id,
-        }));
-    }
     Err(DomainError::InvalidInput {
-        reason: "legacy mutation is missing a rollback preimage",
+        reason: "mutation has no rollback preimage",
     })
 }
 
@@ -5837,7 +5722,7 @@ fn lineage_has_independent_object_mutation(
         }
         // TS value 2 is a concrete preimage (reachable for R05 update/delete/
         // rename); Rust's bool represents it as `true`. Rust intentionally
-        // collapses TS legacy-unset (0) and explicit-absent (1) to `false`;
+        // collapses TS unrecorded (0) and explicit-absent (1) to `false`;
         // this dependency check only needs the concrete-preimage distinction.
         if object_moments.iter().any(|candidate| {
             candidate.version_id == version.version_id
@@ -6106,7 +5991,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
     let after_actual_length: Option<i64> = row.get(24)?;
     let before_actual_length: Option<i64> = row.get(25)?;
     let before_path: Option<String> = row.get(26)?;
-    // Recorded and ACTUAL lengths must agree per side — a corrupted
+    // Recorded and actual lengths must agree per side — a corrupted
     // recorded length (lying small or large) fails closed for text and
     // binary alike, matching the in-band reads.
     if after_byte_length != after_actual_length || before_byte_length != before_actual_length {
@@ -6114,7 +5999,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             reason: "moment blob length does not match its content",
         }));
     }
-    // Byte lengths ALWAYS hydrate (only the text is capped): a side whose
+    // Byte lengths always hydrate (only the text is capped): a side whose
     // sha is set but whose joined length is NULL references a missing
     // blob row — corrupt state, never "over-cap".
     if (after_blob_sha256.is_some() || after_binary_sha256.is_some()) && after_byte_length.is_none()
@@ -6193,7 +6078,7 @@ fn map_moment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Result<MomentReco
             metadata_correlation_id,
             author_json,
             // A record-only marker is a non-NULL, NON-ZERO value; NULL or 0 both
-            // mean 'materialized' (PORTING.md §1, matching the aligned fork SQL).
+            // mean 'materialized' (matching the aligned fork SQL).
             sync_record_only: matches!(sync_record_only, Some(v) if v != 0),
             after_text,
             after_byte_length,
@@ -6895,8 +6780,7 @@ mod tests {
                        (SELECT COUNT(*) FROM file_objects WHERE workspace_id = 'ws'), \
                        (SELECT COUNT(*) FROM path_aliases WHERE workspace_id = 'ws'), \
                        (SELECT COUNT(*) FROM snapshots WHERE workspace_id = 'ws'), \
-                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws'), \
-                       (SELECT COUNT(*) FROM replication_journal)",
+                       (SELECT COUNT(*) FROM moments WHERE workspace_id = 'ws')",
                     [],
                     |row| {
                         Ok((
@@ -6904,7 +6788,6 @@ mod tests {
                             row.get::<_, i64>(1)?,
                             row.get::<_, i64>(2)?,
                             row.get::<_, i64>(3)?,
-                            row.get::<_, i64>(4)?,
                         ))
                     },
                 )
@@ -6912,7 +6795,7 @@ mod tests {
             .expect("inspect rolled-back capture");
         assert_eq!(
             durable_rows,
-            (0, 0, 0, 0, 0),
+            (0, 0, 0, 0),
             "the integrity failure must roll back every capture row"
         );
         let corrupt_blob = store

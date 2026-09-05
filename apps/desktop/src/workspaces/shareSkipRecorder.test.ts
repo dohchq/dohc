@@ -49,7 +49,7 @@ describe("share skip recorder", () => {
 
     expect(
       share.effects,
-      "MUTATION: batching the pages loses the ones a failed pull already committed past",
+      "batching the pages loses the ones a failed pull already committed past",
     ).toEqual(["persist", "persist"]);
     expect(
       share.stored()?.skippedOps?.ops.map((op) => op.originSeq),
@@ -60,7 +60,7 @@ describe("share skip recorder", () => {
   // The fan-out this shape exists to prevent: every renderer broadcast starts
   // file scans, history reads and relay listings, and a relay refusing on
   // every page of a long backlog would start one set per page. The recorder
-  // is handed a reader and a writer and nothing else, so a page CANNOT
+  // is handed a reader and a writer and nothing else, so a page cannot
   // broadcast — the pull sites notify once when they settle.
   it("has no effect on a page beyond persisting it", async () => {
     const share = target({ shareId: "share-1" });
@@ -71,7 +71,7 @@ describe("share skip recorder", () => {
 
     expect(
       new Set(share.effects),
-      "MUTATION: a recorder that also notified would fan one pull into one broadcast per page",
+      "a recorder that also notified would fan one pull into one broadcast per page",
     ).toEqual(new Set(["persist"]));
     expect(share.effects).toHaveLength(25);
   });

@@ -113,10 +113,10 @@ async function resolveWorkspaceFileTarget(
   if (!validated.ok) {
     throw new Error(`Invalid asset path (${validated.reason}): ${relativePath}`);
   }
-  // This resolver FOLLOWS the path (it hands back a path every caller then
+  // This resolver follows the path (it hands back a path every caller then
   // opens), so an in-workspace alias reads or writes whatever it points at.
   // The reservation is therefore decided on where the path lands, and the
-  // caller receives THAT resolution — resolving the spelling a second time
+  // caller receives that resolution — resolving the spelling a second time
   // would hand back a target no rule was applied to.
   const { relative: resolvedPath, resolvedAbsolute } =
     await assertResolvedWorkspacePath({
@@ -846,7 +846,7 @@ export function createOrderedWorkspaceTextAccess(deps: {
         return deps.writeTarget(target, text, expectedContentHash);
       });
     },
-    // The same admission, for a save that does NOT land on disk here. A share
+    // The same admission, for a save that does not land on disk here. A share
     // view's save goes through its engine store and then projects the result,
     // so it cannot call `write` — but two saves racing on one path must be
     // ordered just the same, or the second reads the first's stale bytes and
@@ -964,7 +964,7 @@ const orderedWorkspaceTextAccess = createOrderedWorkspaceTextAccess({
 });
 
 /**
- * Run an operation under the SAME per-file ordering the editor's own save
+ * Run an operation under the same per-file ordering the editor's own save
  * takes. For a writer whose bytes do not reach disk through
  * `writeWorkspaceText` — today, a share view's save, which writes an engine
  * moment and then projects it.
@@ -1099,7 +1099,7 @@ const MAX_ASSET_WRITE_BYTES = 20 * 1024 * 1024;
 // validate → realpath-contain (via the nearest existing ancestor, since the
 // target/parent may not exist yet) → mkdir → re-contain the now-real parent
 // (defeats a symlink swapped in during mkdir) → atomic temp+rename. Kept in
-// ONE place so a future hardening tweak can't be applied to one caller and
+// one place so a future hardening tweak can't be applied to one caller and
 // silently miss the other. `kind` only feeds the error strings.
 async function writeContainedFile(
   rootPath: string,

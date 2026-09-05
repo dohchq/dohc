@@ -265,8 +265,6 @@ async fn query_page_returns_ranked_snippets_from_the_active_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_resolves_every_search_through_its_opaque_workspace_handle() {
-    // MUTATION: resolve the wrong open workspace instead of the request handle
-    // and one side returns the other workspace's path.
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let scratch_a = ScratchDir::new().expect("scratch a");
@@ -328,8 +326,6 @@ async fn query_page_resolves_every_search_through_its_opaque_workspace_handle() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_byte_budget_pages_an_oversized_result_set() {
-    // MUTATION: remove byte_budget_cut_serialized from search.queryPage and the
-    // first page contains all 1,000 hits with no continuation.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-paging").await;
@@ -381,8 +377,6 @@ async fn query_page_byte_budget_pages_an_oversized_result_set() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_short_query_finds_seeded_content() {
-    // MUTATION: return an empty page for the trigram TooShort sentinel and this
-    // loses the legacy daemon-side fallback.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-short").await;
@@ -410,8 +404,6 @@ async fn query_page_short_query_finds_seeded_content() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_resumes_an_empty_bounded_scan_page() {
-    // MUTATION: reject line-zero or consumed-zero cursors and the second page
-    // fails with invalid-cursor instead of reaching the row after the scan cap.
     let scratch = ScratchDir::new().expect("scratch");
     let workspace_id = "workspace-search-empty-page";
     seed_short_query_scan_rows(&scratch, workspace_id, 1_024);
@@ -453,8 +445,6 @@ async fn query_page_resumes_an_empty_bounded_scan_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_cursor_signals_restart_after_index_mutation() {
-    // MUTATION: omit the generation comparison and the second request applies
-    // its keyset to a different index generation without an explicit restart.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-generation").await;
@@ -506,8 +496,6 @@ async fn query_page_cursor_signals_restart_after_index_mutation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_cursor_signals_restart_after_active_version_switch() {
-    // MUTATION: bind cursor decoding to the newly active version and this valid
-    // continuation is rejected as invalid-cursor before restart can be returned.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let workspace_id = "workspace-search-version-restart";
@@ -573,8 +561,6 @@ async fn query_page_cursor_signals_restart_after_active_version_switch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_astral_preview_fits_renderer_utf16_contract() {
-    // MUTATION: window by Unicode scalar count and the emoji-heavy preview is
-    // 360 UTF-16 units, so main-to-renderer validation rejects the result.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-astral").await;
@@ -599,8 +585,6 @@ async fn query_page_astral_preview_fits_renderer_utf16_contract() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn query_page_reads_a_write_committed_through_rpc_immediately() {
-    // MUTATION: omit the in-transaction FTS maintenance or index certification
-    // and the second query remains empty.
     let scratch = ScratchDir::new().expect("scratch");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let handle = open_workspace(&transport, &scratch, 1, "workspace-search-rwyw").await;

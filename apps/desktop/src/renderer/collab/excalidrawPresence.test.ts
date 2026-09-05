@@ -161,7 +161,7 @@ describe("Excalidraw presence", () => {
     const selectedElementIds = Object.create(null) as Record<string, boolean>;
     selectedElementIds.good = true;
     selectedElementIds.falseValue = false;
-    // A long VALID id fits the real envelope and must survive; only an id
+    // A long valid id fits the real envelope and must survive; only an id
     // beyond the envelope-derived byte budget is dropped.
     selectedElementIds["long".padEnd(513, "x")] = true;
     selectedElementIds["x".repeat(8192)] = true;

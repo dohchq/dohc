@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import type {
   CollectionIndexedValue,
   CollectionValue,
@@ -178,22 +178,144 @@ function AddOptionInput({
   );
 }
 
+type PendingSelection = {
+  writeId: number;
+  added: string[];
+  removed: string[];
+};
+
+function sameSelection(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((option, index) => option === right[index]);
+}
+
+// The indexed result acknowledges saved edits by id, including round trips
+// whose final value equals the original. Later local changes still apply on
+// top of that result, including any external edits it contains.
+function MultiSelectEditor({
+  options,
+  value,
+  acknowledgedWriteId,
+  subscribeToDiscardedWrites,
+  emit,
+  close,
+  onCreateOption,
+}: {
+  options: readonly string[];
+  value: CollectionValue;
+  acknowledgedWriteId: number;
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
+  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
+  close: () => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
+}) {
+  const [selection, setSelection] = useState(() => ({
+    observed: asTextArray(value),
+    acknowledgedWriteId,
+    pending: [] as PendingSelection[],
+  }));
+  useEffect(() => subscribeToDiscardedWrites?.((writeId) => {
+    setSelection((current) => ({
+      ...current,
+      pending: current.pending.filter((change) => change.writeId !== writeId),
+    }));
+  }), [subscribeToDiscardedWrites]);
+  const observed = asTextArray(value);
+  let current = selection;
+  if (acknowledgedWriteId !== selection.acknowledgedWriteId || !sameSelection(observed, selection.observed)) {
+    current = {
+      observed,
+      acknowledgedWriteId,
+      pending: selection.pending.filter((change) => change.writeId > acknowledgedWriteId),
+    };
+    setSelection(current);
+  }
+  const previousValues: CollectionValue[] = [value];
+  let selected = current.observed;
+  for (const change of current.pending) {
+    selected = [
+      ...selected.filter((option) => !change.removed.includes(option)),
+      ...change.added.filter((option) => !selected.includes(option)),
+    ];
+    previousValues.push(selected);
+  }
+  const select = (next: string[]) => {
+    const writeId = emit(next, previousValues);
+    setSelection({
+      ...current,
+      pending: [...current.pending, {
+        writeId,
+        added: next.filter((option) => !selected.includes(option)),
+        removed: selected.filter((option) => !next.includes(option)),
+      }],
+    });
+  };
+  return (
+    <span className="flex w-full flex-col gap-0.5">
+      <span
+        role="listbox"
+        aria-multiselectable="true"
+        className="flex flex-col gap-0.5"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") close();
+        }}
+      >
+        {options.map((option) => (
+          <label key={option} className="flex items-center gap-1.5 text-[13px]">
+            <input
+              type="checkbox"
+              checked={selected.includes(option)}
+              onChange={() =>
+                select(
+                  selected.includes(option)
+                    ? selected.filter((entry) => entry !== option)
+                    : [...selected, option],
+                )
+              }
+            />
+            {option}
+          </label>
+        ))}
+      </span>
+      {onCreateOption ? (
+        <AddOptionInput
+          options={options}
+          cancel={close}
+          onPick={(option, isNew) => {
+            const next = selected.includes(option)
+              ? selected
+              : [...selected, option];
+            if (isNew) {
+              onCreateOption(option, next, previousValues);
+              close();
+            } else {
+              select(next);
+            }
+          }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
 export interface CellEditorProps {
   field: FieldDefinition;
   indexed: CollectionIndexedValue | undefined;
+  /** Highest saved edit id reflected in this indexed value; 0 before any edit. */
+  acknowledgedWriteId: number;
+  subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
   /**
    * Receives the edited value. The host applies it through its own write
-   * path; this package never writes.
+   * path and returns a monotonically increasing edit id; this package never writes.
    */
-  emit: (value: CollectionValue) => void;
+  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: () => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
-   * options do not have yet. The host must add `option` to the schema FIRST
+   * options do not have yet. The host must add `option` to the schema first
    * and only then write `nextValue` to the cell; this package never writes.
    * Absent means editors only pick existing options.
    */
-  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
   /**
    * Runs the relation picker's queries against a relation field's related
    * collection. The table never opens a relation editor without one.
@@ -204,6 +326,8 @@ export interface CellEditorProps {
 export function CellEditor({
   field,
   indexed,
+  acknowledgedWriteId,
+  subscribeToDiscardedWrites,
   emit,
   close,
   onCreateOption,
@@ -284,55 +408,18 @@ export function CellEditor({
         </span>
       );
     }
-    case "multi-select": {
-      const selected = asTextArray(value);
+    case "multi-select":
       return (
-        <span className="flex w-full flex-col gap-0.5">
-          <span
-            role="listbox"
-            aria-multiselectable="true"
-            className="flex flex-col gap-0.5"
-            onKeyDown={(event) => {
-              if (event.key === "Escape") close();
-            }}
-          >
-            {field.options.map((option) => (
-              <label key={option} className="flex items-center gap-1.5 text-[13px]">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(option)}
-                  onChange={() =>
-                    emit(
-                      selected.includes(option)
-                        ? selected.filter((entry) => entry !== option)
-                        : [...selected, option],
-                    )
-                  }
-                />
-                {option}
-              </label>
-            ))}
-          </span>
-          {onCreateOption ? (
-            <AddOptionInput
-              options={field.options}
-              cancel={close}
-              onPick={(option, isNew) => {
-                const next = selected.includes(option)
-                  ? selected
-                  : [...selected, option];
-                if (isNew) {
-                  onCreateOption(option, next);
-                  close();
-                } else {
-                  emit(next);
-                }
-              }}
-            />
-          ) : null}
-        </span>
+        <MultiSelectEditor
+          options={field.options}
+          value={value}
+          acknowledgedWriteId={acknowledgedWriteId}
+          subscribeToDiscardedWrites={subscribeToDiscardedWrites}
+          emit={emit}
+          close={close}
+          onCreateOption={onCreateOption}
+        />
       );
-    }
     case "relation": {
       // Guarded by the caller: editing only starts with an executor.
       if (!relationExecutor) return null;
@@ -406,7 +493,7 @@ export function FieldCell({
     reason,
     <button
       type="button"
-      // min-h keeps an EMPTY cell clickable: with no text the button's
+      // min-h keeps an empty cell clickable: with no text the button's
       // content box collapses to zero height and the cell cannot be edited
       // by mouse at all.
       className="block min-h-5 w-full truncate text-left text-[13px]"

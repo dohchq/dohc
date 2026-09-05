@@ -2,10 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createLastKnownDmRequestLanesCache } from "../workspaces/dmRequests";
 import { createWorkspaceAuthorityOwner } from "../workspaces/workspaceAuthorityOwner";
 import { createRendererWorkspaceOperationRunner } from "./rendererWorkspaceOperation";
-
-function deferred() {
-  return Promise.withResolvers<void>();
-}
+import { deferred } from "../testing/deferred";
 
 interface TestWorkspace {
   workspaceId: string;

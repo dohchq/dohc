@@ -13,7 +13,7 @@ import { captureForWorkspace } from "./engineCaptureGate";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createTestScratch } from "./testTemp";
 
-// The shared-view pin drives the REAL gate, which never reaches the engine
+// The shared-view pin drives the real gate, which never reaches the engine
 // for a shared view — these sessions prove it by throwing on any use.
 const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
   get(_target, property) {
@@ -23,7 +23,7 @@ const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
   },
 });
 
-// Retirement Phase C (WS-H1): the legacy change-set read surface
+// The legacy change-set read surface
 // (listChangeSets/readChangeSet) is gone from this layer — engine moments
 // are the only history. These tests cover what remains: the capture hooks
 // and the honest no-recorder status for opted-out workspaces.
@@ -175,7 +175,7 @@ describe("workspaceActivity capture hooks", () => {
   });
 });
 
-describe("workspaceActivity history-off status (retirement Phase C)", () => {
+describe("workspaceActivity history-off status", () => {
   it("reports historyRecordingOff when captureFor yields no capture", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({ capture: null, shareView: false }),
@@ -190,10 +190,10 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 
-  // #540: a shared view's null capture is a capability — the view is fed by
+  // A shared view's null capture is a capability — the view is fed by
   // the share's pull and never records here. Without this cause on the
   // status, the notice blames a Settings toggle nobody touched. Wired
-  // through the REAL gate, so the share rule and the status thread are
+  // through the real gate, so the share rule and the status thread are
   // pinned together: deleting either breaks this test.
   it("separates a shared view's null capture from the engine opt-out", async () => {
     const activity = createWorkspaceActivity(() => {}, {
@@ -218,8 +218,8 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
     await activity.stopAll();
   });
 
-  // #505: a capture build that THREW leaves an empty recorder, and the
-  // cause is a failure. The status says so, so the notice can.
+  // A capture build that threw leaves an empty recorder, and the cause is a
+  // failure. The status says so, so the notice can.
   it("marks a failed capture build unavailable", async () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const activity = createWorkspaceActivity(() => {}, {
@@ -253,7 +253,7 @@ describe("workspaceActivity history-off status (retirement Phase C)", () => {
   });
 });
 
-describe("workspaceActivity cloud sync nudge (0P-C)", () => {
+describe("workspaceActivity cloud sync nudge", () => {
   it("queueCloudSync reaches the workspace's engine and no-ops everywhere else", async () => {
     let queued = 0;
     const engine = {
@@ -604,7 +604,7 @@ describe("workspaceActivity cloud sync nudge (0P-C)", () => {
     );
   });
 
-  // #874: a refused engine store rides the capture outcome into the status
+  // A refused engine store rides the capture outcome into the status
   // the notice center reads, transition-only like the capture-failed flag —
   // a persistently refused store re-reports the same code on every pass and
   // must not re-notify.

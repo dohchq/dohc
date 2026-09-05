@@ -85,7 +85,7 @@ async function waitForCliEndpoint(homeDir: string): Promise<void> {
 }
 
 // The Chats panel mirrors the editor tab's conversation, so an unscoped
-// conversation locator matches both surfaces. Everything about the OPEN
+// conversation locator matches both surfaces. Everything about the open
 // conversation is read from the editor area; the panel stays the navigator.
 function editorArea(page: Page): Locator {
   return page.locator("main");
@@ -107,7 +107,7 @@ function commentWithBody(root: Locator, body: string): Locator {
     .locator("..");
 }
 
-// A comment's replies nest INSIDE its own list item, so an unscoped lookup
+// A comment's replies nest inside its own list item, so an unscoped lookup
 // matches the reply's controls as well. A message's own action row is a direct
 // child element; its replies sit in a sibling list.
 function ownActions(message: Locator): Locator {
@@ -171,7 +171,7 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
     await expect(page.getByTestId("chats-channel-title")).toHaveText(channelName);
 
     // Creating a channel opens it inside the panel. Hand the conversation to
-    // the editor and collapse the navigator, so this spec asserts on ONE
+    // the editor and collapse the navigator, so this spec asserts on one
     // surface — panel/editor duplication is workspace-chats.spec.ts's subject.
     await page.getByTestId("chats-channel-back").click();
     await page.getByTestId("chats-channel").filter({ hasText: channelName }).click();
@@ -386,8 +386,8 @@ test("feed comments, reactions, and CLI decisions persist across relaunch", asyn
   }
 });
 
-// #333: the live external-write invariant. A separate OS process writes an
-// agent chat into the RUNNING app's daemon over the authenticated CLI
+// The live external-write invariant. A separate OS process writes an
+// agent chat into the running app's daemon over the authenticated CLI
 // endpoint, and the unread badge appears with NO relaunch and NO navigation.
 // This is the only cross-process write path after the daemon cutover — a
 // second daemon cannot attach to the app's store — so it is what proves the

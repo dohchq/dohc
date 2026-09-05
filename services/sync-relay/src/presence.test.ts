@@ -79,9 +79,9 @@ describe("PresenceHub", () => {
   });
 
   it("a RETRIED leave still wakes parked pollers when it only prunes an expired peer", async () => {
-    // Regression: leave() used to gate bump() on deleting the caller's OWN
+    // Regression: leave() used to gate bump() on deleting the caller's own
     // entry, discarding prune()'s result. A duplicate/late leave (entry already
-    // gone) that expired a DIFFERENT stale peer in the same call left the
+    // gone) that expired a different stale peer in the same call left the
     // version unbumped — parked pollers slept through an observable departure.
     const hub = new PresenceHub({ entryTtlMs: 5_000 });
     hub.publish("ws:w:general", "alice", "tab1", {}, 1_000);
@@ -120,7 +120,7 @@ describe("PresenceHub", () => {
     expect(hub.stats().waiters).toBe(0);
   });
 
-  it("refuses NEW distinct entries past the per-scope cap but allows updates", () => {
+  it("refuses new distinct entries past the per-scope cap but allows updates", () => {
     const hub = new PresenceHub({ maxEntriesPerScope: 2 });
     hub.publish("ws:w:general", "a", "t", {}, 1000);
     hub.publish("ws:w:general", "b", "t", {}, 1000);
@@ -169,7 +169,7 @@ describe("PresenceHub time-driven expiry (sweeper)", () => {
     vi.useRealTimers();
   });
 
-  it("removes expired entries and GCs their scopes WITHOUT the scopes being touched", () => {
+  it("removes expired entries and GCs their scopes without the scopes being touched", () => {
     vi.useFakeTimers();
     let now = 1_000;
     const hub = new PresenceHub({
@@ -246,7 +246,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
     hub.dispose();
   });
 
-  it("caps TOTAL entries across all scopes", () => {
+  it("caps total entries across all scopes", () => {
     const hub = new PresenceHub({ maxTotalEntries: 2 });
     hub.publish(key("w1", "a"), "u1", "c", {}, 1_000);
     hub.publish(key("w2", "a"), "u2", "c", {}, 1_000);
@@ -286,7 +286,7 @@ describe("PresenceHub caps (memory is bounded)", () => {
 // The DoS fix: parked long-poll waiters are capped globally, per scope, and
 // per actor, and every wake/abort path releases the slot.
 describe("PresenceHub parked-waiter caps", () => {
-  it("caps TOTAL parked waiters and frees the slot on wake", async () => {
+  it("caps total parked waiters and frees the slot on wake", async () => {
     const hub = new PresenceHub({ maxTotalWaiters: 1 });
     const key = presenceScopeKey("w", "general");
     const seed = hub.publish(key, "a", "c", {}, 1_000);

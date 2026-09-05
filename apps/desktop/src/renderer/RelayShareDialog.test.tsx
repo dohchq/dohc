@@ -478,7 +478,7 @@ describe("RelayShareDialog", () => {
     );
     expect(
       screen.getByTestId("share-access-helper").textContent,
-      "MUTATION: promising 'edit what you selected' would name a right Edit does not grant",
+      "promising 'edit what you selected' would name a right Edit does not grant",
     ).toBe("They can read what you selected and send you changes to accept.");
 
     await user.type(screen.getByTestId("share-email"), "friend@dohc.test");

@@ -8,6 +8,7 @@ import type {
   PluginStatusRecord,
 } from "../../ipc/bridgeContract";
 import { PluginsView } from "./PluginsView";
+import { deferred } from "../../testing/deferred";
 
 let statusListener: ((event: PluginStatusChangedEvent) => void) | null = null;
 
@@ -72,14 +73,6 @@ function plugin(
     error: null,
     ...overrides,
   };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
 }
 
 const noop = () => undefined;
@@ -472,7 +465,7 @@ describe("PluginsView", () => {
 
   // The interleaving the round-8 pruneToKeys work only covered from the
   // other direction (an error already recorded, then the offer leaves):
-  // here the offer leaves WHILE the refused response is still in flight.
+  // here the offer leaves while the refused response is still in flight.
   // A stale response settling after that must not recreate a key
   // loadOffers already pruned — there is no row left on screen to show it
   // against.
@@ -489,7 +482,7 @@ describe("PluginsView", () => {
     await userEvent.click(addButton);
     expect(addButton.textContent).toBe("Adding");
 
-    // The offer leaves the authoritative list WHILE Add is still in
+    // The offer leaves the authoritative list while Add is still in
     // flight — added from another window, discovered under a renamed
     // directory, whatever the reason.
     bridgeMock.listOfferedPlugins.mockResolvedValueOnce({ ok: true, offers: [] });
@@ -621,9 +614,6 @@ describe("PluginsView", () => {
   });
 
   it("installs from the row without opening the details tab", async () => {
-    // MUTATION (nest the Install button inside the row's open control): the
-    // click bubbles out and the user gets a tab they never asked for on top
-    // of the install they did.
     const candidate = plugin("fresh-plugin", {
       status: "discovered",
       runtimeStatus: null,
@@ -957,7 +947,7 @@ describe("PluginsView", () => {
     );
   });
 
-  it("surfaces the real reason and offers a retry when the plugin list fails to load (CodeRabbit #779 R29, R31)", async () => {
+  it("surfaces the real reason and offers a retry when the plugin list fails to load", async () => {
     bridgeMock.listPlugins.mockResolvedValueOnce({
       ok: false,
       error: {
@@ -985,7 +975,7 @@ describe("PluginsView", () => {
     expect(bridgeMock.listPlugins).toHaveBeenCalledTimes(2);
   });
 
-  it("merges a status event newer than the in-flight list response (CodeRabbit #779 R29)", async () => {
+  it("merges a status event newer than the in-flight list response", async () => {
     const list = deferred<{ ok: true; plugins: PluginStatusRecord[] }>();
     bridgeMock.listPlugins.mockReturnValue(list.promise);
 
@@ -1016,7 +1006,7 @@ describe("PluginsView", () => {
     ).toBe("starting");
   });
 
-  it("lets a status event newer than an in-flight action's response win (fixround Section B item 14)", async () => {
+  it("lets a status event newer than an in-flight action's response win", async () => {
     const fresh = plugin("fresh-plugin", {
       status: "discovered",
       runtimeStatus: null,
@@ -1245,7 +1235,7 @@ describe("PluginsView", () => {
 
   // Round 16 finding 1: with no prior ready list, the ambiguity check has
   // nothing to count rows in — the naive read is "not ambiguous", so the
-  // initial request's OWN merge (once it lands) re-applies the removed
+  // initial request's own merge (once it lands) re-applies the removed
   // event against whatever it fetched. If that fetch already reflects the
   // removal (one row left, sharing the removed id with the survivor), the
   // merge reads "only one row has this id now" as proof there was never a

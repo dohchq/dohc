@@ -264,17 +264,6 @@ fn local_ops(db: &Path) -> Vec<LoggedOp> {
         .expect("read local ops")
 }
 
-fn replication_journal_count(db: &Path) -> i64 {
-    EngineStore::open(db, 501)
-        .expect("open store")
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
-                row.get(0)
-            })
-        })
-        .expect("count diagnostic journal")
-}
-
 fn write_input(workspace_id: &str, moment_id: &str, text: &str, now_ms: i64) -> WriteText {
     WriteText {
         workspace_id: workspace_id.to_owned(),
@@ -1857,7 +1846,6 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         path: "notes/plan.md".to_owned(),
         mutation_moment_id: "moment-rolled-back".to_owned(),
         request_id: Some("rollback-outbound-stable".to_owned()),
-        legacy_before_text: None,
         metadata_origin: "api".to_owned(),
         author_json: None,
     };
@@ -2298,7 +2286,6 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         path: "drawings/board.excalidraw".to_owned(),
         mutation_moment_id: "drawing-delete".to_owned(),
         request_id: Some("peer-local-drawing-rollback".to_owned()),
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
@@ -2769,7 +2756,6 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 path: drawing_path.to_owned(),
                 mutation_moment_id: "peer-live-drawing-delete".to_owned(),
                 request_id: Some("rollback-peer-live-drawing-delete".to_owned()),
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -3089,7 +3075,6 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         path: "drawings/rollback.excalidraw".to_owned(),
         mutation_moment_id: drawing_delete.moment.moment_id,
         request_id: Some("rollback-scene-delete".to_owned()),
-        legacy_before_text: None,
         metadata_origin: "restore".to_owned(),
         author_json: None,
     };
@@ -3264,7 +3249,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
 }
 
 #[tokio::test]
-async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
+async fn never_synced_mutations_append_no_relay_ops() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let workspace_id = "ws-outbound-disabled";
@@ -3275,10 +3260,9 @@ async fn never_synced_mutations_keep_only_the_diagnostic_journal() {
     supervisor.close(&db).expect("close actor");
 
     assert!(local_ops(&db).is_empty());
-    assert_eq!(replication_journal_count(&db), 30);
 }
 
-// #646 PR3-1 — a share view's FILE writes. The share lane is the only one it
+// A share view's FILE writes. The share lane is the only one it
 // has, so `journal_moment_outbound_in_tx` reads
 // `workspace_journals_file_moments_in_tx` and every sibling journal keeps the
 // owner-lane answer.
@@ -3354,9 +3338,9 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
         ops.iter().any(|op| op.op_kind == "moment.append"
             && op.origin_id == "origin-share-view"
             && op.payload["momentId"] == "moment-share-view"),
-        "MUTATION: an enrolled share view must journal its file writes: {ops:?}",
+        "an enrolled share view must journal its file writes: {ops:?}",
     );
-    // Deliberately NOT asserting the absence of a `ydoc.update` here. This
+    // Deliberately not asserting the absence of a `ydoc.update` here. This
     // write opens no live session and claims no lineage, so none could be
     // journaled whatever the Y.Doc gate reads — the assertion would pass with
     // the gate widened and prove nothing. The lane boundary is pinned where it
@@ -3366,15 +3350,15 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     // in `crates/dohc-engine-sync/src/tests.rs`.
     assert!(
         ops.iter().all(|op| op.op_kind != "version.create"),
-        "MUTATION: a share view creates no versions, so none may journal: {ops:?}",
+        "a share view creates no versions, so none may journal: {ops:?}",
     );
 }
 
 /// The safety property behind the identity conjunct.
 ///
-/// `journal_local_payload_json_in_tx` REFUSES without a sync identity, and
+/// `journal_local_payload_json_in_tx` Refuses without a sync identity, and
 /// that refusal rolls the user's edit back with it. So a predicate that
-/// answered true for a share view WITHOUT an identity would not journal the
+/// answered true for a share view without an identity would not journal the
 /// write — it would destroy it. View and Comment share views are exactly that
 /// state.
 #[tokio::test]
@@ -3394,11 +3378,11 @@ async fn a_read_only_share_view_journals_nothing_and_its_write_still_commits() {
             CancellationToken::new(),
         )
         .await
-        .expect("MUTATION: a read-only share view's write must still commit");
+        .expect("a read-only share view's write must still commit");
     supervisor.close(&db).expect("close actor");
 
     assert!(
         local_ops(&db).is_empty(),
-        "MUTATION: a share view with no identity must journal nothing",
+        "a share view with no identity must journal nothing",
     );
 }

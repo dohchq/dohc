@@ -13,7 +13,7 @@ pub enum BlobKind {
     /// A Y.Doc update or full-state base. Stored beside [`BlobKind::Binary`] in
     /// `binary_blobs`, but its own kind because it carries its own ceiling: a
     /// CRDT payload is not a captured binary file and must not inherit that
-    /// file's cap (#549).
+    /// file's cap.
     Ydoc,
 }
 

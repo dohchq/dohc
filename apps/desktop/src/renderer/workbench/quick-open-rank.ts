@@ -1,6 +1,6 @@
 // Pure quick-open ranking (Phase E5.0 polish). Tier order is the plan's:
 // prefix > word-boundary > substring > fuzzy subsequence; PINNED paths sort
-// first overall, RECENT files are boosted within a tier (most recent wins),
+// first overall, recent files are boosted within a tier (most recent wins),
 // then shorter paths, then alphabetical. Case-insensitive throughout.
 
 // Match-quality tiers, best first.
@@ -56,7 +56,7 @@ export function quickOpenMatchTier(query: string, path: string): number | null {
 }
 
 export interface QuickOpenContext {
-  // Most recent FIRST (workbench recentFiles).
+  // Most recent first (workbench recentFiles).
   recent: readonly string[];
   pinned: readonly string[];
 }

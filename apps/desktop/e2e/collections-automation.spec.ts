@@ -52,7 +52,7 @@ import {
 
 const TOKEN = "test:e2e-user";
 
-// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so BOTH
+// Valid record ids (rec_ + 26 chars of a-z2-7) seeded up front, so both
 // engines adopt the same identity instead of each minting its own.
 const APOLLO_ID = "rec_apolloe2e234567abcdefgh234";
 const ZEPHYR_ID = "rec_zephyre2e234567abcdefgh234";
@@ -291,7 +291,7 @@ test("a record change runs its automation on the origin device exactly once, loo
   }
 
   // A's claim table, read through the one claim-consuming RPC: null means
-  // no pending claim exists on A for ANY key. Safe on A — nothing ever
+  // no pending claim exists on A for any key. Safe on A — nothing ever
   // subscribes automations on A's engine, so this cannot steal work.
   async function claimPendingOnA(): Promise<unknown> {
     return await deviceA!.sessions.run(deviceA!.workspace, async (binding) => {
@@ -370,7 +370,7 @@ test("a record change runs its automation on the origin device exactly once, loo
     await waitForWorkspaceFile(page, workspaceId, "chain-b/counter.md");
 
     // Seed and install the fixture plugin from the real Plugins view. Its
-    // manifest declares ping and pong BEFORE triage, so once a triage run is
+    // manifest declares ping and pong before triage, so once a triage run is
     // observed, the chain pair's engine subscriptions provably landed first
     // (one reconcile registers the manifest's automations in order).
     await seedPluginSource(temp, { fixtureRoot, pluginId: "hello-plugin" });
@@ -387,7 +387,7 @@ test("a record change runs its automation on the origin device exactly once, loo
 
     // The subscription barrier: the engine subscribes the automations only
     // after the installed plugin reaches a runnable status, so an edit
-    // racing that reconcile is a permanent miss for THAT change (never a
+    // racing that reconcile is a permanent miss for that change (never a
     // late double). Poke a throwaway record until the first triage run
     // reports back; every measured trigger below happens after this proof.
     let warmupStatus = "Todo";
@@ -489,7 +489,7 @@ test("a record change runs its automation on the origin device exactly once, loo
     ]);
     expect(await listFailures()).toEqual([]);
 
-    // --- (b) A change authored on A claims on NEITHER device: A has no
+    // --- (b) A change authored on A claims on neither device: A has no
     // subscriptions (nothing registered any), and B's apply of the pulled
     // update is not the origin's. Edit Zephyr through A's own capture path.
     const zephyrOnA = await readFile(join(sourceRoot, "tasks/zephyr.md"), "utf8");
@@ -543,7 +543,7 @@ test("a record change runs its automation on the origin device exactly once, loo
     expect(await listFailures()).toEqual([]);
 
     // --- The race gate's other half, on A: pull B's writes back and read
-    // the SAME history through A's daemon. Exactly the automation rows B
+    // the same history through A's daemon. Exactly the automation rows B
     // derived — one per trigger — and A's claim table holds nothing.
     await expect
       .poll(
@@ -572,7 +572,7 @@ test("a record change runs its automation on the origin device exactly once, loo
     // --- The chain stops at the depth cap. One agent edit on chain-a runs
     // ping (depth 0), whose write to chain-b runs pong (1), whose write to
     // chain-a runs ping (2), then pong (3); pong's depth-4 write would
-    // trigger ping again, and dohc instead records ONE failed claim —
+    // trigger ping again, and dohc instead records one failed claim —
     // "chain-stopped" — where the owner sees it.
     const chainTrigger = await agentCli("collectionSetFields", {
       recordPath: "chain-a/counter.md",
@@ -665,7 +665,7 @@ test("a record change runs its automation on the origin device exactly once, loo
     }
     throw error;
   } finally {
-    // Stop the daemon and relay children BEFORE removing the temp tree they
+    // Stop the daemon and relay children before removing the temp tree they
     // hold open — Windows refuses to unlink open files (EBUSY).
     await capture?.stop().catch(() => undefined);
     await deviceA?.close().catch(() => undefined);

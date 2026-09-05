@@ -1,8 +1,8 @@
 // Cross-engine fixture generator for the R11a durable Y.Doc layer.
 //
-// Produces REAL yjs 13.6.30 update lineages + yjs-computed expectations that the
+// Produces real yjs 13.6.30 update lineages + yjs-computed expectations that the
 // Rust durable pipeline must converge on. This is the non-tautological
-// cross-engine oracle (fixtures from real yjs, NOT Rust round-tripped) — the
+// cross-engine oracle (fixtures from real yjs, not Rust round-tripped) — the
 // same pattern the yrs spike and R08 used. Regenerate with:
 //
 //   node crates/dohc-engine-collab/tests/fixtures/gen-fixtures.mjs
@@ -121,7 +121,7 @@ function capture(doc, edit) {
 }
 
 // Valid UTF-16 code-point boundary offsets of a string (0, then after each code
-// point). A real editor NEVER edits inside a surrogate pair; splitting one
+// point). A real editor never edits inside a surrogate pair; splitting one
 // creates a lone surrogate yjs keeps but Rust cannot represent (binding
 // constraint 3), which the surrogateProbe fixture demonstrates separately. The
 // main corpus stays well-formed so cross-engine convergence is exact.
@@ -792,7 +792,7 @@ function richdocCoverage(doc) {
 }
 
 // The OffsetKind::Utf16 probe: a leading emoji makes byte and UTF-16 offsets of
-// a later boundary DIFFER without any mid-char panic. yjs measures in UTF-16, so
+// a later boundary differ without any mid-char panic. yjs measures in UTF-16, so
 // inserting at index 4 in "😀XYZ" lands before "Z". A Utf16 yrs doc must agree; a
 // Bytes yrs doc (index 4 = byte 4 = before "X") diverges.
 function makeOffsetProbe() {
@@ -815,9 +815,9 @@ function makeOffsetProbe() {
 
 // Surrogate-split probe (binding constraint 3): inserting "X" at UTF-16 index 1
 // splits the emoji's surrogate pair. yjs keeps the lone surrogates (its string
-// stays ill-formed UTF-16); Rust strings CANNOT hold a lone surrogate, so yrs
+// stays ill-formed UTF-16); Rust strings cannot hold a lone surrogate, so yrs
 // diverges. The R11b live adapter must validate isWellFormed() and reject/
-// sanitize such an edit BEFORE journaling — this fixture pins that the boundary
+// sanitize such an edit before journaling — this fixture pins that the boundary
 // check is load-bearing (Rust must diverge from yjs here).
 function makeSurrogateProbe() {
   const doc = new Y.Doc();
@@ -850,8 +850,8 @@ function isWellFormedUtf16(str) {
 
 // Nested-frontmatter probe (binding constraint 2): yjs preserves object key
 // insertion order; yrs stores Any::Map as a HashMap and re-encodes in random
-// order. The Rust projection/canonical MUST sort nested keys, so the fixture's
-// expectation is the SORTED nested object.
+// order. The Rust projection/canonical must sort nested keys, so the fixture's
+// expectation is the sorted nested object.
 function makeNestedFrontmatter() {
   const doc = new Y.Doc();
   const fm = doc.getMap("frontmatter");
@@ -899,7 +899,7 @@ const projectionFixtures = RICHDOC_PROJECTION_CASES.map((fixture, index) => {
   try {
     return makeRichdocProjection(index, fixture);
   } catch (error) {
-    // The drift checker sets this to the cases the LIVE oracle can no longer
+    // The drift checker sets this to the cases the live oracle can no longer
     // produce, so one broken construct cannot blind the check for every other
     // fixture. Regenerating normally still fails loudly on the same case.
     if (allowedOracleFailures.has(fixture.name)) {

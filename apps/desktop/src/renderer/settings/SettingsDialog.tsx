@@ -85,13 +85,13 @@ export function SettingsDialog(props: {
   workspaceId: string;
   workspacePath: string;
   /**
-   * True when this workspace is a shared view (#589). See the Advanced
+   * True when this workspace is a shared view. See the Advanced
    * section: the engine toggle asserts a choice and a recording that a
    * shared view never has.
    */
   sharedView?: boolean;
   /**
-   * Main's open-time recorder decision for this workspace (#687), undefined
+   * Main's open-time recorder decision for this workspace, undefined
    * until its status arrives. The engine setting lives here, so this surface
    * owes the recovery that actually works — and the two off states have
    * different ones. See the runner note in `RunnerSettingsCard`.
@@ -103,7 +103,7 @@ export function SettingsDialog(props: {
     active: boolean;
     /**
      * True only when this panel started or ended the run itself. An
-     * OBSERVATION may be older than a refresh the shell already has in
+     * observation may be older than a refresh the shell already has in
      * flight, so it must never supersede one.
      */
     mutated: boolean;
@@ -120,7 +120,7 @@ export function SettingsDialog(props: {
   const userSaveRequestRef = useRef(0);
   const workspaceSaveRequestRef = useRef(0);
   // Workspace identity token. The request-id refs above only order responses
-  // WITHIN one workspace; they say nothing about which workspace a response
+  // within one workspace; they say nothing about which workspace a response
   // belongs to. This is bumped whenever props.workspaceId changes, and every
   // workspace-scoped response (load, save, reset) is dropped unless the token it
   // captured still matches — so a slow response for workspace A can never repaint
@@ -128,7 +128,7 @@ export function SettingsDialog(props: {
   // token guard DesktopWorkspaceShell uses for engine history.
   const workspaceTokenRef = useRef(0);
   // A zoom broadcast arriving while the initial Promise.all load is in flight
-  // is NEWER than the user-settings snapshot that load retained, and must not
+  // is newer than the user-settings snapshot that load retained, and must not
   // be painted over.
   const settingsEventFiredRef = useRef(false);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>(
@@ -179,7 +179,7 @@ export function SettingsDialog(props: {
         const parsed = DesktopUserSettingsResult.safeParse(result);
         if (!parsed.success) return;
         settingsEventFiredRef.current = true;
-        // A broadcast is NEWER than any request still in flight: bumping the
+        // A broadcast is newer than any request still in flight: bumping the
         // request counter drops those pending responses, so an older save's
         // answer cannot overwrite this result. The write behind the broadcast
         // already succeeded, so the saved state is honest.
@@ -196,7 +196,7 @@ export function SettingsDialog(props: {
 
   useEffect(() => {
     let cancelled = false;
-    // New workspace → new token, and DROP the previous workspace's settings.
+    // New workspace → new token, and drop the previous workspace's settings.
     // Holding on to them would let a control edited before the new workspace's
     // settings arrive merge workspace A's values into a save aimed at B; with no
     // result, saveWorkspaceSettings refuses ("still loading") instead.
@@ -283,7 +283,7 @@ export function SettingsDialog(props: {
       const requestId = workspaceSaveRequestRef.current + 1;
       workspaceSaveRequestRef.current = requestId;
       // Capture the workspace this save belongs to. Everything after the await
-      // is only allowed to touch state if we are STILL on that workspace.
+      // is only allowed to touch state if we are still on that workspace.
       const token = workspaceTokenRef.current;
       const previous = workspaceResult;
       setWorkspaceResult((current) => ({
@@ -429,8 +429,8 @@ export function SettingsDialog(props: {
     setUpdateBusy("install");
     setUpdateError(null);
     try {
-      // Through the guard (#579 review, r8 + r10): with set-aside drafts
-      // present the recovery dialog opens INSTEAD of the one-shot install.
+      // Through the guard: with set-aside drafts
+      // present the recovery dialog opens instead of the one-shot install.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
       acceptUpdateResult(result.state);

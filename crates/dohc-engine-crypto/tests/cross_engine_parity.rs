@@ -5,8 +5,8 @@
 //! are non-tautological: they check the Rust crate against the TS byte format,
 //! not against Rust's own output.
 //!
-//! 1. A TS ciphertext DECRYPTS in Rust to the expected plaintext (byte-exact).
-//! 2. The AAD binds workspace+path: a ciphertext sealed for path A does NOT
+//! 1. A TS ciphertext decrypts in Rust to the expected plaintext (byte-exact).
+//! 2. The AAD binds workspace+path: a ciphertext sealed for path A does not
 //!    decrypt under path B's AAD — it fails closed.
 //! 3. A TS key-envelope UNWRAPS in Rust to the expected data key.
 //!
@@ -78,7 +78,7 @@ fn aad_binds_workspace_and_path_fails_closed_across_paths() {
     let fixture = load("ts_secret_ciphertext.json");
     let entries = fixture["entries"].as_array().unwrap();
     let a = &entries[0]; // path ".env"
-    let b = &entries[1]; // path "config/.env.local" — SAME key+iv+plaintext
+    let b = &entries[1]; // path "config/.env.local" — same key+iv+plaintext
 
     let key = SecretDataKey::from_bytes(&hex(str_field(a, "dataKeyHex"))).unwrap();
     let workspace = str_field(a, "workspaceId");

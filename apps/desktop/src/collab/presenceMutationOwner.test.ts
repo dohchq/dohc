@@ -6,10 +6,7 @@ import {
   type RendererWorkspaceSession,
 } from "../window/rendererWorkspaceSessionOwner";
 
-function deferred() {
-  return Promise.withResolvers<void>();
-}
-
+import { deferred } from "../testing/deferred";
 function sender(id: number) {
   const listeners: Array<() => void> = [];
   const value = {

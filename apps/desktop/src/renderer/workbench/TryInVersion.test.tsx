@@ -84,8 +84,12 @@ afterEach(() => {
 describe("TryTaskDialog", () => {
   it("saves the open draft first, then starts the gesture without a driver", async () => {
     const order: string[] = [];
-    const flushActiveDraft = vi.fn(async () => {
-      order.push("flush");
+    const releaseOperation = vi.fn(() => {
+      order.push("release");
+    });
+    const beginLineageOperation = vi.fn(async () => {
+      order.push("begin");
+      return releaseOperation;
     });
     bridgeMock.tryInWorkspaceVersion.mockImplementation(async () => {
       order.push("start");
@@ -97,7 +101,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={true}
-        flushActiveDraft={flushActiveDraft}
+        beginLineageOperation={beginLineageOperation}
         onStarted={onStarted}
         onClose={() => {}}
       />,
@@ -118,7 +122,9 @@ describe("TryTaskDialog", () => {
     await user.click(screen.getByTestId("try-task-start"));
 
     await waitFor(() => expect(onStarted).toHaveBeenCalledOnce());
-    expect(order).toEqual(["flush", "start"]);
+    // The cell-edit pause spans the whole gesture: drain, then the IPC,
+    // then release.
+    expect(order).toEqual(["begin", "start", "release"]);
     expect(bridgeMock.tryInWorkspaceVersion).toHaveBeenCalledWith({
       workspaceId: "ws-try",
       task: "tidy the notes",
@@ -132,7 +138,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onStarted={() => {}}
         onClose={() => {}}
       />,
@@ -164,7 +170,7 @@ describe("TryTaskDialog", () => {
       <TryTaskDialog
         workspaceId="ws-try"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onStarted={() => {}}
         onClose={() => {}}
       />,
@@ -203,14 +209,16 @@ describe("TryInVersionReviewCard", () => {
     onOpenCompare?: (versionId: string) => void;
     onDismissed?: () => void;
     onWorkspaceStateChanged?: (activeVersionId?: string) => void;
-    flushActiveDraft?: () => Promise<void>;
+    beginLineageOperation?: () => Promise<() => void>;
   }) {
     return render(
       <TryInVersionReviewCard
         workspaceId="ws-try"
         state={state}
         activeTabDirty={false}
-        flushActiveDraft={handlers?.flushActiveDraft ?? (async () => {})}
+        beginLineageOperation={
+          handlers?.beginLineageOperation ?? (async () => () => {})
+        }
         onOpenCompare={handlers?.onOpenCompare ?? (() => {})}
         onWorkspaceStateChanged={handlers?.onWorkspaceStateChanged ?? (() => {})}
         onDismissed={handlers?.onDismissed ?? (() => {})}
@@ -263,33 +271,72 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalled();
   });
 
-  // #579 review r11: the pre-switch flush is the SAME class the version menu
+  it("does not change collection lineage when Set aside is already on Main", async () => {
+    bridgeMock.listWorkspaceVersions.mockResolvedValue({
+      versions: [{ id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false }],
+      activeVersionId: "main",
+    });
+    const onWorkspaceStateChanged = vi.fn();
+    const user = userEvent.setup();
+    renderCard(reviewState(), { onWorkspaceStateChanged });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+    await waitFor(() => expect(onWorkspaceStateChanged).toHaveBeenCalledWith("main", false));
+    expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
+  });
+
+  // The pre-switch flush is the same class the version menu
   // fixed in r7, on the second switch surface. When the flush fails the
   // switch never starts and the workspace never leaves its version —
   // announcing a change would reopen the open document and set its
-  // still-editable draft aside for nothing (#567).
+  // still-editable draft aside for nothing.
   it("announces nothing when the pre-switch flush fails before the switch starts", async () => {
     const onWorkspaceStateChanged = vi.fn();
     const user = userEvent.setup();
     renderCard(reviewState(), {
       onWorkspaceStateChanged,
-      flushActiveDraft: async () => {
+      beginLineageOperation: async () => {
         throw new Error("disk full");
       },
     });
     await user.click(screen.getByTestId("try-review-set-aside"));
 
-    // MUTATION (switchIssued in backToMain): announce unconditionally from
-    // the catch. The bookkeeping reopen then sets the draft aside on the
-    // version the user never left.
     await waitFor(() =>
-      expect(screen.getByTestId("try-review-error")).toBeTruthy(),
+      expect(screen.getByTestId("try-review-error"), "switchIssued in backToMain: announce unconditionally from the catch. The bookkeeping reopen then sets the draft aside on the version the user never left.").toBeTruthy(),
     );
     expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
     expect(onWorkspaceStateChanged).not.toHaveBeenCalled();
   });
 
-  // ...but a failure AFTER the switch IPC started must still announce: main
+  // A cell edit accepted while the switch IPC is pending would enqueue
+  // against the version the workspace is leaving. The card holds the
+  // operation's release until the whole return-to-Main settles.
+  it("holds the write pause across the whole switch back to Main", async () => {
+    const releaseOperation = vi.fn();
+    const beginLineageOperation = vi.fn(async () => releaseOperation);
+    let resolveSwitch!: (result: { activeVersionId: string; changedFileCount: number }) => void;
+    bridgeMock.switchWorkspaceVersion.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveSwitch = resolve;
+        }),
+    );
+    const user = userEvent.setup();
+    renderCard(reviewState(), { beginLineageOperation });
+    await user.click(screen.getByTestId("try-review-set-aside"));
+
+    await waitFor(() =>
+      expect(bridgeMock.switchWorkspaceVersion).toHaveBeenCalledOnce(),
+    );
+    expect(beginLineageOperation).toHaveBeenCalledOnce();
+    expect(releaseOperation).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSwitch({ activeVersionId: "main", changedFileCount: 1 });
+    });
+    await waitFor(() => expect(releaseOperation).toHaveBeenCalled());
+  });
+
+  // ...but a failure after the switch IPC started must still announce: main
   // settles and closes live Y.Doc sessions on its way, so the reopen is what
   // re-binds them.
   it("still announces when the switch itself fails mid-way", async () => {
@@ -308,10 +355,10 @@ describe("TryInVersionReviewCard", () => {
     expect(onWorkspaceStateChanged).toHaveBeenCalledWith(undefined);
   });
 
-  // #579 review r15: the announcement already happened at line 161, before
+  // The announcement already happened at line 161, before
   // the dismissal IPC. A dismissal that fails afterwards does not un-know
   // where the workspace landed, and announcing twice bumps the version epoch
-  // a SECOND time — that same-version reopen sets aside a draft the user
+  // a second time — that same-version reopen sets aside a draft the user
   // typed while the dismissal hung, for a failure that has nothing to do with
   // the version.
   it("announces the landing once when only the dismissal fails", async () => {
@@ -326,9 +373,7 @@ describe("TryInVersionReviewCard", () => {
       expect(screen.getByTestId("try-review-error")).toBeTruthy(),
     );
 
-    // MUTATION (double bump): drop the `landedOn !== undefined` return. The
-    // catch announces the same landing again and reopens Main twice.
-    expect(onWorkspaceStateChanged).toHaveBeenCalledTimes(1);
+    expect(onWorkspaceStateChanged, "double bump: drop the `landedOn !== undefined` return. The catch announces the same landing again and reopens Main twice.").toHaveBeenCalledTimes(1);
     expect(onWorkspaceStateChanged).toHaveBeenCalledWith("main");
   });
 
@@ -360,6 +405,36 @@ describe("TryInVersionReviewCard", () => {
 });
 
 describe("VersionMenu refreshKey (regression: external version switches)", () => {
+  it.each([false, true])("changes lineage after a failed preflight only for an observed version change (%s)", async (recoveredChange) => {
+    const onWorkspaceStateChanged = vi.fn();
+    const onError = vi.fn();
+    const user = userEvent.setup();
+    render(
+      <VersionMenu
+        workspaceId="ws-try"
+        activeTabDirty={false}
+        beginLineageOperation={async () => { throw new Error("Retained collection input"); }}
+        onOpenCompare={() => {}}
+        onWorkspaceStateChanged={onWorkspaceStateChanged}
+        onError={onError}
+      />,
+    );
+    await waitFor(() => expect(screen.getByTestId("version-menu-active").textContent).toBe("Try: tidy the notes"));
+    if (recoveredChange) {
+      bridgeMock.listWorkspaceVersions.mockResolvedValue({
+        versions: [{ id: "main", name: "Main", kind: "main", createdAtMs: 0, canMergeIntoMain: false }],
+        activeVersionId: "main",
+      });
+    } else {
+      bridgeMock.listWorkspaceVersions.mockRejectedValue(new Error("Recovery read failed"));
+    }
+    await user.click(screen.getByTestId("version-menu-button"));
+    await user.click(screen.getByRole("menuitemradio", { name: "Main" }));
+    await waitFor(() => expect(onError).toHaveBeenCalled());
+    expect(bridgeMock.switchWorkspaceVersion).not.toHaveBeenCalled();
+    expect(onWorkspaceStateChanged).toHaveBeenCalledWith(recoveredChange ? "main" : undefined, recoveredChange);
+  });
+
   it("keeps waiting while a large workspace is still importing", async () => {
     vi.useFakeTimers();
     let attempts = 0;
@@ -388,7 +463,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       <VersionMenu
         workspaceId="ws-importing"
         activeTabDirty={false}
-        flushActiveDraft={async () => {}}
+        beginLineageOperation={async () => () => {}}
         onOpenCompare={() => {}}
         onWorkspaceStateChanged={() => {}}
         onError={onError}
@@ -410,7 +485,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
         <VersionMenu
           workspaceId="ws-try"
           activeTabDirty={false}
-          flushActiveDraft={async () => {}}
+          beginLineageOperation={async () => () => {}}
           onOpenCompare={() => {}}
           onWorkspaceStateChanged={() => {}}
           onError={() => {}}
@@ -425,7 +500,7 @@ describe("VersionMenu refreshKey (regression: external version switches)", () =>
       ),
     );
 
-    // The 0N-2 review card switches back to Main OUTSIDE this menu; the shell
+    // The 0N-2 review card switches back to Main outside this menu; the shell
     // bumps versionEpoch -> refreshKey. Without the re-read the selector kept
     // showing the stale try-version name.
     bridgeMock.listWorkspaceVersions.mockResolvedValue({

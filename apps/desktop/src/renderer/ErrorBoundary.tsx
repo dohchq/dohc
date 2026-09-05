@@ -2,14 +2,14 @@ import { Component, type ErrorInfo, type ReactNode } from "react";
 import { DohcMark } from "@dohc/brand";
 import { requestGuardedReload } from "./RecoveryCloseGuard";
 
-// Crash containment for the renderer. React unmounts the ENTIRE tree when a
+// Crash containment for the renderer. React unmounts the entire tree when a
 // render/lifecycle error reaches the root with no boundary — the user sees a
 // permanently blank window ("the app broke"). Two layers stop that:
 //
 //   1. Scoped <ErrorBoundary> around each risky island (editor area, side
 //      panel, chats/history rail): one island crashing renders a small inline
 //      "this view hit an error" card with a Try again affordance while the
-//      REST of the app keeps working. `resetKeys` clear the error when the
+//      rest of the app keeps working. `resetKeys` clear the error when the
 //      user navigates away (switch tab/view) — the crashed render is gone, so
 //      the next one gets a clean start.
 //   2. The app-level <AppErrorBoundary> (main.tsx) as the last line: a
@@ -156,7 +156,7 @@ export class AppErrorBoundary extends Component<
         <button
           type="button"
           data-testid="app-crash-reload"
-          // Through the guard, so a blocked reload resumes as a RELOAD — the
+          // Through the guard, so a blocked reload resumes as a reload — the
           // set-aside-draft warning must not turn it into an exit (#579
           // review, r7).
           onClick={requestGuardedReload}
@@ -171,7 +171,7 @@ export class AppErrorBoundary extends Component<
 
 // Global reporters for errors React never sees: uncaught exceptions outside
 // render (event handlers, timers) and unhandled promise rejections. They do
-// NOT blank the app by themselves, but silently swallowing them hides the
+// not blank the app by themselves, but silently swallowing them hides the
 // exact failures that precede "it just went blank" reports — log them through
 // the same console path everything else uses (captured by e2e pageerror /
 // main stderr).

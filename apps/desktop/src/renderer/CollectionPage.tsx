@@ -18,33 +18,27 @@ import type {
   CollectionQueryParams,
   CollectionRecord,
   CollectionSchema,
-  CollectionValue,
   ViewDefinition,
 } from "@dohc/workspace-contracts";
 import type { WorkspaceActivityEvent } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
 import { createActivityCoalescer } from "./workspaceActivityCoalescer";
-import { useEngineDoc } from "./collab/useEngineDoc";
 import { SecondaryButton } from "./ui/controls";
 import { FieldsDialog } from "./collections/FieldsDialog";
 import { ViewsDialog } from "./collections/ViewsDialog";
-import { addSelectOption } from "./collections/schemaAuthoring";
+import {
+  enqueueCollectionFieldWrite,
+  useCollectionWriteLineage,
+  useCollectionWritesPaused,
+  useCollectionWriteStatus,
+} from "./collections/recordFieldWrites";
 import { rewriteCollectionSchema } from "./collections/schemaWrite";
 
 // The collection surface behind a dohc://collection/<path> tab: the shared
 // @dohc/collection-views components bound to the desktop's collections.*
 // bridge. Reads come from the engine's index; writes ride the record's live
-// document frontmatter map — the SAME path agents and the PropertiesPanel
+// document frontmatter map — the same path agents and the PropertiesPanel
 // take, so attribution and history stay parallel.
-
-// The live document field PropertiesPanel writes; one name for one thing.
-const FRONTMATTER_FIELD = "frontmatter";
-
-// How long a cell write may sit "file-locked" before the queue reports it.
-// Main's settle retries double from 800 ms to a 10 s cap, so 15 s spans the
-// whole ladder: a lock still held then is a program sitting on the file, not
-// a blip worth waiting out silently.
-export const FILE_LOCKED_REPORT_MS = 15_000;
 
 // How many records a board or calendar drains before the page-by-page
 // drain stops. Ten default engine pages: enough for every view we have
@@ -67,128 +61,6 @@ export interface CollectionPageProps {
   // The md file IS the record: opening one goes through the shell's normal
   // file tab machinery, which composes PropertiesPanel and the live editor.
   onOpenRecord: (recordPath: string) => void;
-}
-
-/**
- * Frontmatter values are what js-yaml round-trips. The one indexed shape it
- * cannot carry as-is is bigint (the engine's wire marker for big integers):
- * write it back as a number when exact, else as its decimal text.
- */
-export function frontmatterWriteValue(value: CollectionValue): unknown {
-  if (typeof value === "bigint") {
-    const max = BigInt(Number.MAX_SAFE_INTEGER);
-    return value <= max && value >= -max ? Number(value) : value.toString();
-  }
-  if (Array.isArray(value)) return value.map(frontmatterWriteValue);
-  if (value !== null && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entry]) => [
-        key,
-        frontmatterWriteValue(entry),
-      ]),
-    );
-  }
-  return value;
-}
-
-/**
- * Applies ONE cell change through the record's live document: open the
- * engine doc session, set the field on the frontmatter map inside a
- * transaction, then hold the lease until the engine reports the save
- * settled (local updates are staged and flushed asynchronously, so
- * releasing at transact time could drop the write). A save stuck
- * "file-locked" past FILE_LOCKED_REPORT_MS reports the lock and releases —
- * the engine holds the write durably and keeps retrying. Renders nothing.
- */
-export function CollectionRecordFieldWrite({
-  workspaceId,
-  change,
-  onDone,
-  onError,
-}: {
-  workspaceId: string;
-  change: CollectionCellChange;
-  onDone: () => void;
-  // The full state line the queue shows, or null for its generic one.
-  onError: (message: string | null) => void;
-}) {
-  const docState = useEngineDoc({
-    workspaceId,
-    path: change.recordPath,
-    enabled: true,
-  });
-  const applied = useRef(false);
-  const sawSaving = useRef(false);
-  const lockedReport = useRef<ReturnType<typeof setTimeout> | null>(null);
-  useEffect(
-    () => () => {
-      if (lockedReport.current !== null) clearTimeout(lockedReport.current);
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (applied.current || docState.opening) return;
-    if (!docState.available || !docState.doc) {
-      // The open settled without a session (conflict, deletion, engine off).
-      onError(null);
-      onDone();
-      return;
-    }
-    applied.current = true;
-    const doc = docState.doc;
-    doc.transact(() => {
-      doc
-        .getMap(FRONTMATTER_FIELD)
-        .set(change.field, frontmatterWriteValue(change.value));
-    });
-  }, [docState.opening, docState.available, docState.doc, change, onDone, onError]);
-
-  useEffect(() => {
-    if (!applied.current) return;
-    switch (docState.saveState) {
-      case "saving":
-        sawSaving.current = true;
-        return;
-      case "saved":
-        // Only a "saved" AFTER our own edit was staged counts: the session
-        // opens in "saved", and releasing on that one would race the flush.
-        if (sawSaving.current) onDone();
-        return;
-      case "file-locked":
-        // Main retries this transient refusal until the lock releases, but
-        // nothing bounds that wait. A "file-locked" report means the settle
-        // committed — the edit is journaled and its write job durably
-        // pending, retried while the session lives and paid after release —
-        // so after the window the queue reports the lock and moves on
-        // instead of stalling every later edit behind this one. A retry's
-        // own saving flip must not reset the window: the timer arms once.
-        if (lockedReport.current === null) {
-          lockedReport.current = setTimeout(() => {
-            const file =
-              change.recordPath.split("/").at(-1) ?? change.recordPath;
-            onError(
-              `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`,
-            );
-            onDone();
-          }, FILE_LOCKED_REPORT_MS);
-        }
-        return;
-      case "error":
-      case "read-only":
-      case "changed-on-disk":
-      case "deleted":
-        onError(
-          docState.saveError
-            ? `dohc could not save this change. ${docState.saveError}`
-            : null,
-        );
-        onDone();
-        return;
-    }
-  }, [docState.saveState, docState.saveError, change.recordPath, onDone, onError]);
-
-  return null;
 }
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
@@ -247,10 +119,34 @@ export function CollectionPage({
 
   // The store owns query state and guards its own async responses with a
   // request token; the desktop binds its executor to the query bridge call.
+  const nextEditId = useRef(0);
+  const discardListeners = useRef(new Set<(writeId: number) => void>());
+  const subscribeToDiscardedWrites = useCallback((listener: (writeId: number) => void) => {
+    discardListeners.current.add(listener);
+    return () => { discardListeners.current.delete(listener); };
+  }, []);
+  const completedEdits = useRef(new Map<string, number>());
+  const indexedEdits = useRef(new WeakMap<CollectionRecord, ReadonlyMap<string, number>>());
   const executor = useCallback(
-    async (params: CollectionQueryParams) =>
-      await bridge().queryCollectionRecords({ workspaceId, ...params }),
+    async (params: CollectionQueryParams) => {
+      // Only index commits confirmed before this query belong to its acknowledgement.
+      const acknowledged = new Map(completedEdits.current);
+      const result = await bridge().queryCollectionRecords({ workspaceId, ...params });
+      return {
+        ...result,
+        records: result.records.map((record) => {
+          const indexed = { ...record };
+          indexedEdits.current.set(indexed, acknowledged);
+          return indexed;
+        }),
+      };
+    },
     [workspaceId],
+  );
+  const acknowledgedWriteId = useCallback(
+    (record: CollectionRecord, field: string) =>
+      indexedEdits.current.get(record)?.get(JSON.stringify([record.id, record.path, field])) ?? 0,
+    [],
   );
   const store = useMemo(
     () => createCollectionStore({ collectionPath, executor }),
@@ -289,11 +185,14 @@ export function CollectionPage({
   // Invalidation: refresh when a settled batch touches this collection's
   // folder (or arrives without path detail), on the shell's trailing-edge
   // coalescing cadence. The store's token makes the refresh latest-wins.
-  useEffect(() => {
-    const coalescer = createActivityCoalescer(() => {
+  const refreshCoalescer = useMemo(
+    () => createActivityCoalescer(() => {
       void store.refresh();
       void refreshDetails();
-    });
+    }),
+    [store, refreshDetails],
+  );
+  useEffect(() => {
     const prefix = `${collectionPath}/`;
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
@@ -310,14 +209,14 @@ export function CollectionPage({
         ) {
           return;
         }
-        coalescer.schedule();
+        refreshCoalescer.schedule();
       },
     );
     return () => {
-      coalescer.cancel();
+      refreshCoalescer.cancel();
       unsubscribe();
     };
-  }, [store, refreshDetails, workspaceId, collectionPath]);
+  }, [refreshCoalescer, workspaceId, collectionPath]);
 
   // Board and calendar place every record, so they cannot stop at the
   // engine's first page: once a page settles with a cursor, ask for the
@@ -348,29 +247,34 @@ export function CollectionPage({
   // nears the end of the loaded rows.
   const loadNextPage = useCallback(() => void store.loadMore(), [store]);
 
-  // Cell edits queue one at a time through the live document write path.
-  const nextWriteId = useRef(0);
-  const [writes, setWrites] = useState<
-    { id: number; change: CollectionCellChange }[]
-  >([]);
-  const [writeError, setWriteError] = useState<string | null>(null);
-  const enqueueCellChange = useCallback((change: CollectionCellChange) => {
-    const id = ++nextWriteId.current;
-    // A new write is a new attempt: clear the stale failure; failWrite
-    // repaints it if this one fails too.
-    setWriteError(null);
-    setWrites((queue) => [...queue, { id, change }]);
-  }, []);
-  const completeWrite = useCallback(() => {
-    setWrites((queue) => queue.slice(1));
-    // The index updates when the engine applies the settled write; re-read
-    // now instead of waiting for the activity event.
-    void store.refresh();
-  }, [store]);
-  const failWrite = useCallback((message: string | null) => {
-    setWriteError(message ?? "dohc could not save this change.");
-  }, []);
-  const headWrite = writes[0];
+  // The global host finishes accepted edits after this page unmounts.
+  const lineage = useCollectionWriteLineage(workspaceId);
+  const enqueueCellChange = useCallback(
+    (change: CollectionCellChange, createOption?: string) => {
+      const editId = ++nextEditId.current;
+      const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
+      enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
+        completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
+      }, () => {
+        for (const listener of discardListeners.current) listener(editId);
+      });
+      return editId;
+    },
+    [workspaceId, collectionPath, lineage],
+  );
+  // File and version operations disable new edits until their paths settle.
+  const writesPaused = useCollectionWritesPaused(workspaceId);
+  const onCellChange = writesPaused ? undefined : enqueueCellChange;
+  const writeStatus = useCollectionWriteStatus(workspaceId, collectionPath);
+  const writeError = writeStatus.error;
+  // Settled writes can precede activity events; both share one refresh burst.
+  const settledWrites = writeStatus.settled;
+  const seenSettledWrites = useRef(settledWrites);
+  useEffect(() => {
+    if (settledWrites === seenSettledWrites.current) return;
+    seenSettledWrites.current = settledWrites;
+    refreshCoalescer.schedule();
+  }, [settledWrites, refreshCoalescer]);
 
   const newRecord = useCallback(
     () => onNewRecord(collectionPath),
@@ -383,11 +287,10 @@ export function CollectionPage({
 
   // Schema authoring: fields and views change by rewriting the schema
   // through the authored write path (collections/schemaWrite). Returns a
-  // user-facing sentence on failure, null on success, so the dialogs and
-  // the in-cell option flow share one contract.
+  // user-facing sentence on failure, null on success, so both dialogs
+  // share one contract.
   const [fieldsOpen, setFieldsOpen] = useState(false);
   const [viewsOpen, setViewsOpen] = useState(false);
-  const [schemaError, setSchemaError] = useState<string | null>(null);
   const applySchemaChange = useCallback(
     async (
       mutate: (schema: CollectionSchema) => CollectionSchema,
@@ -414,23 +317,24 @@ export function CollectionPage({
     [workspaceId, collectionPath, refreshDetails, store],
   );
 
-  // A typed select value not in the options yet: the option lands in the
-  // schema FIRST; the cell write is enqueued only after that write settles.
+  // A typed select value not in the options yet: the whole edit enters the
+  // global queue synchronously — before any schema IPC — so navigation and
+  // lineage gates see it. The queue writes the option to the schema first,
+  // then the cell value; a preparation failure retains the edit for retry.
   const createOption = useCallback(
-    async (create: CollectionOptionCreate) => {
-      const failure = await applySchemaChange((schema) =>
-        addSelectOption(schema, create.field, create.option),
+    (create: CollectionOptionCreate) => {
+      return enqueueCellChange(
+        {
+          recordId: create.recordId,
+          recordPath: create.recordPath,
+          field: create.field,
+          value: create.value,
+          ...(create.previousValues ? { previousValues: create.previousValues } : {}),
+        },
+        create.option,
       );
-      setSchemaError(failure);
-      if (failure !== null) return;
-      enqueueCellChange({
-        recordId: create.recordId,
-        recordPath: create.recordPath,
-        field: create.field,
-        value: create.value,
-      });
     },
-    [applySchemaChange, enqueueCellChange],
+    [enqueueCellChange],
   );
 
   // Relation fields target other collections; the list loads when the
@@ -556,13 +460,16 @@ export function CollectionPage({
               Retry
             </SecondaryButton>
           </>
+        ) : writesPaused ? (
+          <span
+            data-testid="collection-writes-paused"
+            className="truncate text-[11px] text-muted"
+          >
+            Editing is paused while dohc changes files in this workspace.
+          </span>
         ) : writeError ? (
           <span data-testid="collection-write-error" className="truncate text-[11px] text-danger">
             {writeError}
-          </span>
-        ) : schemaError ? (
-          <span data-testid="collection-schema-error" className="truncate text-[11px] text-danger">
-            {schemaError}
           </span>
         ) : null}
         <SecondaryButton
@@ -594,7 +501,7 @@ export function CollectionPage({
             groups={state.groups ?? []}
             groupBy={activeView?.groupBy ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={enqueueCellChange}
+            onCellChange={onCellChange}
             onOpenRecord={openRecord}
           />
         ) : calendarReady ? (
@@ -603,7 +510,7 @@ export function CollectionPage({
             records={state.records}
             dateField={activeView?.dateField ?? ""}
             visibleFields={activeView?.visibleFields ?? null}
-            onCellChange={enqueueCellChange}
+            onCellChange={onCellChange}
             onOpenRecord={openRecord}
           />
         ) : (
@@ -614,6 +521,9 @@ export function CollectionPage({
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
             onCellChange={enqueueCellChange}
+            editingDisabled={writesPaused}
+            acknowledgedWriteId={acknowledgedWriteId}
+            subscribeToDiscardedWrites={subscribeToDiscardedWrites}
             onCreateOption={createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
@@ -640,15 +550,6 @@ export function CollectionPage({
           onDeleted={(name) => {
             if (activeViewName === name) onActiveViewChange(null);
           }}
-        />
-      ) : null}
-      {headWrite ? (
-        <CollectionRecordFieldWrite
-          key={headWrite.id}
-          workspaceId={workspaceId}
-          change={headWrite.change}
-          onDone={completeWrite}
-          onError={failWrite}
         />
       ) : null}
     </div>

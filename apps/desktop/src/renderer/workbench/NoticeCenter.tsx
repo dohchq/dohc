@@ -134,8 +134,8 @@ function toneClass(tone: Notice["tone"]): string {
 }
 
 export function NoticeCenter(props: {
-  // Scopes the set-aside section: only the ACTIVE workspace's drafts show
-  // here (#579 review, r6) — another workspace's paths must not leak across
+  // Scopes the set-aside section: only the active workspace's drafts show
+  // here — another workspace's paths must not leak across
   // a switch. The app-level close guard deliberately stays global.
   workspaceId: string;
   syncStatus: SyncStatusResult | null;
@@ -147,12 +147,12 @@ export function NoticeCenter(props: {
   // lands the user directly on the side-by-side choices.
   onOpenConflicts: () => void;
   onRefreshShareView: () => void;
-  // Opens the rebuild confirmation for a refused data store (#874). The
+  // Opens the rebuild confirmation for a refused data store. The
   // shell owns the dialog and the move; the notice only announces the
   // refusal and offers the way in.
   onRebuildEngineStore: (returnFocus: HTMLButtonElement) => void;
-  // Changes a share recipient sent to this workspace, awaiting the granter
-  // (#646 PR3a). One notice per submission, because each names its sender and
+  // Changes a share recipient sent to this workspace, awaiting the granter.
+  // One notice per submission, because each names its sender and
   // opens its own review — collapsing two senders into one row would have to
   // invent a title neither of them wrote.
   shareChangeNotices?: readonly { proposalId: string; sender: string }[];
@@ -209,8 +209,8 @@ export function NoticeCenter(props: {
     if (installPending) return;
     try {
       setInstallPending(true);
-      // Through the guard (#579 review, r8 + r10): with set-aside drafts
-      // present the recovery dialog opens INSTEAD of the one-shot install,
+      // Through the guard: with set-aside drafts
+      // present the recovery dialog opens instead of the one-shot install,
       // and its confirm makes the only quitAndInstall call.
       const result = await requestGuardedUpdateInstall();
       if (result === null) return;
@@ -390,13 +390,13 @@ export function NoticeCenter(props: {
     // and the cause comes from main's own open-time decision, riding the
     // status the renderer already consumes.
     //
-    // A shared view takes no notice at all (#540): at view and comment it
-    // gets no recorder BY DESIGN, a capability, not a failure; at edit it
+    // A shared view takes no notice at all: at view and comment it gets no
+    // recorder by design, a capability, not a failure; at edit it
     // does get one. The share banner already says what the surface is.
     if (props.syncStatus?.historyShareView) {
       // Nothing to warn about.
     } else if (props.syncStatus?.historyRecordingUnavailable) {
-      // #505: the recorder could not be BUILT at open. Main builds the
+      // The recorder could not be built at open. Main builds the
       // recorder once per workspace per app session, so reopening the
       // workspace re-reads nothing; a restart is the step that retries it.
       next.push({
@@ -477,11 +477,11 @@ export function NoticeCenter(props: {
     updateState,
   ]);
 
-  // Set-aside drafts (#567) count as one notice: they may belong to paths
+  // Set-aside drafts count as one notice: they may belong to paths
   // that no longer exist (a deleted file's tab is gone), so this panel is
-  // their always-reachable surface (#579 review, r5) — the list below offers
+  // their always-reachable surface — the list below offers
   // the same Copy/Dismiss the in-document notice does. Scoped to the active
-  // workspace (#579 review, r6).
+  // workspace.
   const allRecoveryRows = useAllOrphanedDrafts();
   const recoveryRows = useMemo(
     () =>

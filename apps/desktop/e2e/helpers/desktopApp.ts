@@ -49,7 +49,7 @@ function requireBuiltDesktopApp(): void {
 // its teardown already survives Windows' refusal to unlink an open file:
 // removeTestScratch retries EBUSY/EPERM, and cleanupDesktopWorkspace logs a
 // failure rather than failing the spec. A leaked profile under the scratch run
-// root costs disk until the sweep; a shared one costs the run (#530).
+// root costs disk until the sweep; a shared one costs the run.
 async function createUserDataDir(
   workspace: Pick<TempWorkspace, "baseDir">,
 ): Promise<string> {

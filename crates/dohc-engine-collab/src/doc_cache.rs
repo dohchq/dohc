@@ -7,11 +7,11 @@
 //! An entry may serve as the gate base only when it is **byte-replay-identical**
 //! to what `load_for_replay_gate` would rebuild inside the same transaction:
 //! the cached doc applied exactly the byte sequence, in the same order, that a
-//! fresh reconstruction would apply. Logical CRDT equality is NOT sufficient —
+//! fresh reconstruction would apply. Logical CRDT equality is not sufficient —
 //! yrs block splits are history-sensitive, and the gate reads the base's
 //! delete-set endpoints. The proof is carried by [`CacheTuple`]: every marker
 //! field that names the replay path, plus the sha of the log row at the head
-//! seq. A hit requires the whole tuple to match inside the caller's WRITE
+//! seq. A hit requires the whole tuple to match inside the caller's write
 //! transaction; any mismatch is a miss and the caller reconstructs as before.
 //!
 //! ## Containment
@@ -167,7 +167,7 @@ pub struct CacheStats {
 }
 
 /// What one gate invocation observed, carried out of the append transaction so
-/// the post-commit step knows how to advance the cache. Built ONLY by
+/// the post-commit step knows how to advance the cache. Built only by
 /// [`super::durable`]'s local append path.
 #[derive(Default)]
 pub(crate) struct GateBaseProbe {
@@ -392,7 +392,7 @@ impl WriterDocCache {
     /// Advance a resident entry after a deferred remote delta committed.
     ///
     /// This does not serve the deferred replay gate, which remains cold under
-    /// #943. It only keeps the already-validated cached document aligned so
+    /// It only keeps the already-validated cached document aligned so
     /// the drain's final read-only projection can reuse it. The post-commit
     /// marker tuple must prove that exactly this one row advanced the lineage;
     /// a fold, reset, crash-after-commit, or any surprising side effect evicts.
@@ -505,7 +505,7 @@ impl WriterDocCache {
         }
     }
 
-    /// Advance or install the entry for one COMMITTED, genuinely-new local
+    /// Advance or install the entry for one committed, genuinely-new local
     /// append. The end-of-transaction token proves that the commit changed the
     /// replay path by exactly this append: the head advanced by one, its row
     /// holds `update_sha`, and every other tuple field is unchanged. An
@@ -670,7 +670,7 @@ impl WriterDocCache {
         self.evict_to_budget();
     }
 
-    /// Warm the cache from the base doc rebuilt INSIDE the just-committed
+    /// Warm the cache from the base doc rebuilt inside the just-committed
     /// transaction, advanced with the committed candidate.
     fn install_committed(
         &mut self,
@@ -838,7 +838,7 @@ impl WriterDocCache {
         }
     }
 
-    /// Replace the cached doc WITHOUT touching its tuple — a deliberately
+    /// Replace the cached doc without touching its tuple — a deliberately
     /// invalid entry for tests that prove the differential check catches a
     /// doc/tuple divergence. Never call outside tests.
     #[doc(hidden)]

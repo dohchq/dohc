@@ -679,7 +679,7 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
     });
     const logFd = prepareLog(input.logPath);
     try {
-      // Inside the try: resolveSpawnCommand REFUSES some runner commands
+      // Inside the try: resolveSpawnCommand refuses some runner commands
       // (a double quote or percent sign in the configured command itself),
       // and it used to sit outside, so its throw escaped the spawn path
       // entirely instead of failing this one dispatch.

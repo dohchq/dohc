@@ -35,6 +35,7 @@ import {
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { createWorkspaceChatLifecycle } from "./workspaceChatLifecycle";
 import { createTestScratch } from "./testTemp";
+import { deferred } from "../testing/deferred";
 
 let root: string;
 let engineDir: string;
@@ -92,14 +93,6 @@ async function expectCompleteStore(): Promise<void> {
   );
   expect(await readFile(join(backupDir, "engine.db-wal"), "utf8")).toBe("wal");
   expect(await readFile(join(backupDir, "engine.db-shm"), "utf8")).toBe("shm");
-}
-
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
 }
 
 function mockRebuildGate() {
@@ -1571,7 +1564,7 @@ describe("rebuildEngineStore", () => {
       }),
     });
 
-    // Mirrors main.ts's actual rebuild-reopen wiring (round 19): the outer
+    // Mirrors main.ts's actual rebuild-reopen wiring: the outer
     // request gate is already raised — rebuildEngineStore raises it before
     // moveStoreAside — and the reopen's completePendingMove wrapper releases
     // it right after recovery settles, before the activity-open body below

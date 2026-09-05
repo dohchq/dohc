@@ -2,17 +2,16 @@
 //!
 //! The versioning domain: stable object identity, versioned text write/read,
 //! moment history with keyset pagination, text delete/rename/rollback,
-//! named-version fork, and restore (set-active-version), built ON the CAL-1
-//! storage core
+//! named-version fork, and restore (set-active-version), built on the storage
+//! core
 //! (`dohc-engine-storage`) rather than around it. Storage owns the connection,
 //! the open ritual, the single-transaction boundary, and the crash-injection
 //! fault seam; this crate owns what a version, a moment, a fork, and a restore
 //! *mean* (`plan §Target architecture`: `dohc-engine-domain` = version/merge
 //! semantics; `dohc-engine-storage` = SQLite ownership + transactions).
 //!
-//! - **Compound commits.** Every mutation and its replication-journal entry (and
-//!   idempotency-ledger row) commit in ONE transaction via
-//!   [`dohc_engine_storage::EngineStore::write_with`] (`PORTING.md` §9).
+//! - **Compound commits.** Every mutation and its idempotency-ledger row commit
+//!   in one transaction via [`dohc_engine_storage::EngineStore::write_with`].
 //! - **Identity, not paths.** [`records::SnapshotView`]/[`records::TextSnapshot`]/
 //!   [`records::MomentRecord`] carry a stable `object_id`; a `path` is an alias
 //!   onto it.
@@ -39,12 +38,14 @@ pub mod store;
 
 pub use automations::{
     AUTOMATION_CHAIN_DEPTH_CAP, AUTOMATION_CHAIN_STOPPED, AUTOMATION_RECLAIM_EXHAUSTED,
-    AutomationClaim, AutomationClaimState, AutomationFailure, AutomationSettle, AutomationTrigger,
-    MAX_AUTOMATION_ERROR_BYTES, claim_automation_triggers_in_tx, claim_next_pending_automation,
+    AutomationClaim, AutomationClaimAttempt, AutomationClaimState, AutomationFailure,
+    AutomationSettle, AutomationTrigger, MAX_AUTOMATION_ERROR_BYTES,
+    claim_automation_triggers_in_tx, claim_next_pending_automation,
     claim_next_pending_automation_in_tx, list_automation_failures, list_automation_failures_in_tx,
-    reclaim_running_automations, reclaim_running_automations_in_tx, settle_automation_claim,
-    settle_automation_claim_in_tx, subscribe_automation, subscribe_automation_in_tx,
-    unsubscribe_automation, unsubscribe_automation_in_tx,
+    list_running_automation_attempts, reclaim_running_automations,
+    reclaim_running_automations_in_tx, settle_automation_claim, settle_automation_claim_in_tx,
+    subscribe_automation, subscribe_automation_in_tx, unsubscribe_automation,
+    unsubscribe_automation_in_tx,
 };
 pub use chats::{
     AGENT_CHANNEL_NAME, AGENT_CHANNEL_WIRE_ID, AgentRunRecord, AgentUnreadThreadRow, BookmarkMode,
@@ -157,6 +158,6 @@ pub use store::{
 pub use dohc_engine_storage::{EngineStore, FaultInjector, NoFaults, StorageError, TxnOutcome};
 
 /// The secret domain's ciphertext shape and plaintext/ciphertext size cap.
-/// Re-exported so replication appliers bind to the SAME values the local
+/// Re-exported so replication appliers bind to the same values the local
 /// seal/open and secret write paths use instead of restating them.
 pub use dohc_engine_crypto::aead::{MAX_SECRET_FILE_BYTES, SECRET_IV_BYTES, SECRET_TAG_BYTES};

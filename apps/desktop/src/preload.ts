@@ -709,7 +709,7 @@ const bridge: DohcDesktopBridge = {
   resumeQuit: async () => {
     await ipcRenderer.invoke(CHANNELS.resumeQuit);
   },
-  // Content search (Phase E5.0): results stream main→renderer as bounded
+  // Content search: results stream main→renderer as bounded
   // batches; the searchId round-trips so stale batches drop renderer-side.
   searchWorkspace: async (payload) =>
     WorkspaceSearchStartResult.parse(
@@ -782,7 +782,7 @@ contextBridge.exposeInMainWorld("dohcDesktopInternal", {
 });
 
 // Test-only bridge. The authoritative gate is the main-process handler, which
-// is double-gated (env AND !app.isPackaged); the preload cannot read
+// is double-gated (env and !app.isPackaged); the preload cannot read
 // isPackaged, so this env-only check is intentionally the weaker side — never
 // expose a data-returning test channel here without a matching double-gated
 // handler. Build-time stripping lands with Phase 14 packaging.

@@ -11,7 +11,7 @@ import {
 } from "./helpers/workspace";
 
 // The Phase 2 collections gate walkthrough (docs/plans/collections.md),
-// driven through the REAL app: create two collections from the File menu's
+// driven through the real app: create two collections from the File menu's
 // New Collection command, add a field of every v1 type through the Fields
 // dialog, create records with New record, edit every field type inline in
 // the table, drag a board card and read the write back from the record's
@@ -372,7 +372,7 @@ test("collections walkthrough: create, shape, edit, drag, and rekey without the 
         { timeout: 30_000, intervals: [500] },
       )
       .toBe(true);
-    // A completed drag is not a click: the record tab must NOT have opened.
+    // A completed drag is not a click: the record tab must not have opened.
     await expect(page.getByTestId("tab-projects/Untitled.md")).toHaveCount(0);
 
     // --- Calendar rekey: keyed to Due only Website renders (day 10); keyed

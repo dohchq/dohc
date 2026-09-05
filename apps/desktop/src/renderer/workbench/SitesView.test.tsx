@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { SitesView } from "./SitesView";
 import { siteTabPath } from "./workbenchState";
+import { deferred } from "../../testing/deferred";
 
 const site: SitePackageInfo = {
   root: "client-portal",
@@ -31,14 +32,6 @@ const bridgeMock = {
     sites: [site],
   })),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 describe("SitesView", () => {
   beforeEach(() => {
@@ -73,9 +66,9 @@ describe("SitesView", () => {
 
   it("reloads detected sites when the settled files revision bumps, including a content-only edit", async () => {
     // filesSettledRevision bumps on every settled workspace file listing,
-    // including a content-only edit to an EXISTING file (e.g. dohc.json) —
+    // including a content-only edit to an existing file (e.g. dohc.json) —
     // not just an add/remove. A structural path/kind/icon hash would
-    // produce the SAME value for that case and never rerun this effect.
+    // produce the same value for that case and never rerun this effect.
     const view = render(
       <SitesView
         workspaceId="ws-sites"

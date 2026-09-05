@@ -127,12 +127,12 @@ fn bookmark_find_is_owner_and_workspace_scoped() {
     base_chat(&mut store);
     let id = bookmark_fixture(&mut store);
     let chats = LinkedChatStore::new(&mut store);
-    // MUTATION: remove owner/workspace predicates -> a foreign lookup reveals the bookmark.
     assert!(
         chats
             .find_bookmark(WS, "other", &id)
             .expect("find")
-            .is_none()
+            .is_none(),
+        "remove owner/workspace predicates -> a foreign lookup reveals the bookmark.",
     );
     assert!(
         chats
@@ -154,8 +154,11 @@ fn bookmark_archive_queues_generation_once() {
     let second = chats
         .archive_bookmark(WS, "owner", &id, 31, &NO_FAULTS)
         .expect("replay");
-    // MUTATION: queue on every archive call -> the replay advances generation again.
-    assert_eq!((first.generation, second.generation), (2, 2));
+    assert_eq!(
+        (first.generation, second.generation),
+        (2, 2),
+        "queue on every archive call -> the replay advances generation again."
+    );
 }
 
 #[test]
@@ -170,8 +173,10 @@ fn bookmark_failed_generation_cas_rejects_stale_worker() {
     let stale = chats
         .mark_bookmark_failed(WS, "owner", &id, 1, "old", 31, &NO_FAULTS)
         .expect("stale");
-    // MUTATION: remove generation/state CAS -> a stale worker wins.
-    assert!(!stale.applied);
+    assert!(
+        !stale.applied,
+        "remove generation/state CAS -> a stale worker wins."
+    );
 }
 
 #[test]
@@ -186,8 +191,10 @@ fn bookmark_stale_generation_cas_rejects_stale_worker() {
     let stale = chats
         .mark_bookmark_stale(WS, "owner", &id, 1, None, 31, &NO_FAULTS)
         .expect("stale");
-    // MUTATION: remove generation/state CAS -> a stale access check wins.
-    assert!(!stale.applied);
+    assert!(
+        !stale.applied,
+        "remove generation/state CAS -> a stale access check wins."
+    );
 }
 
 #[test]
@@ -202,8 +209,11 @@ fn bookmark_mark_pending_request_replay_does_not_double_increment() {
     let replay = chats
         .mark_bookmark_pending(WS, "owner", &id, "same", 31, &NO_FAULTS)
         .expect("replay");
-    // MUTATION: skip request-ledger replay -> generation increments twice.
-    assert_eq!((first.generation, replay.generation), (2, 2));
+    assert_eq!(
+        (first.generation, replay.generation),
+        (2, 2),
+        "skip request-ledger replay -> generation increments twice."
+    );
 }
 
 #[test]
@@ -240,10 +250,10 @@ fn pending_bookmarks_preserve_oracle_order_and_limit() {
     let rows = chats
         .list_pending_bookmarks_page(WS, "owner", 1, None)
         .expect("page");
-    // MUTATION: order by bookmark updated time or ignore limit -> wrong first row/count.
     assert_eq!(
         (rows.len(), rows[0].bookmark.bookmark_id.as_str()),
-        (1, second.as_str())
+        (1, second.as_str()),
+        "order by bookmark updated time or ignore limit -> wrong first row/count.",
     );
 }
 
@@ -268,12 +278,12 @@ fn list_threads_for_file_is_workspace_object_scoped_and_stably_ordered() {
     let rows = chats
         .list_threads_for_file(WS, "object", None, 10)
         .expect("list");
-    // MUTATION: match path/foreign rows or omit the id tie-break -> ids differ.
     assert_eq!(
         rows.iter()
             .map(|row| row.thread_id.as_str())
             .collect::<Vec<_>>(),
-        ["a", "b"]
+        ["a", "b"],
+        "match path/foreign rows or omit the id tie-break -> ids differ.",
     );
 }
 
@@ -296,12 +306,12 @@ fn find_thread_channel_id_hides_foreign_and_file_threads() {
         Ok::<_, StorageError>(())
     }).expect("file");
     let chats = LinkedChatStore::new(&mut store);
-    // MUTATION: drop workspace/owner semantics -> foreign or file threads return a channel.
     assert_eq!(
         chats
             .find_thread_channel_id(WS, "channel-thread")
             .expect("channel"),
-        Some("channel".to_owned())
+        Some("channel".to_owned()),
+        "drop workspace/owner semantics -> foreign or file threads return a channel.",
     );
     assert_eq!(
         chats.find_thread_channel_id(WS, "file").expect("file"),
@@ -364,20 +374,17 @@ fn default_follows_exclude_dm_and_placeholders() {
                 .map_err(StorageError::corrupt_public)
         })
         .expect("targets");
-    // MUTATION: omit DM/placeholder filters -> extra follow cells appear.
-    assert_eq!(targets, ["channel"]);
+    assert_eq!(
+        targets,
+        ["channel"],
+        "omit DM/placeholder filters -> extra follow cells appear."
+    );
 }
 
 #[test]
-fn default_follow_seed_is_insert_ignore_and_unjournaled() {
+fn default_follow_seed_is_insert_ignore() {
     let (_scratch, mut store) = open_store();
     base_chat(&mut store);
-    let before: i64 = store
-        .read_with(|conn| {
-            conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |r| r.get(0))
-                .map_err(StorageError::corrupt_public)
-        })
-        .expect("before");
     let mut chats = LinkedChatStore::new(&mut store);
     chats
         .ensure_default_channel_follows(WS, "owner", &NO_FAULTS)
@@ -385,22 +392,17 @@ fn default_follow_seed_is_insert_ignore_and_unjournaled() {
     chats
         .ensure_default_channel_follows(WS, "owner", &NO_FAULTS)
         .expect("second");
-    let (count, after): (i64, i64) = store
+    let count: i64 = store
         .read_with(|conn| {
-            Ok::<_, StorageError>((
-                conn.query_row(
-                    "SELECT COUNT(*) FROM chat_follows WHERE workspace_id=?1",
-                    params![WS],
-                    |r| r.get(0),
-                )
-                .map_err(StorageError::corrupt_public)?,
-                conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |r| r.get(0))
-                    .map_err(StorageError::corrupt_public)?,
-            ))
+            conn.query_row(
+                "SELECT COUNT(*) FROM chat_follows WHERE workspace_id=?1",
+                params![WS],
+                |r| r.get(0),
+            )
+            .map_err(StorageError::corrupt_public)
         })
-        .expect("counts");
-    // MUTATION: replace insert-ignore or journal seeds -> duplicates/journal growth.
-    assert_eq!((count, after), (1, before));
+        .expect("count");
+    assert_eq!(count, 1, "replace insert-ignore -> duplicates.");
 }
 
 #[test]
@@ -415,8 +417,11 @@ fn agent_read_cursor_rejects_stale_revision() {
     let error = chats
         .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(0), 21, &NO_FAULTS)
         .unwrap_err();
-    // MUTATION: remove expected-revision CAS -> stale caller succeeds.
-    assert_eq!(error.code(), "read-state-revision-mismatch");
+    assert_eq!(
+        error.code(),
+        "read-state-revision-mismatch",
+        "remove expected-revision CAS -> stale caller succeeds."
+    );
 }
 
 #[test]
@@ -432,13 +437,13 @@ fn agent_read_cursor_clamps_to_latest_and_never_moves_back() {
     let backward = chats
         .mark_thread_read_by_agent(WS, "thread", 10, "m1", None, 31, &NO_FAULTS)
         .expect("backward");
-    // MUTATION: remove latest clamp/backward comparison -> cursor escapes or regresses.
     assert_eq!(
         (
             clamped.last_read_message_id.as_str(),
             backward.last_read_message_id.as_str()
         ),
-        ("m2", "m2")
+        ("m2", "m2"),
+        "remove latest clamp/backward comparison -> cursor escapes or regresses.",
     );
 }
 
@@ -454,8 +459,11 @@ fn agent_read_revision_bumps_only_on_advance() {
     let replay = chats
         .mark_thread_read_by_agent(WS, "thread", 10, "m1", Some(1), 21, &NO_FAULTS)
         .expect("replay");
-    // MUTATION: increment revision for no-op coordinates -> replay revision becomes 2.
-    assert_eq!((first.revision, replay.revision), (1, 1));
+    assert_eq!(
+        (first.revision, replay.revision),
+        (1, 1),
+        "increment revision for no-op coordinates -> replay revision becomes 2."
+    );
 }
 
 #[test]
@@ -472,8 +480,10 @@ fn agent_unread_requires_latest_human_message_beyond_cursor() {
     let rows = chats
         .list_agent_unread_threads(WS, None, 10)
         .expect("unread");
-    // MUTATION: accept agent-latest or cursor-covered threads -> list is nonempty.
-    assert!(rows.is_empty());
+    assert!(
+        rows.is_empty(),
+        "accept agent-latest or cursor-covered threads -> list is nonempty."
+    );
 }
 
 #[test]
@@ -489,8 +499,10 @@ fn agent_unread_tie_breaks_equal_timestamps_by_message_id() {
     let rows = chats
         .list_agent_unread_threads(WS, None, 10)
         .expect("unread");
-    // MUTATION: compare timestamp only -> equal-time message b is missed.
-    assert_eq!(rows[0].latest_message_id, "b");
+    assert_eq!(
+        rows[0].latest_message_id, "b",
+        "compare timestamp only -> equal-time message b is missed."
+    );
 }
 
 #[test]
@@ -505,12 +517,12 @@ fn pending_dispatch_order_is_created_then_trigger() {
     let rows = chats
         .list_pending_dispatches(WS, None, 10)
         .expect("pending");
-    // MUTATION: order by update/id only -> oracle order changes.
     assert_eq!(
         rows.iter()
             .map(|row| row.trigger_message_id.as_str())
             .collect::<Vec<_>>(),
-        ["old", "a", "b"]
+        ["old", "a", "b"],
+        "order by update/id only -> oracle order changes.",
     );
 }
 
@@ -528,8 +540,11 @@ fn open_runs_requires_one_unended_run_per_running_ledger() {
     let error = LinkedChatStore::new(&mut store)
         .list_open_dispatch_runs(WS, None, 10)
         .unwrap_err();
-    // MUTATION: skip the one-run invariant preflight -> broken running ledger is omitted.
-    assert_eq!(error.code(), "state-corrupt");
+    assert_eq!(
+        error.code(),
+        "state-corrupt",
+        "skip the one-run invariant preflight -> broken running ledger is omitted."
+    );
 }
 
 #[test]
@@ -548,8 +563,11 @@ fn open_runs_rejects_unmatched_unended_run() {
     let error = LinkedChatStore::new(&mut store)
         .list_open_dispatch_runs(WS, None, 10)
         .unwrap_err();
-    // MUTATION: skip unmatched-run preflight -> orphan process state is hidden.
-    assert_eq!(error.code(), "state-corrupt");
+    assert_eq!(
+        error.code(),
+        "state-corrupt",
+        "skip unmatched-run preflight -> orphan process state is hidden."
+    );
 }
 
 #[test]
@@ -572,8 +590,11 @@ fn get_run_record_rejects_duplicate_global_run_id() {
     let error = LinkedChatStore::new(&mut store)
         .get_run_record(WS, "duplicate")
         .unwrap_err();
-    // MUTATION: take the first globally duplicated run -> corruption is returned as data.
-    assert_eq!(error.code(), "state-corrupt");
+    assert_eq!(
+        error.code(),
+        "state-corrupt",
+        "take the first globally duplicated run -> corruption is returned as data."
+    );
 }
 
 #[test]
@@ -602,12 +623,12 @@ fn run_records_limit_selects_runs_before_joining_messages() {
     let rows = LinkedChatStore::new(&mut store)
         .run_records_for_thread(WS, "thread", Some(1), None, 10)
         .expect("records");
-    // MUTATION: apply limit after joining links -> only one message from newest run survives.
     assert_eq!(
         rows.iter()
             .map(|row| row.message_id.as_str())
             .collect::<Vec<_>>(),
-        ["message-2a", "message-2b"]
+        ["message-2a", "message-2b"],
+        "apply limit after joining links -> only one message from newest run survives.",
     );
 }
 
@@ -618,8 +639,7 @@ fn recent_dispatch_count_includes_since_boundary() {
     let count = LinkedChatStore::new(&mut store)
         .recent_dispatch_count(WS, "thread", 20.0)
         .expect("count");
-    // MUTATION: change >= to > -> boundary run disappears.
-    assert_eq!(count, 1);
+    assert_eq!(count, 1, "change >= to > -> boundary run disappears.");
 }
 
 #[test]
@@ -629,8 +649,10 @@ fn recent_dispatch_count_accepts_finite_negative_since() {
     let count = LinkedChatStore::new(&mut store)
         .recent_dispatch_count(WS, "thread", -1.5)
         .expect("count");
-    // MUTATION: impose a nonnegative DTO/domain bound -> this finite oracle input fails.
-    assert_eq!(count, 1);
+    assert_eq!(
+        count, 1,
+        "impose a nonnegative DTO/domain bound -> this finite oracle input fails."
+    );
 }
 
 #[test]
@@ -652,8 +674,11 @@ fn fail_pending_is_workspace_thread_scoped() {
     let pending = chats
         .list_pending_dispatches(WS, None, 10)
         .expect("pending");
-    // MUTATION: drop workspace/thread/state predicate -> more than one row changes.
-    assert_eq!((changed, pending[0].trigger_message_id.as_str()), (1, "b"));
+    assert_eq!(
+        (changed, pending[0].trigger_message_id.as_str()),
+        (1, "b"),
+        "drop workspace/thread/state predicate -> more than one row changes."
+    );
 }
 
 #[test]
@@ -663,8 +688,11 @@ fn record_run_message_rejects_foreign_workspace_run() {
     let error = LinkedChatStore::new(&mut store)
         .record_run_message(OTHER_WS, "message", "run", &NO_FAULTS)
         .unwrap_err();
-    // MUTATION: trust globally unique run id without workspace check -> foreign link inserts.
-    assert_eq!(error.code(), "run-not-found");
+    assert_eq!(
+        error.code(),
+        "run-not-found",
+        "trust globally unique run id without workspace check -> foreign link inserts."
+    );
 }
 
 #[test]
@@ -684,8 +712,11 @@ fn record_run_message_rejects_different_run_collision() {
     let error = LinkedChatStore::new(&mut store)
         .record_run_message(WS, "message", "other-run", &NO_FAULTS)
         .unwrap_err();
-    // MUTATION: treat insert-ignore as same-link replay -> collision returns false.
-    assert_eq!(error.code(), "state-corrupt");
+    assert_eq!(
+        error.code(),
+        "state-corrupt",
+        "treat insert-ignore as same-link replay -> collision returns false."
+    );
 }
 
 #[test]
@@ -703,8 +734,11 @@ fn pause_false_clears_reason_and_missing_pause_defaults_false() {
     let cleared = chats
         .set_thread_dispatch_paused(WS, "thread", false, Some("ignored"), 11, &NO_FAULTS)
         .expect("clear");
-    // MUTATION: preserve reason while paused=false -> invalid stale reason remains.
-    assert_eq!((cleared.paused, cleared.reason), (false, None));
+    assert_eq!(
+        (cleared.paused, cleared.reason),
+        (false, None),
+        "preserve reason while paused=false -> invalid stale reason remains."
+    );
 }
 
 #[test]
@@ -714,8 +748,10 @@ fn requeue_requires_ended_matching_failed_run_below_attempt_cap() {
     let requeued = LinkedChatStore::new(&mut store)
         .requeue_failed_trigger(WS, "trigger", "run", 21, &NO_FAULTS)
         .expect("requeue");
-    // MUTATION: remove ended/state/attempt guards -> live running trigger requeues.
-    assert!(!requeued);
+    assert!(
+        !requeued,
+        "remove ended/state/attempt guards -> live running trigger requeues."
+    );
 }
 
 #[test]
@@ -732,8 +768,10 @@ fn requeue_clears_run_and_failure_atomically() {
         .list_pending_dispatches(WS, None, 10)
         .expect("pending")
         .remove(0);
-    // MUTATION: clear only state -> stale run/failure survives the transition.
-    assert!(requeued && row.run_id.is_none() && row.failure_reason.is_none());
+    assert!(
+        requeued && row.run_id.is_none() && row.failure_reason.is_none(),
+        "clear only state -> stale run/failure survives the transition."
+    );
 }
 
 #[test]
@@ -749,9 +787,11 @@ fn app_quit_failure_remains_durably_recoverable_after_note() {
     let rows = LinkedChatStore::new(&mut store)
         .list_app_quit_recoveries(WS, None, 10)
         .expect("recoveries");
-    // MUTATION: require an unposted failure note -> a crash after the recovery
-    // note but before requeue makes the app-quit row disappear.
-    assert_eq!((rows.len(), rows[0].attempt_count), (1, 1));
+    assert_eq!(
+        (rows.len(), rows[0].attempt_count),
+        (1, 1),
+        "require an unposted failure note -> a crash after the recovery note but before requeue makes the app-quit row disappear."
+    );
 }
 
 #[test]
@@ -767,12 +807,11 @@ fn restart_failure_remains_durably_recoverable_before_requeue() {
     let rows = LinkedChatStore::new(&mut store)
         .list_app_quit_recoveries(WS, None, 10)
         .expect("recoveries");
-    // MUTATION: require failure_note_posted = 0 for restart failures -> the
-    // normal note-then-fail ordering strands this row if requeue never commits.
     assert_eq!(
         rows.first()
             .map(|row| (row.run.failure_reason.as_deref(), row.attempt_count,)),
         Some((Some("app restart during run"), 1)),
+        "require failure_note_posted = 0 for restart failures -> the normal note-then-fail ordering strands this row if requeue never commits.",
     );
 }
 
@@ -787,6 +826,8 @@ fn failure_note_mark_is_idempotent_and_requires_one_transition() {
     let replay = chats
         .mark_failure_note_posted(WS, "run", &NO_FAULTS)
         .expect("replay");
-    // MUTATION: require/update more than the one false->true transition -> replay fails or false remains.
-    assert!(first.failure_note_posted && replay.failure_note_posted);
+    assert!(
+        first.failure_note_posted && replay.failure_note_posted,
+        "require/update more than the one false->true transition -> replay fails or false remains."
+    );
 }

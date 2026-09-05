@@ -8,6 +8,13 @@ import {
 } from "react";
 import type { UpdateActionResult } from "../ipc/bridgeContract";
 import { bridge } from "./bridge";
+import {
+  COLLECTION_WRITE_STALL_MS,
+  abandonPendingCollectionFieldWrites,
+  collectionWriteFailures,
+  hasPendingCollectionFieldWrites,
+  settleCollectionFieldWrites,
+} from "./collections/recordFieldWrites";
 import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
 import { trapModalTabKey } from "./modalFocus";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
@@ -16,29 +23,31 @@ import { RecoveryList } from "./RecoveryList";
 type UnloadKind = "close" | "reload" | "update" | "quit";
 
 // The guard cannot tell one unload's beforeunload from another's, but the
-// user asked for a specific action by name — confirming must resume THAT
-// action, never swap it for a plain exit (#579 review, r7 + r8). In-app
+// user asked for a specific action by name — confirming must resume that
+// action, never swap it for a plain exit. In-app
 // reloads route through here so the guard knows what it blocked: one slot,
 // consumed by the next beforeunload, cleared when the request itself fails
-// without unloading. Quits are decided BEFORE they start (main asks), and
+// without unloading. Quits are decided before they start (main asks), and
 // update installs are decided before quitAndInstall is ever called — neither
 // uses this slot.
 type PendingUnload = {
   kind: "reload" | "update" | "quit";
-  // Re-runs the blocked action. Resolves TRUE when the action was accepted
-  // and an unload should follow, FALSE when it failed without unloading —
-  // the guard re-arms itself on false (#579 review, r9).
+  // Re-runs the blocked action. Resolves true when the action was accepted
+  // and an unload should follow, false when it failed without unloading —
+  // the guard re-arms itself on false.
   resume: () => Promise<boolean>;
 };
 let pendingUnload: PendingUnload | null = null;
+let exitRequest = 0;
 
 // The mounted guard registers its dialog opener here so the decide-first
-// paths (update install) can warn WITHOUT triggering the destructive call.
+// paths (update install) can warn without triggering the destructive call.
 let openRecoveryWarning:
   | ((warning: { kind: UnloadKind; resume: () => Promise<boolean> }) => void)
   | null = null;
 
 export function requestGuardedReload(): void {
+  exitRequest += 1;
   const attempt: PendingUnload = {
     kind: "reload",
     resume: () =>
@@ -57,21 +66,28 @@ export function requestGuardedReload(): void {
     });
 }
 
-// Decide BEFORE the destructive call (#579 review, r10): electron-updater's
+// Decide before the destructive call: electron-updater's
 // quitAndInstall is ONE-SHOT — calling it and then vetoing the quit would
 // burn the latch, and no "Restart anyway" could ever restart. So the drafts
 // are checked first: on a clear path the install runs at once (main
 // pre-approves the quit it starts), and on a blocked path the dialog opens
-// INSTEAD of the install, whose confirm makes the one and only call.
+// instead of the install, whose confirm makes the one and only call.
 // Returns null when the dialog took over — the caller's own flow ends there.
 export async function requestGuardedUpdateInstall(): Promise<UpdateActionResult | null> {
+  const request = ++exitRequest;
+  if (hasUnsettledCollectionWrites() && !(await settleCollectionWritesForExit())) {
+    return null;
+  }
+  if (request !== exitRequest) return null;
   if (atRiskOrphanedDraftIds().length === 0 || openRecoveryWarning === null) {
     const result = await beginInstall();
+    if (request !== exitRequest) return null;
+    if (!result.accepted && hasUnsettledCollectionWrites()) return null;
     // Main's boundary re-check refuses the install when a reopen set an edit
-    // aside after THIS renderer's own check (#579 review, r12). That refusal
-    // is a RECOVERY decision, not an install failure, and the direct branch
+    // aside after this renderer's own check. That refusal
+    // is a recovery decision, not an install failure, and the direct branch
     // used to report it as one — the user's Restart click became a generic
-    // error and the drafts were never mentioned (#579 review, r18). The
+    // error and the drafts were never mentioned. The
     // dialog path already re-prompts; both paths reach the same state, so
     // both must say the same thing.
     if (
@@ -92,8 +108,8 @@ const resumeInstall = () =>
   beginInstall().then((result) => result.accepted, () => false);
 
 // Resumes an exit main has already approved, re-claiming the intent each
-// attempt so a draft captured before THIS attempt's unload still produces a
-// warning that names the right action (#579 review, r16 + r17).
+// attempt so a draft captured before this attempt's unload still produces a
+// warning that names the right action.
 function resumeExit(kind: "update" | "quit"): Promise<boolean> {
   pendingUnload = { kind, resume: () => resumeExit(kind) };
   return bridge()
@@ -104,24 +120,89 @@ function resumeExit(kind: "update" | "quit"): Promise<boolean> {
     );
 }
 
+function hasUnsettledCollectionWrites(): boolean {
+  return hasPendingCollectionFieldWrites() || collectionWriteFailures().length > 0;
+}
+
+async function settleCollectionWritesForExit(): Promise<boolean> {
+  const settled = await settleCollectionFieldWrites(undefined, {
+    stallMs: COLLECTION_WRITE_STALL_MS,
+  });
+  if (settled.stalled) {
+    abandonPendingCollectionFieldWrites(
+      "dohc could not finish saving this change. Retry it before closing, or discard the unsaved change.",
+    );
+  }
+  return !settled.stalled && settled.failed === 0;
+}
+
+// One drain serves every unload attempt it overlaps: a second beforeunload
+// while writes are still landing hands its intent to the drain in flight
+// instead of racing a second resume against the first.
+let pendingWritesDrain: { pending: PendingUnload | null; request: number } | null = null;
+
+function holdUnloadForCollectionWrites(pending: PendingUnload | null): void {
+  if (pendingWritesDrain) {
+    pendingWritesDrain.pending = pending;
+    pendingWritesDrain.request = exitRequest;
+    return;
+  }
+  const drain = { pending, request: exitRequest };
+  pendingWritesDrain = drain;
+  void (async () => {
+    const settled = await settleCollectionWritesForExit();
+    if (pendingWritesDrain !== drain) return;
+    pendingWritesDrain = null;
+    if (!settled || drain.request !== exitRequest) return;
+    const claimed = drain.pending;
+    if (claimed) pendingUnload = claimed;
+    const resume =
+      claimed?.resume ??
+      (() => {
+        window.close();
+        return Promise.resolve(true);
+      });
+    void resume().then((unloading) => {
+      // A resume that failed without unloading must not label a later,
+      // unrelated close (`requestGuardedReload` precedent).
+      if (!unloading && claimed && pendingUnload === claimed) {
+        pendingUnload = null;
+      }
+    });
+  })();
+}
+
 // Test seam: this module's state is deliberately app-run scoped, so suites
 // reset it between tests instead of leaking an unclaimed intent into the next
 // one.
 export function resetGuardedExits(): void {
+  exitRequest += 1;
   pendingUnload = null;
+  pendingWritesDrain = null;
 }
 
 // The install's own exit runs through beforeunload like any other unload, and
-// a draft captured between the recovery check and that exit blocks it there
-// (#579 review, r13). The warning must then name what the user was actually
-// doing — a RESTART, not a close — so the intent is claimed before the call
-// (#579 review, r16).
+// a draft captured between the recovery check and that exit blocks it there.
+// The warning must then name what the user was actually
+// doing — a restart, not a close — so the intent is claimed before the call.
 //
-// The resume is the QUIT, never a second install: quitAndInstall's latch is
+// The resume is the quit, never a second install: quitAndInstall's latch is
 // one-shot and already spent by the time beforeunload can fire, and main has
 // pre-approved the quit it started. A plain window.close() would also strand
 // the staged installer on macOS, where closing a window does not quit.
-function beginInstall(): Promise<UpdateActionResult> {
+async function beginInstall(): Promise<UpdateActionResult> {
+  const request = exitRequest;
+  for (;;) {
+    const result = await attemptInstall();
+    if (result.accepted || !hasUnsettledCollectionWrites()) return result;
+    if (request !== exitRequest) return result;
+    // Main can observe an edit accepted after the renderer's first drain.
+    // A refused install has not consumed the updater's one-shot latch.
+    if (!(await settleCollectionWritesForExit()) || request !== exitRequest) return result;
+  }
+}
+
+function attemptInstall(): Promise<UpdateActionResult> {
   const attempt: PendingUnload = {
     kind: "update",
     resume: () => resumeExit("update"),
@@ -151,18 +232,18 @@ function beginInstall(): Promise<UpdateActionResult> {
 // back on its own. Not a rejection limit — real unloads land in
 // milliseconds; this only bounds how long the drafts go unguarded.
 const BYPASS_REARM_MS = 10_000;
-// Set-aside drafts (#567) are persisted on capture and restored on launch
-// (#600), so most of them now survive closing, reloading, quitting, and
-// restarting into an update. What CANNOT be persisted still dies with the app
-// run — a secret-classified path never enters plaintext storage (#446), and a
+// Set-aside drafts are persisted on capture and restored on launch,
+// so most of them now survive closing, reloading, quitting, and
+// restarting into an update. What cannot be persisted still dies with the app
+// run — a secret-classified path never enters plaintext storage, and a
 // storage refusal leaves the text in memory — and destroying that text is
 // irreversible, so it must be announced before it runs (product invariant).
-// Electron cancels a close SILENTLY on preventDefault, so the dialog below is
+// Electron cancels a close silently on preventDefault, so the dialog below is
 // the announcement, and it carries the at-risk drafts with their own
 // Copy/Dismiss: the warning must offer the very actions it demands (#579
 // review, r5).
 //
-// This mounts ABOVE AppErrorBoundary (see main.tsx): a crash unmounts the
+// This mounts above AppErrorBoundary (see main.tsx): a crash unmounts the
 // shell, and the crash screen's "Reload dohc" must not destroy the drafts
 // unannounced. The store already lives outside React, so this guard needs
 // nothing from the crashed tree.
@@ -172,10 +253,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     kind: UnloadKind;
     resume: (() => Promise<boolean>) | null;
   } | null>(null);
-  // LIVE, not a snapshot (#579 review, r10): the dialog embeds Copy/Dismiss,
+  // Live, not a snapshot: the dialog embeds Copy/Dismiss,
   // so the count must follow every dismissal, and an emptied dialog has
-  // nothing left to warn about. Only the drafts an exit would DESTROY belong
-  // here (#600) — a restored draft comes back on its own.
+  // nothing left to warn about. Only the drafts an exit would destroy belong
+  // here — a restored draft comes back on its own.
   const allDrafts = useAllOrphanedDrafts();
   const liveDrafts = useMemo(
     () => allDrafts.filter((row) => !row.persisted),
@@ -233,10 +314,10 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     };
   }, [warningVisible]);
   const bypassRearmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The drafts the warning LISTED when the user confirmed. An approval covers
-  // exactly those (#579 review, r13 + r14) — never a draft a queued reopen
+  // The drafts the warning listed when the user confirmed. An approval covers
+  // exactly those — never a draft a queued reopen
   // sets aside afterwards, which the user was never shown. Every gate below
-  // measures the LIVE store against this set, so a new draft stops the exit
+  // measures the live store against this set, so a new draft stops the exit
   // and comes back to the dialog with its text intact. The approval IS the
   // bypass: an empty set gates nothing, so there is no separate flag to keep
   // in step with it.
@@ -252,23 +333,34 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   };
   useEffect(() => {
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      exitRequest += 1;
       // Consumed either way: if this unload proceeds the slot dies with the
       // page, and if it is blocked the dialog now owns the answer.
       const pending = pendingUnload;
       pendingUnload = null;
+      if (hasUnsettledCollectionWrites()) {
+        // An accepted collection cell edit has not reached its record yet.
+        // Stop the unload, land the queue, then rerun EXACTLY the requested
+        // action — whose own beforeunload re-checks the drafts. The draft
+        // approval is NOT consumed here: this is the same attempt, resumed.
+        event.preventDefault();
+        void bridge().holdQuit();
+        holdUnloadForCollectionWrites(pending);
+        return;
+      }
       if (!hasUnapprovedDrafts()) {
-        // One-shot (#579 review, r9): an approval is consumed by the unload it
+        // One-shot: an approval is consumed by the unload it
         // permits — never a later, unrelated close.
         rearmGuard();
         return;
       }
       // Past this line the store holds a draft the user never saw. The earlier
       // approval does not cover it, so the exit stops and asks again with the
-      // full list (#579 review, r13).
+      // full list.
       rearmGuard();
       event.preventDefault();
-      // Tell main the exit it approved is not happening (#579 review, r19).
-      // An update install pre-approves the quit BEFORE this veto is possible,
+      // Tell main the exit it approved is not happening.
+      // An update install pre-approves the quit before this veto is possible,
       // and an approval that outlives its quit makes the next Cmd+Q skip the
       // ask entirely — arriving here with no pending intent and warning about
       // a "close". Confirming that would call window.close(), which does not
@@ -279,16 +371,16 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
         resume: pending?.resume ?? null,
       });
     };
-    // Required contract, called directly (#579 review, r15). The bridge and
+    // Required contract, called directly. The bridge and
     // the preload gained both listeners in this same change, so an optional
-    // call would define a SECOND supported preload — one where the renderer
+    // call would define a second supported preload — one where the renderer
     // silently drops native-quit handling instead of showing the mismatched
     // build. There are no users and no old preloads to carry.
     //
-    // Main re-asks at the quit boundary (#579 review, r12) — the answer is
-    // read at ANSWER time, so an edit set aside after this renderer's own
-    // check still blocks the install. The answer is the LIVE store measured
-    // against what the user approved (#579 review, r13), never a blanket
+    // Main re-asks at the quit boundary — the answer is
+    // read at answer time, so an edit set aside after this renderer's own
+    // check still blocks the install. The answer is the live store measured
+    // against what the user approved, never a blanket
     // "the user already confirmed": a draft captured after the confirm was in
     // no warning, and quitAndInstall is the last chance to stop. A refusal
     // here is what brings the dialog back with that draft listed.
@@ -296,7 +388,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       (requestId) => {
         void bridge().answerRecoveryCheck({
           requestId,
-          blocked: hasUnapprovedDrafts(),
+          blocked: hasUnapprovedDrafts() || hasUnsettledCollectionWrites(),
         });
       },
     );
@@ -304,8 +396,17 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     // resume when nothing is at stake, hold when the dialog takes over — so
     // main's hung-renderer fail-safe never fires for a live renderer.
     const unsubscribeQuit = bridge().onQuitRequested(() => {
+      exitRequest += 1;
+      if (hasUnsettledCollectionWrites()) {
+        void bridge().holdQuit();
+        holdUnloadForCollectionWrites({
+          kind: "quit",
+          resume: () => resumeExit("quit"),
+        });
+        return;
+      }
       if (!hasUnapprovedDrafts()) {
-        // Claim the intent BEFORE resuming (#579 review, r17). Answering
+        // Claim the intent before resuming. Answering
         // clear does not end the story: a queued reopen can still capture a
         // draft between this answer and the quit's own beforeunload, and the
         // warning that blocks it there must resume the QUIT. Falling back to
@@ -317,7 +418,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
       void bridge().holdQuit();
       showCloseWarning({ kind: "quit", resume: () => resumeExit("quit") });
     });
-    // Registered LAST, so a preload that fails the contract above leaves no
+    // Registered last, so a preload that fails the contract above leaves no
     // listener and no opener behind — a half-installed guard is worse than
     // none, because the cleanup React skips would never remove it.
     window.addEventListener("beforeunload", onBeforeUnload);
@@ -393,8 +494,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                 data-testid="recovery-close-anyway"
                 onClick={() => {
                   // Resume exactly what the user asked for: a requested
-                  // reload, restart, or quit must not become a plain exit
-                  // (#579 review, r7 + r8 + r10).
+                  // reload, restart, or quit must not become a plain exit.
                   const kind = closeWarning.kind;
                   const resume =
                     closeWarning.resume ??
@@ -403,13 +503,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                       return Promise.resolve(true);
                     });
                   setCloseWarning(null);
-                  // The approval is scoped to THIS attempt (#579 review, r9):
+                  // The approval is scoped to this attempt:
                   // consumed by the unload it permits, cleared on an explicit
                   // failure signal, and cleared by the fail-safe timer when no
                   // signal exists — a resumed action that never unloads must
                   // not leave a later close unguarded.
                   //
-                  // It is scoped to THIS LIST too (#579 review, r13): the user
+                  // It is scoped to THIS LIST too: the user
                   // approved losing the drafts the dialog just showed, and a
                   // reopen queued behind this click can still set one more
                   // aside. That draft keeps its notice and its Copy button,
@@ -424,12 +524,13 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                     rearmGuard,
                     BYPASS_REARM_MS,
                   );
+                  const request = exitRequest;
                   void resume().then((unloading) => {
-                    if (unloading) return;
+                    if (unloading || request !== exitRequest) return;
                     // The action did not unload. When a draft this approval
-                    // never covered is WHY — the boundary re-check refuses an
+                    // never covered is why — the boundary re-check refuses an
                     // install for it — the user gets the decision back, now
-                    // over the full list (#579 review, r14). Any other
+                    // over the full list. Any other
                     // failure (an updater that is not ready) re-arms in
                     // silence, exactly as before: nothing new is at stake.
                     const uncovered = hasUnapprovedDrafts();

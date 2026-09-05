@@ -1,22 +1,25 @@
-//! Workspace-actor traces (CAL-1 calibration signal): lifecycle, canonical
-//! identity convergence across aliases, single-writer dedup, restart
-//! generations, and deterministic connection release on close.
+//! Workspace-actor traces: lifecycle, canonical identity convergence across
+//! aliases, single-writer dedup, restart generations, and deterministic
+//! connection release on close.
 
+use dohc_engine_domain::WriteText;
 use dohc_engine_runtime::{
-    CompoundWrite, FaultInjector, FaultPoint, LifecycleState, NoFaults, WorkspaceSupervisor,
-    WriteOutcome,
+    ActorHandle, CancellationToken, FaultInjector, FaultPoint, LifecycleState, NoFaults,
+    RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::harness::wal_sidecar;
 use dohc_engine_testkit::{
-    GateFaults, PanicFaults, ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink,
+    PanicFaults, ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+const WS: &str = "ws";
+
 /// Spin (bounded) until the actor behind `handle` publishes `Closed`, so panic
 /// teardown is observed deterministically without a fixed sleep.
-fn wait_for_closed(handle: &dohc_engine_runtime::ActorHandle) {
+fn wait_for_closed(handle: &ActorHandle) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while handle.lifecycle() != LifecycleState::Closed {
         assert!(Instant::now() < deadline, "actor never reached Closed");
@@ -24,51 +27,96 @@ fn wait_for_closed(handle: &dohc_engine_runtime::ActorHandle) {
     }
 }
 
-fn write(request_id: &str, doc_id: &str, body: &str, now_ms: i64) -> CompoundWrite {
-    CompoundWrite {
-        request_id: request_id.to_owned(),
-        doc_id: doc_id.to_owned(),
-        body: body.to_owned(),
-        op_kind: "text.write".to_owned(),
-        now_ms,
-    }
+async fn seed(handle: &ActorHandle) {
+    handle
+        .ensure_main_version(
+            WS.to_owned(),
+            1,
+            Arc::new(NoFaults),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("main version");
+}
+
+async fn write(
+    handle: &ActorHandle,
+    path: &str,
+    text: &str,
+    now_ms: i64,
+    faults: Arc<dyn FaultInjector>,
+) -> Result<(), RuntimeError> {
+    handle
+        .versioned_text_write(
+            WriteText {
+                workspace_id: WS.to_owned(),
+                version_id: "main".to_owned(),
+                object_id: format!("object-{path}"),
+                path: path.to_owned(),
+                text: text.to_owned(),
+                moment_id: format!("moment-{path}-{now_ms}"),
+                metadata_origin: "user".to_owned(),
+                metadata_summary: None,
+                metadata_correlation_id: None,
+                author_json: None,
+                now_ms,
+                request_id: None,
+            },
+            faults,
+            CancellationToken::new(),
+        )
+        .await
+        .map(|_| ())
+}
+
+async fn read(handle: &ActorHandle, path: &str) -> Option<String> {
+    handle
+        .versioned_text_read(
+            WS.to_owned(),
+            "main".to_owned(),
+            path.to_owned(),
+            CancellationToken::new(),
+        )
+        .await
+        .expect("read")
+        .map(|snapshot| snapshot.text)
+}
+
+fn moments(db: &std::path::Path) -> i64 {
+    EngineStore::open(db, 99)
+        .expect("reopen")
+        .table_row_count("moments")
+        .expect("count moments")
 }
 
 // oracle: actor lifecycle open→ready→...→closed with a live write in between.
-#[test]
-fn actor_lifecycle_open_ready_closed() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn actor_lifecycle_open_ready_closed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
     assert_eq!(handle.lifecycle(), LifecycleState::Ready);
-
-    let outcome = handle
-        .write(write("r1", "d1", "hi", 1), Arc::new(NoFaults))
+    seed(&handle).await;
+    write(&handle, "d1.md", "hi", 1, Arc::new(NoFaults))
+        .await
         .expect("write");
-    assert_eq!(
-        outcome,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: false
-        }
-    );
 
     assert!(sup.close(&db).expect("close"));
     // The shared lifecycle flag reflects the released connection.
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
     // A handle to a closed actor fails cleanly instead of hanging.
-    let err = handle
-        .write(write("r2", "d2", "no", 2), Arc::new(NoFaults))
+    let err = write(&handle, "d2.md", "no", 2, Arc::new(NoFaults))
+        .await
         .expect_err("closed actor rejects writes");
     assert_eq!(err.code(), "actor-unavailable");
 }
 
-// oracle: two aliased paths converge on ONE actor / ONE writer connection
+// oracle: two aliased paths converge on one actor / one writer connection
 // (canonical-identity keying), proven with a lexical alias that always works.
-#[test]
-fn lexical_aliases_converge_on_one_actor() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lexical_aliases_converge_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
@@ -84,17 +132,18 @@ fn lexical_aliases_converge_on_one_actor() {
     assert_eq!(sup.actor_count(), 1, "only one actor / one writer");
 
     // A write through A is visible through B — same underlying store.
-    a.write(write("r1", "shared", "via-a", 1), Arc::new(NoFaults))
+    seed(&a).await;
+    write(&a, "shared.md", "via-a", 1, Arc::new(NoFaults))
+        .await
         .expect("write a");
-    let doc = b.read("shared").expect("read b").expect("present");
-    assert_eq!(doc.body, "via-a");
+    assert_eq!(read(&b, "shared.md").await.as_deref(), Some("via-a"));
 }
 
-// oracle: a symlink/junction to the same engine dir converges on the SAME
+// oracle: a symlink/junction to the same engine dir converges on the same
 // actor (portability + file-identity). Skips honestly if the platform refuses
 // to create the alias.
-#[test]
-fn symlink_or_junction_alias_converges_on_one_actor() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn symlink_or_junction_alias_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path"); // creates .dohc/engine
     let real_engine_dir = db.parent().expect("engine dir").to_path_buf();
@@ -125,22 +174,24 @@ fn symlink_or_junction_alias_converges_on_one_actor() {
         "aliased opens must not fork a second writer"
     );
 
-    real.write(write("r1", "k", "value", 1), Arc::new(NoFaults))
+    seed(&real).await;
+    write(&real, "k.md", "value", 1, Arc::new(NoFaults))
+        .await
         .expect("write real");
-    let doc = via_link.read("k").expect("read via link").expect("present");
-    assert_eq!(doc.body, "value");
+    assert_eq!(read(&via_link, "k.md").await.as_deref(), Some("value"));
 }
 
 // oracle: restart increments the session generation and preserves state.
-#[test]
-fn restart_bumps_generation_and_preserves_state() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_bumps_generation_and_preserves_state() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
-    handle
-        .write(write("r1", "keep", "durable", 1), Arc::new(NoFaults))
+    seed(&handle).await;
+    write(&handle, "keep.md", "durable", 1, Arc::new(NoFaults))
+        .await
         .expect("write");
     assert_eq!(sup.generation_of(&db).expect("gen"), Some(1));
 
@@ -149,30 +200,27 @@ fn restart_bumps_generation_and_preserves_state() {
     assert_eq!(sup.actor_count(), 1);
 
     // State survived the restart, and the reopened actor is writable.
-    let doc = reopened.read("keep").expect("read").expect("present");
-    assert_eq!(doc.body, "durable");
-    let snap = reopened.snapshot().expect("snapshot");
-    assert_eq!(snap.documents, 1);
-
-    reopened
-        .write(write("r2", "more", "again", 2), Arc::new(NoFaults))
+    assert_eq!(read(&reopened, "keep.md").await.as_deref(), Some("durable"));
+    write(&reopened, "more.md", "again", 2, Arc::new(NoFaults))
+        .await
         .expect("write after restart");
-    assert_eq!(reopened.snapshot().expect("snap").documents, 2);
+    assert_eq!(read(&reopened, "more.md").await.as_deref(), Some("again"));
 }
 
 // oracle: close deterministically releases the connection. A second open alone
-// does NOT prove release (SQLite permits concurrent connections), so we assert
-// the WAL sidecar was checkpointed away — which only happens when the LAST
+// does not prove release (SQLite permits concurrent connections), so we assert
+// the WAL sidecar was checkpointed away — which only happens when the last
 // connection closes — and, on Windows, that the file is now deletable.
-#[test]
-fn close_releases_the_connection() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_releases_the_connection() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
-    handle
-        .write(write("r1", "d", "x", 1), Arc::new(NoFaults))
+    seed(&handle).await;
+    write(&handle, "d.md", "x", 1, Arc::new(NoFaults))
+        .await
         .expect("write");
     sup.close_all().expect("close all");
     assert_eq!(handle.lifecycle(), LifecycleState::Closed);
@@ -197,42 +245,43 @@ fn close_releases_the_connection() {
     }
 
     // And a brand-new writer opens cleanly and sees the committed state.
-    let store = EngineStore::open(&db, 2).expect("reopen after release");
-    assert_eq!(store.document_count().expect("docs"), 1);
+    assert_eq!(moments(&db), 1);
 }
 
 // oracle: dropping the supervisor closes every actor (deterministic Drop, no
 // detached worker outlives its owner).
-#[test]
-fn dropping_supervisor_releases_all_actors() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dropping_supervisor_releases_all_actors() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
 
     {
         let sup = WorkspaceSupervisor::new();
         let handle = sup.open(&db, 1).expect("open").actor;
-        handle
-            .write(write("r1", "d", "x", 1), Arc::new(NoFaults))
+        seed(&handle).await;
+        write(&handle, "d.md", "x", 1, Arc::new(NoFaults))
+            .await
             .expect("write");
         // sup drops here → its actors drop → each joins its worker + releases.
     }
 
     // Reopen proves the connection was released when the supervisor dropped.
-    let store = EngineStore::open(&db, 2).expect("reopen after supervisor drop");
-    assert_eq!(store.document_count().expect("docs"), 1);
+    assert_eq!(moments(&db), 1);
 }
 
 // oracle: a hard link addresses the same bytes → same file identity → one
 // actor (a path-key would have forked a second writer).
-#[test]
-fn hardlink_converges_on_one_actor() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hardlink_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     // Open (creates + initializes the db), then hard-link a second name to it.
     let a = sup.open(&db, 1).expect("open real").actor;
-    a.write(write("r1", "k", "value", 1), Arc::new(NoFaults))
+    seed(&a).await;
+    write(&a, "k.md", "value", 1, Arc::new(NoFaults))
+        .await
         .expect("write");
 
     let linked = db.parent().expect("engine dir").join("engine-hardlink.db");
@@ -241,8 +290,7 @@ fn hardlink_converges_on_one_actor() {
     let b = sup.open(&linked, 1).expect("open hardlink").actor;
     assert_eq!(a.identity(), b.identity(), "hard links share file identity");
     assert_eq!(sup.actor_count(), 1, "one actor / one writer");
-    let doc = b.read("k").expect("read").expect("present");
-    assert_eq!(doc.body, "value");
+    assert_eq!(read(&b, "k.md").await.as_deref(), Some("value"));
 }
 
 // oracle: a filename-case alias on a case-insensitive volume addresses the same
@@ -300,16 +348,17 @@ fn file_symlink_converges_on_one_actor() {
 
 // oracle: a worker panic publishes Closed (panic-safe teardown) and the handle
 // fails cleanly rather than hanging.
-#[test]
-fn worker_panic_publishes_closed() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn worker_panic_publishes_closed() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
     let handle = sup.open(&db, 1).expect("open").actor;
+    seed(&handle).await;
 
     let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
-    let err = handle
-        .write(write("r1", "d1", "boom", 1), panic_faults)
+    let err = write(&handle, "d1.md", "boom", 1, panic_faults)
+        .await
         .expect_err("panic in the worker surfaces as a lost reply");
     assert_eq!(err.code(), "actor-unavailable");
 
@@ -319,17 +368,18 @@ fn worker_panic_publishes_closed() {
 
 // oracle: restart after a panicked predecessor preserves generation continuity
 // and yields a fresh, writable actor.
-#[test]
-fn restart_after_panicked_predecessor_continues_generation() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn restart_after_panicked_predecessor_continues_generation() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
     assert_eq!(sup.generation_of(&db).expect("gen"), Some(1));
+    seed(&handle).await;
 
     let panic_faults: Arc<dyn FaultInjector> = PanicFaults::at(FaultPoint::StorageBeforePersist);
-    let _ = handle.write(write("r1", "d1", "boom", 1), panic_faults);
+    let _ = write(&handle, "d1.md", "boom", 1, panic_faults).await;
     wait_for_closed(&handle);
 
     // Restart evicts the dead actor and carries the generation forward.
@@ -338,109 +388,17 @@ fn restart_after_panicked_predecessor_continues_generation() {
     assert_eq!(sup.actor_count(), 1);
 
     // The reopened actor is writable; the rolled-back panic left no data.
-    let outcome = reopened
-        .write(write("r2", "d2", "ok", 2), Arc::new(NoFaults))
+    write(&reopened, "d2.md", "ok", 2, Arc::new(NoFaults))
+        .await
         .expect("write after restart");
-    assert_eq!(
-        outcome,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: false
-        }
-    );
-    assert_eq!(reopened.snapshot().expect("snap").documents, 1);
+    assert_eq!(read(&reopened, "d1.md").await, None);
+    assert_eq!(read(&reopened, "d2.md").await.as_deref(), Some("ok"));
 }
 
-// oracle: bounded backpressure is observable and recoverable — repeatedly
-// filling the command queue behind a wedged worker yields a typed Overloaded,
-// then draining it restores normal writes without a lost wakeup.
-#[test]
-fn full_command_queue_reports_overloaded() {
-    let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
-    let sup = WorkspaceSupervisor::new();
-    let handle = sup.open(&db, 1).expect("open").actor;
-
-    for round in 0..4 {
-        // Wedge the worker: it dequeues this write and parks inside the gate.
-        let gate = GateFaults::at(FaultPoint::StorageBeforePersist);
-        let gate_dyn: Arc<dyn FaultInjector> = gate.clone();
-        handle
-            .try_submit_write(
-                write(
-                    &format!("wedge-{round}"),
-                    &format!("wd-{round}"),
-                    "held",
-                    round,
-                ),
-                gate_dyn,
-            )
-            .expect("submit wedger");
-        gate.wait_until_reached();
-
-        // Fill the bounded queue; a bounded number of submits must hit
-        // Overloaded, and it must remain overloaded while the gate is closed.
-        let mut accepted = 0;
-        for i in 0..512 {
-            match handle.try_submit_write(
-                write(
-                    &format!("fill-{round}-{i}"),
-                    &format!("fd-{round}-{i}"),
-                    "x",
-                    round,
-                ),
-                Arc::new(NoFaults),
-            ) {
-                Ok(()) => accepted += 1,
-                Err(err) if err.code() == "overloaded" => break,
-                Err(err) => panic!("unexpected error while filling queue: {err}"),
-            }
-        }
-        assert!(
-            accepted > 0,
-            "the bounded queue must accept work before full"
-        );
-        let err = handle
-            .try_submit_write(
-                write(
-                    &format!("still-full-{round}"),
-                    &format!("still-full-doc-{round}"),
-                    "x",
-                    round,
-                ),
-                Arc::new(NoFaults),
-            )
-            .expect_err("a wedged full queue must stay overloaded");
-        assert_eq!(err.code(), "overloaded");
-
-        // Release, drain all FIFO work, and prove a normal blocking write can
-        // enter behind it and receive an acknowledgement. Repeating the cycle
-        // exercises both condition-variable paths and queue recovery.
-        gate.release();
-        let outcome = handle
-            .write(
-                write(
-                    &format!("recover-{round}"),
-                    &format!("recover-doc-{round}"),
-                    "recovered",
-                    round,
-                ),
-                Arc::new(NoFaults),
-            )
-            .expect("queue must recover after drain");
-        assert!(matches!(
-            outcome,
-            WriteOutcome::Acked { deduped: false, .. }
-        ));
-    }
-
-    sup.close_all().expect("close all");
-}
-
-// oracle: concurrent opens of the same file converge on ONE actor / ONE writer
+// oracle: concurrent opens of the same file converge on one actor / one writer
 // (the reservation protocol dedups; the lock is not held across the spawn).
-#[test]
-fn concurrent_opens_share_one_actor() {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_opens_share_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db path");
     let sup = Arc::new(WorkspaceSupervisor::new());
@@ -449,18 +407,19 @@ fn concurrent_opens_share_one_actor() {
     for t in 0..8 {
         let sup = Arc::clone(&sup);
         let db = db.clone();
-        joins.push(std::thread::spawn(move || {
+        joins.push(tokio::spawn(async move {
             let handle = sup.open(&db, 1).expect("concurrent open").actor;
-            handle
-                .write(
-                    write(&format!("r-{t}"), &format!("d-{t}"), "v", 1),
-                    Arc::new(NoFaults),
-                )
+            seed(&handle).await;
+            write(&handle, &format!("d-{t}.md"), "v", 1, Arc::new(NoFaults))
+                .await
                 .expect("write");
             handle
         }));
     }
-    let handles: Vec<_> = joins.into_iter().map(|j| j.join().expect("join")).collect();
+    let mut handles = Vec::new();
+    for join in joins {
+        handles.push(join.await.expect("join"));
+    }
 
     assert_eq!(sup.actor_count(), 1, "all opens share one actor");
     let first_identity = handles[0].identity();
@@ -468,5 +427,10 @@ fn concurrent_opens_share_one_actor() {
         assert_eq!(handle.identity(), first_identity, "one file identity");
     }
     // Every concurrent write landed in the single store.
-    assert_eq!(handles[0].snapshot().expect("snap").documents, 8);
+    for t in 0..8 {
+        assert_eq!(
+            read(&handles[0], &format!("d-{t}.md")).await.as_deref(),
+            Some("v")
+        );
+    }
 }

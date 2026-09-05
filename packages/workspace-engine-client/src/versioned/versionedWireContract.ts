@@ -125,7 +125,6 @@ export type VersionedTextRollbackParams = Omit<MutationMetadata, "nowMs"> & {
   versionId: string;
   path: string;
   mutationMomentId: string;
-  legacyBeforeText?: string;
 };
 
 export type VersionedTextListParams = JsonObject & {

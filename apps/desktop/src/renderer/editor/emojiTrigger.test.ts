@@ -52,7 +52,7 @@ function makeDocWithParent(
 }
 
 describe('detectEmojiAutocomplete — :shortcode: picker trigger', () => {
-  it('does NOT open after just one query character', () => {
+  it('does not open after just one query character', () => {
     expect(detectEmojiAutocomplete(makeDocWithParent(':s', paragraph()), 3)).toEqual({
       active: false,
     })
@@ -154,7 +154,7 @@ describe('detectCompleteEmojiShortcode — immediate-insert trigger', () => {
   })
 })
 
-// --- appendTransaction gating: the Slack-style auto-insert must fire ONLY on
+// --- appendTransaction gating: the Slack-style auto-insert must fire only on
 // local typing that completes the shortcode, never on other doc-changing
 // transactions (remote collab edits, edits elsewhere) that merely leave the
 // cursor after a pre-existing literal `:shortcode:`. Uses a real editor so the
@@ -199,7 +199,7 @@ describe('makeEmojiPlugin — appendTransaction auto-insert gating', () => {
     expect(editor.state.doc.textContent).not.toContain(':smile:')
   })
 
-  it('does NOT replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it', () => {
+  it('does not replace a pre-existing literal shortcode on an unrelated doc change with the cursor after it', () => {
     // "hi :smile: yo" — the literal is intentionally left in prose.
     const editor = makeEditor('<p>hi :smile: yo</p>')
 
@@ -210,7 +210,7 @@ describe('makeEmojiPlugin — appendTransaction auto-insert gating', () => {
       editor.state.tr.setSelection(TextSelection.create(editor.state.doc, cursor)),
     )
 
-    // A doc-changing transaction ELSEWHERE (mimicking a remote/collab edit or
+    // A doc-changing transaction elsewhere (mimicking a remote/collab edit or
     // an edit further along) that keeps the collapsed cursor parked after the
     // literal. Pre-fix, any docChanged with the cursor after a complete
     // shortcode triggered the auto-insert; the step-gate now blocks it.

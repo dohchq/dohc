@@ -14,7 +14,7 @@ import {
   type WorkspaceFileWrite,
 } from "./helpers/workspace";
 
-// PR 0N-2 — THE AGENT LOOP AS A TEST. One gesture hands a task to an agent in
+// THE AGENT LOOP AS A TEST. One gesture hands a task to an agent in
 // a fresh version: the version menu's "Try in a version…" creates and
 // switches to "Try: <task>", starts a dohc-tracked run (0N-1 attribution),
 // shows an honest banner while the agent works, and turns the run's end into
@@ -87,7 +87,7 @@ async function expectActiveVersion(page: Page, name: string): Promise<void> {
   await expect(page.getByTestId("version-menu-button")).toBeEnabled();
 }
 
-// Drives the REAL gesture end to end through the product UI: version menu ->
+// Drives the real gesture end to end through the product UI: version menu ->
 // "Try in a version…" -> task -> Start. Resolves once the running banner is
 // visible, returning the wall-clock milliseconds from Start to banner.
 async function startTryGesture(page: Page, task: string): Promise<number> {
@@ -249,7 +249,7 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
     ).toBeVisible({ timeout: 20_000 });
     await expect(page.getByTestId("try-review-card")).toBeVisible();
 
-    // Merge into Main through the EXISTING merge flow; after Done, dohc
+    // Merge into Main through the existing merge flow; after Done, dohc
     // returns to Main so the folder shows the merged result.
     await page.getByTestId("try-review-merge").click();
     await expect(page.getByTestId("version-merge-dialog")).toBeVisible();

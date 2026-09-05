@@ -9,7 +9,7 @@
 //!
 //! Ids that carry identity are pinned in the trace, so the capture is fully
 //! deterministic and compared to a golden STRING with no ID substitution. A
-//! LIVE TS-process runner would drive the same trace through the TS engine and
+//! live TS-process runner would drive the same trace through the TS engine and
 //! apply N7 structural ID substitution before comparing — see the PR notes.
 
 use dohc_engine_domain::{
@@ -79,7 +79,7 @@ fn run_trace(db: &std::path::Path) -> String {
     )
     .expect("write feat");
     // Cross-version fork: fork feat2 from `main` (a NON-TIP version) while the
-    // global-latest moment (m2) belongs to `feat`. feat2's fork point MUST be
+    // global-latest moment (m2) belongs to `feat`. feat2's fork point must be
     // main's latest (m1), never the global-latest m2. This exercises the fork
     // provenance the P1 bug corrupted; the fork base (frozen below) must be
     // main's content, not feat's.
@@ -153,7 +153,6 @@ fn run_trace(db: &std::path::Path) -> String {
             path: "a.md".to_owned(),
             mutation_moment_id: "m5".to_owned(),
             request_id: None,
-            legacy_before_text: None,
             metadata_origin: "restore".to_owned(),
             author_json: None,
         },

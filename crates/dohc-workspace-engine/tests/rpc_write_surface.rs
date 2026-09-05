@@ -150,10 +150,12 @@ async fn moments(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
-    // MUTATION: drop `object` (or `moment`) from the write response -> this test fails.
     let (_scratch, transport, handle) = fixture("write-shape").await;
     let result = write(&transport, &handle, 2, "shape.md", "shape", "shape-1").await;
-    assert!(result["object"]["id"].is_string());
+    assert!(
+        result["object"]["id"].is_string(),
+        "drop `object` (or `moment`) from the write response -> this test fails."
+    );
     assert_eq!(result["snapshot"]["contentKind"], "text");
     assert!(result["snapshot"]["sha256"].is_string());
     assert!(result["moment"]["momentId"].is_string());
@@ -162,7 +164,7 @@ async fn write_response_shape_contains_object_snapshot_moment_and_deduped() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_over_long_write_identifier_is_refused_by_name() {
-    // #654. THE PATH WITH NO GUARD. `versionedText.write` takes the caller's
+    // THE PATH WITH NO GUARD. `versionedText.write` takes the caller's
     // `objectId` and `momentId` and serves each of them three times in its
     // answer — `object.id`, `snapshot.objectId`, `moment.objectId`, and the
     // moment id across the snapshot and the moment. Nothing here reserves
@@ -170,10 +172,6 @@ async fn an_over_long_write_identifier_is_refused_by_name() {
     // 3 MB id fit one 8 MiB request frame and came back as a ~9 MB answer the
     // daemon's writer treats as fatal — after the write had committed.
     //
-    // MUTATION: drop `bounded_identifier` from `normalized_write_input` and
-    // the write commits instead of refusing. MUTATION: map `IdentifierTooLong`
-    // through the static tail of `map_runtime` and the message loses its
-    // numbers.
     let (_scratch, transport, handle) = fixture("over-long-write-identifier").await;
     let limit = dohc_engine_storage::MAX_IDENTIFIER_BYTES;
     let over_long = "x".repeat(limit + 1);
@@ -268,8 +266,6 @@ async fn text_mutations_persist_summary_and_correlation_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
-    // MUTATION: let ensure_main_version bootstrap the caller's arbitrary id ->
-    // either draft write succeeds and creates versioned state.
     let (scratch, transport, handle) = fixture("fresh-main-only").await;
     for (id, method, params) in [
         (
@@ -336,10 +332,12 @@ async fn fresh_workspace_bootstraps_only_the_canonical_main_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() {
-    // MUTATION: enqueue text materialization or omit binary materialization -> moment/disk assertions fail.
     let (scratch, transport, handle) = fixture("materialize").await;
     write(&transport, &handle, 2, "plain.md", "db only", "plain-1").await;
-    assert!(!scratch.path().join("plain.md").exists());
+    assert!(
+        !scratch.path().join("plain.md").exists(),
+        "enqueue text materialization or omit binary materialization -> moment/disk assertions fail."
+    );
     let binary = call(
         &transport,
         &handle,
@@ -362,7 +360,6 @@ async fn text_write_enqueues_no_materialization_and_binary_write_enqueues_one() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conflicted_binary_materialize_returns_the_committed_moment() {
-    // MUTATION: restore post-commit conflict refusal -> this call errors and hides the durable moment.
     let (scratch, transport, handle) = fixture("binary-conflict-result").await;
     std::fs::write(scratch.path().join("occupied.bin"), b"external").expect("external file");
     let result = call(
@@ -391,7 +388,6 @@ async fn conflicted_binary_materialize_returns_the_committed_moment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
-    // MUTATION: move/remove the pre-materialize suppression record -> watcher capture adds a moment.
     let (_scratch, transport, handle) = fixture("binary-suppression").await;
     call(
         &transport,
@@ -408,7 +404,6 @@ async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
-    // MUTATION: seed generated ids from the wire request id instead of requestId -> retry mismatches.
     let (_scratch, transport, handle) = fixture("binary-request-ledger").await;
     let params = json!({
         "versionId": "main",
@@ -452,7 +447,6 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
         .await
         .expect_err("request id reuse with different bytes must fail");
     assert_eq!(mismatch.message, "idempotency-key-reuse-mismatch");
-    // MUTATION: omit object_id from the binary ledger hash -> this silently replays.
     let object_mismatch = transport
         .call(
             RequestContext::unbounded(),
@@ -478,7 +472,6 @@ async fn binary_write_request_id_replays_once_and_rejects_mismatch() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_sized_text_write_succeeds_and_over_cap_refuses_before_commit() {
-    // MUTATION: commit text/binary and only then refuse -> the moment count changes.
     let (_scratch, transport, handle) = fixture("cap").await;
     write(&transport, &handle, 2, "seed.md", "seed", "cap-seed").await;
     let before = moments(&transport, &handle, 3).await.len();
@@ -583,10 +576,6 @@ async fn blob_write_accepts_full_range_bytes_and_reuses_a_referenced_digest() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_paths_flow_verbatim_without_unicode_normalization() {
-    // MUTATION: NFC-normalize RPC paths -> the stored spelling changes and a
-    // caller feeding back a listed path misses its own row (the recorded
-    // cross-engine posture: Rust stores the spelling the write carried;
-    // classification stays disguise-proof).
     let (_scratch, transport, handle) = fixture("verbatim-path").await;
     call(
         &transport,
@@ -664,7 +653,6 @@ async fn rpc_paths_flow_verbatim_without_unicode_normalization() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_write_rejects_over_cap_text_before_commit() {
-    // MUTATION: commit the secret and truncate only the response -> the moment leaks and fails.
     let (_scratch, transport, handle) = fixture("secret-cap").await;
     call(
         &transport,
@@ -716,7 +704,6 @@ async fn secrets_write_rejects_over_cap_text_before_commit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_moments_keyset_pages_round_trip_without_overlap() {
-    // MUTATION: return the old bare/truncated array or use an inclusive cursor -> shape/overlap fails.
     let (_scratch, transport, handle) = fixture("secret-moment-pages").await;
     call(
         &transport,
@@ -781,7 +768,6 @@ async fn secret_moments_keyset_pages_round_trip_without_overlap() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_moments_version_wide_pages_across_paths_newest_first() {
-    // MUTATION: require or unconditionally filter by path -> the mixed-path page loses a row.
     let (_scratch, transport, handle) = fixture("secret-version-history").await;
     call(
         &transport,
@@ -1157,7 +1143,6 @@ async fn aggregate_history_page_marks_a_protected_byte_budget_cut() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_moments_without_version_list_workspace_history_newest_first() {
-    // MUTATION: require versionId or always scope the actor query to one version -> fails.
     let (_scratch, transport, handle) = fixture("secret-workspace-history").await;
     let workspace_id = "ws-rpcd-secret-workspace-history";
     call(
@@ -1228,7 +1213,6 @@ async fn secret_moments_without_version_list_workspace_history_newest_first() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_apply_uses_explicit_target_and_preserves_caller_provenance() {
-    // MUTATION: hardcode apply provenance to sync or drop summary/correlation -> assertions fail.
     let (_scratch, transport, handle) = fixture("secret-apply-target").await;
     let workspace_id = "ws-rpcd-secret-apply-target";
     call(
@@ -1343,7 +1327,6 @@ async fn secrets_apply_uses_explicit_target_and_preserves_caller_provenance() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_apply_fresh_workspace_returns_invalid_version() {
-    // MUTATION: return the no-key/no-state early answer before validating versions -> this succeeds.
     let (_scratch, transport, handle) = fixture("secret-apply-fresh").await;
     let error = transport
         .call(
@@ -1369,8 +1352,6 @@ async fn secrets_apply_fresh_workspace_returns_invalid_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rpc_secret_delete_enqueues_pending_disk_removal() {
-    // MUTATION: restore the completed-marker-only RPC delete -> this job is
-    // complete instead of pending, so open replay cannot remove disk plaintext.
     let (scratch, transport, handle) = fixture("secret-delete-marker").await;
     let workspace_id = "ws-rpcd-secret-delete-marker";
     call(
@@ -1435,8 +1416,6 @@ async fn rpc_secret_delete_enqueues_pending_disk_removal() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_open_replay_writes_decrypted_plaintext_and_completes_once() {
-    // MUTATION: keep skipping secret-mat_ jobs, write the ciphertext blob, or
-    // omit the completion transition -> disk/status assertions fail.
     let (scratch, transport, handle) = fixture("secret-open-replay").await;
     let workspace = "ws-rpcd-secret-open-replay";
     call(
@@ -1513,8 +1492,6 @@ async fn secret_open_replay_writes_decrypted_plaintext_and_completes_once() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
-    // MUTATION: revert the RPC delete to a completed-marker-only job -> the
-    // previously materialized plaintext survives the second open replay.
     let (scratch, transport, handle) = fixture("secret-active-delete-removes-disk").await;
     let workspace = "ws-rpcd-secret-active-delete-removes-disk";
     call(
@@ -1626,8 +1603,6 @@ async fn active_secret_delete_removes_materialized_plaintext_from_disk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
-    // MUTATION: revert restore-to-absent to record_completed_job -> the
-    // restored-away plaintext survives because open has no pending delete.
     let (scratch, transport, handle) = fixture("secret-restore-absent-removes-disk").await;
     let workspace = "ws-rpcd-secret-restore-absent-removes-disk";
     call(
@@ -1753,8 +1728,6 @@ async fn secret_restore_to_absent_removes_materialized_plaintext_on_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() {
-    // MUTATION: preserve a preimage mismatch for secret deletes by writing a
-    // plaintext `.conflict` sibling -> the leak-artifact assertion fails.
     let (scratch, transport, handle) = fixture("secret-delete-adopts-disk").await;
     let workspace = "ws-rpcd-secret-delete-adopts-disk";
     call(
@@ -1863,8 +1836,6 @@ async fn active_secret_delete_adopts_modified_disk_without_plaintext_conflict() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
-    // MUTATION: let a non-active-version delete drive the disk executor -> the
-    // active Main secret is removed instead of surviving as the disk projection.
     let (scratch, transport, handle) = fixture("secret-cross-version-order").await;
     let workspace = "ws-rpcd-secret-cross-version-order";
     call(
@@ -1975,8 +1946,6 @@ async fn non_active_secret_delete_does_not_remove_active_disk_secret() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn non_active_secret_write_survives_until_activation_and_reopen() {
-    // MUTATION: mark the non-active secret job complete during the first open
-    // -> activation plus the second open loses the inactive version's secret.
     let (scratch, transport, handle) = fixture("secret-non-active-write").await;
     let workspace = "ws-rpcd-secret-non-active-write";
     call(
@@ -2142,8 +2111,6 @@ async fn non_active_secret_write_survives_until_activation_and_reopen() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
-    // MUTATION: treat a missing secret moment as StateCorrupt -> workspace.open
-    // fails after the deleted version leaves its pending materialization job.
     let (scratch, transport, handle) = fixture("secret-deleted-version-orphan").await;
     let workspace = "ws-rpcd-secret-deleted-version-orphan";
     call(
@@ -2251,8 +2218,6 @@ async fn orphan_pending_secret_job_from_deleted_version_does_not_brick_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_write_then_delete_reopens_without_materializing_stale_plaintext() {
-    // MUTATION: restore StateCorrupt-on-missing-tip -> the pending write sees
-    // the later active-version delete, and workspace.open bricks.
     let (scratch, transport, handle) = fixture("secret-active-write-delete").await;
     let workspace = "ws-rpcd-secret-active-write-delete";
     call(
@@ -2323,8 +2288,6 @@ async fn active_secret_write_then_delete_reopens_without_materializing_stale_pla
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_apply_pending_secret_delete_reopens_without_bricking() {
-    // MUTATION: treat the superseded pending write's absent active tip as
-    // StateCorrupt -> replay aborts before the replicated pending delete runs.
     let (scratch, transport, handle) = fixture("secret-apply-pending-delete").await;
     let workspace = "ws-rpcd-secret-apply-pending-delete";
     call(
@@ -2447,8 +2410,6 @@ async fn replicated_apply_pending_secret_delete_reopens_without_bricking() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn newer_non_active_marker_does_not_suppress_active_secret_delete() {
-    // MUTATION: route the active secret delete through the workspace-wide
-    // generation fence -> the newer non-active marker suppresses disk removal.
     let (scratch, transport, handle) = fixture("secret-active-delete-fence").await;
     let workspace = "ws-rpcd-secret-active-delete-fence";
     call(
@@ -2589,8 +2550,6 @@ async fn newer_non_active_marker_does_not_suppress_active_secret_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() {
-    // MUTATION: restore StateCorrupt-on-missing-tip or decrypt a superseded
-    // same-version write -> the tampered historical ciphertext bricks open.
     let (scratch, transport, handle) = fixture("secret-superseded-tampered").await;
     let workspace = "ws-rpcd-secret-superseded-tampered";
     call(
@@ -2688,8 +2647,6 @@ async fn newer_marker_lets_a_superseded_tampered_secret_open_without_bricking() 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
-    // MUTATION: `?`-propagate decrypt-failed or write plaintext from
-    // unauthenticated bytes -> open fails or the target/status assertions fail.
     let (scratch, transport, handle) = fixture("secret-replay-tamper").await;
     let workspace = "ws-rpcd-secret-replay-tamper";
     call(
@@ -2772,8 +2729,6 @@ async fn tampered_secret_open_replay_fails_closed_without_writing_plaintext() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_disk_symlink_at_path_does_not_brick_open() {
-    // MUTATION: `?`-propagate the secret write executor's symlink error ->
-    // workspace.open fails instead of leaving this one job pending.
     let (scratch, transport, handle) = fixture("secret-replay-symlink").await;
     let workspace = "ws-rpcd-secret-replay-symlink";
     call(
@@ -2859,8 +2814,6 @@ async fn secret_disk_symlink_at_path_does_not_brick_open() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_symlinked_parent_never_writes_outside_workspace() {
-    // MUTATION: drop the secret ancestor walk -> replay follows `config` and
-    // writes the decrypted .env into the external directory.
     let (scratch, transport, handle) = fixture("secret-replay-parent-symlink").await;
     let workspace = "ws-rpcd-secret-replay-parent-symlink";
     call(
@@ -2944,8 +2897,6 @@ async fn secret_symlinked_parent_never_writes_outside_workspace() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn planted_secret_temp_symlink_is_never_followed() {
-    // MUTATION: restore create+truncate for the secret temp -> replay follows
-    // the predictable temp symlink and writes plaintext into the external file.
     let (scratch, transport, handle) = fixture("secret-replay-temp-symlink").await;
     let workspace = "ws-rpcd-secret-replay-temp-symlink";
     call(
@@ -3036,8 +2987,6 @@ async fn planted_secret_temp_symlink_is_never_followed() {
 // path while preserving exclusive-create on the replacement entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn planted_secret_temp_regular_file_is_unlinked_for_recovery() {
-    // MUTATION: remove the AlreadyExists classify+unlink+retry branch -> the
-    // planted regular temp leaves the job pending and .env absent.
     let (scratch, transport, handle) = fixture("secret-replay-temp-regular").await;
     let workspace = "ws-rpcd-secret-replay-temp-regular";
     call(
@@ -3118,8 +3067,6 @@ async fn planted_secret_temp_regular_file_is_unlinked_for_recovery() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn crashed_secret_write_recovers_after_reopen() {
-    // MUTATION: revert write_secret_temp_no_follow to bare create_new -> reopen
-    // cannot replace the durable crashed temp, so .env stays absent and pending.
     let (scratch, transport, handle) = fixture("secret-replay-crashed-temp").await;
     let workspace = "ws-rpcd-secret-replay-crashed-temp";
     call(
@@ -3200,8 +3147,6 @@ async fn crashed_secret_write_recovers_after_reopen() {
 #[cfg(any(unix, windows))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
-    // MUTATION: reject_link_or_reparse the workspace root itself -> replay
-    // refuses this benign root alias, leaving .env absent and the job pending.
     let scratch = ScratchDir::new().expect("real workspace");
     let alias_parent = ScratchDir::new().expect("workspace alias parent");
     let aliased_root = alias_parent.path().join("workspace-link");
@@ -3313,12 +3258,10 @@ async fn secret_write_beneath_symlinked_workspace_root_succeeds() {
 
 // Windows runtime coverage for the ancestor-reparse rejection (the #[cfg(unix)]
 // symlink test can't run on Windows). A junction (`mklink /J`) is a reparse point
-// creatable WITHOUT elevation, so it exercises FILE_ATTRIBUTE_REPARSE_POINT.
+// creatable without elevation, so it exercises FILE_ATTRIBUTE_REPARSE_POINT.
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_junctioned_parent_never_writes_outside_workspace() {
-    // MUTATION: drop the secret ancestor walk / the reparse check -> replay
-    // traverses the `config` junction and writes the decrypted .env outside.
     let (scratch, transport, handle) = fixture("secret-replay-parent-junction").await;
     let workspace = "ws-rpcd-secret-replay-parent-junction";
     call(
@@ -3405,8 +3348,6 @@ async fn secret_junctioned_parent_never_writes_outside_workspace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_write_blocked_by_directory_stays_pending() {
-    // MUTATION: restore Oversized -> mark_materialization_conflict -> the
-    // active write becomes terminal instead of remaining retryable.
     let (scratch, transport, handle) = fixture("secret-write-directory").await;
     let workspace = "ws-rpcd-secret-write-directory";
     call(
@@ -3492,8 +3433,6 @@ async fn active_secret_write_blocked_by_directory_stays_pending() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_directory_at_path_does_not_brick_open() {
-    // MUTATION: `?`-propagate the secret delete executor's directory error ->
-    // workspace.open fails instead of leaving the directory and job pending.
     let (scratch, transport, handle) = fixture("secret-replay-directory").await;
     let workspace = "ws-rpcd-secret-replay-directory";
     call(
@@ -3615,8 +3554,6 @@ async fn secret_directory_at_path_does_not_brick_open() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending() {
-    // MUTATION: remove the secret delete executor's non-regular guards -> on
-    // Unix the socket path is unlinked and the delete job completes.
     let (scratch, transport, handle) = fixture("secret-delete-non-regular").await;
     let workspace = "ws-rpcd-secret-delete-non-regular";
     call(
@@ -3746,7 +3683,6 @@ async fn active_secret_delete_refuses_non_regular_target_and_leaves_job_pending(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
-    // MUTATION: move the secret-path gate after key/version handling -> the two errors diverge.
     let (scratch, transport, handle) = fixture("secret-apply-path-gate").await;
     let params = json!({
         "workspaceId": "ws-rpcd-secret-apply-path-gate",
@@ -3773,7 +3709,6 @@ async fn secrets_apply_rejects_non_secret_path_before_key_handling() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_require_version_wire_code_is_invalid_version() {
-    // MUTATION: restore the text-domain VersionNotFound code in secrets::require_version -> fails.
     let (_scratch, transport, handle) = fixture("secret-invalid-version").await;
     let error = transport
         .call(
@@ -3796,14 +3731,15 @@ async fn secret_require_version_wire_code_is_invalid_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
-    // MUTATION: ignore the request ledger -> replay creates a second moment.
     let (_scratch, transport, handle) = fixture("request-id").await;
     let first = write(&transport, &handle, 2, "id.md", "same", "stable-id").await;
     let replay = write(&transport, &handle, 3, "id.md", "same", "stable-id").await;
-    assert_eq!(replay["deduped"], true);
+    assert_eq!(
+        replay["deduped"], true,
+        "ignore the request ledger -> replay creates a second moment."
+    );
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     assert_eq!(moments(&transport, &handle, 4).await.len(), 1);
-    // MUTATION: omit origin/author from the write ledger hash -> this silently replays.
     let origin_flip = transport
         .call(
             RequestContext::unbounded(),
@@ -3834,7 +3770,6 @@ async fn request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload() {
-    // MUTATION: silently overwrite a colliding moment id -> the refusal assertion fails.
     let (_scratch, transport, handle) = fixture("moment-id").await;
     let params = json!({ "versionId": "main", "path": "moment.md", "text": "same", "origin": "api", "momentId": "fixed-moment" });
     call(
@@ -3859,8 +3794,6 @@ async fn moment_id_collision_rejects_different_payload_and_replays_exact_payload
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_moment_id_blocks_a_secret_moment_with_the_same_id() {
-    // MUTATION: drop `moments` from the secret-domain collision query -> the
-    // protected row is admitted and becomes shadowed by text history.
     let (_scratch, transport, handle) = fixture("text-then-secret-moment-id").await;
     call(
         &transport,
@@ -3901,8 +3834,6 @@ async fn text_moment_id_blocks_a_secret_moment_with_the_same_id() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_moment_id_blocks_a_text_moment_with_the_same_id() {
-    // MUTATION: drop `secret_moments` from the text-domain collision query ->
-    // the plaintext row is admitted and shadows the protected history.
     let (_scratch, transport, handle) = fixture("secret-then-text-moment-id").await;
     call(
         &transport,
@@ -3951,7 +3882,6 @@ async fn secret_moment_id_blocks_a_text_moment_with_the_same_id() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn origin_closed_set_rejects_capture_and_ydoc() {
-    // MUTATION: admit reserved origins or reject one of the public five -> this test fails.
     let (_scratch, transport, handle) = fixture("origins").await;
     for (offset, origin) in ["api", "local-file", "restore", "sync", "unknown"]
         .into_iter()
@@ -4001,22 +3931,21 @@ async fn origin_closed_set_rejects_capture_and_ydoc() {
         )
         .await
         .expect_err("conflicts.resolve reserved origin");
-    // MUTATION: forward LocalResolveDto.metadata_origin without
-    // validated_origin. The actor sees the missing conflict instead.
-    assert_eq!(conflict_origin.message, "invalid-metadata");
+    assert_eq!(
+        conflict_origin.message, "invalid-metadata",
+        "forward LocalResolveDto.metadata_origin without validated_origin. The actor sees the missing conflict instead."
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_refused_write_creates_no_version() {
     // A write that is refused must leave NO trace, including no implicitly created
     // `main`. Nothing asserted this, and the question is not academic: the
-    // TypeScript loopback resolves its version through a helper that CREATES
-    // `main` when absent, and it did so BEFORE validating the request — so the
+    // TypeScript loopback resolves its version through a helper that creates
+    // `main` when absent, and it did so before validating the request — so the
     // fake left a version behind on a refusal. That divergence (dohc-ai/dohc#439)
     // could not be settled without knowing what the daemon does, which is this.
     //
-    // MUTATION: make the binary write ensure the version before decoding its
-    // bytes, and the second assertion fails.
     let (_scratch, transport, handle) = fixture("refused-write-atomicity").await;
     let before = call(&transport, &handle, 2, "versions.list", json!({})).await;
     assert_eq!(
@@ -4052,8 +3981,6 @@ async fn a_refused_write_creates_no_version() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
-    // MUTATION: remove endpoint validation -> these calls fall through to
-    // state/path errors or accept a field the TypeScript contract rejects.
     let (_scratch, transport, handle) = fixture("metadata-bounds").await;
     let oversized = "x".repeat(16 * 1024 + 1);
     let cases = [
@@ -4132,8 +4059,6 @@ async fn mutation_metadata_fields_are_bounded_at_every_rpc_entry() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
-    // MUTATION: hash Option<String> through unwrap_or("") -> every retry below
-    // silently replays instead of reporting request-key payload reuse.
     let (_scratch, transport, handle) = fixture("metadata-presence-fingerprint").await;
     let mut initial = vec![
         (
@@ -4215,11 +4140,13 @@ async fn empty_metadata_is_distinct_from_absent_in_mutation_fingerprints() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn raw_text_and_secret_bodies_round_trip_byte_identical() {
-    // MUTATION: re-add trimming, CRLF rewriting, or body NFC normalization -> either equality fails.
     let (_scratch, transport, handle) = fixture("raw-bodies").await;
     let body = "  leading\r\ntrailing  ";
     let written = write(&transport, &handle, 2, "raw.md", body, "raw-body").await;
-    assert_eq!(written["snapshot"]["text"], body);
+    assert_eq!(
+        written["snapshot"]["text"], body,
+        "re-add trimming, CRLF rewriting, or body NFC normalization -> either equality fails."
+    );
     let read = call(
         &transport,
         &handle,
@@ -4260,7 +4187,6 @@ async fn raw_text_and_secret_bodies_round_trip_byte_identical() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
-    // MUTATION: emit two moments, leave the old alias, or skip the secret-floor gate -> assertions fail.
     let (_scratch, transport, handle) = fixture("rename").await;
     write(
         &transport,
@@ -4305,7 +4231,6 @@ async fn rename_is_one_moment_atomic_and_secret_floor_is_enforced() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
-    // MUTATION: skip the ledger check -> a replayed rename double-moves the alias.
     let (_scratch, transport, handle) = fixture("rename-request-id").await;
     write(&transport, &handle, 2, "old.md", "body", "rename-id-seed").await;
     let params = json!({ "versionId": "main", "fromPath": "old.md", "toPath": "new.md", "origin": "api", "requestId": "rename-stable" });
@@ -4329,7 +4254,6 @@ async fn rename_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     let after_replay = moments(&transport, &handle, 5).await.len();
     assert_eq!(after_replay, 2);
-    // MUTATION: omit origin/author from the rename ledger hash -> this silently replays.
     let mut flipped = params.clone();
     flipped["origin"] = json!("sync");
     let origin_flip = transport
@@ -4393,7 +4317,6 @@ async fn delete_commits_without_a_disk_confirmation_gate() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
-    // MUTATION: skip the ledger check -> a replayed delete re-enters the absent-head mutation path.
     let (_scratch, transport, handle) = fixture("delete-request-id").await;
     write(&transport, &handle, 2, "gone.md", "gone", "delete-id-seed").await;
     write(&transport, &handle, 3, "keep.md", "keep", "delete-id-keep").await;
@@ -4418,7 +4341,6 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
     assert_eq!(replay["moment"]["momentId"], first["moment"]["momentId"]);
     let after_replay = moments(&transport, &handle, 6).await.len();
     assert_eq!(after_replay, 3);
-    // MUTATION: omit origin/author from the delete ledger hash -> this silently replays.
     let mut flipped = params.clone();
     flipped["origin"] = json!("sync");
     let origin_flip = transport
@@ -4454,7 +4376,6 @@ async fn delete_request_id_replay_is_deduped_and_reuse_mismatch_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
-    // MUTATION: skip the ledger check -> replay re-deletes the moment and re-enqueues compensation.
     let (_scratch, transport, handle) = fixture("rollback-request-id").await;
     let before = write(
         &transport,
@@ -4488,25 +4409,6 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     let after_replay = moments(&transport, &handle, 6).await.len();
     // Rollback removes the target moment and appends one compensating moment.
     assert_eq!(after_replay, 2);
-    // MUTATION: omit legacyBeforeText from the rollback ledger hash -> a
-    // different legacy preimage silently replays as deduped.
-    let mut legacy_flip = params.clone();
-    legacy_flip["legacyBeforeText"] = json!("a different legacy preimage");
-    let legacy_mismatch = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                39,
-                "versionedText.rollback",
-                Some(handle.clone()),
-                legacy_flip,
-            ),
-        )
-        .await
-        .expect_err("rollback legacy-preimage mismatch");
-    assert_eq!(legacy_mismatch.message, "idempotency-key-reuse-mismatch");
-
-    // MUTATION: omit origin/author from the rollback ledger hash -> this silently replays.
     let mut flipped = params.clone();
     flipped["origin"] = json!("api");
     let origin_flip = transport
@@ -4542,11 +4444,13 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_rollback_enqueues_compensation_and_cancels_the_original() {
-    // MUTATION: drop compensating restore or original-job cancellation -> disk remains/reappears.
     let (scratch, transport, handle) = fixture("rollback-binary").await;
     let write = call(&transport, &handle, 2, "versionedBinary.write", json!({ "versionId": "main", "path": "rollback.bin", "bytes": [4, 3, 2, 1], "origin": "api" })).await;
     call(&transport, &handle, 3, "versionedText.rollback", json!({ "versionId": "main", "path": "rollback.bin", "mutationMomentId": write["moment"]["momentId"], "origin": "restore" })).await;
-    assert!(!scratch.path().join("rollback.bin").exists());
+    assert!(
+        !scratch.path().join("rollback.bin").exists(),
+        "drop compensating restore or original-job cancellation -> disk remains/reappears."
+    );
     assert!(
         call(
             &transport,
@@ -4562,7 +4466,6 @@ async fn binary_rollback_enqueues_compensation_and_cancels_the_original() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_rejects_sync_record_only_moment() {
-    // MUTATION: allow a replication marker to drive rollback -> this call succeeds.
     use dohc_engine_domain::{NoFaults, VersionedTextStore, WriteText};
     use dohc_engine_storage::EngineStore;
 
@@ -4646,7 +4549,6 @@ async fn rollback_rejects_sync_record_only_moment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn leased_doc_rejects_write_rename_delete_and_rollback() {
-    // MUTATION: remove any per-RPC lease guard -> that mutation lands behind the live editor.
     let (_scratch, transport, handle) = fixture("leases").await;
     let seed = write(&transport, &handle, 2, "leased.md", "held", "lease-seed").await;
     let opened = call(
@@ -4701,7 +4603,6 @@ async fn leased_doc_rejects_write_rename_delete_and_rollback() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn absent_path_lease_uses_the_domain_canonical_path() {
-    // MUTATION: key the absent-path fallback on the raw caller spelling -> the write succeeds.
     let (_scratch, transport, handle) = fixture("absent-path-canonical-lease").await;
     let opened = call(
         &transport,
@@ -4744,7 +4645,6 @@ async fn absent_path_lease_uses_the_domain_canonical_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_rename_rejects_a_lease_on_the_restore_path() {
-    // MUTATION: skip the rename restore-path lease check -> rollback recreates a.md.
     let (_scratch, transport, handle) = fixture("rollback-rename-restore-lease").await;
     write(
         &transport,
@@ -4820,7 +4720,6 @@ async fn rollback_rename_rejects_a_lease_on_the_restore_path() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fts_is_maintained_in_each_mutation_transaction() {
-    // MUTATION: defer FTS update outside the mutation transaction -> an immediate query is stale.
     let (scratch, transport, handle) = fixture("fts").await;
     write(
         &transport,
@@ -4892,8 +4791,6 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn degraded_policy_write_invalidates_healthy_state_and_rebuilds_after_restore() {
-    // MUTATION: skip degraded-write search-state invalidation -> restored ensure
-    // trusts the old healthy generation and this new file stays unsearchable.
     let (scratch, transport, handle) = fixture("degraded-write-rebuild").await;
     let workspace_id = "ws-rpcd-degraded-write-rebuild";
     call(
@@ -4953,7 +4850,6 @@ async fn degraded_policy_write_invalidates_healthy_state_and_rebuilds_after_rest
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn binary_rename_does_not_create_an_empty_fts_row() {
-    // MUTATION: unconditionally upsert the renamed head into FTS -> the raw row count becomes one.
     let (scratch, transport, handle) = fixture("binary-rename-fts").await;
     call(
         &transport,
@@ -4995,8 +4891,6 @@ async fn binary_rename_does_not_create_an_empty_fts_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_version_binary_rename_moves_the_materialized_disk_file() {
-    // MUTATION: skip binary rename disk reconciliation -> old.bin survives and
-    // new.bin is absent.
     let (scratch, transport, handle) = fixture("binary-rename-disk").await;
     let bytes = [4_u8, 8, 15, 16, 23, 42];
     call(
@@ -5030,7 +4924,6 @@ async fn active_version_binary_rename_moves_the_materialized_disk_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_version_binary_delete_removes_the_materialized_disk_file() {
-    // MUTATION: skip binary delete disk reconciliation -> deleted.bin survives.
     let (scratch, transport, handle) = fixture("binary-delete-disk").await;
     call(
         &transport,
@@ -5059,8 +4952,6 @@ async fn active_version_binary_delete_removes_the_materialized_disk_file() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouched() {
-    // MUTATION: reconcile inactive binary mutations -> old.bin is removed or
-    // new.bin appears even though main remains active.
     let (scratch, transport, handle) = fixture("inactive-binary-disk").await;
     let workspace_id = "ws-rpcd-inactive-binary-disk";
     let bytes = [9_u8, 8, 7, 6];
@@ -5126,7 +5017,6 @@ async fn inactive_version_binary_rename_and_delete_leave_the_working_tree_untouc
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
-    // MUTATION: run the FTS upsert for a requestId replay -> stale.md reappears in search.
     let (_scratch, transport, handle) = fixture("deduped-write-fts").await;
     let params = json!({
         "versionId": "main",
@@ -5178,8 +5068,6 @@ async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
-    // MUTATION: delete the binary object's FTS row before the dedup short-circuit
-    // -> replay removes the newer text head from search.
     let (_scratch, transport, handle) = fixture("binary-replay-live-text-fts").await;
     let binary_params = json!({
         "versionId": "main",
@@ -5244,7 +5132,6 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_ensure_index_is_idempotent() {
-    // MUTATION: make ensure append duplicate state or fail on an existing generation -> second call fails.
     let (_scratch, transport, handle) = fixture("search-ensure").await;
     write(
         &transport,
@@ -5288,7 +5175,6 @@ async fn search_ensure_index_is_idempotent() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn search_ensure_index_rejects_an_unknown_version() {
-    // MUTATION: dispatch an unknown version directly to the index builder -> this succeeds.
     let (_scratch, transport, handle) = fixture("search-ensure-unknown-version").await;
     call(
         &transport,
@@ -5325,7 +5211,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    // The seed CREATES the engine db, so the shadow token must bind here —
+    // The seed creates the engine db, so the shadow token must bind here —
     // a pre-existing unbound db is exactly what the fence refuses at
     // workspace.open.
     store.bind_root_token(TOKEN).expect("bind token");
@@ -5408,7 +5294,6 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_classifies_and_never_inlines_the_merged_body() {
-    // MUTATION: inline merged text in the response -> the `text` absence assertion fails.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge");
@@ -5446,8 +5331,6 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_conflict_returns_the_exact_created_conflict_id() {
-    // MUTATION: omit conflictId from the merge response -> the string
-    // assertion fails instead of forcing callers to guess from an open list.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-conflict-id");
@@ -5520,17 +5403,15 @@ async fn merge_conflict_returns_the_exact_created_conflict_id() {
     );
 }
 
-/// WS-G1 over the wire: a path holding BYTES on one side compares as a present
+/// WS-G1 over the wire: a path holding bytes on one side compares as a present
 /// binary head, a source-only change fast-forwards through the binary write
 /// status, and divergent bytes open a conflict — each carrying the content
 /// address and byte length the review surface renders.
 ///
 /// `asset.bin` exists only in the source, so nothing on the target can be lost
-/// and the merge takes it (#497).
+/// and the merge takes it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
-    // MUTATION: serialize a comparison side through the text-only snapshot
-    // encoder -> the binary side reports contentKind "text" with a text body.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-binary-merge-wire");
@@ -5661,7 +5542,6 @@ async fn compare_and_merge_carry_a_binary_head_through_the_wire() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
-    // MUTATION: re-derive replay from current target state -> the original merged variant/id is lost.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-request-id");
@@ -5707,7 +5587,6 @@ async fn merge_request_id_replay_after_target_moves_returns_recorded_outcome() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
-    // MUTATION: treat a foreign-operation ledger payload as a merge replay -> this call succeeds.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-cross-kind");
@@ -5760,7 +5639,6 @@ async fn merge_rejects_a_request_id_recorded_by_a_text_write() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn merge_on_a_leased_target_is_refused() {
-    // MUTATION: omit the merge lease guard -> the merge lands behind the editor.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-merge-lease");
@@ -5820,7 +5698,6 @@ async fn merge_on_a_leased_target_is_refused() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
-    // MUTATION: add binary sha/text fields or drop byte-budget paging -> exact-shape/cursor assertions fail.
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_versions(scratch.path(), "ws-rpcd-compare");
@@ -5860,7 +5737,6 @@ async fn compare_files_is_paged_and_binary_entry_shape_is_exact() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn compare_files_pages_via_db_keyset_not_full_vector() {
-    // MUTATION: swap target/source in the SQL -> only-source/only-target statuses flip and fail.
     use dohc_engine_domain::{
         CreateNamedVersion, NoFaults, VersionFileChangeStatus, VersionedTextStore, WriteText,
     };
@@ -6032,7 +5908,6 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn named_version_and_active_rpcs_return_full_version_records() {
-    // MUTATION: return id-only version responses -> the full-record assertions fail.
     let (_scratch, transport, handle) = fixture("version-rpcs").await;
     write(
         &transport,
@@ -6091,7 +5966,6 @@ async fn named_version_and_active_rpcs_return_full_version_records() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
-    // MUTATION: keep binary-head refusal or omit by-sha blob lookup -> either read assertion fails.
     let (_scratch, transport, handle) = fixture("binary-read-parity").await;
     let written = call(
         &transport,
@@ -6131,8 +6005,6 @@ async fn text_read_returns_binary_head_and_read_blob_reads_by_sha() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
-    // MUTATION: authorize text digests against binary columns -> the referenced
-    // body is refused as file-not-found instead of producing blob egress.
     use dohc_engine_domain::{NoFaults, VersionedTextStore, WriteText};
     use dohc_engine_storage::EngineStore;
 
@@ -6259,12 +6131,10 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     assert_eq!(refused.message, "file-not-found");
 
     // Overwrite the path so the original digest is no longer any snapshot's
-    // head: its ONLY remaining reference is the moment that wrote it. Reading
+    // head: its only remaining reference is the moment that wrote it. Reading
     // over-cap text out of HISTORY is exactly what the moments branch of the
     // authorization exists for, and without this the snapshots branch alone
     // could carry the whole test.
-    // MUTATION: drop the moments branch from read_text_blob_with_hydration ->
-    // this read refuses with file-not-found.
     call(
         &transport,
         &handle,
@@ -6296,8 +6166,6 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn over_cap_blob_egress_announces_chunks_fin_and_reassembles_exactly() {
-    // MUTATION: drop FIN, use the 64 KiB socket read size, omit raw egress, or
-    // reorder/truncate a chunk -> the frame and exact-byte assertions fail.
     let (_scratch, service, transport, handle) = fixture_with_service("blob-egress").await;
     let workspace = "ws-rpcd-blob-egress";
     let bytes: Vec<u8> = (0..(600 * 1024 + 17))
@@ -6427,9 +6295,6 @@ async fn over_cap_blob_egress_announces_chunks_fin_and_reassembles_exactly() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn blob_capability_gate_prevents_unnegotiated_over_cap_hydration() {
-    // MUTATION: always call read_binary_blob_for_egress before checking the
-    // negotiated set -> the non-negotiating metadata request detects the
-    // deliberately corrupt bytes instead of returning without hydration.
     let (scratch, service, transport, handle) =
         fixture_with_service("blob-capability-hydration").await;
     let workspace = "ws-rpcd-blob-capability-hydration";
@@ -6498,8 +6363,6 @@ async fn blob_capability_gate_prevents_unnegotiated_over_cap_hydration() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cancelled_blob_egress_never_produces_a_service_payload() {
-    // MUTATION: ignore OperationCancellation on the blob read -> a successful
-    // response (and possible egress payload) is produced after cancellation.
     let (_scratch, service, transport, handle) = fixture_with_service("blob-egress-cancel").await;
     let workspace = "ws-rpcd-blob-egress-cancel";
     let bytes = vec![9_u8; 64 * 1024];
@@ -6557,7 +6420,6 @@ async fn cancelled_blob_egress_never_produces_a_service_payload() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_blob_requires_a_reference_from_the_handle_workspace() {
-    // MUTATION: drop the workspace reference check -> workspace B reads workspace A's blobs.
     let (scratch, transport, handle_a) = fixture("blob-scope-a").await;
     let workspace_a = "ws-rpcd-blob-scope-a";
     call(
@@ -6660,7 +6522,6 @@ async fn read_blob_requires_a_reference_from_the_handle_workspace() {
         .expect("reopen workspace A");
     let handle_a: WorkspaceHandle = serde_json::from_value(reopened_a.result["workspace"].clone())
         .expect("reopened workspace A handle");
-    // MUTATION: drop the conflicts EXISTS branch -> this conflict-side-only read fails.
     let conflict_happy = call(
         &transport,
         &handle_a,
@@ -6744,8 +6605,6 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
         .as_str()
         .expect("sha")
         .to_owned();
-    // MUTATION: skip lowercase canonicalization -> the uppercase spelling of a
-    // referenced digest misses the exact-match lookup.
     let upper = call(
         &transport,
         &handle,
@@ -6819,8 +6678,6 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
         .expect("reopen");
     let handle: WorkspaceHandle =
         serde_json::from_value(reopened.result["workspace"].clone()).expect("handle");
-    // MUTATION: answer Ok(None) for a referenced-but-missing blob -> the broken
-    // reference masquerades as a caller mistake instead of failing closed.
     let corrupt = transport
         .call(
             RequestContext::unbounded(),
@@ -6834,9 +6691,6 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
         .await
         .expect_err("a referenced digest with no blob row is corruption");
     assert_eq!(corrupt.message, "state-corrupt");
-    // MUTATION: hydrate over-cap blobs for the metadata answer -> this still
-    // passes, but the arm loads 49k bytes to discard them; the shape contract
-    // (null bytes + recorded length) is what this pins.
     let over_cap = call(
         &transport,
         &handle,
@@ -6848,8 +6702,6 @@ async fn read_blob_canonicalizes_digests_and_rejects_broken_or_length_mismatched
     assert_eq!(over_cap["bytesBase64"], Value::Null);
     assert_eq!(over_cap["byteLength"], 49_153);
     assert_eq!(over_cap["inbandLimitBytes"], 49_152);
-    // MUTATION: trust recorded byte_length for an over-cap metadata answer ->
-    // this succeeds with false metadata instead of reporting store corruption.
     let mismatched = transport
         .call(
             RequestContext::unbounded(),
@@ -6979,13 +6831,10 @@ async fn unversioned_conflict_resolve_rpc_is_rejected_before_import_bookkeeping(
     assert_eq!(before, (0, 0, 0));
 }
 
-/// A resolution can remove a BINARY head. Its preimage must reach the wire as
+/// A resolution can remove a binary head. Its preimage must reach the wire as
 /// what it was — bytes, their content address, their real size — not as the
 /// empty TEXT file the head's text view looks like.
 ///
-/// MUTATION: serialize `delete.before` with the text-only snapshot encoder ->
-/// contentKind reads "text", byteLength reads 0, and sha256 silently reports a
-/// binary address under a text kind.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_resolved_binary_removal_reports_its_preimage_as_bytes() {
     let scratch = ScratchDir::new().expect("scratch");

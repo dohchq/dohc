@@ -114,7 +114,7 @@ fn first_reconcile_ingests_everything_then_converges() {
         reconcile_if_dirty_and_apply(&mut ctrl, &scanner, ws.path(), &token),
         ReconcileRun::Converged
     ));
-    // ...but a forced full reconcile produces an EMPTY plan (converged).
+    // ...but a forced full reconcile produces an empty plan (converged).
     let second = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(second.is_empty());
     assert_eq!(second.to_generation.0, 2);
@@ -168,7 +168,7 @@ fn cancellation_mid_scan_leaves_consistent_resumable_state() {
     let mut ctrl = ReconcileController::new();
 
     // A cancelled reconcile (token tripped at a between-unit boundary) commits
-    // NOTHING: generation stays 0, dirty stays set, manifest stays empty.
+    // nothing: generation stays 0, dirty stays set, manifest stays empty.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -206,7 +206,7 @@ fn watcher_overflow_sets_dirty_and_full_rescan_converges() {
     let _ = reconcile_and_apply(&mut ctrl, &scanner, ws.path(), &token);
     assert!(!ctrl.is_dirty());
 
-    // A change happens WHILE the watcher is uncertain: an external edit plus an
+    // A change happens while the watcher is uncertain: an external edit plus an
     // overflow storm. Many events coalesce to one dirty flag but never drop the
     // evidence of the change.
     ws.write("a.md", b"two\n");
@@ -256,7 +256,7 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
     ws.write("a.md", b"two\n");
     ctrl.mark_dirty();
 
-    // A cancelled rescan must NOT clear dirty.
+    // A cancelled rescan must not clear dirty.
     let cancelled = CancellationToken::new();
     cancelled.cancel();
     assert!(matches!(
@@ -281,8 +281,8 @@ fn overflow_during_cancelled_rescan_is_not_lost() {
 
 #[test]
 fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
-    // P1 REGRESSION: a previously-tracked file edited PAST the size cap must be
-    // RETAINED (still on disk, last-known-good kept), never classified `removed`
+    // P1 REGRESSION: a previously-tracked file edited past the size cap must be
+    // retained (still on disk, last-known-good kept), never classified `removed`
     // and Retired — that would forget live user data.
     use dohc_engine_files::OverCapPolicy;
     let ws = Scratch::new();
@@ -326,7 +326,7 @@ fn size_cap_grow_retains_never_retires_the_false_delete_regression() {
 
 #[test]
 fn genuinely_deleted_over_cap_absent_file_is_still_removed() {
-    // The complement of the P1 fix: a file that is truly gone from BOTH the
+    // The complement of the P1 fix: a file that is truly gone from both the
     // tracked and skipped sets is still `removed`.
     let ws = Scratch::new();
     ws.write("gone.md", b"here\n");
@@ -564,7 +564,7 @@ fn retire_requires_final_lstat_confirm_and_toctou_reappearance_is_retained() {
 /// R14 robustness: manifest rehydration. A controller seeded from a prior
 /// generation's manifest (standing in for state recovered after a process
 /// restart) must (1) still force a full reconcile (`rehydrated` starts
-/// dirty, same as `new`), and (2) NOT re-report already-tracked, unchanged
+/// dirty, same as `new`), and (2) not re-report already-tracked, unchanged
 /// files as freshly `Added` -- only genuinely new/changed/removed paths
 /// should appear. An empty-manifest restart (the pre-R14 behavior) would
 /// mis-report every unchanged file as `Added`. Also the amended-N8 safety
@@ -593,7 +593,7 @@ fn rehydrated_manifest_reconciles_only_real_changes() {
     let recovered_generation = live.generation();
     let baseline_hashed = scanner.pool().gauge().hashed();
 
-    // Simulate a restart: a FRESH controller, but rehydrated from the prior
+    // Simulate a restart: a fresh controller, but rehydrated from the prior
     // manifest instead of ReconcileController::new()'s empty baseline.
     let manifest = ScanManifest::from_entries([
         (
@@ -734,8 +734,8 @@ fn touched_mtime_with_same_content_rehashes_without_a_spurious_change() {
 }
 
 /// (c, d-size) The documented tradeoff, pinned as a chosen fact: an edit that
-/// keeps the byte size AND forges the mtime back to the recorded pairing is
-/// NOT detected — exactly git's blind spot. A size change under the same
+/// keeps the byte size and forges the mtime back to the recorded pairing is
+/// not detected — exactly git's blind spot. A size change under the same
 /// forged mtime IS detected, because either mismatch forces the hash.
 #[test]
 fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
@@ -776,7 +776,7 @@ fn forged_mtime_same_size_edit_is_unseen_but_a_size_change_is_not() {
 }
 
 /// Coarse-timestamp guard: filesystems truncate mtimes (exFAT to 2s), so a
-/// write landing AFTER scan start can still stat below it. An mtime inside
+/// write landing after scan start can still stat below it. An mtime inside
 /// the worst-case 2s granule below scan start must not record a pairing —
 /// the next rescan re-hashes — while the aged-mtime pins above show an mtime
 /// a full granule older still records normally.

@@ -33,7 +33,7 @@ function runnerSettingsEqual(left: RunnerSettings, right: RunnerSettings): boole
   );
 }
 
-// What the self-test surface may offer, and what it must say (#687). The
+// What the self-test surface may offer, and what it must say. The
 // SESSION decides, not the live setting: main builds the recorder when it
 // opens the workspace, so a workspace opened without one can only refuse a
 // self-test until dohc restarts — however the user sets the toggle now. The
@@ -57,10 +57,10 @@ function runnerEngineNote(
 export function RunnerSettingsCard(props: {
   workspaceId: string;
   runner: RunnerSettings;
-  // Mirrors SettingsDialog's shared-view fact (#589/#687).
+  // Mirrors SettingsDialog's shared-view fact.
   sharedView?: boolean;
-  // Whether main built a recorder for this workspace in THIS app session
-  // (#687). Undefined until its status arrives. See `runnerEngineNote`.
+  // Whether main built a recorder for this workspace in this app session.
+  // Undefined until its status arrives. See `runnerEngineNote`.
   sessionRecorderOn: boolean | undefined;
   onRunnerChange: (runner: RunnerSettings) => Promise<void>;
 }) {

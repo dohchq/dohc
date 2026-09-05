@@ -21,7 +21,7 @@ const CHILD_PROCESS_EXIT_WAIT_MS = 5_000;
 // result stay readable by design — a plugin may call logs()/wait() after a
 // child exits), so nothing removes it until the whole spawn is disposed.
 // A plugin that spawns many short-lived children within one still-open
-// spawn would otherwise accumulate unbounded records (CodeRabbit #779 R9).
+// spawn would otherwise accumulate unbounded records.
 // This caps that at the same order of magnitude as PLUGIN_PROCESS_LOG_LIMIT
 // (200): once a spawn's exited-and-still-retained children pass the cap,
 // the oldest are dropped — a plugin reading their logs immediately after
@@ -86,7 +86,7 @@ export interface PluginChildProcessHandle {
  * turn it starts the child. The broker receives its handle one await later,
  * so a listener it attached itself would miss a child that exited first —
  * the record would then never finish, `wait()` would time out, and the
- * retained handle would never be cleaned up (#779 round 10 B4).
+ * retained handle would never be cleaned up.
  *
  * `code` is null for a child a signal ended, which is how a POSIX command
  * child reports being killed.
@@ -399,8 +399,8 @@ function environmentPath(env: NodeJS.ProcessEnv): string | undefined {
  *
  * `shell` is never set. The plugin hands over an argv array and this runs that
  * file, so no command line exists for a shell to reinterpret. Windows is the
- * one place a command line is unavoidable — an npm-installed CLI there is a
- * .cmd shim that only cmd.exe can start — and `resolveSpawnCommand` builds
+ * one place a command line is unavoidable — an npm-installed CLI there is a.
+ * Cmd shim that only cmd.exe can start — and `resolveSpawnCommand` builds
  * that single line itself under its own quoting rules, which refuse any
  * argument cmd.exe could reparse.
  */
@@ -604,8 +604,8 @@ export class PluginChildProcessBroker {
     this.spawnTeardowns.set(key, teardown);
     // The entry exists to join concurrent teardowns of one spawn, not to be
     // a permanent record: spawn keys are unique per spawn, so keeping every
-    // fulfilled teardown grew the map without bound across plugin restarts
-    // (#779 round 13 A4). The failure paths delete their own entries; only
+    // fulfilled teardown grew the map without bound across plugin restarts.
+    // The failure paths delete their own entries; only
     // the entry that IS this settled promise may be removed here, so a
     // replacement teardown registered after a failure is left alone.
     teardown.then(
@@ -789,7 +789,7 @@ export class PluginChildProcessBroker {
     }
     // The launcher attaches these in the same turn it starts the child, so an
     // exit or error that lands before the record exists is buffered here
-    // rather than lost (#779 round 10 B4).
+    // rather than lost.
     let record: SpawnRecord | null = null;
     let exitedWith: number | null | undefined;
     const pendingErrors: string[] = [];
@@ -1076,7 +1076,7 @@ export class PluginChildProcessBroker {
       // chain exits before the force round, is reparented to init and no ppid
       // walk can find it. Closing that needs a process group this app owns,
       // and these children cannot have one — utilityProcess.fork has no
-      // `detached` option (#779 R10), and packaged builds fuse `runAsNode`
+      // `detached` option, and packaged builds fuse `runAsNode`
       // off and ship no system node, so no detached group-leader node process
       // can exist to wrap them.
       await Promise.race([record.exit.then(() => undefined), grace]);

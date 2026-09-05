@@ -1,6 +1,5 @@
 //! AES-256-GCM secret-file AEAD, byte-exact with the TS oracle
-//! (`secretFileStore.ts` `encryptSecretText`/`decryptSecretText`,
-//! `LANGUAGE_SEMANTICS_MATRIX.md` §10.6).
+//! (`encryptSecretText`/`decryptSecretText`).
 //!
 //! Parameters, fixed and non-negotiable for cross-engine parity:
 //! - 256-bit key, 96-bit (12-byte) random IV per write, 128-bit (16-byte) tag.
@@ -8,8 +7,8 @@
 //!   base64 fields, so we use `encrypt_inout_detached` rather than the
 //!   append-tag `Aead::encrypt`.
 //! - AAD is the UTF-8 bytes of `dohc-secret-v1\0<workspace>\0<path>` — binding
-//!   ciphertext to its workspace AND path so rows cannot be spliced across
-//!   files. Deliberately NOT version-bound (fork/merge/restore copy ciphertext
+//!   ciphertext to its workspace and path so rows cannot be spliced across
+//!   files. Deliberately not version-bound (fork/merge/restore copy ciphertext
 //!   across versions of the same path without re-encryption).
 //! - Any open failure (wrong key, tampered ciphertext/tag, AAD mismatch) →
 //!   [`CryptoError::DecryptFailed`], fail closed. Never a partial/garbage return.
@@ -65,7 +64,7 @@ impl SealedSecret {
         ciphertext_base64: &str,
         byte_length: usize,
     ) -> Result<Self, CryptoError> {
-        // Enforce the 1 MiB cap and a cheap encoded-length precheck BEFORE
+        // Enforce the 1 MiB cap and a cheap encoded-length precheck before
         // decoding, so a poison DB/replication row cannot make us allocate and
         // decode a huge string only to reject it (everything bounded; the cap
         // `seal` enforces must also hold on the read/ingest path).
@@ -146,7 +145,7 @@ fn cipher_for(key: &SecretDataKey) -> Result<Aes256Gcm, CryptoError> {
     Aes256Gcm::new_from_slice(key.as_bytes()).map_err(|_| CryptoError::InvalidKeyLength)
 }
 
-/// The always-compiled sealing core. Private: the ONLY public entry is [`seal`]
+/// The always-compiled sealing core. Private: the only public entry is [`seal`]
 /// (fresh CSPRNG IV). `seal_with_iv` (gated) also routes here for parity tests.
 fn seal_core(
     key: &SecretDataKey,
@@ -256,18 +255,15 @@ mod tests {
     }
 
     // Nonce reuse under AES-GCM with one key leaks the GHASH authentication key
-    // and the XOR of both plaintexts, and it is SILENT: sealing still succeeds.
+    // and the XOR of both plaintexts, and it is silent: sealing still succeeds.
     // `seal` is the only public sealing entry, so this is where freshness must be
     // pinned.
     //
-    // MUTATION: replace the `getrandom` draw in `seal` with a constant
-    // `[0u8; SECRET_IV_BYTES]`, or with any function of the plaintext (e.g.
-    // `sha256(plaintext)[..12]`) -> all three assert_ne! below fail.
     #[test]
     fn seal_draws_a_fresh_iv_for_identical_plaintext() {
         let k = key();
         // Same key, same workspace, same path, same plaintext: every input that
-        // could make the two seals agree is held equal on purpose, so the ONLY
+        // could make the two seals agree is held equal on purpose, so the only
         // thing that can make them differ is a freshly drawn nonce.
         let text = b"API_KEY=identical-every-time";
         let first = seal(&k, "ws1", ".env", text).unwrap();
@@ -288,7 +284,7 @@ mod tests {
             second.tag(),
             "a fresh nonce must change the GHASH tag"
         );
-        // Positive control: both really are seals of the SAME plaintext, so the
+        // Positive control: both really are seals of the same plaintext, so the
         // inequalities above cannot be passing because the inputs differed.
         assert_eq!(open(&k, "ws1", ".env", &first).unwrap().as_bytes(), text);
         assert_eq!(open(&k, "ws1", ".env", &second).unwrap().as_bytes(), text);
@@ -404,7 +400,7 @@ mod tests {
         assert!(dbg.contains("SealedSecret"));
     }
 
-    // Byte-exact re-encryption parity vs the REAL Node fixture. Lives inline (not
+    // Byte-exact re-encryption parity vs the real Node fixture. Lives inline (not
     // in tests/) because it needs `seal_with_iv`, which is gated behind
     // `test-util`/`cfg(test)` so production consumers cannot reuse a nonce. The
     // integration test (`tests/cross_engine_parity.rs`) covers the public-API

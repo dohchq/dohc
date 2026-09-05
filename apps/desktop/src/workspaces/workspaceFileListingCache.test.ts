@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ListWorkspaceFilesResult } from "../ipc/bridgeContract";
 import { WorkspaceFileListingCache } from "./workspaceFileListingCache";
+import { deferred } from "../testing/deferred";
 
 const ATTACHMENT_A = Symbol("attachment-a");
 const ATTACHMENT_B = Symbol("attachment-b");
@@ -11,16 +12,6 @@ function listing(path: string): ListWorkspaceFilesResult {
 
 function cachedListing(path: string): ListWorkspaceFilesResult {
   return { ...listing(path), cached: true };
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((settle, fail) => {
-    resolve = settle;
-    reject = fail;
-  });
-  return { promise, resolve, reject };
 }
 
 describe("WorkspaceFileListingCache", () => {
@@ -194,7 +185,6 @@ describe("WorkspaceFileListingCache", () => {
     });
     await expect(read("ws-a")).resolves.toEqual(cachedListing("ws-a-2.md"));
 
-    // MUTATION: treating a mixed set as hidden leaves the file tree stale.
     cache.invalidate({
       workspaceId: "ws-a",
       paths: [".dohc/engine/index", "notes/new.md"],

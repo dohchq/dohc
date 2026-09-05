@@ -1,23 +1,57 @@
-//! Store-level durability and crash-recovery traces (CAL-1 calibration
-//! signal). Each test is the oracle staple: mutate → (crash) → reopen →
-//! compare, and where relevant, mutate again to prove the reopened store stays
+//! Store-level durability and crash-recovery traces: mutate, (crash), reopen,
+//! compare, and where relevant mutate again to prove the reopened store stays
 //! writable.
 
-use dohc_engine_storage::{
-    CompoundWrite, EngineStore, FaultPoint, MAX_DOCUMENT_BODY_BYTES, NoFaults, StorageError,
-    WriteOutcome,
-};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_domain::{VersionedTextStore, WriteText};
+use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, StorageError};
 use dohc_engine_testkit::harness::{
-    crash_during_write, open_readonly_keeper, sample_write, wal_sidecar, write_fingerprint_db,
-    write_foreign_unversioned_db,
+    open_readonly_keeper, wal_sidecar, write_fingerprint_db, write_foreign_unversioned_db,
 };
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use std::path::Path;
 
+const WS: &str = "ws";
 const NO_FAULTS: NoFaults = NoFaults;
 
-/// Assert that opening `db` fails with `expected_code` AND left the file's
+fn open(db: &Path, now_ms: i64) -> EngineStore {
+    let mut store = EngineStore::open(db, now_ms).expect("open");
+    VersionedTextStore::new(&mut store)
+        .ensure_main_version(WS, "main", now_ms, &NO_FAULTS)
+        .expect("main version");
+    store
+}
+
+fn write(path: &str, text: &str, moment: &str, request_id: Option<&str>, now_ms: i64) -> WriteText {
+    WriteText {
+        workspace_id: WS.to_owned(),
+        version_id: "main".to_owned(),
+        object_id: format!("object-{moment}"),
+        path: path.to_owned(),
+        text: text.to_owned(),
+        moment_id: moment.to_owned(),
+        metadata_origin: "user".to_owned(),
+        metadata_summary: None,
+        metadata_correlation_id: None,
+        author_json: None,
+        now_ms,
+        request_id: request_id.map(str::to_owned),
+    }
+}
+
+fn read(store: &mut EngineStore, path: &str) -> Option<String> {
+    VersionedTextStore::new(store)
+        .read_text(WS, "main", path)
+        .expect("read")
+        .map(|snapshot| snapshot.text)
+}
+
+fn moments(store: &EngineStore) -> i64 {
+    store.table_row_count("moments").expect("count moments")
+}
+
+/// Assert that opening `db` fails with `expected_code` And left the file's
 /// bytes and WAL state untouched (the fence must never mutate a rejected store).
-fn assert_rejected_without_mutation(db: &std::path::Path, expected_code: &str) {
+fn assert_rejected_without_mutation(db: &Path, expected_code: &str) {
     let before = std::fs::read(db).expect("read before");
     let wal = wal_sidecar(db);
     let wal_before = wal.exists();
@@ -41,70 +75,60 @@ fn write_then_reopen_reads_back() {
     let db = scratch.engine_db_path().expect("db path");
 
     {
-        let mut store = EngineStore::open(&db, 1_000).expect("open fresh");
-        let outcome = store
-            .commit_compound(
-                &sample_write("r1", "notes/today", "hello\n", 1_000),
+        let mut store = open(&db, 1_000);
+        let written = VersionedTextStore::new(&mut store)
+            .write_text(
+                &write("notes/today.md", "hello\n", "m1", None, 1_000),
                 &NO_FAULTS,
             )
             .expect("write");
-        assert_eq!(
-            outcome,
-            WriteOutcome::Acked {
-                seq: 1,
-                deduped: false
-            }
-        );
+        assert!(!written.deduped);
         // Store dropped here — the connection closes (simulated clean close).
     }
 
-    let store = EngineStore::open(&db, 2_000).expect("reopen");
-    let doc = store
-        .read_document("notes/today")
-        .expect("read")
-        .expect("present");
-    assert_eq!(doc.body, "hello\n");
-    assert_eq!(doc.updated_at_ms, 1_000);
-    assert_eq!(store.document_count().expect("count"), 1);
-    assert_eq!(store.journal_len().expect("journal"), 1);
+    let mut store = open(&db, 2_000);
+    assert_eq!(
+        read(&mut store, "notes/today.md").as_deref(),
+        Some("hello\n")
+    );
+    assert_eq!(moments(&store), 1);
 }
 
 // oracle: storage.after-commit-before-ack — restart shows committed state;
-// a retry is exactly-once (idempotency ledger), no duplicate journal entry.
+// a retry is exactly-once (idempotency ledger), no duplicate moment.
 #[test]
 fn crash_after_commit_recovers_exactly_once() {
     let scratch = ScratchDir::new().expect("scratch dir");
     let db = scratch.engine_db_path().expect("db path");
+    let input = write("doc/a.md", "committed body", "m1", Some("req-42"), 5);
 
-    let write = sample_write("req-42", "doc/a", "committed body", 5);
-    let outcome = crash_during_write(&db, 5, FaultPoint::StorageAfterCommitBeforeAck, &write)
-        .expect("crash run");
-    assert_eq!(outcome, WriteOutcome::Crashed { committed: true });
+    {
+        let mut store = open(&db, 5);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageAfterCommitBeforeAck);
+        let err = VersionedTextStore::new(&mut store)
+            .write_text(&input, faults.as_ref())
+            .expect_err("crash after commit");
+        assert_eq!(err.code(), "persist-failed");
+        // Simulate process death: the writer connection is closed here.
+    }
 
     // Restart: the committed state survives.
-    let mut store = EngineStore::open(&db, 6).expect("reopen");
-    let doc = store
-        .read_document("doc/a")
-        .expect("read")
-        .expect("present");
-    assert_eq!(doc.body, "committed body");
-    assert_eq!(store.document_count().expect("docs"), 1);
-    assert_eq!(store.journal_len().expect("journal"), 1);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 1);
+    let mut store = open(&db, 6);
+    assert_eq!(
+        read(&mut store, "doc/a.md").as_deref(),
+        Some("committed body")
+    );
+    assert_eq!(moments(&store), 1);
+    assert_eq!(store.table_row_count("engine_requests").expect("ledger"), 1);
 
     // Retry the same request id after recovery: exactly-once — replays to the
-    // recorded result, no second document write and no second journal entry.
-    let retry = store.commit_compound(&write, &NO_FAULTS).expect("retry");
-    assert_eq!(
-        retry,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: true
-        }
-    );
-    assert_eq!(store.document_count().expect("docs"), 1);
-    assert_eq!(store.journal_len().expect("journal"), 1);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 1);
+    // recorded result, no second moment.
+    let retry = VersionedTextStore::new(&mut store)
+        .write_text(&input, &NO_FAULTS)
+        .expect("retry");
+    assert!(retry.deduped);
+    assert_eq!(moments(&store), 1);
+    assert_eq!(store.table_row_count("engine_requests").expect("ledger"), 1);
 }
 
 // oracle: storage.before-persist — a mid-transaction crash rolls back;
@@ -113,30 +137,30 @@ fn crash_after_commit_recovers_exactly_once() {
 fn crash_before_persist_leaves_no_partial_state() {
     let scratch = ScratchDir::new().expect("scratch dir");
     let db = scratch.engine_db_path().expect("db path");
+    let input = write("doc/ghost.md", "should vanish", "m1", Some("req-lost"), 7);
 
-    let write = sample_write("req-lost", "doc/ghost", "should vanish", 7);
-    let outcome =
-        crash_during_write(&db, 7, FaultPoint::StorageBeforePersist, &write).expect("crash run");
-    assert_eq!(outcome, WriteOutcome::Crashed { committed: false });
+    {
+        let mut store = open(&db, 7);
+        let faults = ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist);
+        let err = VersionedTextStore::new(&mut store)
+            .write_text(&input, faults.as_ref())
+            .expect_err("crash before persist");
+        assert_eq!(err.code(), "persist-failed");
+    }
 
     // Restart: nothing from the rolled-back transaction survived.
-    let mut store = EngineStore::open(&db, 8).expect("reopen");
-    assert_eq!(store.read_document("doc/ghost").expect("read"), None);
-    assert_eq!(store.document_count().expect("docs"), 0);
-    assert_eq!(store.journal_len().expect("journal"), 0);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 0);
+    let mut store = open(&db, 8);
+    assert_eq!(read(&mut store, "doc/ghost.md"), None);
+    assert_eq!(moments(&store), 0);
+    assert_eq!(store.table_row_count("file_objects").expect("objects"), 0);
 
     // The store is still writable after recovering from the rollback — the
     // same request id now legitimately applies exactly once.
-    let redo = store.commit_compound(&write, &NO_FAULTS).expect("redo");
-    assert_eq!(
-        redo,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: false
-        }
-    );
-    assert_eq!(store.document_count().expect("docs"), 1);
+    let redo = VersionedTextStore::new(&mut store)
+        .write_text(&input, &NO_FAULTS)
+        .expect("redo");
+    assert!(!redo.deduped);
+    assert_eq!(moments(&store), 1);
 }
 
 // oracle: storage.open-version-fingerprint-mismatch — a v1 database is
@@ -170,7 +194,7 @@ fn foreign_unversioned_database_is_rejected_without_mutation() {
     assert_rejected_without_mutation(&db, "foreign-database");
 }
 
-// oracle: durability is pinned, not luck — `synchronous` reads back NORMAL, so
+// oracle: durability is pinned, not luck — `synchronous` reads back normal, so
 // a weakened configuration fails this test.
 #[test]
 fn synchronous_is_pinned_to_normal() {
@@ -189,9 +213,9 @@ fn committed_write_replays_from_wal_on_reopen() {
     let db = scratch.engine_db_path().expect("db path");
 
     let keeper = {
-        let mut writer = EngineStore::open(&db, 1).expect("open writer");
-        writer
-            .commit_compound(&sample_write("r1", "d1", "replayed", 1), &NO_FAULTS)
+        let mut writer = open(&db, 1);
+        VersionedTextStore::new(&mut writer)
+            .write_text(&write("d1.md", "replayed", "m1", None, 1), &NO_FAULTS)
             .expect("write");
         // The keeper holds an open read transaction across the writer's close,
         // which keeps SQLite from checkpointing (and deleting) the WAL.
@@ -212,164 +236,72 @@ fn committed_write_replays_from_wal_on_reopen() {
     );
 
     // A fresh connection recovers the committed state by replaying the WAL.
-    let reopened = EngineStore::open(&db, 2).expect("reopen");
-    let doc = reopened
-        .read_document("d1")
-        .expect("read")
-        .expect("present");
-    assert_eq!(doc.body, "replayed");
+    let mut reopened = open(&db, 2);
+    assert_eq!(read(&mut reopened, "d1.md").as_deref(), Some("replayed"));
 
     drop(reopened);
     drop(keeper);
 }
 
 // oracle: idempotency — a same-payload retry replays exactly-once; a key reused
-// with a DIFFERENT payload is rejected, never silently replayed.
+// with a different payload is rejected, never silently replayed.
 #[test]
 fn idempotency_key_reuse_is_guarded() {
     let scratch = ScratchDir::new().expect("scratch dir");
     let db = scratch.engine_db_path().expect("db path");
-    let mut store = EngineStore::open(&db, 1).expect("open");
+    let mut store = open(&db, 1);
 
-    let first = sample_write("req-k", "doc/k", "original", 1);
-    let ack = store.commit_compound(&first, &NO_FAULTS).expect("first");
-    assert_eq!(
-        ack,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: false
-        }
-    );
+    let first = write("doc/k.md", "original", "m1", Some("req-k"), 1);
+    let ack = VersionedTextStore::new(&mut store)
+        .write_text(&first, &NO_FAULTS)
+        .expect("first");
+    assert!(!ack.deduped);
 
-    // Same key, same payload → exactly-once replay (no new journal entry).
-    let retry = store.commit_compound(&first, &NO_FAULTS).expect("retry");
-    assert_eq!(
-        retry,
-        WriteOutcome::Acked {
-            seq: 1,
-            deduped: true
-        }
-    );
-    assert_eq!(store.journal_len().expect("journal"), 1);
+    // Same key, same payload → exactly-once replay (no new moment).
+    let retry = VersionedTextStore::new(&mut store)
+        .write_text(&first, &NO_FAULTS)
+        .expect("retry");
+    assert!(retry.deduped);
+    assert_eq!(moments(&store), 1);
 
-    // Same key, DIFFERENT payload → typed mismatch, nothing written.
-    let conflicting = CompoundWrite {
-        request_id: "req-k".to_owned(),
-        doc_id: "doc/k".to_owned(),
-        body: "tampered".to_owned(),
-        op_kind: "text.write".to_owned(),
-        now_ms: 2,
-    };
-    let err = store
-        .commit_compound(&conflicting, &NO_FAULTS)
+    // Same key, different payload → typed mismatch, nothing written.
+    let conflicting = write("doc/k.md", "tampered", "m1", Some("req-k"), 2);
+    let err = VersionedTextStore::new(&mut store)
+        .write_text(&conflicting, &NO_FAULTS)
         .expect_err("reuse must be rejected");
     assert_eq!(err.code(), "idempotency-key-reuse-mismatch");
-    // The original document and single journal entry are untouched.
-    assert_eq!(
-        store
-            .read_document("doc/k")
-            .expect("read")
-            .expect("doc")
-            .body,
-        "original"
-    );
-    assert_eq!(store.journal_len().expect("journal"), 1);
-}
-
-// oracle: bounded parameter — limit-1 / limit / limit+1 on the document body.
-#[test]
-fn document_body_bound_is_enforced_at_the_edge() {
-    let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
-    let mut store = EngineStore::open(&db, 1).expect("open");
-
-    let at_limit = "a".repeat(MAX_DOCUMENT_BODY_BYTES);
-    let below = "a".repeat(MAX_DOCUMENT_BODY_BYTES - 1);
-    let over = "a".repeat(MAX_DOCUMENT_BODY_BYTES + 1);
-
-    assert!(matches!(
-        store.commit_compound(&sample_write("b1", "d1", &below, 1), &NO_FAULTS),
-        Ok(WriteOutcome::Acked { .. })
-    ));
-    assert!(matches!(
-        store.commit_compound(&sample_write("b2", "d2", &at_limit, 1), &NO_FAULTS),
-        Ok(WriteOutcome::Acked { .. })
-    ));
-    let err = store
-        .commit_compound(&sample_write("b3", "d3", &over, 1), &NO_FAULTS)
-        .expect_err("over-limit must fail");
-    assert_eq!(err.code(), "document-too-large");
-
-    // The rejected over-limit write left no trace in ANY compound-write
-    // component (validation runs before the transaction opens).
-    assert_eq!(store.document_count().expect("docs"), 2);
-    assert_eq!(store.journal_len().expect("journal"), 2);
-    assert_eq!(store.request_ledger_len().expect("ledger"), 2);
+    // The original text and single moment are untouched.
+    assert_eq!(read(&mut store, "doc/k.md").as_deref(), Some("original"));
+    assert_eq!(moments(&store), 1);
 }
 
 // oracle: close/reopen/mutate cycle — the reopened store stays writable and
-// accumulates across sessions (the plan's oracle staple).
+// accumulates across sessions.
 #[test]
 fn close_reopen_mutate_cycle_stays_writable() {
     let scratch = ScratchDir::new().expect("scratch dir");
     let db = scratch.engine_db_path().expect("db path");
 
     for round in 0..3_i64 {
-        let mut store = EngineStore::open(&db, round).expect("open round");
-        let req = format!("req-{round}");
-        let doc = format!("doc-{round}");
-        let outcome = store
-            .commit_compound(&sample_write(&req, &doc, "body", round), &NO_FAULTS)
+        let mut store = open(&db, round + 1);
+        let path = format!("doc-{round}.md");
+        let moment = format!("m-{round}");
+        let written = VersionedTextStore::new(&mut store)
+            .write_text(&write(&path, "body", &moment, None, round + 1), &NO_FAULTS)
             .expect("write");
-        assert!(matches!(
-            outcome,
-            WriteOutcome::Acked { deduped: false, .. }
-        ));
+        assert!(!written.deduped);
         // Reopening never wipes: the row count grows by one each round.
-        assert_eq!(store.document_count().expect("docs"), round + 1);
+        assert_eq!(moments(&store), round + 1);
         // Store dropped → connection closed before the next round reopens.
     }
 
-    let store = EngineStore::open(&db, 99).expect("final reopen");
-    assert_eq!(store.document_count().expect("docs"), 3);
-    // The migration ledger recorded the frozen list: the v2 baseline row, the
-    // R08 secrets migration (ordinal 1), the R11a Y.Doc migration (ordinal 2),
-    // the R09 chats migration (ordinal 3), the R12 search migration (ordinal 4),
-    // the R05 moment-preimage-link migration (ordinal 5), the R10 sync
-    // migration (ordinal 6), the R06 conflicts migration (ordinal 7), the
-    // shadow-clone migration (ordinal 8), binary conflict sides (ordinal 9),
-    // binary heads (ordinal 10), the path-aliases reverse-alias index
-    // (ordinal 11), the deferred Y.Doc coordinates table (ordinal 12), the
-    // request-ledger kind discriminator (ordinal 13), secret capture ownership
-    // (ordinal 14), moment payload provenance (ordinal 15), replication
-    // pending resolves (ordinal 16), deferred chat coordinates (ordinal 17),
-    // imported moment metadata provenance (ordinal 18), the imported moment
-    // rollback preimage (ordinal 19), shared-channel dense push position
-    // (ordinal 20), the file-object-rooted Y.Doc deferred-update queue (ordinal 21),
-    // pending replication refusals (ordinal 22), the parked
-    // chat-message-before-thread coordinates (ordinal 23), the
-    // materialization-workspace migration (ordinal 24), the bootstrap
-    // main-version name backfill (ordinal 25, #325), the secret fork-base
-    // timestamp migration (ordinal 26), the Y.Doc path migration
-    // (`ydoc_docs.path`) (ordinal 27), the secret-moment source-origin
-    // provenance migration (ordinal 28), Y.Doc lineage claims with compact
-    // inactive epochs (ordinal 29), and removal of the obsolete replicated
-    // pending-resolution sidecar (ordinal 30), the durable replication-log
-    // apply disposition used by compound-shadow replay (ordinal 31), the
-    // Y.Doc relay-arbitration coordinate (ordinal 32), scene asset delete
-    // authority (ordinal 33), the scene Y.Doc content-kind migration
-    // (ordinal 34), scene support in Y.Doc recovery decisions (ordinal 35),
-    // the share-view file lane (ordinal 36, #646 PR3-1), the
-    // share-proposal submit scan position (ordinal 37, #646 PR3a), the Y.Doc
-    // seed-source provenance (ordinal 38, #815), the protected-history
-    // time-window index (ordinal 39), per-conversation chat content revisions
-    // (ordinal 40), collection adoption (ordinal 41), the collection
-    // index (ordinal 42), and the collection historical record-owner
-    // index (ordinal 43), global generation-first indexes (ordinal 44),
-    // record attribution on updates and field history (ordinal 45), the
-    // automation subscription and claim tables (ordinal 46), and the drained
-    // record-event decision on deferred Y.Doc coordinates (ordinal 47).
-    assert_eq!(store.migration_ledger_len().expect("ledger"), 48);
+    let store = open(&db, 99);
+    assert_eq!(moments(&store), 3);
+    // The ledger holds the one baseline row.
+    assert_eq!(
+        store.table_row_count("engine_migrations").expect("ledger"),
+        1
+    );
     let conflict_objects = store
         .read_with(|conn| {
             conn.query_row(

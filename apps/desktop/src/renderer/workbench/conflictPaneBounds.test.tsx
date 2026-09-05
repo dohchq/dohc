@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
-// #536: PR #524 made a 2 MB - 10 MiB conflict side listable, and the conflict
+// PR #524 made a 2 MB - 10 MiB conflict side listable, and the conflict
 // surface then painted it unguarded — a whole side per `<pre>`, a whole side
-// seeded into a CONTROLLED textarea, and every open conflict at once, two panes
+// seeded into a controlled textarea, and every open conflict at once, two panes
 // each. These pin all three bounds on the surface itself.
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -42,7 +42,7 @@ const { ConflictReviewDialog, openConflictId } = await import("./WorkspaceVersio
 
 // 250,000 lines of 41 characters: over 10 MiB, the band #524 opened up.
 //
-// Built ONCE per marker and shared by every fixture that needs one. Strings
+// Built once per marker and shared by every fixture that needs one. Strings
 // are immutable, so two conflicts holding the same body are indistinguishable
 // from two holding equal copies — and the twenty-card test below wanted forty
 // of these, which is 435 MiB of heap before the first render and a plausible
@@ -102,7 +102,7 @@ afterEach(() => {
 async function openReview(conflicts: WorkspaceVersionConflict[]) {
   bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
   render(
-    <ConflictReviewDialog
+    <ConflictReviewDialog beginLineageOperation={async () => () => {}}
       workspaceId="ws-1"
       onWorkspaceStateChanged={() => {}}
       onClose={() => {}}
@@ -154,8 +154,8 @@ describe("a conflict side pane", () => {
 });
 
 describe("combine by hand", () => {
-  it("still offers an empty start when NEITHER copy fits, and says why", async () => {
-    // `apply-merged` measures the SUBMITTED text and nothing else, so a short
+  it("still offers an empty start when neither copy fits, and says why", async () => {
+    // `apply-merged` measures the submitted text and nothing else, so a short
     // replacement written by hand is a body the engine takes however large the
     // two sides are. Removing the affordance refused work it accepts.
     await openReview([
@@ -193,7 +193,7 @@ describe("combine by hand", () => {
     );
   });
 
-  it("falls back to the OTHER side when the preferred one is over the cap", async () => {
+  it("falls back to the other side when the preferred one is over the cap", async () => {
     // A 10 MiB incoming copy beside a small copy on Main is still a conflict
     // the user can combine by hand. Preferring the oversized side and then
     // declaring the affordance unavailable refuses work the engine accepts.
@@ -224,8 +224,8 @@ describe("combine by hand", () => {
     fireEvent.change(input, { target: { value: "my own draft\n" } });
 
     // A 10 MiB paste. Stored first and checked afterwards, this both counted
-    // every byte on the next render AND handed the whole string to a
-    // CONTROLLED textarea — the stall this surface exists to prevent.
+    // every byte on the next render and handed the whole string to a
+    // controlled textarea — the stall this surface exists to prevent.
     const paste = "x".repeat(10 * 1024 * 1024);
     fireEvent.change(input, { target: { value: paste } });
 
@@ -340,7 +340,7 @@ describe("a list of open conflicts", () => {
   });
 
   it("never measures a side it is not painting", async () => {
-    // Every one of these seeds is over the apply cap, so every card WOULD
+    // Every one of these seeds is over the apply cap, so every card would
     // count its bytes exactly if the count were not deferred to expansion.
     // Twenty 10 MiB sides cost 750 ms on mount that way, against 79 ms here —
     // and every other test in this file passed through that regression.
@@ -430,7 +430,7 @@ describe("a list of open conflicts", () => {
       ),
     ).toBe("false");
 
-    // And collapsing a LATER card must not reopen the first one.
+    // And collapsing a later card must not reopen the first one.
     fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));
     expect(within(cards[5]).queryAllByTestId("version-conflict-side-text")).toHaveLength(2);
     fireEvent.click(within(cards[5]).getByTestId("version-conflict-toggle"));

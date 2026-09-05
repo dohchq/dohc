@@ -141,8 +141,6 @@ mod tests {
         let first = ScratchDir::new().unwrap();
         let second = ScratchDir::new().unwrap();
 
-        // MUTATION: drop the nonce and the trailing segment is the counter,
-        // which is not 16 hex digits — the width assertion is what bites.
         assert_eq!(
             nonce_of(&first).len(),
             16,

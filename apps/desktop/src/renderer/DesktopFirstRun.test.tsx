@@ -154,7 +154,7 @@ describe("first run", () => {
     ).toBeTruthy();
   });
 
-  it("offers joining a synced workspace, gated on sign-in (0P-C)", async () => {
+  it("offers joining a synced workspace, gated on sign-in", async () => {
     const user = userEvent.setup();
     render(<DesktopFirstRun onWorkspaceReady={() => {}} />);
     await screen.findByText("/home/ice/dohc");

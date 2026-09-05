@@ -19,7 +19,7 @@ export type WebAppRecoveryStage = "unpair" | "stop";
  *    down with it.
  * 3. Stop the view, releasing the guest and this open's claim on the host.
  *
- * Both teardown steps run in ONE `withTeardownLock` section, which the caller
+ * Both teardown steps run in one `withTeardownLock` section, which the caller
  * makes the same section a reopen queues on. An unpair outside it races the
  * reopen: the reopen reads the plugin's server state before the unpair retired
  * it, gets the doomed server's origin, and fails on its way to a guest.

@@ -1,10 +1,7 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
@@ -17,6 +14,16 @@ import {
   referencedBlobShas,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  reopenTestStorage,
+  request,
+  sha256,
+  tempRoot,
+  testStorage,
+} from "./linkTestHelpers";
 
 interface InspectionStatement {
   get(...params: unknown[]): Record<string, unknown> | undefined;
@@ -38,35 +45,7 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   ) => InspectionDatabase;
 };
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs: Windows cannot unlink
-  // files that still have open handles (EBUSY).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function tempRoot(label: string): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), `dohc-sync-relay-${label}-`));
-  roots.push(root);
-  return root;
-}
-
-async function testStorage(
-  options?: Parameters<typeof openSyncRelayStorage>[1],
-): Promise<SyncRelayStorage> {
-  const root = await tempRoot("db");
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"), options);
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -75,32 +54,6 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     return { userId: auth.slice("Bearer user:".length), workspaceId };
   };
   return createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
-}
-
-function request(
-  userId: string | null,
-  path: string,
-  init: RequestInit = {},
-): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
 }
 
 interface ConflictResolveFixture {
@@ -883,135 +836,9 @@ describe("sync relay handler", () => {
       await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })),
     );
     expect(fetched.ops).toEqual([]);
-    // MUTATION: Number.isFinite, Math.trunc, or rounding admits the fractional
-    // row and makes the Rust i64 decoder permanently stall behind it.
   });
 
-  it("refuses a legacy relay database with a fractional timestamp at cutover", async () => {
-    const root = await tempRoot("fractional-cutover");
-    const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storage.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "a",
-      createdAtMs: 1,
-    });
-    storage.appendLogBatch({
-      workspaceId: "workspace-a",
-      originId: "legacy-origin",
-      ops: [
-        {
-          originSeq: 0,
-          opKind: "future.opaque",
-          payloadJson: "{}",
-          recordedAtMs: 1,
-        },
-      ],
-    });
-    storage.close();
-    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    legacy.exec(
-      "UPDATE sync_relay_log SET recorded_at_ms=1.5; " +
-        "DELETE FROM sync_relay_migrations WHERE migration_id='recorded-at-safe-integer-v1';",
-    );
-    legacy.close();
-
-    expect(() => openSyncRelayStorage(dbPath)).toThrow(
-      "sync relay log contains a timestamp outside the integer wire contract",
-    );
-    // MUTATION: casting/truncating during cutover silently changes the signed
-    // wire value; omitting the scan re-exposes the poison row to Rust pulls.
-  });
-
-  it("persists the legacy timestamp validation marker after the first scan", async () => {
-    const root = await tempRoot("timestamp-migration-marker");
-    const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storage.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "a",
-      createdAtMs: 1,
-    });
-    storage.appendLogBatch({
-      workspaceId: "workspace-a",
-      originId: "legacy-origin",
-      ops: [{ originSeq: 0, opKind: "probe", payloadJson: "{}", recordedAtMs: 1 }],
-    });
-    storage.close();
-    const db = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    const marker = db
-      .prepare(
-        "SELECT completed_at_ms FROM sync_relay_migrations WHERE migration_id=?",
-      )
-      .get("recorded-at-safe-integer-v1");
-    db.exec("UPDATE sync_relay_log SET recorded_at_ms=1.5");
-    db.close();
-    expect(Number(marker?.completed_at_ms)).toBeGreaterThan(0);
-    expect(() => openSyncRelayStorage(dbPath).close()).not.toThrow();
-    // MUTATION: omitting the durable marker makes every reopen rescan the full log.
-  });
-
-  it("replaces the pre-launch combined share table without carrying rows forward", async () => {
-    const root = await tempRoot("share-grant-cutover");
-    const dbPath = join(root, "relay.sqlite");
-    const initial = openSyncRelayStorage(dbPath);
-    initial.claimWorkspace({
-      workspaceId: "workspace-a",
-      ownerUserId: "owner-a",
-      createdAtMs: 1,
-    });
-    initial.close();
-
-    const legacy = new InspectionDatabaseSync(dbPath, { readOnly: false });
-    legacy.exec(`
-      PRAGMA foreign_keys = OFF;
-      DROP TABLE sync_relay_share_grants;
-      DROP TABLE sync_relay_shares;
-      CREATE TABLE sync_relay_shares (
-        share_id TEXT PRIMARY KEY,
-        workspace_id TEXT NOT NULL,
-        granter_user_id TEXT NOT NULL,
-        recipient_user_id TEXT,
-        recipient_email TEXT,
-        selector_json TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        revoked_at_ms INTEGER
-      );
-      INSERT INTO sync_relay_shares (
-        share_id, workspace_id, granter_user_id, recipient_user_id,
-        recipient_email, selector_json, created_at_ms, revoked_at_ms
-      ) VALUES (
-        'legacy-share', 'workspace-a', 'owner-a', 'recipient-a', NULL,
-        '{"paths":["docs"],"versionId":null,"access":"view"}', 1, NULL
-      );
-    `);
-    legacy.close();
-
-    const normalized = openSyncRelayStorage(dbPath);
-    expect(normalized.getShare("legacy-share")).toBeNull();
-    normalized.close();
-
-    const inspected = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    const legacyColumns = inspected
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM pragma_table_info('sync_relay_shares')
-         WHERE name IN ('recipient_user_id', 'recipient_email', 'revoked_at_ms')`,
-      )
-      .get();
-    const grantTable = inspected
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM sqlite_master
-         WHERE type = 'table' AND name = 'sync_relay_share_grants'`,
-      )
-      .get();
-    inspected.close();
-    expect(Number(legacyColumns?.count)).toBe(0);
-    expect(Number(grantTable?.count)).toBe(1);
-  });
-
-  // Gate finding: a missing blob in an OWNED workspace must be
+  // Gate finding: a missing blob in an owned workspace must be
   // distinguishable from a missing/foreign workspace so clients can degrade
   // honestly instead of reporting the whole workspace unavailable. The
   // isolation invariant is untouched: non-owners still get the fixed
@@ -1086,7 +913,7 @@ describe("sync relay handler", () => {
     expect(create.status).toBe(200);
     expect(await json(create)).toMatchObject({ ok: true, sha256: sha256(first) });
 
-    // Concurrent-enroll race: a second unconditional PUT with DIFFERENT
+    // Concurrent-enroll race: a second unconditional PUT with different
     // content loses — exactly one winner, nothing clobbered.
     const racingCreate = await h(putKeys(second));
     expect(racingCreate.status).toBe(409);
@@ -1321,8 +1148,8 @@ describe("sync relay handler", () => {
     expect(owner).toEqual({ ok: true, removed: 1, removedSha256s: [orphanSha] });
   });
 
-  // WS-G2-C1 GC-ROOT: a blob referenced by a LIVE ydoc.update log op is a root
-  // and MUST NOT be collected out from under the rich-doc head — even with a
+  // WS-G2-C1 GC-ROOT: a blob referenced by a live ydoc.update log op is a root
+  // and must not be collected out from under the rich-doc head — even with a
   // zero grace window (so aging cannot save it) and even though a sibling
   // orphan blob IS reclaimed in the same sweep. This is the relay side of the
   // GC-root invariant G2-B documented; referencedBlobShas now counts the update.
@@ -1402,19 +1229,19 @@ describe("sync relay handler", () => {
     const content = Buffer.from("blob-in-flight");
     const contentSha = sha256(content);
 
-    // Phase 1: the blob is uploaded.
+    // The blob is uploaded.
     expect(
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content })))
         .status,
     ).toBe(200);
 
-    // GC runs in the gap BEFORE the log append. The blob is younger than the
-    // grace window, so it is NOT reclaimed.
+    // GC runs in the gap before the log append. The blob is younger than the
+    // grace window, so it is not reclaimed.
     const gc = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
     expect(gc).toEqual({ ok: true, removed: 0, removedSha256s: [] });
     expect((await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "GET" }))).status).toBe(200);
 
-    // Phase 2: the referencing log op is appended against durable content.
+    // The referencing log op is appended against durable content.
     expect(
       (
         await h(
@@ -1437,7 +1264,7 @@ describe("sync relay handler", () => {
       ).status,
     ).toBe(200);
 
-    // Once the blob has aged past the grace window AND is referenced by the log,
+    // Once the blob has aged past the grace window and is referenced by the log,
     // it stays (referenced). An unreferenced aged blob is still collectible.
     clock.now += 10 * 60 * 1000 + 1;
     const gcLater = await json(await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })));
@@ -1447,7 +1274,7 @@ describe("sync relay handler", () => {
 
   // 0P sync-hardening GATE FIX (durable log referencing a missing blob). The
   // grace window keeps a fresh blob alive across the PUT->POST gap, but it does
-  // NOT cover an old blob that ages past the grace, nor a blob GC'd after a
+  // not cover an old blob that ages past the grace, nor a blob GC'd after a
   // failed /log that a retry re-references. The append validates every
   // referenced blob IN-TRANSACTION and rejects the whole batch (retryable
   // 422 blob_missing) rather than pinning the log to content the relay lost.
@@ -1869,7 +1696,7 @@ describe("sync relay handler", () => {
       (await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })))).ops,
     ).toEqual([]);
 
-    // Two-phase happy path: re-upload the blob, then the SAME append lands
+    // Two-phase happy path: re-upload the blob, then the same append lands
     // cleanly against durable content.
     expect(
       (await h(request("a", `/sync/workspace-a/blobs/${contentSha}`, { method: "PUT", body: content }))).status,
@@ -2376,8 +2203,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
   it("records supersession time from the injected relay clock", async () => {
     const root = await tempRoot("epoch-clock");
     const dbPath = join(root, "relay.sqlite");
-    const storage = openSyncRelayStorage(dbPath);
-    storages.push(storage);
+    const storage = reopenTestStorage(dbPath);
     const h = handler(storage);
     await createWorkspace(h);
     expect(
@@ -2846,8 +2672,7 @@ describe("sync relay epoch and stream identity enforcement", () => {
       firstStorage.close();
     }
 
-    const reopenedStorage = openSyncRelayStorage(dbPath);
-    storages.push(reopenedStorage);
+    const reopenedStorage = reopenTestStorage(dbPath);
     const reopenedHandler = handler(reopenedStorage);
     expect(reopenedStorage.getWorkspaceIdentity("workspace-a")).toEqual({
       replicationEpoch: EPOCH_2,
@@ -3092,7 +2917,7 @@ describe("MU-C0 verified chat authorship", () => {
     });
   }
 
-  it("rejects a batch mixing one valid and one forged op ATOMICALLY (nothing admitted)", async () => {
+  it("rejects a batch mixing one valid and one forged op atomically (nothing admitted)", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -3105,7 +2930,7 @@ describe("MU-C0 verified chat authorship", () => {
     );
     expect(mixed.status).toBe(403);
     expect(await json(mixed)).toMatchObject({ ok: false, code: "authorship_mismatch" });
-    // Atomic: the valid op in the same batch was NOT admitted either.
+    // Atomic: the valid op in the same batch was not admitted either.
     expect(await logOps(h)).toEqual([]);
   });
 
@@ -3114,7 +2939,7 @@ describe("MU-C0 verified chat authorship", () => {
     const h = handler(storage);
     await createWorkspace(h);
     // A non-chat op that happens to carry an authorId belonging to someone else
-    // is NOT a chat op, so the authorship gate ignores it.
+    // is not a chat op, so the authorship gate ignores it.
     const opaque = await h(
       request(
         "a",
@@ -3176,9 +3001,9 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toHaveLength(4);
   });
 
-  it("REJECTS an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
+  it("Rejects an unknown chat.* op carrying author-shaped fields (fail-closed completeness)", async () => {
     // A future authored chat op (here a made-up chat.thread.update) that carries
-    // an author-shaped field we have NOT taught the policy to verify must be
+    // an author-shaped field we have not taught the policy to verify must be
     // refused, not admitted unverified. Shipping a new authored chat op without
     // extending CHAT_OP_POLICY fails closed.
     const storage = await testStorage();
@@ -3206,7 +3031,7 @@ describe("MU-C0 verified chat authorship", () => {
     expect(await logOps(h)).toEqual([]);
   });
 
-  it("REJECTS a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
+  it("Rejects a made-up chat.* op even with no author field (unknown = fail-closed)", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);

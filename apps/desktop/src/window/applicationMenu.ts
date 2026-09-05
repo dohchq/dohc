@@ -3,7 +3,7 @@ import { basename } from "node:path";
 import type { MenuCommand, WorkspaceSummary } from "../ipc/bridgeContract";
 import type { ZoomStep } from "../settings/userSettings";
 
-// Real application menu (File/Edit/View/Go/Help). Custom items SEND a
+// Real application menu (File/Edit/View/Go/Help). Custom items send a
 // MenuCommand to the focused window's renderer, where the shell routes it
 // through the same command registry the palette uses — the menu owns no
 // action logic of its own. Pure template builder so the structure is
@@ -43,7 +43,7 @@ export function buildMenuTemplate(options: {
       options.sendCommand(window as BrowserWindow | undefined, name),
   });
 
-  // macOS renders the FIRST template entry as the application menu (label
+  // macOS renders the first template entry as the application menu (label
   // replaced by the app name); without an explicit appMenu role, "File"
   // would be swallowed into it and Quit/Hide/Services would be missing.
   const recentWorkspaces = (options.recentWorkspaces ?? []).slice(0, 10);

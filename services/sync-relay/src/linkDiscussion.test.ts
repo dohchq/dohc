@@ -1,8 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
@@ -12,10 +9,17 @@ import {
   type SyncRelayHandler,
 } from "./server";
 import {
-  openSyncRelayStorage,
   type OpenSyncRelayStorageOptions,
   type SyncRelayStorage,
 } from "./storage";
+import {
+  closeTestStorages,
+  jsonBody as jsonRequest,
+  closeTestStorage,
+  reopenTestStorage,
+  storagePath,
+  testStorage,
+} from "./linkTestHelpers";
 
 const OWNER = "owner-account-sentinel";
 const NEW_OWNER = "new-owner-account-sentinel";
@@ -50,15 +54,7 @@ const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
   ) => InspectionDatabase;
 };
 
-const roots: string[] = [];
-const storages: SyncRelayStorage[] = [];
-
-afterEach(async () => {
-  for (const storage of storages.splice(0)) storage.close();
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
+afterEach(closeTestStorages);
 
 type LinkFixture = {
   access: "view" | "comment" | "edit";
@@ -99,16 +95,13 @@ async function fixture(
     >;
   } = {},
 ): Promise<Fixture> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-link-discussion-http-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
   let discussionId = 0;
-  const storage = openSyncRelayStorage(dbPath, {
+  const storage = await testStorage({
     newDiscussionId: () => `discussion-row-${++discussionId}`,
     workspaceQuotaBytes: overrides.workspaceQuotaBytes,
     ...overrides.discussionLimits,
   });
-  storages.push(storage);
+  const dbPath = storagePath(storage);
   expect(
     storage.claimWorkspace({
       workspaceId: WORKSPACE,
@@ -343,14 +336,6 @@ function request(
     }
   }
   return rawRequest(userId, `${url.pathname}${url.search}`, boundInit);
-}
-
-function jsonRequest(body: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  };
 }
 
 function linkRequest(
@@ -2047,12 +2032,10 @@ describe("share discussion HTTP boundary", () => {
     expect(await genericRefusal(await revokedWait)).toContain("404:");
     expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
 
-    test.storage.close();
-    storages.splice(storages.indexOf(test.storage), 1);
-    const reopened = openSyncRelayStorage(test.dbPath, {
+    closeTestStorage(test.storage);
+    const reopened = reopenTestStorage(test.dbPath, {
       newDiscussionId: () => "discussion-after-restart",
     });
-    storages.push(reopened);
     const restarted = test.makeHandler(reopened);
     const later = await body(
       await restarted(
@@ -4303,10 +4286,8 @@ describe("share discussion HTTP boundary", () => {
       expect(messages(page)[0]).not.toHaveProperty("moderation");
     }
 
-    test.storage.close();
-    storages.splice(storages.indexOf(test.storage), 1);
-    const reopened = openSyncRelayStorage(test.dbPath);
-    storages.push(reopened);
+    closeTestStorage(test.storage);
+    const reopened = reopenTestStorage(test.dbPath);
     const restarted = test.makeHandler(reopened);
     const restartedPage = await body(
       await restarted(request(OWNER, `/sync/shares/${SHARE}/discussion`)),
@@ -4526,10 +4507,8 @@ describe("share discussion HTTP boundary", () => {
     });
     expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
 
-    test.storage.close();
-    storages.splice(storages.indexOf(test.storage), 1);
-    const reopened = openSyncRelayStorage(test.dbPath);
-    storages.push(reopened);
+    closeTestStorage(test.storage);
+    const reopened = reopenTestStorage(test.dbPath);
     const restarted = test.makeHandler(reopened);
     for (const response of [
       await restarted(linkRequest(test.view, "/sync/link/discussion")),

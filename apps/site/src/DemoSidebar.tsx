@@ -211,7 +211,10 @@ export function DemoSidebar(props: {
           onTogglePin={() => undefined}
           onBeginChanges={async () => {
             await props.onBeforeChanges();
-            return async () => undefined;
+            return {
+              settle: async () => undefined,
+              release: () => undefined,
+            };
           }}
           onPathsChanged={reprojectPaths}
           onImportFiles={() => undefined}

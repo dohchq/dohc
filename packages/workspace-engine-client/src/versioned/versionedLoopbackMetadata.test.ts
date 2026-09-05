@@ -224,7 +224,7 @@ describe("loopback moment metadata", () => {
     expect(moments[0].metadataCorrelationId).toBe("corr-text");
   });
 
-  it("carries them through a BINARY write too", async () => {
+  it("carries them through a binary write too", async () => {
     // The regression this file was added for: binaryWrite built its moment
     // without the metadata, so the write wrapper could echo it back while
     // moments.list returned undefined.
@@ -337,7 +337,7 @@ describe("loopback moment metadata", () => {
     // AgentAuthor is `JsonObject & {...}`, so a caller may pass extension
     // fields. The daemon accepts them and returns only the recognized ones
     // (parsed_moment_author). A loopback that copied the author raw would be
-    // STRICTER than the daemon: its own response fails the client's
+    // stricter than the daemon: its own response fails the client's
     // strictObjectValue on the extra key, so a write that works against the
     // engine breaks against the fake.
     const engine = new VersionedLoopbackEngine();
@@ -368,11 +368,11 @@ describe("loopback moment metadata", () => {
     });
   });
 
-  it("REFUSES a malformed author instead of recording it", async () => {
+  it("Refuses a malformed author instead of recording it", async () => {
     // The daemon's write path (`validated_author`) rejects with
     // `invalid-metadata` before any mutation. An earlier draft of this suite
     // expected `{ corrupt: true }` on the recorded moment, mirroring
-    // `parsed_moment_author` — but that marker is for READING malformed
+    // `parsed_moment_author` — but that marker is for reading malformed
     // historical rows, so expecting it here let the fake accept a write
     // production refuses.
     const engine = new VersionedLoopbackEngine();
@@ -396,7 +396,7 @@ describe("loopback moment metadata", () => {
     expect(page.moments as unknown[]).toHaveLength(0);
   });
 
-  it("REFUSES author and authorJson together, as the daemon does", async () => {
+  it("Refuses author and authorJson together, as the daemon does", async () => {
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
     await expect(
@@ -439,7 +439,7 @@ describe("loopback moment metadata", () => {
   it("accepts an explicit null summary, as the daemon does", async () => {
     // The daemon deserializes these as `Option<String>`, where JSON null is the
     // valid absent value. An earlier draft passed null to a string validator, so
-    // the fake REJECTED requests production accepts — the opposite error from the
+    // the fake rejected requests production accepts — the opposite error from the
     // no-op hole below, and both were in the same helper.
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
@@ -453,7 +453,7 @@ describe("loopback moment metadata", () => {
       summary: null,
       correlationId: null,
     });
-    // Assert the RECORDED fields. An earlier version of this test read
+    // Assert the recorded fields. An earlier version of this test read
     // `moment.metadataSummary` — a key secret moments never carry, since
     // makeSecretMoment nests them under `metadata` — so with `?? null` both reads
     // were undefined and the test passed for every possible engine behaviour,
@@ -466,7 +466,7 @@ describe("loopback moment metadata", () => {
   });
 
   it("refuses malformed restore metadata even when the restore is a no-op", async () => {
-    // The daemon deserializes SecretsRestoreParams BEFORE looking at state, so a
+    // The daemon deserializes SecretsRestoreParams before looking at state, so a
     // malformed request that happens to be a no-op is still refused. An earlier
     // draft parsed after the no-op return, which reported success.
     const engine = new VersionedLoopbackEngine();
@@ -488,9 +488,9 @@ describe("loopback moment metadata", () => {
       momentId: "moment-restore-second",
     });
     // Restore once so the secret already equals the selected before-state; the
-    // SECOND restore is then the no-op branch. Reaching it needs two writes and
+    // second restore is then the no-op branch. Reaching it needs two writes and
     // two restores — my first draft used one write, whose `before` is undefined,
-    // so `prior === sourceMoment.before` was false and it took the MUTATION path.
+    // so `prior === sourceMoment.before` was false and it took the mutation path.
     // That draft passed and proved nothing; the mutation check is what exposed it.
     await send(engine, VERSIONED_METHOD.secretsRestore, {
       workspaceId: WORKSPACE,
@@ -547,7 +547,7 @@ describe("loopback moment metadata", () => {
   });
 
   it("refuses an over-cap metadata field on a TEXT write too", async () => {
-    // The daemon calls validate_metadata_fields from EVERY write handler, not
+    // The daemon calls validate_metadata_fields from every write handler, not
     // only the secret ones. The cap first landed on the secret path alone, so
     // the text and binary paths still accepted an over-cap summary — the same
     // over-permissive fake, one layer up, and nothing caught it because the
@@ -586,7 +586,7 @@ describe("loopback moment metadata", () => {
   it("refuses an over-cap field on a DEDUPED binary write, which returned success", async () => {
     // The refusal is the easy half. The half that needed a test: the daemon
     // validates metadata before it reads state, but the fake's content-equality
-    // dedup returned `deduped: true` FIRST, so an over-cap field on a repeat
+    // dedup returned `deduped: true` First, so an over-cap field on a repeat
     // write got a success response. Same shape as the no-op holes already fixed
     // on the secret paths, on a path nothing was checking.
     const engine = new VersionedLoopbackEngine();
@@ -601,7 +601,7 @@ describe("loopback moment metadata", () => {
     });
     expect(first.deduped).toBeFalsy();
 
-    // The SAME bytes again, which is the dedup path, with an over-cap field.
+    // The same bytes again, which is the dedup path, with an over-cap field.
     await expect(
       send(engine, VERSIONED_METHOD.binaryWrite, {
         workspaceId: WORKSPACE,
@@ -630,7 +630,7 @@ describe("loopback moment metadata", () => {
     // value and the daemon answers normally. Hoisting the parse ahead of the
     // dedup return exposed that `optionalString` threw on null: a same-content
     // write with `summary: null` had never reached the parse before, so moving it
-    // made the fake REJECT a request production accepts. The opposite direction
+    // made the fake reject a request production accepts. The opposite direction
     // from the hole the hoist was fixing, introduced by the fix itself.
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
@@ -746,9 +746,9 @@ describe("loopback moment metadata", () => {
   });
 
   it("refuses bad METADATA before bad bytes on writeBlob, reversing write's order", async () => {
-    // The blob handler validates origin, metadata and author BEFORE decoding or
+    // The blob handler validates origin, metadata and author before decoding or
     // looking up the bytes, the opposite of versionedBinary.write. So the same
-    // doubly-invalid request gets a DIFFERENT refusal from each, and a fake that
+    // doubly-invalid request gets a different refusal from each, and a fake that
     // used one order for both would certify the wrong one.
     const engine = new VersionedLoopbackEngine();
     const versionId = await openWorkspace(engine);
@@ -807,11 +807,11 @@ describe("loopback moment metadata", () => {
       }),
     ).rejects.toThrow(/invalid-input/);
 
-    // Removed a third sub-assertion that sent a bad origin AND an over-cap field
+    // Removed a third sub-assertion that sent a bad origin and an over-cap field
     // expecting `invalid-metadata`: `requiredOrigin` and the cap check raise the
-    // SAME code, so it passed whichever fired first and proved nothing about
+    // same code, so it passed whichever fired first and proved nothing about
     // their order. The two cases above work because bad bytes and bad metadata
-    // raise DIFFERENT codes, which is what makes precedence observable at all.
+    // raise different codes, which is what makes precedence observable at all.
   });
 
   it("refuses an over-cap field on a secret MERGE", async () => {
@@ -841,9 +841,9 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
-  it("refuses a malformed AUTHOR on writeBlob before resolving the bytes", async () => {
+  it("refuses a malformed author on writeBlob before resolving the bytes", async () => {
     // The daemon's blob handler runs origin, metadata, validated_author, and only
-    // then the decode/lookup. My preflight did origin and metadata and CLAIMED in
+    // then the decode/lookup. My preflight did origin and metadata and claimed in
     // its own comment to do the author too, so a malformed author plus a missing
     // blob answered `file-not-found`.
     const engine = new VersionedLoopbackEngine();
@@ -860,7 +860,7 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
-  it("refuses over-cap APPLY metadata before looking up either version", async () => {
+  it("refuses over-cap apply metadata before looking up either version", async () => {
     // secrets_apply validates metadata before its source/target checks, so an
     // over-cap field plus a missing version answers for the metadata.
     const engine = new VersionedLoopbackEngine();
@@ -878,7 +878,7 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
-  it("requires an origin on RESTORE, which the fake used to ignore", async () => {
+  it("requires an origin on restore, which the fake used to ignore", async () => {
     // The daemon takes `origin` as a non-Option field on SecretsRestoreParams, so
     // a restore without one is refused. The fake ignored params.origin entirely
     // and hardcoded "restore" on the recorded moment, so it accepted requests
@@ -904,7 +904,7 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid parameters/);
   });
 
-  it("refuses over-cap RENAME and DELETE metadata before resolving the version", async () => {
+  it("refuses over-cap rename and DELETE metadata before resolving the version", async () => {
     // The daemon validates metadata before the actor resolves the version, so an
     // over-cap field plus an unknown versionId answers `invalid-metadata`.
     //
@@ -1860,7 +1860,6 @@ describe("loopback moment metadata", () => {
       mutationMomentId: "canonical-rollback-mutation",
       origin: "restore",
       author: null,
-      legacyBeforeText: null,
       requestId: "canonical-rollback-request",
     });
     expect(first.deduped).toBe(false);
@@ -2789,7 +2788,7 @@ describe("loopback moment metadata", () => {
     }
   });
 
-  it("refuses a RESTORE that only supplies the legacy metadataOrigin", async () => {
+  it("refuses a restore that only supplies the legacy metadataOrigin", async () => {
     // SecretsRestoreParams requires `origin` and denies unknown fields, so the
     // text-write compatibility fallback to `metadataOrigin` accepts a request the
     // daemon rejects while deserializing. And the recorded moment used to hardcode
@@ -2814,7 +2813,7 @@ describe("loopback moment metadata", () => {
       }),
     ).rejects.toThrow(/invalid parameters/);
 
-    // And an accepted origin other than "restore" is PRESERVED on the moment.
+    // And an accepted origin other than "restore" is preserved on the moment.
     await send(engine, VERSIONED_METHOD.secretsWrite, {
       workspaceId: WORKSPACE,
       versionId,
@@ -2837,7 +2836,7 @@ describe("loopback moment metadata", () => {
     expect((moment.metadata as Record<string, unknown>).origin).toBe("api");
   });
 
-  it("refuses a RESTORE carrying metadataOrigin even alongside a valid origin", async () => {
+  it("refuses a restore carrying metadataOrigin even alongside a valid origin", async () => {
     // `deny_unknown_fields` on SecretsRestoreParams makes the PRESENCE of
     // metadataOrigin fatal — serde refuses before reading any field — so a request
     // with both is rejected, not silently accepted on the valid one.
@@ -2863,11 +2862,11 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid parameters/);
   });
 
-  it("refuses over-cap RESTORE metadata before it looks for the moment", async () => {
+  it("refuses over-cap restore metadata before it looks for the moment", async () => {
     // Fourth handler in this file where the fake read state before validating
     // metadata. The daemon validates origin then metadata immediately after
     // deserialization, before looking up the source moment, so a request that is
-    // wrong in BOTH ways must answer for the metadata.
+    // wrong in both ways must answer for the metadata.
     const engine = new VersionedLoopbackEngine();
     await openWorkspace(engine);
     await expect(
@@ -2882,10 +2881,10 @@ describe("loopback moment metadata", () => {
     ).rejects.toThrow(/invalid-metadata/);
   });
 
-  it("refuses malformed secret metadata WITHOUT changing the secret", async () => {
+  it("refuses malformed secret metadata without changing the secret", async () => {
     // The daemon refuses a malformed request atomically, before touching state.
     // An earlier draft of this fix evaluated `optionalString` inside the
-    // makeSecretMoment call — AFTER `version.secrets.set` — so a non-string
+    // makeSecretMoment call — after `version.secrets.set` — so a non-string
     // summary left the secret changed, recorded no moment, and still returned a
     // refusal. The refusal is the easy half to get right; not mutating is the
     // half that needs a test.
@@ -2912,7 +2911,7 @@ describe("loopback moment metadata", () => {
       }),
     ).rejects.toThrow();
 
-    // The secret must still hold the FIRST value: a refused write that mutated
+    // The secret must still hold the first value: a refused write that mutated
     // would be worse than one that succeeded.
     const listed = await send(engine, VERSIONED_METHOD.secretsList, {
       versionId,

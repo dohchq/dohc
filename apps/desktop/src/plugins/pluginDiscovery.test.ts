@@ -102,7 +102,7 @@ describe("discoverInstalledPlugins", () => {
       supersededPluginId: null,
     });
     // The loser keeps no claim on the shared id: its directory names it, so
-    // no two records ever report one id (#779 round 14 A4). It carries the
+    // no two records ever report one id. It carries the
     // lost id structurally too, not only in its diagnostics text — a
     // caller that needs to detect this collision reads that field, never
     // scans diagnostic prose.
@@ -117,7 +117,7 @@ describe("discoverInstalledPlugins", () => {
     );
   });
 
-  it("keeps a duplicate id with the directory it was installed from (#779 round 11 A4)", async () => {
+  it("keeps a duplicate id with the directory it was installed from", async () => {
     const root = await createWorkspace();
     const zetaRoot = await writeManifest(root, "zeta", "shared-id");
     const alphaRoot = await writeManifest(root, "alpha", "shared-id");
@@ -222,7 +222,7 @@ describe("discoverInstalledPlugins", () => {
     await expect(discoverInstalledPlugins(root, new Map())).resolves.toEqual([]);
   });
 
-  it("does not walk into node_modules or .dohc for nested manifests (CodeRabbit #779 R11)", async () => {
+  it("does not walk into node_modules or .dohc for nested manifests", async () => {
     const root = await createWorkspace();
     const pluginRoot = await writeManifest(root, "with-deps");
     await mkdir(join(pluginRoot, "node_modules", "dep"), { recursive: true });
@@ -243,7 +243,7 @@ describe("discoverInstalledPlugins", () => {
     ]);
   });
 
-  it("keeps a candidate isolated when one of its nested directories cannot be read (CodeRabbit #779 R12)", async () => {
+  it("keeps a candidate isolated when one of its nested directories cannot be read", async () => {
     const root = await createWorkspace();
     await writeManifest(root, "alpha");
     const brokenRoot = await writeManifest(root, "broken");

@@ -837,7 +837,7 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
                 reason: "moment.append payload is malformed".to_owned(),
             },
         }),
-        "MUTATION: parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
+        "parsing before apply_envelope_with returns a hard error and leaves seq 0 unacked"
     );
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "malformed-moment-peer").expect("refusal ack"),
@@ -991,9 +991,11 @@ fn moment_append_head_fast_forward_write_delete_and_rename_updates_alias_snapsho
         apply_moment_envelope(&mut rename_store, &rename, &NoFaults).expect("rename"),
         ApplyOutcome::Applied(0)
     );
-    // MUTATION: deleting the payloadBeforePath alias instead of the matched
-    // local head path leaves old.md behind beside the new live alias.
-    assert_eq!(aliases(&rename_store, "object-rename"), ["new.md"]);
+    assert_eq!(
+        aliases(&rename_store, "object-rename"),
+        ["new.md"],
+        "deleting the payloadBeforePath alias instead of the matched local head path leaves old.md behind beside the new live alias."
+    );
     assert_eq!(
         snapshot(&rename_store, "object-rename").unwrap().0,
         "new.md"
@@ -1658,7 +1660,6 @@ fn moment_append_record_only_divergence_is_not_a_head_and_cannot_be_rolled_back(
                 path: "doc.md".to_owned(),
                 mutation_moment_id: "remote-record-only".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -1760,8 +1761,6 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             )
         })
         .expect("stored rollback preimage");
-    // MUTATION: omit any identity/metadata binding from insert_moment and the
-    // durable preimage tuple no longer matches the shipped snapshot.
     assert_eq!(
         stored_preimage,
         (
@@ -1772,7 +1771,8 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
             Some("sync".to_owned()),
             Some("shipped summary".to_owned()),
             Some("shipped correlation".to_owned()),
-        )
+        ),
+        "omit any identity/metadata binding from insert_moment and the durable preimage tuple no longer matches the shipped snapshot.",
     );
 
     let database_path = scratch.engine_db_path().expect("database path");
@@ -1786,7 +1786,6 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
                 path: "shipped.md".to_owned(),
                 mutation_moment_id: "remote-after-shipped".to_owned(),
                 request_id: None,
-                legacy_before_text: None,
                 metadata_origin: "restore".to_owned(),
                 author_json: None,
             },
@@ -1844,16 +1843,16 @@ fn moment_append_first_delivery_refuses_and_acks_plaintext_id_collision_but_rede
             "missing blob is never hydrated",
         ),
     );
-    // MUTATION: treating a same-table ID hit as idempotence lets this unrelated
-    // first-delivery coordinate claim another moment; true replay was already
-    // skipped above before entering the moment applier.
-    assert!(matches!(
-        apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "replicated plaintext moment id collides with existing history"
-    ));
+    assert!(
+        matches!(
+            apply_moment_envelope(&mut store, &duplicate_id, &NoFaults),
+            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            })) if reason == "replicated plaintext moment id collides with existing history"
+        ),
+        "treating a same-table ID hit as idempotence lets this unrelated first-delivery coordinate claim another moment; true replay was already skipped above before entering the moment applier."
+    );
     assert_eq!(
         read_replication_acked_seq(&store, "ws", "second-peer").expect("ack"),
         0
@@ -1934,7 +1933,7 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             operation: "write",
             content_kind: "text",
         }],
-        "MUTATION: re-deriving from the live active version loses the apply-time disk change"
+        "re-deriving from the live active version loses the apply-time disk change"
     );
 }
 
@@ -1960,15 +1959,16 @@ fn moment_append_refuses_and_acks_id_collision_with_secret_history() {
         absent_text_payload("protected-id", "plaintext-object", "doc.md", "incoming"),
     );
 
-    // MUTATION: removing the secret_moments arm lets two unrelated histories
-    // claim the same workspace-wide moment identity.
-    assert!(matches!(
-        apply_moment_envelope(&mut store, &op, &NoFaults),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { ref reason },
-            ..
-        })) if reason == "replicated plaintext moment id collides with existing history"
-    ));
+    assert!(
+        matches!(
+            apply_moment_envelope(&mut store, &op, &NoFaults),
+            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { ref reason },
+                ..
+            })) if reason == "replicated plaintext moment id collides with existing history"
+        ),
+        "removing the secret_moments arm lets two unrelated histories claim the same workspace-wide moment identity."
+    );
     let rows: (i64, i64) = store
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -2040,15 +2040,16 @@ fn moment_append_accepts_only_oracle_metadata_origins_and_acks_refusals() {
         let peer = format!("{field}-{reserved}-peer");
         let op = envelope(&peer, 0, "ws", payload);
 
-        // MUTATION: an empty-only check accepts capture/ydoc ownership markers
-        // and can make the local capture reconciler claim replicated content.
-        assert!(matches!(
-            apply_moment_envelope(&mut store, &op, &NoFaults),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                reason: RefusalReason::InvalidInput { ref reason },
-                ..
-            })) if reason == "moment.append payload is invalid"
-        ));
+        assert!(
+            matches!(
+                apply_moment_envelope(&mut store, &op, &NoFaults),
+                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { ref reason },
+                    ..
+                })) if reason == "moment.append payload is invalid"
+            ),
+            "an empty-only check accepts capture/ydoc ownership markers and can make the local capture reconciler claim replicated content."
+        );
         let persisted: (i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -2105,7 +2106,7 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         .expect("missing-version journal count");
     assert_eq!(
         journaled, 0,
-        "MUTATION: journaling the retryable failure permanently consumes the missing-version coordinate"
+        "journaling the retryable failure permanently consumes the missing-version coordinate"
     );
 
     let version = ReplicationEnvelope {
@@ -2442,9 +2443,11 @@ fn moment_append_persists_full_wire_payload_provenance() {
         Some("adopted from peer".to_owned()),
         Some("correlation-remote-adopted".to_owned()),
     );
-    // MUTATION: dropping either optional field from the moment or snapshot
-    // insert makes one side of this round trip differ.
-    assert_eq!(metadata, (expected.clone(), expected));
+    assert_eq!(
+        metadata,
+        (expected.clone(), expected),
+        "dropping either optional field from the moment or snapshot insert makes one side of this round trip differ."
+    );
 
     let versioned = VersionedTextStore::new(&mut store);
     let page = versioned
@@ -2549,9 +2552,11 @@ fn local_overwrite_clears_imported_snapshot_metadata() {
             )
         })
         .expect("local snapshot metadata");
-    // MUTATION: omitting either optional metadata assignment from the local
-    // upsert leaves the imported value attached to the newer local head.
-    assert_eq!(metadata, ("api".to_owned(), None, None));
+    assert_eq!(
+        metadata,
+        ("api".to_owned(), None, None),
+        "omitting either optional metadata assignment from the local upsert leaves the imported value attached to the newer local head."
+    );
 }
 
 #[test]
@@ -2607,9 +2612,10 @@ fn moment_append_search_index_respects_files_and_visibility_policy() {
         );
     }
 
-    // MUTATION: removing or inverting either policy predicate indexes one of
-    // the excluded rows; skipping the healthy insert loses the public row.
-    assert!(indexed(&store, "private-object").is_empty());
+    assert!(
+        indexed(&store, "private-object").is_empty(),
+        "removing or inverting either policy predicate indexes one of the excluded rows; skipping the healthy insert loses the public row."
+    );
     assert!(indexed(&store, "hidden-object").is_empty());
     assert_eq!(
         indexed(&store, "public-object"),
@@ -2747,8 +2753,10 @@ fn replicated_delete_after_path_divergent_rename_removes_the_live_alias() {
         apply_moment_envelope(&mut store, &delete, &NoFaults).expect("delete"),
         ApplyOutcome::Applied(0)
     );
-    // MUTATION: deleting by the remote payload path leaves `new.md` behind.
-    assert!(aliases(&store, "rename-delete-object").is_empty());
+    assert!(
+        aliases(&store, "rename-delete-object").is_empty(),
+        "deleting by the remote payload path leaves `new.md` behind."
+    );
     assert_eq!(snapshot(&store, "rename-delete-object"), None);
 }
 

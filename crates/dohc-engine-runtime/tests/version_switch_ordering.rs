@@ -259,8 +259,6 @@ impl FaultInjector for RewriteAtJobStart {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_is_active_when_switch_materialization_fails() {
-    // MUTATION: materialize before updating active_versions, or restore the
-    // database-only switch, and the error/active-version assertions fail.
     let scratch = ScratchDir::new().expect("scratch");
     let database = scratch.engine_db_path().expect("database");
     let supervisor = WorkspaceSupervisor::new();
@@ -806,10 +804,6 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     // CIPHERTEXT, so the plaintext lives only in memory and on the projected
     // file — never in the database.
     //
-    // MUTATION: in `plan_secret_switch`, leave the decrypted plaintext behind as
-    // a stray blob — `store.write_with(…, |tx| put_binary_blob(tx, &leaked))`
-    // beside the existing `drop(plaintext)`. Nothing reads that blob, so every
-    // other assertion here still passes and only the scan fails.
     //
     // Planning the projection with the plaintext INLINE also fails this test,
     // but for the wrong reason: the secret executor then cannot decrypt what it
@@ -901,7 +895,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
         );
     }
 
-    // The WAL is part of the evidence, so the scan runs BEFORE the close: closing
+    // The WAL is part of the evidence, so the scan runs before the close: closing
     // the last connection checkpoints the WAL into the main file and normally
     // deletes it, and plaintext that reached a WAL page and was later overwritten
     // would be gone before this could look. `assert_scanned_wal` fails if that

@@ -1,34 +1,19 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
+import {
+  closeTestStorages,
+  createShare as mint,
+  json,
+  jsonBody,
+  request,
+  sha256,
+  testStorage,
+} from "./linkTestHelpers";
 
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs: Windows cannot unlink
-  // files that still have open handles (EBUSY).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-sync-relay-shares-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 // Mirrors the relay's test-auth seam: user identity from the bearer token,
 // emails resolvable as "<userId>@dohc.test".
@@ -78,32 +63,17 @@ function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
   };
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 const GRANTER = "granter";
 const RECIPIENT = "recipient";
 const STRANGER = "stranger";
 const WORKSPACE = "workspace-a";
+
+async function createShare(
+  h: SyncRelayHandler,
+  body: Record<string, unknown> = { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] },
+): Promise<string> {
+  return mint(h, GRANTER, WORKSPACE, body);
+}
 
 async function createWorkspace(h: SyncRelayHandler): Promise<void> {
   const response = await h(request(GRANTER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
@@ -154,19 +124,6 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   );
   expect(response.status).toBe(200);
   return sha;
-}
-
-async function createShare(
-  h: SyncRelayHandler,
-  body: Record<string, unknown> = { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] },
-): Promise<string> {
-  // The level is required at create (#646); cases that are not about levels
-  // mint at the narrowest one unless they pass their own.
-  const response = await h(
-    request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ access: "view", ...body })),
-  );
-  expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
 }
 
 // Captures a denial as comparable bytes: unauthorized probes of every kind
@@ -588,7 +545,7 @@ describe("share grants", () => {
   });
 
   // #646 PR2 opens the append route to comment and edit file shares. What
-  // must NOT change is the refusal a VIEW share gets: one code, and a body
+  // must not change is the refusal a VIEW share gets: one code, and a body
   // byte-identical to the one a read-only chat-channel grant gets. A refusal
   // that differed by selector kind or by level would let a probing recipient
   // read the grant it was refused. Byte-identical bodies are the
@@ -632,7 +589,7 @@ describe("share grants", () => {
     }
     expect(
       bodies[0],
-      "MUTATION: a view share's refusal must not be distinguishable from a read-only channel's",
+      "a view share's refusal must not be distinguishable from a read-only channel's",
     ).toBe(bodies[1]);
   });
 
@@ -715,7 +672,7 @@ describe("share grants", () => {
     expect(self.status).toBe(400);
     expect((await json(self)).code).toBe("self_share");
 
-    // A self-share addressed by the granter's OWN email is refused with the
+    // A self-share addressed by the granter's own email is refused with the
     // same code (the email resolves to the granter's account).
     const selfByEmail = await h(
       request(
@@ -757,7 +714,7 @@ describe("share grants", () => {
     expect(unknownBody).not.toHaveProperty("recipientUserId");
     expect(Object.keys(knownBody).sort()).toEqual(Object.keys(unknownBody).sort());
 
-    // The unknown email is recorded as a PENDING invite: unclaimed, it is not
+    // The unknown email is recorded as a pending invite: unclaimed, it is not
     // yet readable by anyone, but it survives as an honest grant.
     const pendingShareId = unknownBody.shareId as string;
     const beforeClaim = await h(request(RECIPIENT, `/sync/shares/${pendingShareId}/log?since=0`));
@@ -767,7 +724,7 @@ describe("share grants", () => {
   it("claims a pending email invite only for the account whose session email matches", async () => {
     const storage = await testStorage();
     // LATE_EMAIL has no @dohc.test account, so it is stored as a pending
-    // invite. The reverse lookup maps the LATE user id to that address, so its
+    // invite. The reverse lookup maps the late user id to that address, so its
     // first authenticated request claims the invite — but RECIPIENT's does not.
     const LATE = "late-user";
     const LATE_EMAIL = "late@corp.example";
@@ -822,7 +779,7 @@ describe("share grants", () => {
     expect(foreign).toBe(missing);
   });
 
-  it("serves the recipient ONLY ops inside the selector and denies everyone else byte-identically", async () => {
+  it("serves the recipient only ops inside the selector and denies everyone else byte-identically", async () => {
     const storage = await testStorage();
     const h = handler(storage);
     await createWorkspace(h);
@@ -1094,7 +1051,7 @@ describe("share grants", () => {
     const page = await json(await h(request(RECIPIENT, "/sync/shares/share-0/log?since=0")));
     const ops = page.ops as Array<{ opKind: string; payload: { path?: string } }>;
     // Exactly one moment.append survives — the version-1 one. The main-version
-    // write of the SAME path is excluded.
+    // write of the same path is excluded.
     expect(ops).toHaveLength(1);
     expect(JSON.stringify(page)).not.toContain(sha256("main body"));
   });
@@ -1102,7 +1059,7 @@ describe("share grants", () => {
   it("aborts an in-flight shared-log read when the share is revoked mid-request (revocation race)", async () => {
     const storage = await testStorage();
     // Wrap the storage so fetchLogPage revokes the share as a side effect:
-    // this lands AFTER the route's entry check but BEFORE the body is
+    // this lands after the route's entry check but before the body is
     // returned, exactly the race the immediate re-check must catch.
     const racing = new Proxy(storage, {
       get(target, prop, receiver) {

@@ -29,7 +29,7 @@ import type {
 
 // Phase E5.0 content-search panel (Cmd/Ctrl+Shift+F surface): debounced
 // search-as-you-type over the streamed ripgrep IPC, grouped-by-file results
-// with offset-based highlighting (the pattern NEVER re-executes here),
+// with offset-based highlighting (the pattern never re-executes here),
 // keyboard navigation in flat result order, and the 2000-match cap notice.
 
 const DEBOUNCE_MS = 150;
@@ -54,7 +54,7 @@ function dirnameOf(path: string): string {
 // Offset-based match highlighting: slice the preview at matchStart/matchEnd.
 // The row END-truncates, so deep-column matches are lead-trimmed first
 // (windowPreviewForRow) — the match must always be visible in its own row.
-// The mark is the OPAQUE --dohc-match blue (3:1+ vs panel AND the selected
+// The mark is the OPAQUE --dohc-match blue (3:1+ vs panel and the selected
 // row in both themes; one hue means "your match" here and in the editor).
 function HighlightedPreview({ entry }: { entry: SearchResultsEventEntry }) {
   const windowed = windowPreviewForRow(entry);
@@ -71,15 +71,15 @@ function HighlightedPreview({ entry }: { entry: SearchResultsEventEntry }) {
 }
 
 // One file's result group. Memoized against the streaming re-renders: the
-// model clones ONLY touched groups per batch, so untouched groups keep their
+// model clones only touched groups per batch, so untouched groups keep their
 // references and skip re-rendering as later batches arrive.
 const FileGroup = memo(function FileGroup(props: {
   group: SearchGroup;
   collapsed: boolean;
-  // Whether the group renders ALL its entries (vs the bounded preview window
+  // Whether the group renders all its entries (vs the bounded preview window
   // — committing hundreds of rows at once is a keystroke-budget long task).
   showAll: boolean;
-  // Index of the keyboard-selected entry WITHIN this group, or -1.
+  // Index of the keyboard-selected entry within this group, or -1.
   selectedEntryIndex: number;
   onToggle: (path: string) => void;
   onShowAll: (path: string) => void;
@@ -234,7 +234,7 @@ export function SearchView(props: {
     };
   }, []);
 
-  // THE one search-issuing seam: explicit values (state set in the same tick
+  // The one search-issuing seam: explicit values (state set in the same tick
   // hasn't committed yet), debounce cancelled, selection/collapse reset.
   const { run, clear } = props.search;
   function issueNow(options: SearchRunOptions): void {
@@ -257,7 +257,7 @@ export function SearchView(props: {
     });
   }
 
-  // Writes the criteria AND returns them: state set in this tick has not
+  // Writes the criteria and returns them: state set in this tick has not
   // committed yet, so the search must read the returned values.
   function applyCriteria(patch: Partial<SearchCriteria>): SearchCriteria {
     const next = { ...criteria, ...patch };

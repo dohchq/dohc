@@ -1,14 +1,14 @@
 // Is the entry at this path still the one we started on?
 //
 // Two surfaces move files into <workspace>/.dohc/trash, and both do it as a
-// LADDER of renames: the real name first, then shorter ones, each attempted
+// ladder of renames: the real name first, then shorter ones, each attempted
 // only because the platform refused the last. Nothing serializes those
 // attempts, so a failed rung leaves a window in which another process can
 // replace the source -- and the next rung would move the replacement into the
 // trash and report the delete done, for a file nobody named.
 //
 // Both surfaces therefore ask this question before every attempt after the
-// first, against an identity captured ONCE before the first one. It lives here
+// first, against an identity captured once before the first one. It lives here
 // so there is one answer rather than two that can drift.
 
 /** The parts of a stat that identify one filesystem entry. */

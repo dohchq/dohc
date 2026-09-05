@@ -88,7 +88,7 @@ pub(crate) fn owned_op_kinds() -> impl Iterator<Item = &'static str> {
 
 /// Whether this engine knows the op kind at all.
 ///
-/// The share boundary asks so it can tell two refusals apart: a KNOWN kind a
+/// The share boundary asks so it can tell two refusals apart: a known kind a
 /// share does not carry is a scope decision, and a kind this engine cannot
 /// interpret is not — no grant admits it, and only the sender can fix it.
 /// One list answers both, so a new op kind cannot drift into the wrong class.

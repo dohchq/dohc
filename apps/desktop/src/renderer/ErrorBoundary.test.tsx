@@ -65,7 +65,7 @@ describe("ErrorBoundary (scoped)", () => {
     render(<Harness />);
     expect(screen.getByTestId("error-boundary-side-panel")).toBeTruthy();
     // The crash state is owned by the boundary; retry re-renders children.
-    // (The bomb is disarmed by remount-free state living OUTSIDE the boundary
+    // (The bomb is disarmed by remount-free state living outside the boundary
     // in real usage — here we simulate recovery by retrying a now-safe tree.)
     fireEvent.click(screen.getByTestId("error-boundary-side-panel-retry"));
     // Children render again; the bomb still throws, so the card comes back —

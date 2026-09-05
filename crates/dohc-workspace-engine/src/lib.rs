@@ -2,6 +2,7 @@
 
 #![forbid(unsafe_code)]
 
+mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
 pub mod root_binding;
@@ -64,14 +65,14 @@ const MAX_OPEN_HANDLES: usize = 64;
 const CHAT_DISPATCH_MAX_ATTEMPTS: i64 = 2;
 const AUTOMATION_CLAIM_MAX_ATTEMPTS: i64 = 2;
 
-/// The startup reaper only reclaims a running automation claim idle at least
+/// Startup recovery only reclaims a running automation claim idle at least
 /// this long. A desktop that outlives a daemon rebind may still be running
 /// its handler; a claim younger than this bound is presumed alive and left
 /// running rather than double-fired.
 const AUTOMATION_CLAIM_REAP_IDLE_MS: i64 = 10 * 60 * 1000;
 
 /// Emitted once per settled capture batch / reconcile pass that settled any
-/// path — a REPAINT PING, not a moment ledger. Most emissions follow new
+/// path — a repaint ping, not a moment ledger. Most emissions follow new
 /// moment rows (ingests, retires, policy/non-ownable/secret untracks), but
 /// content-equality dedupes and no-op retires fire it too: the renderer
 /// re-lists cheaply, and under-notifying is the staleness bug this event
@@ -164,7 +165,7 @@ impl EngineEvents {
     }
 }
 
-/// In-band CONTENT (binary bytes, secret plaintext) uses the capture contract's
+/// In-band content (binary bytes, secret plaintext) uses the capture contract's
 /// smaller request cap. Larger binary blobs use the full-range write endpoint
 /// or raw blob-chunk egress.
 const MAX_INBAND_CONTENT_BYTES: usize = dohc_engine_domain::INBAND_CONTENT_CAP_BYTES;
@@ -527,12 +528,12 @@ fn json_string_encoded_len(text: &str) -> usize {
 /// The encoded size of the request envelope that carried these params — what
 /// the control frame actually held.
 ///
-/// Every field is the CALLER'S OWN: this request's id, deadline, workspace
+/// Every field is the caller'S OWN: this request's id, deadline, workspace
 /// handle, idempotency key and params, re-encoded by the same encoder the
 /// transport uses. Nothing is reserved and nothing is substituted. A
 /// worst-case stand-in for a field the daemon can read (this one used
 /// `u64::MAX` and `u32::MAX` for the id and deadline) inflates the total by
-/// about thirty bytes, which rejects requests that DID cross the frame and
+/// about thirty bytes, which rejects requests that did cross the frame and
 /// reports a size that never existed — a limit must name what happened.
 fn resolve_request_encoded_bytes(
     id: u64,
@@ -624,7 +625,7 @@ impl EncodedMomentPage {
 }
 
 /// How many leading serialized rows fit a byte budget (at least one always
-/// ships — every string is wire-capped, so a single row fits). MEASURED on
+/// ships — every string is wire-capped, so a single row fits). Measured on
 /// the serialized JSON, not estimated from raw lengths: escaping can expand
 /// a control-character-heavy string up to 6x, and an estimate that ignores
 /// that can pass the budget while the encoded frame exceeds the limit.
@@ -909,6 +910,7 @@ struct OpenWorkspace {
     /// loop), spawned only after the shadow binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
+    automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
     /// Held by every capture reconcile+apply and by versions.setActive across
     /// its forced full scan plus switch transaction. This drains an in-flight
     /// apply and prevents a new one from resolving the destination version
@@ -991,29 +993,36 @@ impl OpenWorkspace {
         }
     }
 
-    /// Signal the capture loop to stop without removing its handle. A version
+    /// Signal the background tasks to stop without removing their handles. A version
     /// fence that already owns the apply gate can still finish against the
     /// driver; teardown takes the handle only after acquiring that gate.
     fn request_capture_shutdown(&self) {
+        if let Some(recovery) = lock(&self.automation_recovery).as_ref() {
+            recovery.request_shutdown();
+        }
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.request_shutdown();
         }
     }
 
-    /// Take the driver and cancel it SYNCHRONOUSLY (no await point, so an
-    /// aborted RPC future can never leave a driver un-cancelled), returning
-    /// the join handle for callers that must await the full drain.
-    fn begin_capture_shutdown(&self) -> Option<tokio::task::JoinHandle<()>> {
-        lock(&self.capture)
+    /// Take and cancel the background tasks without an await point, so an
+    /// aborted RPC future cannot leave them running. Return
+    /// the join handles for callers that must await the full drain.
+    fn begin_capture_shutdown(&self) -> [Option<tokio::task::JoinHandle<()>>; 2] {
+        let capture = lock(&self.capture)
             .take()
-            .and_then(capture_driver::CaptureDriver::begin_shutdown)
+            .and_then(capture_driver::CaptureDriver::begin_shutdown);
+        let recovery = lock(&self.automation_recovery)
+            .take()
+            .and_then(automation_recovery::AutomationRecovery::begin_shutdown);
+        [capture, recovery]
     }
 
-    /// Cancel and await the capture driver's full drain (idempotent).
-    /// Strictly BEFORE the store-actor close: the driver may be mid-apply
+    /// Cancel and await capture and automation recovery (idempotent).
+    /// Strictly before the store-actor close: the driver may be mid-apply
     /// against the actor.
     async fn shutdown_capture(&self) {
-        if let Some(task) = self.begin_capture_shutdown() {
+        for task in self.begin_capture_shutdown().into_iter().flatten() {
             let _ = task.await;
         }
     }
@@ -1055,7 +1064,7 @@ pub struct EngineService {
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     leases: LeaseRegistry,
     next_session: std::sync::atomic::AtomicU64,
-    /// Unique per service INSTANCE (process id + construction time):
+    /// Unique per service instance (process id + construction time):
     /// session ids seed client-side idempotency keys that persist in
     /// `engine_requests`, so ids restarting from 1 each daemon lifetime
     /// would collide a fresh session's first requests with a prior
@@ -1071,7 +1080,7 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
-    /// PER-EngineService by design. Production runs exactly ONE EngineService per
+    /// PER-EngineService by design. Production runs exactly one EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
     /// The budget is per-instance (not a process-global static) so tests can
@@ -1245,7 +1254,7 @@ impl EngineService {
             next_handle: std::sync::atomic::AtomicU64::new(1),
             sessions: Arc::new(Mutex::new(HashMap::new())),
             leases: {
-                // ONE process-wide registry remains a defense in depth for
+                // One process-wide registry remains a defense in depth for
                 // non-service actor users. EngineService itself rejects a
                 // second attachment to an already-live physical engine.db, so
                 // one service owns all session admission for that actor.
@@ -1991,9 +2000,9 @@ impl EngineService {
     }
 
     /// Tear down every open workspace's capture driver (watcher joined,
-    /// files actor closed). Called at daemon shutdown AFTER the transport's
+    /// files actor closed). Called at daemon shutdown after the transport's
     /// workspace close hook: store actors are already gone by then, so any
-    /// in-flight capture write fails CONTAINED (never acked — the next
+    /// in-flight capture write fails contained (never acked — the next
     /// daemon start re-offers it from the dirty baseline), and this drain
     /// joins the watcher/files threads so the process exits clean.
     pub async fn shutdown_all_capture(&self) {
@@ -2068,7 +2077,7 @@ impl EngineService {
             // A maintenance-free open is read intent, not a request for
             // ownership. Mint a non-owning token over the live binding so its
             // close cannot tear down the desktop's actor, capture, or relay.
-            // Same workspace: short-circuit only on a LIVE binding. A bound-but-
+            // Same workspace: short-circuit only on a live binding. A bound-but-
             // closed actor (its worker died) is stale — drop it and reopen fresh.
             if open.actor.lifecycle() != LifecycleState::Closed {
                 if requested_mode == WorkspaceOpenMode::ReadOnly {
@@ -2161,7 +2170,7 @@ impl EngineService {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
             // The evicted binding's files layer must not outlive it. Clear
-            // suppression only AFTER the shutdown drain — an in-flight
+            // suppression only after the shutdown drain — an in-flight
             // reconcile apply still consults the registry.
             open.shutdown_capture().await;
             self.self_writes
@@ -2198,12 +2207,12 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
-            // The root binding runs HERE, inside the task no cancellation can
+            // The root binding runs here, inside the task no cancellation can
             // interrupt, not as the first await after it. The first open of a
             // workspace creates and migrates engine.db; a request dropped
             // between that commit and the bind left the store migrated but
             // unbound, and every later open then refused it as a mismatch,
-            // permanently (#908). Now the store is either bound or the actor
+            // permanently. Now the store is either bound or the actor
             // is closed before the request can observe either.
             //
             // A root with no binding yet gets a fresh token only when the
@@ -2291,7 +2300,7 @@ impl EngineService {
                 ),
             )
             .await?;
-            // Startup replay BEFORE the files layer exists: jobs left pending by
+            // Startup replay before the files layer exists: jobs left pending by
             // a crash, a transient settle failure, or a pulled replication apply
             // land on disk while nothing is watching (no suppression window),
             // and the baseline reconcile below then scans the POST-replay disk.
@@ -2299,7 +2308,7 @@ impl EngineService {
                 .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
-            // The files layer spawns ONLY here — after the shadow binding
+            // The files layer spawns only here — after the shadow binding
             // succeeded — so an unmarked or mismatched root can never grow a
             // watcher or files actor (the shadow-scope dormancy invariant).
             let capture = capture_enabled.then(|| {
@@ -2323,7 +2332,7 @@ impl EngineService {
             // capture never claims a foreign head, so a caller's first write
             // wins while the bounded import finishes behind the handle.
             //
-            // CANCELLATION: nothing owns the store actor yet (the handle is
+            // Cancellation: nothing owns the store actor yet (the handle is
             // inserted below), so an abort here would leak it. The `open_guard`
             // armed above the startup replay closes the actor on an early drop
             // and is disarmed once the handle is inserted; `CaptureDriver`'s own
@@ -2331,7 +2340,7 @@ impl EngineService {
             // Desktop rebinds opt out because their runner processes outlive the daemon.
             if actor_open.created_actor && params.recover_running_dispatches.unwrap_or(true) {
                 // Cancellation-aware like every other actor wait in this flow:
-                // a caller abort stops WAITING promptly (the actor still finishes
+                // a caller abort stops waiting promptly (the actor still finishes
                 // the reclaim it already accepted — it is idempotent on the next
                 // open) and the open_guard above closes the actor on early drop.
                 Self::read_under_ctx(
@@ -2358,6 +2367,7 @@ impl EngineService {
                     "workspace.open (automation reclaim)",
                     actor.automation_reclaim_running(
                         params.workspace_id.clone(),
+                        None,
                         AUTOMATION_CLAIM_MAX_ATTEMPTS,
                         now_ms - AUTOMATION_CLAIM_REAP_IDLE_MS,
                         now_ms,
@@ -2372,6 +2382,24 @@ impl EngineService {
             }
             capture
         };
+        let automation_recovery = if requested_mode == WorkspaceOpenMode::Full {
+            let attempts = Self::read_under_ctx(
+                &cancellation,
+                "workspace.open (automation recovery snapshot)",
+                actor.automation_running_attempts(params.workspace_id.clone()),
+            )
+            .await?;
+            (!attempts.is_empty()).then(|| {
+                automation_recovery::AutomationRecovery::spawn(
+                    actor.clone(),
+                    params.workspace_id.clone(),
+                    attempts,
+                    self.events.clone(),
+                )
+            })
+        } else {
+            None
+        };
         lock(&self.handles).insert(
             handle.clone(),
             OpenWorkspace {
@@ -2385,6 +2413,7 @@ impl EngineService {
                     .relay
                     .map(|configuration| configuration.configuration()),
                 capture: Arc::new(Mutex::new(capture)),
+                automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
             },
@@ -2463,7 +2492,7 @@ impl EngineService {
                 lock(&self.sessions).retain(|_, session| session.workspace != handle);
                 return Ok(json!({ "closed": false, "attachmentClosed": removed }));
             }
-            // Install the GLOBAL Closing marker BEFORE removing the handle, so a
+            // Install the GLOBAL Closing marker before removing the handle, so a
             // workspace_open on another EngineService (which does not take this
             // service's open_lock) observes Closing at supervisor.open and waits
             // for a fresh actor instead of the one being torn down.
@@ -2491,7 +2520,7 @@ impl EngineService {
         let capture_gate = Arc::clone(&removed.capture_apply_gate);
         let session_gate = Arc::clone(&removed.session_ops);
         let sessions = Arc::clone(&self.sessions);
-        // Suppression entries clear AFTER the capture drain: an in-flight
+        // Suppression entries clear after the capture drain: an in-flight
         // reconcile apply still consults the registry, and clearing first
         // would let it re-ingest the daemon's own just-settled file as a
         // capture write (provenance flip) during teardown.
@@ -2513,7 +2542,7 @@ impl EngineService {
             lock(&sessions).retain(|_, session| {
                 session.workspace != handle && !attached_handles.contains(&session.workspace)
             });
-            if let Some(drain) = capture_drain {
+            for drain in capture_drain.into_iter().flatten() {
                 let _ = drain.await;
             }
             clear_suppression.0.clear_workspace(&clear_suppression.1);
@@ -2986,7 +3015,7 @@ impl EngineService {
         Ok(result)
     }
 
-    /// Record this share view's own replica identity (#646 PR3-1). Run at
+    /// Record this share view's own replica identity. Run at
     /// open and again at every refresh; the engine writes the row once and
     /// later calls answer `already-recorded`.
     ///
@@ -2996,7 +3025,7 @@ impl EngineService {
     /// and Comment record nothing — and refuses an unreadable level the same
     /// way the pull does.
     ///
-    /// The three identity components are minted HERE, not by the caller, for
+    /// The three identity components are minted here, not by the caller, for
     /// the same reason `sync.claim` mints its own: the durable row is the
     /// record, so a refresh cannot re-mint an origin and split this replica's
     /// log in two. The origin is a REPLICA id — the relay namespaces this
@@ -3016,7 +3045,7 @@ impl EngineService {
                 ctx,
                 &open,
                 configuration,
-                // The RPC still parses the WHOLE selector above, because a
+                // The RPC still parses the whole selector above, because a
                 // caller that sends a malformed one must be refused here. The
                 // operation carries only the access: the level is the entire
                 // decision it makes, and handing it paths would suggest they
@@ -3035,8 +3064,7 @@ impl EngineService {
         relay_outcome_json(outcome)
     }
 
-    /// Offer this replica's own edits of a RECEIVED file share to the granter
-    /// (#646 PR3).
+    /// Offer this replica's own edits of a received file share to the granter.
     ///
     /// Takes the same pinned selector the pull takes and refuses an unreadable
     /// level the same way. The client refuses again below `edit` — the caller
@@ -3099,7 +3127,7 @@ impl EngineService {
     }
 
     /// Acquire the ordering guard shared with `ydoc.open` before probing a
-    /// path lease. The caller must retain the returned OWNED guard until its
+    /// path lease. The caller must retain the returned owned guard until its
     /// actor mutation has completed: check-without-lease -> mutation and
     /// probe -> lease -> authoritative re-read are mutually exclusive orders.
     async fn mutation_session_guard(
@@ -3597,7 +3625,6 @@ impl EngineService {
                     path,
                     mutation_moment_id: params.mutation_moment_id,
                     request_id,
-                    legacy_before_text: params.legacy_before_text,
                     metadata_origin: origin,
                     author_json,
                 },
@@ -3835,7 +3862,7 @@ impl EngineService {
 
     /// Freeze the active workspace snapshot before a version fork or switch.
     ///
-    /// Lock order is per-workspace capture gate FIRST, then that workspace's
+    /// Lock order is per-workspace capture gate first, then that workspace's
     /// Y.Doc/session mutation gate — the same helper used by workspace.close.
     /// Once both are held, no capture apply or session admission can straddle
     /// the session sweep, forced reconcile, and version transaction. After the
@@ -3953,9 +3980,9 @@ impl EngineService {
         let events = self.events.clone();
         let detached_operation = operation.to_owned();
         let settle_summary = settle_summary.to_owned();
-        // The fence's forced reconcile is a capture PASS (TS parity:
+        // The fence's forced reconcile is a capture pass (TS parity:
         // `version-switch-${id}` / `version-create-${id}`): its moments carry
-        // the fence's own summary and ONE correlation id so the pre-switch
+        // the fence's own summary and one correlation id so the pre-switch
         // "nothing is ever lost" capture groups in history instead of
         // rendering as unrelated per-file rows.
         let reconcile_provenance = capture_sink::CaptureProvenance {
@@ -4177,7 +4204,7 @@ impl EngineService {
         let params: VersionedTextReadParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // ONE actor turn decides the in-band cap: an over-cap body never
+        // One actor turn decides the in-band cap: an over-cap body never
         // leaves SQLite, and no concurrent write can grow the body between
         // a size probe and the load (there is no probe).
         let snapshot = Self::read_under_ctx(
@@ -4403,7 +4430,7 @@ impl EngineService {
         let guard = lock(&open.capture);
         Ok(match guard.as_ref() {
             Some(driver) => {
-                // ONE snapshot — the three flags must come from the same
+                // One snapshot — the three flags must come from the same
                 // atomic load, or a reader racing a transition could report
                 // running && terminal.
                 let snapshot = driver.status().snapshot();
@@ -4425,10 +4452,10 @@ impl EngineService {
         })
     }
 
-    /// Drive capture to quiescence and report what was achieved. THE
+    /// Drive capture to quiescence and report what was achieved. The
     /// determinism seam for the capture differential: without it a harness
     /// can only sleep and hope, which turns timing blips into parity
-    /// failures. Quiescence covers every change the WATCHER has noticed — a
+    /// failures. Quiescence covers every change the watcher has noticed — a
     /// write still inside the OS debounce is invisible to flush too; callers
     /// needing a specific write poll for it (flush + check), which the
     /// differential does. `settled: false` is an honest answer (layer down, teardown
@@ -4455,7 +4482,7 @@ impl EngineService {
         open: &OpenWorkspace,
         operation: &'static str,
     ) -> Result<capture_driver::FlushOutcome, WireError> {
-        // Clone the sender OUT of the lock and await OUTSIDE it: a flush can
+        // Clone the sender out of the lock and await outside it: a flush can
         // legitimately take many reconcile cycles, and the workspace table
         // must not be blocked for its duration.
         let capture = lock(&open.capture).as_ref().map(|driver| {
@@ -4483,7 +4510,7 @@ impl EngineService {
         }
         // A flush can drive up to MAX_FLUSH_CYCLES reconciles or sit behind
         // a full flush queue — a cancelled/deadlined caller must get its
-        // answer NOW, like every other workspace RPC. The driver still
+        // answer now, like every other workspace RPC. The driver still
         // finishes its pass; only the wait is abandoned (the reply send
         // fails harmlessly).
         let cancellation = OperationCancellation::new(ctx);
@@ -4779,7 +4806,7 @@ impl EngineService {
         let params: VersionedTextListParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // METADATA ONLY, PAGED: bodies come one path at a time via
+        // METADATA ONLY, paged: bodies come one path at a time via
         // versionedText.read (aggregated bodies trivially exceed the 1 MiB
         // frame limit), and even metadata rows are paged so a large
         // workspace cannot exceed it either. The +1 row probes for more.
@@ -4795,7 +4822,7 @@ impl EngineService {
             ),
         )
         .await?;
-        // An unknown version must REFUSE, never read as empty — on EVERY
+        // An unknown version must refuse, never read as empty — on every
         // page: a stale cursor plus a typo'd version would otherwise read
         // as "exhausted". A legitimately-empty tail page for a real
         // version pays one extra membership read; correctness wins.
@@ -4811,7 +4838,7 @@ impl EngineService {
                 .any(|version| version.version_id == params.version_id)
             {
                 // The domain code, like every other refusal (`map_runtime`).
-                // Spelling this one as prose gave the SAME refusal two wire
+                // Spelling this one as prose gave the same refusal two wire
                 // messages depending on which method the caller reached it
                 // through, and a client that keys on the code saw neither.
                 return Err(wire(ErrorCode::InvalidParams, "version-not-found"));
@@ -4867,7 +4894,7 @@ impl EngineService {
         let params: VersionPathParams = parse(params)?;
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // ONE actor turn: the cap is decided in the query, so a replaced
+        // One actor turn: the cap is decided in the query, so a replaced
         // head can never smuggle an over-cap blob into memory, and the
         // recorded length is integrity-checked against the stored bytes.
         let head = tokio::select! {
@@ -4924,10 +4951,6 @@ impl EngineService {
         let open = self.open(handle.as_ref())?;
         validate_workspace_param(Some(&params.workspace_id), &open.workspace_id)?;
         let cancellation = OperationCancellation::new(ctx);
-        // MUTATION: hydrate directly before reserving its recorded byte length
-        // -> concurrent over-cap reads can retain queue-capacity full blobs.
-        // Metadata/in-band first: over-cap bytes do not leave SQLite until the
-        // exact-byte egress reservation has been acquired.
         let read = Self::read_under_ctx(
             &cancellation,
             "versionedBinary.readBlob",
@@ -5085,7 +5108,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsListParams = parse(params)?;
-        // The filter rejects ONLY what the write path can never store
+        // The filter rejects only what the write path can never store
         // (the empty string): every id versionedText.list or
         // moments.list can return — whitespace/control-carrying
         // included — must stay filterable verbatim.
@@ -5203,8 +5226,8 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: MomentsGetParams = parse(params)?;
-        // Reject ONLY what the write path can never store (the empty
-        // string): all-whitespace ids ARE storable and moments.list
+        // Reject only what the write path can never store (the empty
+        // string): all-whitespace ids are storable and moments.list
         // returns them verbatim — they must stay fetchable verbatim.
         if params.moment_id.is_empty() {
             return Err(wire(ErrorCode::InvalidParams, "momentId must not be empty"));
@@ -5250,7 +5273,7 @@ impl EngineService {
         .await?;
         let has_more = secrets.len() > limit;
         let secrets = &secrets[..secrets.len().min(limit)];
-        // Metadata-only AND keyset-paged (afterPath/nextAfterPath); the
+        // Metadata-only and keyset-paged (afterPath/nextAfterPath); the
         // byte budget is the second bound so no page can outgrow the
         // frame even when rows are string-heavy.
         let row_values: Vec<Value> = secrets
@@ -5637,7 +5660,7 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: SecretsApplyParams = parse(params)?;
-        // Secret-path gate UP FRONT so the error surface is identical across
+        // Secret-path gate UP front so the error surface is identical across
         // key states (a non-secret path refuses the same way with or without
         // a key on disk).
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
@@ -5758,7 +5781,7 @@ impl EngineService {
         }))
     }
 
-    /// THE single authorized plaintext accessor over RPC (TS parity:
+    /// The single authorized plaintext accessor over RPC (TS parity:
     /// `materializeSecretFile`). The key is loaded from the workspace root
     /// per call — the daemon holds no key custody — and a missing key with
     /// live secret state fails closed rather than returning nothing.
@@ -5769,18 +5792,18 @@ impl EngineService {
         params: Value,
     ) -> Result<Value, WireError> {
         let params: VersionPathParams = parse(params)?;
-        // Normalize ONCE and use the normalized spelling everywhere: the
-        // policy stable-decodes percent disguises (%2eenv classifies as
-        // .env), and querying with the raw spelling would answer "absent
+        // Normalize once and use the normalized spelling everywhere: the
+        // policy stable-decodes percent disguises (%2eenv classifies as.
+        // Env), and querying with the raw spelling would answer "absent
         // secret" for a real one. This also runs the fail-closed secret
-        // gate up front, before ANY state-dependent branch, so the error
+        // gate up front, before any state-dependent branch, so the error
         // surface is identical across key states.
         if dohc_engine_files::policy::classify_engine_file_path(&params.path)
             != dohc_engine_files::policy::PathClassification::Secret
         {
             return Err(wire(ErrorCode::InvalidParams, "not a secret path"));
         }
-        // QUERY VERBATIM: the domain stores the spelling the write
+        // Query verbatim: the domain stores the spelling the write
         // carried, and a path secrets.list returns must materialize
         // verbatim — rewriting to the normalized spelling would orphan
         // stored tips (the classification above still uses it, so the
@@ -5788,9 +5811,9 @@ impl EngineService {
         let secret_path = params.path.clone();
         let open = self.open(handle.as_ref())?;
         let cancellation = OperationCancellation::new(ctx);
-        // PRECEDENCE stat (keyless): validates the secret path and the
-        // version BEFORE any key work, so caller mistakes error
-        // identically regardless of local key-file state — and an ABSENT
+        // Precedence stat (keyless): validates the secret path and the
+        // version before any key work, so caller mistakes error
+        // identically regardless of local key-file state — and an absent
         // secret answers null right here: no key material is needed to
         // say "nothing stored", and a stale malformed key file must not
         // turn that answer into an error. The in-band cap itself is
@@ -5809,7 +5832,7 @@ impl EngineService {
             return Ok(Value::Null);
         }
         // Blocking filesystem work stays off the tokio worker — and the
-        // WAIT for it is cancellation/deadline-raced like every other
+        // wait for it is cancellation/deadline-raced like every other
         // await on this surface (the blocking task finishes on its own;
         // only the caller's wait abandons).
         let key_root = open.root.clone();
@@ -5827,7 +5850,7 @@ impl EngineService {
         let Some(key) = key else {
             // Path and version already validated above (gate + stat).
             // The state check: a workspace that never minted a key has no
-            // secrets; one WITH secret rows and no key is
+            // secrets; one with secret rows and no key is
             // corrupt/misrestored state and fails closed.
             let has_state = Self::read_under_ctx(
                 &cancellation,
@@ -8306,7 +8329,7 @@ impl EngineService {
             }
             serial = Arc::clone(&open.session_ops).lock_owned() => serial,
         };
-        // The first read only DERIVES the key (head resolution can't happen
+        // The first read only derives the key (head resolution can't happen
         // without it). The lease is then taken on that key and the state is
         // RE-READ under it, so the second read is authoritative for the
         // acquired session.
@@ -8386,11 +8409,11 @@ impl EngineService {
             .map_err(map_ydoc_open_runtime)?;
         if state.key != probe.key {
             // The path's owner changed between the probe and the lease: the
-            // held lease guards the WRONG key. Refuse; the client retries.
+            // held lease guards the wrong key. Refuse; the client retries.
             return Err(wire(ErrorCode::InvalidParams, "ydoc-session-busy"));
         }
         // Post-commit: the open's drain committed these history rows, and no
-        // other path fires a parked update's events (#1002). Never claims —
+        // other path fires a parked update's events. Never claims —
         // drained updates are synced, and only the origin device claims its
         // automation triggers (ADR 0008).
         for facts in &state.record_facts {
@@ -8533,7 +8556,7 @@ impl EngineService {
         let params: YdocRecordUpdateParams = parse(params)?;
         let cancellation = OperationCancellation::new(ctx);
         let open = self.open(handle.as_ref())?;
-        // An OWNED guard: it moves INTO the spawned task below, so a dropped
+        // An owned guard: it moves INTO the spawned task below, so a dropped
         // RPC future cannot release the session serial while the record (and
         // its first_update_pending transition) is still running — a second
         // recordUpdate would otherwise read the stale flag and refuse
@@ -8563,8 +8586,8 @@ impl EngineService {
             return Err(wire(ErrorCode::InvalidParams, "seed-not-first-update"));
         }
         let seed_source_sha256 = params.seed.then(|| session.open_head_sha.clone()).flatten();
-        // The record and the first-seed flag transition run in a SPAWNED
-        // task: if the seed COMMITS but a deadline/cancel drops this future
+        // The record and the first-seed flag transition run in a spawned
+        // task: if the seed commits but a deadline/cancel drops this future
         // before the post-await assignment, the session would keep
         // `first_update_pending` and send its next distinct edit with
         // `require_empty_lineage = true` — a spurious
@@ -8620,7 +8643,7 @@ impl EngineService {
         };
         // A lineage that could have started sharing and did not is the one
         // origination outcome a person can act on, so it does not pass in
-        // silence (#632). The wire result reports the append; stderr keeps the
+        // silence. The wire result reports the append; stderr keeps the
         // server-side trail, the same split the post-commit materialize path
         // uses. The per-document sharing surface that will show this to the
         // user arrives with #356 — until a workspace can replicate at all,
@@ -8700,9 +8723,9 @@ impl EngineService {
             dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
             // A distinct wire message the client acts on: remote edits
             // drained under this session's lease mean the client's doc is
-            // BEHIND — it must resync (which returns the full drained
+            // behind — it must resync (which returns the full drained
             // state) and settle again. The drained updates' record facts
-            // ride the refusal and fire here, post-commit (#1002).
+            // ride the refusal and fire here, post-commit.
             dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
                 for facts in &record_facts {
                     emit_record_events(&self.events, &open.workspace_id, facts);
@@ -8789,7 +8812,7 @@ impl EngineService {
         handle: Option<&WorkspaceHandle>,
         params: YdocCloseParams,
     ) -> Result<Value, WireError> {
-        // Missing `settle` means SETTLE — the TS driver treats close() as
+        // Missing `settle` means settle — the TS driver treats close() as
         // settle-unless-explicitly-false, and defaulting to false here would
         // fail dirty local-only closes (UnsettledClose) and let a replicated
         // close compact while the artifact projection is stale.
@@ -8811,9 +8834,9 @@ impl EngineService {
                 .await;
             match settled {
                 Ok(_) => {}
-                // The refusal fires AFTER the deferred rows drained: for the
-                // EXPLICIT settle RPC the client must resync (it keeps
-                // editing), but a CLOSE is final — the session ends, so the
+                // The refusal fires after the deferred rows drained: for the
+                // explicit settle RPC the client must resync (it keeps
+                // editing), but a close is final — the session ends, so the
                 // converged doc (local + drained remote) IS the artifact.
                 // Retry once; the drain has emptied the queue, so the second
                 // settle projects the merged state. Without this, a routine
@@ -8832,19 +8855,19 @@ impl EngineService {
             }
         }
         let (open, session) = self.ydoc_session(handle, &params.session_id)?;
-        // The close command carries a FRESH token: once the settle above has
+        // The close command carries a fresh token: once the settle above has
         // materialized, honoring a caller cancel here would leave the
         // session/lease held, and the retried close would re-settle over the
         // already-settled content (the fingerprint's previous-moment input
         // changed) — duplicate moments for one close.
         //
-        // The session entry (and with it the lease guard) is TAKEN before
+        // The session entry (and with it the lease guard) is taken before
         // the await: if a deadline drops this future while the actor still
         // compacts/prunes, dropping the entry releases the lease — the doc
-        // can't stay ydoc-session-busy forever. A close REFUSAL (e.g.
+        // can't stay ydoc-session-busy forever. A close refusal (e.g.
         // UnsettledClose on a dirty prune-close) reinserts the entry.
         //
-        // The take→close→reinsert sequence runs in a SPAWNED task, not this
+        // The take→close→reinsert sequence runs in a spawned task, not this
         // RPC future: the protocol supervisor can drop this future on a
         // caller cancel/deadline, and a drop between the take and the
         // actor's refusal would skip the reinsert — the session and lease
@@ -8858,9 +8881,9 @@ impl EngineService {
         let session_key = session.key.clone();
         let close_root = open.root.clone();
         let close_self_writes = Arc::new(self.self_writes.scoped(&open.root));
-        // The TAKE happens synchronously BEFORE the spawn: if this future is
+        // The take happens synchronously before the spawn: if this future is
         // dropped right after spawning, `session_ops` releases while the task
-        // has not yet run — a concurrent recordUpdate/settle must NOT be able
+        // has not yet run — a concurrent recordUpdate/settle must not be able
         // to find the session and race edits against the in-flight close.
         let taken = lock(&self.sessions).remove(&params.session_id);
         let close_events = self.events.clone();
@@ -8878,17 +8901,17 @@ impl EngineService {
                 .await;
             // Post-commit, inside the spawned task — it runs to completion
             // even when the RPC future is dropped, and the close's drain
-            // committed these history rows (#1002).
+            // committed these history rows.
             if let Ok(closed) = &close_result {
                 for facts in &closed.record_facts {
                     emit_record_events(&close_events, &close_workspace_id, facts);
                 }
             }
-            // Reinsert ONLY on a genuine close refusal (UnsettledClose and
+            // Reinsert only on a genuine close refusal (UnsettledClose and
             // friends) — an ActorUnavailable/WorkerPanicked error means the
             // workspace was torn down while this task ran, and resurrecting
             // the entry would keep its embedded lease alive past the
-            // eviction, leaving the doc ydoc-session-busy for the NEXT
+            // eviction, leaving the doc ydoc-session-busy for the next
             // workspace open.
             if matches!(
                 close_result,
@@ -8915,7 +8938,7 @@ impl EngineService {
     /// does to every session, and it is the only exit for a session that can
     /// neither settle (nothing may write this artifact) nor prune (the guard
     /// refuses while no artifact holds the CRDT's bytes). Nothing is discarded,
-    /// so the next open resurrects the lineage with its edits (#665).
+    /// so the next open resurrects the lineage with its edits.
     async fn ydoc_evict(
         &self,
         ctx: &RequestContext,
@@ -8934,7 +8957,7 @@ impl EngineService {
         };
         // Refuse an unknown id for the same reason `ydoc.close` does: a caller
         // holding a session the daemon does not have must learn that, not read
-        // a success. The removal below is the WHOLE operation — no await, no
+        // a success. The removal below is the whole operation — no await, no
         // actor round trip — so no cancellation can land between the two.
         self.ydoc_session(handle.as_ref(), &params.session_id)?;
         lock(&self.sessions).remove(&params.session_id);
@@ -9063,16 +9086,16 @@ impl EngineService {
         let candidates = conflicts.len().min(CONFLICTS_RESPONSE_ROW_LIMIT);
         let mut rows: Vec<Value> = conflicts[..candidates].iter().map(conflict_json).collect();
         // A row past the hard cap can never ship in band, and refusing it
-        // would refuse its healthy neighbors AND dead-end the cursor: an
+        // would refuse its healthy neighbors and dead-end the cursor: an
         // over-cap row that is not first ends the page, the cursor advances
-        // to it, and the next request makes it the leading row. Degrade THAT
+        // to it, and the next request makes it the leading row. Degrade that
         // row instead: withhold each over-cap side body, so the `blobSha256`
         // and `inbandLimitBytes` beside it route the caller to
         // `versionedText.readBlob` — the hydration `versionedText.read`
         // already uses.
         for row in &mut rows {
             if serde_json::to_string(row).map_or(0, |s| s.len()) > CONFLICT_ROW_HARD_CAP_BYTES {
-                // EVERY body, not just the over-cap ones: the row crossed on
+                // Every body, not just the over-cap ones: the row crossed on
                 // the sum of its parts, so withholding only the parts that
                 // individually cross can leave it over the cap.
                 withhold_all_conflict_side_texts(row);
@@ -9085,7 +9108,7 @@ impl EngineService {
         );
         if included == 0 && !conflicts.is_empty() {
             // The last line of defense, not dead code: withholding nulls only
-            // the side BODIES, so this fires for a row still over the cap on
+            // the side bodies, so this fires for a row still over the cap on
             // what remains — which is why every string that survives
             // withholding is bounded before persistence, at the shared path
             // both open routes funnel through
@@ -9116,7 +9139,7 @@ impl EngineService {
             "nextAfterConflictId": next_after_conflict_id,
         });
         // The cap above bounds a ROW; the frame carries the PAGE. The
-        // continuation is appended AFTER the cut — a second copy of one row's
+        // continuation is appended after the cut — a second copy of one row's
         // id — and a body admitted in band can leave no room for it, so a row
         // and a cursor that are each admissible still cross together. Measure
         // the encoded response, and past the frame withhold every body on
@@ -9125,7 +9148,7 @@ impl EngineService {
         // The withheld page fits. A fully withheld row costs its non-withheld
         // strings plus scaffolding — `CONFLICT_METADATA_BUDGET_BYTES` plus
         // `CONFLICT_ROW_STRUCTURAL_HEADROOM_BYTES`, both bounded before
-        // persistence — and that budget counts the conflict id TWICE, which is
+        // persistence — and that budget counts the conflict id twice, which is
         // precisely the continuation's copy. A page of several rows is bounded
         // instead by `CONFLICTS_PAGE_BYTE_BUDGET`, which admits a row after the
         // first only while the running total stays inside it, and its
@@ -9241,11 +9264,11 @@ impl EngineService {
             local.metadata_correlation_id.as_deref(),
         )?;
         let metadata_origin = validated_origin(Some(&local.metadata_origin), None)?;
-        // THE ANSWER IS BUILT AFTER THE MUTATION COMMITS. Withholding (below)
+        // The answer is built after the mutation commits. Withholding (below)
         // takes out every body, never the strings beside them, so an answer
         // whose withheld form still passes the frame cannot be sent at all —
         // and by then the resolution has happened, which turns a transport
-        // limit into a lost acknowledgement. So the answer is bounded BEFORE
+        // limit into a lost acknowledgement. So the answer is bounded before
         // anything is written: reserve what this request's own fields will
         // spend, and the resolve transaction refuses inside itself, without
         // writing, if the conflict cannot fit in what remains.
@@ -9259,12 +9282,12 @@ impl EngineService {
         //   3. scaffolding, fixed-width fields, and the removed head's
         //      metadata pair — `RESOLVE_ANSWER_STRUCTURAL_BYTES`.
         // Nothing else can appear. The write and delete blocks describe the
-        // LIVE head, and `live_state_matches_conflict_current` admits a
+        // live head, and `live_state_matches_conflict_current` admits a
         // resolution only when that head matches the recorded current side on
         // path, object and latest moment — so those identifiers are the
         // conflict row's, already counted in (1).
         //
-        // Healthy work cannot reach it, MEASURED rather than assumed. Three
+        // Healthy work cannot reach it, measured rather than assumed. Three
         // UUID identifiers served twelve times cost under 600 bytes, and the
         // sibling write paths cap a metadata field at
         // `MAX_METADATA_FIELD_BYTES`. `a_worst_legitimate_resolve_is_admitted`
@@ -9355,8 +9378,8 @@ impl EngineService {
                 "moment": moment_json(&delete.moment),
             })),
         });
-        // ONE frame carries the whole ANSWER, and this one reports a mutation
-        // that ALREADY COMMITTED: an over-frame answer loses the caller's
+        // One frame carries the whole answer, and this one reports a mutation
+        // that already committed: an over-frame answer loses the caller's
         // acknowledgement for work the workspace kept. Each body is withheld
         // past the in-band cap above; nothing bounds their sum beside a
         // conflict whose own metadata may reach
@@ -9369,7 +9392,7 @@ impl EngineService {
         // reserved above and enforced inside the resolve transaction, which
         // refuses — without writing — an answer whose withheld form cannot
         // fit. What this pass adds is the shrinking that keeps a fitting
-        // answer inside the frame once the bodies are counted. Refusing HERE
+        // answer inside the frame once the bodies are counted. Refusing here
         // is not an option: the resolution has committed, and a refusal would
         // report a mutation that happened as one that did not.
         if response_encoded_bytes(id, &answer) > RESPONSE_FRAME_BYTES {
@@ -9784,7 +9807,7 @@ async fn close_ydoc_session_for_version_fence(
         lock(sessions).insert(session_id.to_owned(), entry);
     }
     let closed = close.map_err(map_runtime)?;
-    // Post-commit: the close's drain committed these history rows (#1002).
+    // Post-commit: the close's drain committed these history rows.
     for facts in &closed.record_facts {
         emit_record_events(events, &open.workspace_id, facts);
     }
@@ -9843,7 +9866,7 @@ async fn settle_ydoc_session_for_version_fence(
     let settled = match settled {
         dohc_engine_runtime::YdocSettleOutcome::Settled(settlement) => *settlement,
         dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { record_facts } => {
-            // Post-commit (#1002); the fence's caller retries the settle.
+            // Post-commit; the fence's caller retries the settle.
             for facts in &record_facts {
                 emit_record_events(events, &open.workspace_id, facts);
             }
@@ -9936,7 +9959,7 @@ impl ProtocolEngineService for EngineService {
 
 struct OperationCancellation {
     token: CancellationToken,
-    /// Whether the DEADLINE (not a client cancel) is what fired the token —
+    /// Whether the deadline (not a client cancel) is what fired the token —
     /// the two report different wire codes with different retryability.
     deadline_hit: Arc<std::sync::atomic::AtomicBool>,
     bridge: tokio::task::JoinHandle<()>,
@@ -9955,7 +9978,7 @@ impl OperationCancellation {
         let child = token.clone();
         let bridge = tokio::spawn(async move {
             // The supervisor enforces deadlines non-cooperatively for wire
-            // requests; EMBEDDED callers (InProcessTransport, future
+            // requests; embedded callers (InProcessTransport, future
             // mobile/WASM hosts) have no supervisor, so the deadline arms
             // the same token here.
             match deadline {
@@ -9979,7 +10002,7 @@ impl OperationCancellation {
     }
 
     /// The wire error for an interrupted wait: DEADLINE_EXCEEDED when the
-    /// deadline fired, CANCELLED for a client cancel — retryability differs.
+    /// deadline fired, cancelled for a client cancel — retryability differs.
     fn interruption(&self, what: &str) -> WireError {
         if self.deadline_hit.load(std::sync::atomic::Ordering::Relaxed) {
             WireError::new(
@@ -10022,7 +10045,7 @@ impl Drop for OpenGuard {
             return;
         };
         // Detached + blocking: never run the actor join on a runtime worker
-        // (the #201 cancellation-safety contract). begin_close installed the
+        // (the cancellation-safety contract). begin_close installed the
         // Closing marker synchronously, so an immediate reopen waits here.
         tokio::task::spawn_blocking(move || {
             let _ = closing.finish();
@@ -10143,7 +10166,7 @@ struct ShareViewParams {
     workspace_id: String,
     share_id: String,
     /// The selector the relay stated for this share, pinned by the caller on
-    /// first read. REQUIRED, and required as an object: absent and explicit
+    /// first read. Required, and required as an object: absent and explicit
     /// `null` both parse as "no scope", which is the one pull nothing checks.
     /// Serde refuses either — a caller with no selector must resolve one
     /// before it pulls.
@@ -10154,7 +10177,7 @@ struct ShareViewParams {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ShareViewEnrollParams {
     workspace_id: String,
-    /// REQUIRED, for the level it carries. Recording is a level decision, and
+    /// Required, for the level it carries. Recording is a level decision, and
     /// a caller that cannot state the level must not record one.
     granted_selector: GrantedSelectorParams,
 }
@@ -10169,7 +10192,7 @@ struct ShareProposalSubmitParams {
     /// wrote, and the level inside it is what the client refuses below `edit`
     /// on.
     granted_selector: GrantedSelectorParams,
-    /// The idempotency key for ONE submit. No default: a generated-per-attempt
+    /// The idempotency key for one submit. No default: a generated-per-attempt
     /// id would open a second proposal on every retry of the same intent.
     submit_id: String,
 }
@@ -10180,7 +10203,7 @@ struct GrantedSelectorParams {
     paths: Vec<String>,
     #[serde(default)]
     version_id: Option<String>,
-    // REQUIRED (#646 PR1): the level the caller pinned from the relay's own
+    // Required (#646 PR1): the level the caller pinned from the relay's own
     // selector. No default here — a grant whose level cannot be read is not
     // a narrower grant, it is an unreadable one, and `share_view_pull` below
     // refuses it rather than substituting a default.
@@ -10351,8 +10374,6 @@ struct VersionedTextRollbackParams {
     author_json: Option<String>,
     #[serde(default)]
     request_id: Option<String>,
-    #[serde(default)]
-    legacy_before_text: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -10673,7 +10694,7 @@ struct YdocRecordUpdateParams {
     attribution: Option<dohc_engine_domain::ChangeAttribution>,
     /// The client declares this update as the SEED: a faithful import of the
     /// `seedContent` the open returned, built before any user input could
-    /// reach the session (#815). Only the adapter's seed path sends it; a
+    /// reach the session. Only the adapter's seed path sends it; a
     /// crash-replay of prior state must not. The engine accepts it only for
     /// the first update of a lineage-absent session, and records the open
     /// head as the lineage's seed source.
@@ -10717,7 +10738,7 @@ struct YdocSettleResult {
     content: Option<String>,
     sha256: String,
     /// `false` when the settle committed but materialization was blocked by
-    /// containment: the file on disk is still the OLD artifact and the write
+    /// containment: the file on disk is still the old artifact and the write
     /// is pending a retry. Nothing may report the document as saved on this.
     materialized: bool,
     projection: YdocProjectionProvenance,
@@ -11500,7 +11521,7 @@ struct SnapshotDto {
 impl ConflictDto {
     fn into_domain(self) -> Result<TextConflict, WireError> {
         // No size gate here on purpose. Everything a conflict row carries
-        // that withholding cannot shrink is bounded ONCE, at the shared
+        // that withholding cannot shrink is bounded once, at the shared
         // pre-persistence path both conflict opens funnel through
         // (`insert_text_conflict_if_absent`) — this DTO is only the local
         // route, and a peer's replicated open never passes through it.
@@ -12333,17 +12354,17 @@ fn settled_snapshot_json(snapshot: &TextSnapshot) -> Value {
 /// The conflict a resolution closed, with every side's body withheld past the
 /// in-band cap.
 ///
-/// ONE rule bounds this whole answer, because no part of it may grow with a
+/// One rule bounds this whole answer, because no part of it may grow with a
 /// body. The answer carries five text bodies — three sides, the settled
 /// snapshot, and the moment's before and after — and one control frame has to
 /// hold all of them. Withholding each past 128 KiB caps the answer at five
 /// residuals plus metadata, about 640 KiB inside an 8 MiB frame. Withhold
 /// only some of them and a conflict whose row approaches
 /// `CONFLICT_ROW_HARD_CAP_BYTES` still overruns the frame — and the daemon's
-/// writer treats an oversized answer as a fatal transport error AFTER the
+/// writer treats an oversized answer as a fatal transport error after the
 /// resolution has committed.
 ///
-/// The conflict LISTING shares the withholding, not the trigger: it carries
+/// The conflict listing shares the withholding, not the trigger: it carries
 /// bodies in band up to `CONFLICT_ROW_HARD_CAP_BYTES` per row, and degrades
 /// only a row past that (`conflicts_list`).
 fn settled_conflict_json(conflict: &TextConflict) -> Value {
@@ -12365,10 +12386,10 @@ fn withhold_conflict_side_texts(value: &mut Value) {
     }
 }
 
-/// Withhold EVERY side body of one serialized conflict, whatever each body's
+/// Withhold every side body of one serialized conflict, whatever each body's
 /// own size.
 ///
-/// The per-body rule above cannot degrade an AGGREGATE overrun: three sides of
+/// The per-body rule above cannot degrade an aggregate overrun: three sides of
 /// 128 KiB each are individually in band, and beside metadata near
 /// `CONFLICT_METADATA_BUDGET_BYTES` their sum still carries the row past
 /// `CONFLICT_ROW_HARD_CAP_BYTES`. Withholding only the over-cap bodies would
@@ -12400,7 +12421,7 @@ fn withhold_moment_texts(moment: &mut Value) {
     }
 }
 
-/// Withhold EVERY body one resolve answer carries: the conflict's three sides,
+/// Withhold every body one resolve answer carries: the conflict's three sides,
 /// the settled snapshot, and both moments' payloads. The removed head is
 /// described by its moment, so `delete.before` carries no body to withhold.
 fn withhold_all_resolve_answer_texts(answer: &mut Value) {
@@ -12979,8 +13000,8 @@ fn relay_outcome_json(outcome: RelayOperationOutcome) -> Result<Value, WireError
 /// The selector the relay stated for this share, pinned by the caller on first
 /// read, read into the grant every share RPC enforces.
 ///
-/// Read BEFORE the relay round trip: a grant whose level this process cannot
-/// read must never pin (#646). The refusal names the accepted set, like the
+/// Read before the relay round trip: a grant whose level this process cannot
+/// read must never pin. The refusal names the accepted set, like the
 /// relay's own — the caller is an agent reading this error, and "unknown share
 /// access" told it nothing it could act on.
 fn share_grant(selector: GrantedSelectorParams) -> Result<dohc_engine_sync::ShareGrant, WireError> {
@@ -13130,12 +13151,12 @@ fn now_ms() -> Result<i64, WireError> {
 /// different things to the same caller, which is the defect this recognizer
 /// exists to remove.
 ///
-/// Matched on the VARIANT for the reason the artifact lock above is: `code()`
+/// Matched on the variant for the reason the artifact lock above is: `code()`
 /// delegates through each wrapper, so "file-locked" alone cannot tell a busy
 /// database apart from a busy file.
 fn store_busy(error: &RuntimeError) -> bool {
     use dohc_engine_storage::StorageError;
-    // The search index keeps the RAW rusqlite failure instead of wrapping it
+    // The search index keeps the raw rusqlite failure instead of wrapping it
     // in the storage taxonomy, so it carries no `FileLocked` to match on and
     // has to be asked directly.
     if let RuntimeError::Search(SearchError::Storage(sqlite)) = error {
@@ -13151,7 +13172,7 @@ fn store_busy(error: &RuntimeError) -> bool {
             | RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked))
             | RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked))
             | RuntimeError::Search(SearchError::Store(StorageError::FileLocked))
-            // The relay route carries it under its OWN type rather than a
+            // The relay route carries it under its own type rather than a
             // storage error, because `RelayError` is where a relay operation's
             // local failures land. Same condition, same answer.
             | RuntimeError::Relay(RelayError::StoreBusy)
@@ -13161,12 +13182,12 @@ fn store_busy(error: &RuntimeError) -> bool {
 fn map_runtime(error: RuntimeError) -> WireError {
     // A materialization that exhausted its replace retries against a lock an
     // external program holds on the ARTIFACT. The settle committed and the
-    // write job is durably pending, so the ONLY missing piece is a later
+    // write job is durably pending, so the only missing piece is a later
     // attempt — which is exactly `Overloaded`'s retry contract
     // (afterBackoff). Flattening it to Internal (retry: no) is what left a
-    // locked file's save landing only on the next unrelated settle (#554).
+    // locked file's save landing only on the next unrelated settle.
     //
-    // Matched on the VARIANT, never on `code()`: the code delegates through
+    // Matched on the variant, never on `code()`: the code delegates through
     // `MaterializeError::Storage`, so a busy SQLite handle answers
     // "file-locked" too — and the desktop would then tell the user another
     // program has their DOCUMENT open while it retried a database contention.
@@ -13176,13 +13197,13 @@ fn map_runtime(error: RuntimeError) -> WireError {
     ) {
         return wire(ErrorCode::Overloaded, "file-locked");
     }
-    // The OTHER busy thing, and the same answer. `StorageError::FileLocked` is
+    // The other busy thing, and the same answer. `StorageError::FileLocked` is
     // the store reporting itself intact and the operation retryable: writers
     // met inside SQLite and the bounded retry budget ran out. Waiting fixes it.
     //
     // The Internal tail below called it "workspace operation failed", whose
     // retry contract is `no`, so every caller stood down on a condition that
-    // clears by itself (#658). It carries its own message because the desktop
+    // clears by itself. It carries its own message because the desktop
     // must not read it as the user's file being held: nothing outside dohc is
     // involved, and there is nothing for a person to do.
     if store_busy(&error) {
@@ -13235,7 +13256,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
     // and a size refusal that drops its limit and usage is the one an agent
     // cannot act on (AGENTS.md: show agents the limits they hit). Each of these
     // names a constraint, a limit, a unit and an observed size (the identifier
-    // one also names the field, #654). One code for all of them —
+    // one also names the field). One code for all of them —
     // `PayloadTooLarge` means "what you sent is past a size limit", whichever
     // part of it was.
     match &error {
@@ -13308,9 +13329,7 @@ fn map_runtime(error: RuntimeError) -> WireError {
         }
     }
     let code = match error {
-        RuntimeError::Overloaded => ErrorCode::Overloaded,
         RuntimeError::Cancelled => ErrorCode::Cancelled,
-        RuntimeError::DeadlineExceeded => ErrorCode::DeadlineExceeded,
         RuntimeError::ActorUnavailable | RuntimeError::WorkerPanicked => {
             ErrorCode::WorkspaceUnavailable
         }
@@ -13454,7 +13473,6 @@ fn map_collab_code(error: CollabError) -> ErrorCode {
         | CollabError::SuccessorProjectionMismatch { .. }
         | CollabError::SuccessorResultMismatch { .. }
         | CollabError::LineageEpochChanged { .. }
-        | CollabError::LineageClaimUnresolved { .. }
         | CollabError::LineagePredecessorMismatch { .. }
         | CollabError::LineageStateVectorMismatch { .. }
         | CollabError::InvalidSuccessorBase { .. }
@@ -13613,7 +13631,7 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{CompoundWrite, FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultInjector, FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
     use dohc_engine_testkit::{GateFaults, ScratchDir};
     use std::time::Duration;
@@ -13922,11 +13940,11 @@ mod tests {
         ));
     }
 
-    /// #595 round 8: the artifact lock and a busy engine database are two
+    /// The artifact lock and a busy engine database are two
     /// different contentions, and only the first may be reported as
     /// `file-locked` — the desktop turns that message into "another program
     /// has this file open" and retries the ARTIFACT write against it. The
-    /// code() of MaterializeError::Storage DELEGATES to the storage error, so
+    /// code() of MaterializeError::Storage delegates to the storage error, so
     /// matching on the code alone reported a busy SQLite handle as an
     /// artifact lock. Matching the variant is what keeps them apart.
     ///
@@ -13934,12 +13952,10 @@ mod tests {
     /// retry it would have advertised. #658 built the collector — the Y.Doc
     /// provider's settle ladder retries `engine-store-busy` — so the busy
     /// store now carries the retry contract that has always been true of it,
-    /// under its OWN message. Two messages, because the two contentions need
+    /// under its own message. Two messages, because the two contentions need
     /// different words: one names a program outside dohc holding the user's
     /// file, and the other is dohc's own writers meeting inside SQLite.
     ///
-    /// MUTATION: match on `materialize.code() == "file-locked"` again -> the
-    /// storage case below reports "file-locked".
     #[test]
     fn a_busy_engine_store_is_not_reported_as_a_locked_artifact() {
         let artifact = map_runtime(RuntimeError::Materialize(
@@ -13963,12 +13979,9 @@ mod tests {
     /// of which layer noticed it first.
     ///
     /// The paired assertion is what keeps the recognizer narrow: a store error
-    /// that is NOT the transient lock keeps its terminal answer, so this does
+    /// that is not the transient lock keeps its terminal answer, so this does
     /// not turn every storage failure into a retry.
     ///
-    /// MUTATION: drop any arm from `store_busy` -> that wrapper reports
-    /// `Internal`. Widen an arm to `StorageError::_` -> the corrupt case
-    /// below reports `Overloaded`.
     #[test]
     fn a_busy_store_is_retryable_under_every_wrapper_that_carries_it() {
         use dohc_engine_storage::StorageError;
@@ -13981,7 +13994,7 @@ mod tests {
             RuntimeError::Collab(CollabError::Storage(StorageError::FileLocked)),
             RuntimeError::Sync(SyncError::Storage(StorageError::FileLocked)),
             RuntimeError::Search(SearchError::Store(StorageError::FileLocked)),
-            // The search index's OTHER carrier: a raw rusqlite failure that
+            // The search index's other carrier: a raw rusqlite failure that
             // never passed through this taxonomy, so it has no variant to
             // match and is asked about its result code directly.
             RuntimeError::Search(SearchError::Storage(rusqlite::Error::SqliteFailure(
@@ -14027,12 +14040,10 @@ mod tests {
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
     /// still 0 — sitting in a real workspace root. `workspace.open` must
-    /// surface the REAL fence's classification (`foreign-database`) on the
+    /// surface the real fence's classification (`foreign-database`) on the
     /// wire, driven through the storage layer rather than a fabricated error
     /// value, so the desktop's recovery surface has a code to match.
     ///
-    /// MUTATION: remove the refused-database arm from `map_runtime` -> this
-    /// open reports "workspace operation failed".
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_a_workspace_over_a_foreign_engine_db_names_the_refusal() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -14066,11 +14077,9 @@ mod tests {
         // The merged-resolution budget is spent in ENCODED bytes, so this
         // count must be the encoder's count, not an approximation of it. Every
         // escape class serde_json has: the two-byte shorthands, the six-byte
-        // \u form for the other control bytes, DEL (which it does NOT escape),
+        // \u form for the other control bytes, DEL (which it does not escape),
         // and multi-byte UTF-8 (which it passes through).
         //
-        // MUTATION: change any width in the fold -> this fails on the class
-        // that moved.
         let samples = [
             "plain ascii".to_owned(),
             "\"\\\n\r\t\u{08}\u{0c}".to_owned(),
@@ -14091,9 +14100,9 @@ mod tests {
 
     #[tokio::test]
     async fn engine_events_shed_instead_of_growing_when_the_subscriber_stalls() {
-        // codex P2: an unbounded notice queue under a stalled transport
+        // An unbounded notice queue under a stalled transport
         // grows the daemon without bound. The channel is bounded and emit
-        // NEVER blocks: overflow is shed (the queued backlog already
+        // never blocks: overflow is shed (the queued backlog already
         // guarantees a repaint on drain).
         let events = EngineEvents::default();
         let mut rx = events.subscribe();
@@ -14112,9 +14121,6 @@ mod tests {
 
     #[tokio::test]
     async fn engine_ping_answers_without_a_workspace_handle() {
-        // MUTATION: drop the "engine.ping" dispatch arm and the call falls
-        // through to MethodNotFound; require a workspace and it errors on a
-        // probe that must work before any workspace is open.
         let service = EngineService::new();
         let answer = service
             .call(
@@ -14366,8 +14372,6 @@ mod tests {
     /// hit. `wire` only takes static strings, so the generic tail replaces
     /// every message with "workspace operation failed".
     ///
-    /// MUTATION: drop the explicit `BlobTooLarge` arm in `map_runtime` and the
-    /// numbers vanish from the surfaced error.
     #[test]
     fn an_oversized_blob_refusal_reaches_the_caller_naming_its_limit() {
         let surfaced = map_runtime(RuntimeError::Relay(RelayError::BlobTooLarge {
@@ -14415,9 +14419,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
-        // MUTATION: ignore recoverRunningDispatches=false on the second open ->
-        // the claim is reclaimed and requeued before the surviving runner can
-        // complete it.
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
@@ -14518,6 +14519,84 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn automation_recovery_follows_full_workspace_lifetime_without_requiring_capture() {
+        let scratch = ScratchDir::new().expect("scratch");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+        let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
+        store
+            .bind_root_token(BINDING_TOKEN)
+            .expect("bind root token");
+        drop(store);
+        for (capture_enabled, read_only, seed_claim) in [
+            (false, false, true),
+            (false, true, true),
+            (true, false, true),
+            (false, false, false),
+        ] {
+            let conn = rusqlite::Connection::open(&db_path).expect("seed connection");
+            conn.execute("DELETE FROM automation_claims", [])
+                .expect("reset claims");
+            if seed_claim {
+                conn.execute(
+                    "INSERT INTO automation_claims \
+                     (workspace_id,claim_id,automation_id,trigger_history_id,record_id,collection_path, \
+                      depth,state,attempts,created_at_ms,updated_at_ms) \
+                     VALUES ('automation-recovery-lifetime','interrupted','automation',1,'record','tasks', \
+                             0,'running',2,?1,?1)",
+                    [now_ms().expect("current time")],
+                ).expect("seed interrupted claim");
+            }
+            drop(conn);
+            let mut params = json!({
+                "rootDir": scratch.path().to_string_lossy(),
+                "workspaceId": "automation-recovery-lifetime",
+                "recoverRunningDispatches": false,
+                "skipStartupMaintenance": read_only,
+            });
+            if !capture_enabled {
+                params["captureMode"] = json!("none");
+            }
+            let opened = service
+                .workspace_open(&RequestContext::unbounded(), params)
+                .await
+                .expect("open workspace");
+            let handle: WorkspaceHandle =
+                serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+            let open = service.open(Some(&handle)).expect("open state");
+            assert_eq!(lock(&open.capture).is_some(), capture_enabled);
+            assert_eq!(
+                lock(&open.automation_recovery).is_some(),
+                seed_claim && !read_only
+            );
+
+            // The synchronous cleanup fallback has no Tokio runtime. Taking
+            // both tasks must cancel them there without spawning a join task.
+            let tasks = std::thread::spawn(move || open.begin_capture_shutdown())
+                .join()
+                .expect("background cancellation needs no runtime");
+            assert_eq!(
+                tasks.iter().flatten().count(),
+                usize::from(capture_enabled) + usize::from(seed_claim && !read_only),
+            );
+            for task in tasks.into_iter().flatten() {
+                task.await
+                    .expect("background task joins after cancellation");
+            }
+            let open = service.open(Some(&handle)).expect("binding still open");
+            assert!(lock(&open.capture).is_none());
+            assert!(lock(&open.automation_recovery).is_none());
+            service
+                .workspace_close(Some(handle))
+                .await
+                .expect("close workspace after drain");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_open_does_not_apply_pending_migrations() {
         let scratch = ScratchDir::new().expect("scratch");
         root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
@@ -14532,31 +14611,11 @@ mod tests {
         );
         drop(store);
 
+        // A store whose ledger lacks the baseline row needs the migration
+        // runner. A maintenance-free open must refuse it, not repair it.
         let conn = rusqlite::Connection::open(&db_path).expect("fixture connection");
-        let removed_migration: String = conn
-            .query_row(
-                "SELECT id FROM engine_migrations ORDER BY ordinal DESC LIMIT 1",
-                [],
-                |row| row.get(0),
-            )
-            .expect("latest migration");
-        conn.execute(
-            "DELETE FROM engine_migrations WHERE id = ?1",
-            [&removed_migration],
-        )
-        .expect("remove latest migration ledger row");
-        for column in [
-            "before_object_id",
-            "before_version_id",
-            "before_path",
-            "before_updated_at_ms",
-            "before_metadata_origin",
-            "before_metadata_summary",
-            "before_metadata_correlation_id",
-        ] {
-            conn.execute(&format!("ALTER TABLE moments DROP COLUMN {column}"), [])
-                .expect("restore the pre-migration moments shape");
-        }
+        conn.execute("DELETE FROM engine_migrations", [])
+            .expect("remove the baseline ledger row");
         drop(conn);
 
         let supervisor: &'static WorkspaceSupervisor =
@@ -14572,14 +14631,11 @@ mod tests {
                     "skipStartupMaintenance": true,
                 }),
             )
-            .await
-            .expect("maintenance-free open");
-        let handle: WorkspaceHandle =
-            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
-        service
-            .workspace_close(Some(handle))
-            .await
-            .expect("workspace close");
+            .await;
+        assert!(
+            opened.is_err(),
+            "a maintenance-free open must refuse a store that needs migration"
+        );
 
         let conn = rusqlite::Connection::open_with_flags(
             &db_path,
@@ -14587,14 +14643,10 @@ mod tests {
         )
         .expect("read migration ledger");
         let present: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM engine_migrations WHERE id = ?1",
-                [&removed_migration],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM engine_migrations", [], |row| {
+                row.get(0)
+            })
             .expect("migration count");
-        // MUTATION: routing this mode through supervisor.open applies the
-        // missing ledger entry before workspace.open returns.
         assert_eq!(
             present, 0,
             "a maintenance-free read must not apply a pending migration"
@@ -14640,8 +14692,6 @@ mod tests {
         let incompatible = service
             .workspace_open(&RequestContext::unbounded(), params.clone())
             .await;
-        // MUTATION: omitting the mode comparison returns the maintenance-free
-        // handle as a successful full open and silently leaves capture absent.
         assert!(
             matches!(
                 incompatible,
@@ -14783,8 +14833,6 @@ mod tests {
 
     #[tokio::test]
     async fn blob_egress_budget_blocks_when_aggregate_bytes_are_exhausted() {
-        // MUTATION: remove the exact-byte reservation before blob hydration ->
-        // the second over-budget egress proceeds while the first is retained.
         let budget = BlobEgressBudget::new(8);
         let first_ctx = RequestContext::unbounded();
         let first_cancellation = OperationCancellation::new(&first_ctx);
@@ -14792,7 +14840,11 @@ mod tests {
             .reserve(5, &first_cancellation, "test.first")
             .await
             .expect("reserve first five bytes");
-        assert_eq!(budget.permits.available_permits(), 3);
+        assert_eq!(
+            budget.permits.available_permits(),
+            3,
+            "remove the exact-byte reservation before blob hydration -> the second over-budget egress proceeds while the first is retained."
+        );
 
         let waiting_budget = budget.clone();
         let mut waiting = tokio::spawn(async move {
@@ -15026,7 +15078,7 @@ mod tests {
         assert_eq!(value["status"], "complete");
         assert_eq!(
             value["hasMore"], true,
-            "MUTATION: omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
+            "omitting hasMore makes a bounded prefix indistinguishable from a drained relay"
         );
         assert_eq!(
             value["sharingDeclined"],
@@ -15299,7 +15351,7 @@ mod tests {
             assert_eq!(
                 map_relay_code(relay),
                 expected,
-                "MUTATION: collapsing a relay condition prevents generated clients from recovering"
+                "collapsing a relay condition prevents generated clients from recovering"
             );
         }
         assert_eq!(
@@ -15319,7 +15371,7 @@ mod tests {
         assert_eq!(
             permanent_limit.retry,
             dohc_engine_protocol::Retryability::No,
-            "MUTATION: a permanent discussion limit must not ask the client to retry"
+            "a permanent discussion limit must not ask the client to retry"
         );
     }
 
@@ -15350,12 +15402,12 @@ mod tests {
         .expect("serialize share view outcome");
         assert_eq!(
             value["hasMore"], true,
-            "MUTATION: omitting hasMore hides that the pending cursor is only a bounded prefix"
+            "omitting hasMore hides that the pending cursor is only a bounded prefix"
         );
         assert_eq!(
             value["refusals"][0]["detail"],
             "the share granted version main, the relay offered version other",
-            "MUTATION: serializing a bare count leaves the client nothing to tell the user"
+            "serializing a bare count leaves the client nothing to tell the user"
         );
         assert_eq!(value["refusals"][0]["originSeq"], 4);
         assert_eq!(value["refusals"][0]["code"], "share-boundary-violation");
@@ -15382,12 +15434,12 @@ mod tests {
         assert_eq!(nothing["submitted"], 0);
         assert!(
             nothing["proposalId"].is_null(),
-            "MUTATION: an omitted proposalId reads as a missing field, and the client \
+            "an omitted proposalId reads as a missing field, and the client \
              cannot tell 'nothing was offered' from 'the engine did not answer'"
         );
     }
 
-    /// A submit that dropped work, or left work behind, has to SAY so. Both
+    /// A submit that dropped work, or left work behind, has to say so. Both
     /// facts are silent otherwise, and a recipient reading only `submitted`
     /// believes the whole edit reached the granter.
     #[test]
@@ -15403,11 +15455,11 @@ mod tests {
         .expect("serialize share proposal outcome");
         assert_eq!(
             value["skippedOutsideShare"], 3,
-            "MUTATION: a change dropped for landing outside the share must be counted to the caller"
+            "a change dropped for landing outside the share must be counted to the caller"
         );
         assert_eq!(
             value["morePending"], true,
-            "MUTATION: without this the recipient cannot know a further submit has more to offer"
+            "without this the recipient cannot know a further submit has more to offer"
         );
 
         let complete = relay_outcome_json(RelayOperationOutcome::ShareProposalSubmitted(
@@ -15435,7 +15487,7 @@ mod tests {
         }));
         assert!(
             no_submit_id.is_err(),
-            "MUTATION: defaulting the submit id opens a second proposal per retry"
+            "defaulting the submit id opens a second proposal per retry"
         );
 
         let no_access: Result<ShareProposalSubmitParams, _> = serde_json::from_value(json!({
@@ -15446,7 +15498,7 @@ mod tests {
         }));
         assert!(
             no_access.is_err(),
-            "MUTATION: defaulting the level submits through a grant nobody read"
+            "defaulting the level submits through a grant nobody read"
         );
     }
 
@@ -15456,21 +15508,19 @@ mod tests {
         assert_eq!(origin.code, ErrorCode::InvalidParams);
         assert_eq!(
             origin.message, "relay-origin-diverged",
-            "MUTATION: a generic INVALID_PARAMS would re-baseline on protocol errors"
+            "a generic INVALID_PARAMS would re-baseline on protocol errors"
         );
 
         let read_only = map_runtime(RuntimeError::Relay(RelayError::ShareReadOnly));
         assert_eq!(read_only.code, ErrorCode::InvalidParams);
         assert_eq!(
             read_only.message, "share-read-only",
-            "MUTATION: a generic INVALID_PARAMS would permanently downgrade writable shares"
+            "a generic INVALID_PARAMS would permanently downgrade writable shares"
         );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn binary_write_records_suppression_in_the_root_scoped_registry() {
-        // MUTATION: pass the process-global suppression registry to the actor
-        // instead of the root-scoped view -> the scoped lookup is empty.
         let scratch = ScratchDir::new().expect("scratch");
         let service = EngineService::new();
         let workspace_id = "binary-root-scoped-suppression";
@@ -15649,8 +15699,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
-        // MUTATION: remove the versionedText.write session_ops acquisition ->
-        // the write completes while this test still holds the ydoc ordering guard.
         let scratch = ScratchDir::new().expect("scratch");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
@@ -15739,15 +15787,23 @@ mod tests {
         let gate_faults: Arc<dyn FaultInjector> = gate.clone();
         let held_write = tokio::spawn(async move {
             actor
-                .write_async(
-                    CompoundWrite {
-                        request_id: "hold-close".to_owned(),
-                        doc_id: "held".to_owned(),
-                        body: "held".to_owned(),
-                        op_kind: "text.write".to_owned(),
+                .versioned_text_write(
+                    WriteText {
+                        workspace_id: "cancelled-close".to_owned(),
+                        version_id: "main".to_owned(),
+                        object_id: "object-held".to_owned(),
+                        path: "held.md".to_owned(),
+                        text: "held".to_owned(),
+                        moment_id: "moment-held".to_owned(),
+                        metadata_origin: "user".to_owned(),
+                        metadata_summary: None,
+                        metadata_correlation_id: None,
+                        author_json: None,
                         now_ms: 1,
+                        request_id: None,
                     },
                     gate_faults,
+                    dohc_engine_runtime::CancellationToken::new(),
                 )
                 .await
         });
@@ -16087,7 +16143,7 @@ mod tests {
         assert_eq!(service.supervisor.actor_count(), baseline);
     }
 
-    /// A workspace whose actor died is EVICTED and rebound by the next open,
+    /// A workspace whose actor died is evicted and rebound by the next open,
     /// never closed. That path dropped the handle and the sessions but left
     /// the handle's pending cursors in the map, where nothing could ever
     /// remove them: `consume_pending_cursor` matches on the handle, and every

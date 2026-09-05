@@ -5,7 +5,7 @@ import { captureForWorkspace } from "./engineCaptureGate";
 import type { WorkspaceCaptureHooks } from "./workspaceActivity";
 import type { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 
-// The gate REQUIRES daemon sessions, matching production, where main.ts quits
+// The gate requires daemon sessions, matching production, where main.ts quits
 // the app if the daemon does not start. These tests only assert null vs
 // non-null and never invoke an engine operation, so the sessions throw on any
 // use.
@@ -23,7 +23,7 @@ const hooks: WorkspaceCaptureHooks = {
 const ATTACHMENT_ID = Symbol("engine-capture-gate-test");
 
 describe("captureForWorkspace", () => {
-  // #540: the gate owns the shared-view rule. The decision carries the cause,
+  // The gate owns the shared-view rule. The decision carries the cause,
   // and the workspace folder is never touched.
   it("gives a shared view a null capture with the share cause", () => {
     const decision = captureForWorkspace(

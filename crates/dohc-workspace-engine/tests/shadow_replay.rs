@@ -356,9 +356,7 @@ async fn an_existing_store_under_an_unbound_root_is_refused() {
                 conn.query_row(
                     "SELECT \
                        (SELECT COUNT(*) FROM versioned_workspaces) + \
-                       (SELECT COUNT(*) FROM documents) + \
-                       (SELECT COUNT(*) FROM engine_requests) + \
-                       (SELECT COUNT(*) FROM replication_journal)",
+                       (SELECT COUNT(*) FROM engine_requests)",
                     [],
                     |row| row.get(0),
                 )
@@ -410,9 +408,7 @@ async fn an_existing_store_under_an_unbound_root_is_refused() {
             conn.query_row(
                 "SELECT \
                    (SELECT COUNT(*) FROM versioned_workspaces) + \
-                   (SELECT COUNT(*) FROM documents) + \
-                   (SELECT COUNT(*) FROM engine_requests) + \
-                   (SELECT COUNT(*) FROM replication_journal)",
+                   (SELECT COUNT(*) FROM engine_requests)",
                 [],
                 |row| row.get(0),
             )

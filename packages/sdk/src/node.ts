@@ -31,7 +31,7 @@ interface PendingRequest {
 
 // The automation run the calling code is executing inside, carried on the
 // async context so every SDK request an automation handler makes — through
-// the ONE process-wide client — names the claim it belongs to. The host
+// the one process-wide client — names the claim it belongs to. The host
 // resolves the claim id against the runs it actually started on this exact
 // process; the tag grants nothing by itself.
 const automationRunContext = new AsyncLocalStorage<{ claimId: string }>();

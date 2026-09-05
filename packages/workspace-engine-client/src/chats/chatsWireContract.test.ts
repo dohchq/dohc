@@ -297,7 +297,6 @@ describe("B2 chats wire contract and loopback", () => {
         headCursor: feed.headCursor ?? "",
       })).lastSeenMessageId,
     ).toBe("file-message");
-    // MUTATION: legacy slim Feed copies erase attachments and linked-file metadata.
 
     for (const bookmarkId of ["find", "archive", "pending", "failed", "stale"]) {
       engine.seedBookmark({
@@ -580,9 +579,7 @@ describe("B2 chats wire contract and loopback", () => {
       }
     };
 
-    // MUTATION: restoring the empty parameter contract and unbounded insertion
-    // order makes these assertions receive "request-rejected" or all rows.
-    expect(await unreadPage({ pageLimit: 2 })).toEqual([
+    expect(await unreadPage({ pageLimit: 2 }), "restoring the empty parameter contract and unbounded insertion order makes these assertions receive 'request-rejected' or all rows.").toEqual([
       "thread-a",
       "thread-b",
     ]);
@@ -616,9 +613,7 @@ describe("B2 chats wire contract and loopback", () => {
       nextCursor: null,
     });
 
-    // MUTATION: replacing Object.create(null) with {} drops __proto__ into the
-    // prototype setter instead of preserving the caller-supplied message id.
-    expect(Object.getPrototypeOf(decoded.runs)).toBeNull();
+    expect(Object.getPrototypeOf(decoded.runs), "replacing Object.create(null) with {} drops __proto__ into the prototype setter instead of preserving the caller-supplied message id.").toBeNull();
     expect(Object.keys(decoded.runs)).toEqual(["__proto__", "constructor"]);
     expect(Object.prototype.hasOwnProperty.call(decoded.runs, "__proto__")).toBe(true);
     expect(Object.prototype.hasOwnProperty.call(decoded.runs, "constructor")).toBe(true);
@@ -677,8 +672,7 @@ describe("B2 chats wire contract and loopback", () => {
       },
       "reaction-2",
     );
-    // MUTATION: drop the per-cell bump -> both writes receive atMs=20.
-    expect(second.atMs).toBe(first.atMs + 1);
+    expect(second.atMs, "drop the per-cell bump -> both writes receive atMs=20.").toBe(first.atMs + 1);
     expect(
       (await call(engine, 4, CHATS_METHOD.reactionsList, { threadId: "thread" }))
         .reactions,
@@ -696,8 +690,7 @@ describe("B2 chats wire contract and loopback", () => {
       CHATS_METHOD.dispatchRecordEligibleTriggers,
       {},
     );
-    // MUTATION: omit send-time mention indexing or ledger insert-ignore -> these differ.
-    expect([inserted, retry]).toEqual([1, 0]);
+    expect([inserted, retry], "omit send-time mention indexing or ledger insert-ignore -> these differ.").toEqual([1, 0]);
 
     await call(
       engine,
@@ -805,9 +798,7 @@ describe("B2 chats wire contract and loopback", () => {
       "normalized-file-thread",
     );
 
-    // MUTATION: fingerprinting raw params (including nowMs or insertion order)
-    // turns this semantic retry into idempotency-key-reuse-mismatch.
-    expect(replay).toEqual(first);
+    expect(replay, "fingerprinting raw params (including nowMs or insertion order) turns this semantic retry into idempotency-key-reuse-mismatch.").toEqual(first);
     expect(replay.createdAtMs).toBe(10);
   });
 
@@ -905,9 +896,7 @@ describe("B2 chats wire contract and loopback", () => {
       },
       "start",
     );
-    // MUTATION: restore normalizeNonempty for the stored body -> leading whitespace is
-    // trimmed and the embedded CR survives, diverging from the daemon's normalize_body.
-    expect(started.message.body).toBe("  keep-lead\nmid");
+    expect(started.message.body, "restore normalizeNonempty for the stored body -> leading whitespace is trimmed and the embedded CR survives, diverging from the daemon's normalize_body.").toBe("  keep-lead\nmid");
   });
 
   it("keeps dispatch claims single-flight until the open run ends", async () => {
@@ -932,12 +921,12 @@ describe("B2 chats wire contract and loopback", () => {
         nowMs: 30,
       }))?.dispatch.triggerMessageId,
     ).toBe("first-trigger");
-    // MUTATION: omit the workspace-wide running-dispatch guard -> the next trigger is double-claimed.
     expect(
       await call(running, 2, CHATS_METHOD.dispatchClaimNextPending, {
         runId: "blocked-run",
         nowMs: 31,
       }),
+      "omit the workspace-wide running-dispatch guard -> the next trigger is double-claimed.",
     ).toBeNull();
 
     const ended = new ChatsLoopbackEngine();
@@ -1083,7 +1072,6 @@ describe("B2 chats wire contract and loopback", () => {
       CHATS_METHOD.dispatchListAppQuitRecoveries,
       {},
     );
-    // MUTATION: filtering on exit code or failureNotePosted strands restart recovery rows.
     expect(
       result.recoveries.map(({ run, attemptCount }) => ({
         runId: run.runId,
@@ -1091,6 +1079,7 @@ describe("B2 chats wire contract and loopback", () => {
         failureNotePosted: run.failureNotePosted,
         attemptCount,
       })),
+      "filtering on exit code or failureNotePosted strands restart recovery rows.",
     ).toEqual([
       {
         runId: "app-quit-run",
@@ -1126,8 +1115,7 @@ describe("B2 chats wire contract and loopback", () => {
       command: "ignored-on-retry",
       nowMs: 21,
     });
-    // MUTATION: rejecting every known run id loses the daemon's response-loss retry contract.
-    expect(retry).toEqual(first);
+    expect(retry, "rejecting every known run id loses the daemon's response-loss retry contract.").toEqual(first);
   });
 
   it("refuses ended and foreign run-id reuse as invalid input", async () => {
@@ -1150,8 +1138,6 @@ describe("B2 chats wire contract and loopback", () => {
       startedAtMs: 10,
     });
     for (const runId of ["ended-run", "foreign-run"]) {
-      // MUTATION: treating known ended/foreign ids as state corruption diverges
-      // from the daemon's explicit caller-facing invalid-input refusal.
       await expect(
         call(engine, 1, CHATS_METHOD.dispatchClaimNextPending, { runId, nowMs: 30 }),
       ).rejects.toThrow("invalid-input");
@@ -1180,7 +1166,6 @@ describe("B2 chats wire contract and loopback", () => {
       },
       "large-thread",
     );
-    // MUTATION: slice/truncate the projection to 48 KiB -> this resolves.
     await expect(
       call(engine, 2, CHATS_METHOD.threadGetProjection, {
         threadId: "large-thread",
@@ -1236,12 +1221,10 @@ describe("B2 chats wire contract and loopback", () => {
         params: { surprise: true },
       }),
     ).rejects.toThrow("invalid-parameters");
-    // MUTATION: accept unknown params -> daemon/loopback contract parity breaks.
   });
 
   it("uses invalid-parameters for an oversized page limit", async () => {
     const engine = new ChatsLoopbackEngine();
-    // MUTATION: restore the cursor error identity for pageLimit > 500 -> this mismatches the daemon.
     await expect(
       call(engine, 1, CHATS_METHOD.dispatchListPending, { pageLimit: 501 }),
     ).rejects.toThrow("invalid-parameters");
@@ -1249,7 +1232,6 @@ describe("B2 chats wire contract and loopback", () => {
 
   it("uses invalid-parameters for listPending logical limit above 200", async () => {
     const engine = new ChatsLoopbackEngine();
-    // MUTATION: retain invalid-bookmark-target for limit > 200 -> daemon/loopback errors diverge.
     await expect(
       call(engine, 1, CHATS_METHOD.bookmarkListPending, {
         ownerUserId: "viewer",
@@ -1260,8 +1242,6 @@ describe("B2 chats wire contract and loopback", () => {
 
   it("uses invalid-follow-target for a personal feed limit above 100", async () => {
     const engine = new ChatsLoopbackEngine();
-    // MUTATION: restore the loopback's cursor error for limit > 100 -> its
-    // error identity diverges from the daemon domain contract.
     await expect(
       call(engine, 1, CHATS_METHOD.feedListPersonal, {
         ownerUserId: "viewer",
@@ -1316,15 +1296,13 @@ describe("B2 chats wire contract and loopback", () => {
     const personFeed = await call(engine, 3, CHATS_METHOD.feedListPersonal, {
       ownerUserId: "person-viewer",
     });
-    // MUTATION: let a person follow match every author kind -> agent-opening leaks here.
-    expect(personFeed.items.map((item) => item.message.id)).toEqual(["human-opening"]);
+    expect(personFeed.items.map((item) => item.message.id), "let a person follow match every author kind -> agent-opening leaks here.").toEqual(["human-opening"]);
 
     engine.seedFollow(WORKSPACE, "agent-viewer", "agent", "agent-user");
     const agentFeed = await call(engine, 4, CHATS_METHOD.feedListPersonal, {
       ownerUserId: "agent-viewer",
     });
-    // MUTATION: match agent follows by displayName -> this id-addressed follow misses.
-    expect(agentFeed.items.map((item) => item.message.id)).toEqual(["agent-opening"]);
+    expect(agentFeed.items.map((item) => item.message.id), "match agent follows by displayName -> this id-addressed follow misses.").toEqual(["agent-opening"]);
     expect(agentFeed.items[0]?.matchedBy).toEqual(["agent"]);
 
     for (const [kind, target] of [
@@ -1338,8 +1316,7 @@ describe("B2 chats wire contract and loopback", () => {
       ownerUserId: "order-viewer",
     });
     const humanItem = orderedFeed.items.find((item) => item.message.id === "human-opening");
-    // MUTATION: push thread/channel matches before the author match -> order differs from the oracle.
-    expect(humanItem?.matchedBy).toEqual(["person", "thread", "channel"]);
+    expect(humanItem?.matchedBy, "push thread/channel matches before the author match -> order differs from the oracle.").toEqual(["person", "thread", "channel"]);
   });
 
   it("matches default channel follows by wire id", async () => {
@@ -1371,8 +1348,7 @@ describe("B2 chats wire contract and loopback", () => {
     const feed = await call(engine, 3, CHATS_METHOD.feedListPersonal, {
       ownerUserId: "viewer",
     });
-    // MUTATION: compare the follow target with thread.channelId -> the opening disappears.
-    expect(feed.items.map((item) => item.message.id)).toEqual(["opening"]);
+    expect(feed.items.map((item) => item.message.id), "compare the follow target with thread.channelId -> the opening disappears.").toEqual(["opening"]);
     expect(feed.items[0]?.matchedBy).toEqual(["channel"]);
   });
 
@@ -1421,9 +1397,7 @@ describe("B2 chats wire contract and loopback", () => {
     const page = await call(engine, 4, CHATS_METHOD.threadsListForChannel, {
       channelId: "channel",
     });
-    // MUTATION: derive this summary from agentReads -> the fully-read agent
-    // cursor reports 2/0 instead of the human cursor's 1/1.
-    expect(page.threads[0]).toMatchObject({
+    expect(page.threads[0], "derive this summary from agentReads -> the fully-read agent cursor reports 2/0 instead of the human cursor's 1/1.").toMatchObject({
       lastReadSequence: 1,
       unreadCount: 1,
     });
@@ -1451,8 +1425,7 @@ describe("B2 chats wire contract and loopback", () => {
       runId: "run-two",
       nowMs: 21,
     });
-    // MUTATION: leave same-thread siblings pending -> secondClaim claims "second".
-    expect(claim?.dispatch.triggerMessageId).toBe("first");
+    expect(claim?.dispatch.triggerMessageId, "leave same-thread siblings pending -> secondClaim claims 'second'.").toBe("first");
     expect(secondClaim).toBeNull();
   });
 
@@ -1493,7 +1466,6 @@ describe("B2 chats wire contract and loopback", () => {
         body: "Reply",
         nowMs: 20 + id,
       });
-    // MUTATION: store parentMessageId unchecked -> either request resolves.
     await expect(reply(3, "missing-reply", "missing")).rejects.toThrow("message-not-found");
     await expect(reply(4, "cross-reply", "opening-b")).rejects.toThrow("message-not-found");
   });
@@ -1501,7 +1473,6 @@ describe("B2 chats wire contract and loopback", () => {
 
 describe("chats result decoder rejection", () => {
   it("accepts daemon-emitted negative imported timestamps", () => {
-    // MUTATION: restore any decoder's default nonnegative guard -> its decode throws.
     expect(
       decodeChatReaction({
         reactionId: "reaction",
@@ -1512,6 +1483,7 @@ describe("chats result decoder rejection", () => {
         state: "added",
         atMs: -10,
       }).atMs,
+      "restore any decoder's default nonnegative guard -> its decode throws.",
     ).toBe(-10);
     expect(
       decodeChatDecision({

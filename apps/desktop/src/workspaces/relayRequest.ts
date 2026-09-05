@@ -3,14 +3,14 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 
-// ONE authenticated call to the relay, for the surfaces that make them
+// One authenticated call to the relay, for the surfaces that make them
 // directly rather than through the engine.
 //
 // Three things every caller repeated: joining a path onto a base url whose
 // trailing slashes are nobody's business, setting the bearer header, and
 // reading 401 as "this session cannot be used". Those are shared here.
 //
-// What a 404 or a 409 MEANS is deliberately NOT shared. A share that ended, a
+// What a 404 or a 409 means is deliberately not shared. A share that ended, a
 // workspace this account does not own, and a claim that lost a race are
 // different sentences on different surfaces, and a helper that picked one for
 // everybody would make some caller say the wrong thing.

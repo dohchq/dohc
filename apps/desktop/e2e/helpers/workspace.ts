@@ -115,7 +115,7 @@ export async function seedWorkspaceSettings(
   );
 }
 
-// Seeds .dohc/manifest.json with a KNOWN workspace id before launch so a
+// Seeds.dohc/manifest.json with a known workspace id before launch so a
 // spec can pre-populate per-workspace state (engine.db moments, chats) that
 // the app will adopt — createWorkspaceFolder preserves an existing manifest's
 // identity.
@@ -243,7 +243,7 @@ export async function writeWorkspaceFiles(
  * — the watcher, and any install already running — can catch it half made:
  * an install that hashes a partial tree records an approval for bytes that
  * are replaced moments later, and the plugin then switches itself off waiting
- * for approval of source nobody edited (#803). The move keeps the specs
+ * for approval of source nobody edited. The move keeps the specs
  * correct wherever they seed, instead of resting on seeding before launch.
  */
 export async function seedPluginSource(
@@ -390,10 +390,10 @@ export async function revealExplorerPath(
   await expect(explorerRow(page, path)).toBeVisible();
 }
 
-// Opens the left History view (idempotent: re-clicking the ACTIVE activity
+// Opens the left History view (idempotent: re-clicking the active activity
 // entry would collapse the side panel, and a restored ui-state may bring the
 // view back already open). aria-current="page" is exactly "history view
-// showing" — active view AND visible panel.
+// showing" — active view and visible panel.
 export async function openHistoryView(page: Page): Promise<void> {
   const button = page.getByTestId("activity-history");
   if ((await button.getAttribute("aria-current")) !== "page") {

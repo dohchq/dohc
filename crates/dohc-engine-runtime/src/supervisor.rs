@@ -1,7 +1,7 @@
 //! The session registry: one workspace actor per canonical `engine.db`
 //! **file identity**. This is the Rust home of the TS engine's process-global
-//! `storeWriteChains` map + `workspaceActivity` registry
-//! (`STATE_OWNERSHIP.tsv` row `actor-registry`). Its defining job is dedup by
+//! `storeWriteChains` map + `workspaceActivity` registry. Its defining job
+//! is dedup by
 //! file identity so two aliased paths to one database — case-alias, symlink,
 //! junction, or hard link — resolve to one actor, and therefore one writer
 //! connection, never two.

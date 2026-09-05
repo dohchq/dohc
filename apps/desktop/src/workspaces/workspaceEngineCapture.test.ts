@@ -16,7 +16,6 @@ import {
   localWorkspaceSdkDatabaseEditor,
   localWorkspaceSdkReads,
 } from "../testing/localWorkspaceSdkReads";
-import { createTestScratch } from "./testTemp";
 import { createInMemoryWorkspaceActivity as createWorkspaceActivity } from "./workspaceActivity.testSupport";
 import { invokePluginSdkHost } from "../plugins/pluginSdkHost";
 import {
@@ -54,18 +53,11 @@ import {
 } from "./workspaceEngineCaptureLiveStore";
 import * as Y from "yjs";
 import { MAX_DESKTOP_CAPTURE_TEXT_BYTES } from "@dohc/workspace-engine-client/limits";
+import { deferred } from "../testing/deferred";
 
-const roots: string[] = [];
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-engine-capture-");
-  roots.push(root);
-  return root;
-}
-
+import { createTestScratch } from "./testTemp";
 afterEach(async () => {
   vi.restoreAllMocks();
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 interface EngineMomentRow {
@@ -85,14 +77,6 @@ async function write(root: string, path: string, contents: string | Uint8Array) 
 
 function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
 }
 
 const WORKSPACE_ID = "engine-capture-test";
@@ -130,7 +114,7 @@ function capture(root: string, options: CaptureOptions = {}) {
 
 describe("probeEngineStoreRefusal", () => {
   it("probes through the exact attachment session key", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const sessions = mockLiveSessions(new VersionedLoopbackEngine());
     const run = vi.spyOn(sessions, "run");
     const attachmentId = Symbol("attachment");
@@ -150,7 +134,7 @@ describe("probeEngineStoreRefusal", () => {
   });
 
   it("rethrows an unrecognized engine error", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const probeError = Object.assign(new Error("permission denied"), {
       code: "EACCES",
     });
@@ -179,7 +163,7 @@ describe("probeEngineStoreRefusal", () => {
 // Daemon-path capture: `rustEngineSessions` selects the Rust engine, and the
 // VersionedLoopbackEngine behind it holds real state and real sha256 — so the
 // history these tests read back is recorded engine state, not a hand-written
-// responder. Passing the SAME loopback to two captures models two sessions
+// responder. Passing the same loopback to two captures models two sessions
 // against one workspace, the way two sessions shared one engine.db before.
 function liveCapture(
   root: string,
@@ -195,11 +179,11 @@ function liveCapture(
 
 // The daemon-path equivalent of readEngineMoments: the same six facts, read
 // through the engine's own timeline API. Oldest first, matching the raw
-// `ORDER BY moment_order` query. PROTECTED (secret) rows are dropped here
+// `ORDER BY moment_order` query. Protected (secret) rows are dropped here
 // exactly as a query against the text `moments` table dropped them.
 async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMomentRow[]> {
   // DRAINED, not capped. An earlier draft asked for one 500-row page, which
-  // returns the NEWEST 500 — so the moment a test recorded more, the reversed
+  // returns the newest 500 — so the moment a test recorded more, the reversed
   // array stopped being oldest-first and every count and sequence assertion
   // below would have compared against a truncated page without saying so. A cap
   // here is a limit rejecting valid work; paging costs nothing and removes the
@@ -218,7 +202,7 @@ async function liveMoments(engine: WorkspaceEngineCapture): Promise<EngineMoment
   for (const summary of [...summaries].reverse()) {
     if (summary.protected) continue;
     const detail = await engine.readMoment(summary.id);
-    // A null detail must FAIL, not collapse to an empty body: `text: ""` for a
+    // A null detail must fail, not collapse to an empty body: `text: ""` for a
     // missing read makes a readMoment regression look like an empty file, which
     // several assertions below would accept.
     if (detail === null) {
@@ -276,7 +260,7 @@ async function liveMomentAuthors(
 
 describe("workspaceEngineCapture batch capture", () => {
   it("uses the daemon as the sole capture and version-switch materialization owner", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
     loopback.seedTextFile({
@@ -322,10 +306,7 @@ describe("workspaceEngineCapture batch capture", () => {
     const flushIndex = requests.findIndex(
       (request) => request.method === "capture.flush",
     );
-    // MUTATION: omit the daemon flush in switchVersion. Source metadata is
-    // listed without a capture settlement between the target preflight and
-    // the before/after comparison.
-    expect(flushIndex).toBeGreaterThanOrEqual(0);
+    expect(flushIndex, "omit the daemon flush in switchVersion. Source metadata is listed without a capture settlement between the target preflight and the before/after comparison.").toBeGreaterThanOrEqual(0);
     expect(
       requests
         .slice(flushIndex + 1)
@@ -341,7 +322,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("flushes daemon capture before resolving a file object id", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
     loopback.seedTextFile({
@@ -363,14 +344,12 @@ describe("workspaceEngineCapture batch capture", () => {
       );
 
     expect(objectId).toBeTruthy();
-    // MUTATION: remove fileObjectIdForPath's flushCapture call. The read
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
+    expect(relevant, "remove fileObjectIdForPath's flushCapture call. The read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.textRead]);
     await engine.stop();
   });
 
   it("continues draining pending collection adoptions after one adoption fails", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     let listed = false;
     const store = {
       ensureMainVersion: async () => undefined,
@@ -431,7 +410,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("retries a busy collection adoption provider on a later pass while other items proceed", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const adoptions = [
       {
         versionId: "main",
@@ -535,7 +514,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("retains the provider after a cancelled eviction and reuses it on a later pass", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const adoption = {
       versionId: "main",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -611,7 +590,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("releases a retained busy collection adoption provider after the file is deleted", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const adoption = {
       versionId: "main",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -667,7 +646,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("releases a retained collection adoption when its provider path matches a renamed pending item", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const originalAdoption = {
       versionId: "main",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -743,7 +722,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("releases the old collection adoption provider before reopening after a transport rebind", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const adoption = {
       versionId: "main",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -840,7 +819,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("serializes overlapping collection adoption drains and preserves a busy provider", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const adoption = {
       versionId: "main",
       recordId: "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -848,8 +827,8 @@ describe("workspaceEngineCapture batch capture", () => {
       filePath: "projects/busy-overlap.md",
       objectId: "object-busy-overlap",
     };
-    const firstListingEntered = deferredVoid();
-    const releaseListings = deferredVoid();
+    const firstListingEntered = deferred();
+    const releaseListings = deferred();
     let activeListings = 0;
     let maxActiveListings = 0;
     let completed = false;
@@ -928,7 +907,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("flushes daemon capture before reading versions for a merge", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
@@ -945,14 +924,12 @@ describe("workspaceEngineCapture batch capture", () => {
           method === "capture.flush" || method === VERSIONED_METHOD.versionsList,
       );
 
-    // MUTATION: remove mergeVersionIntoMain's daemon flush. The versions read
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.versionsList]);
+    expect(relevant, "remove mergeVersionIntoMain's daemon flush. The versions read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.versionsList]);
     await engine.stop();
   });
 
   it("flushes daemon capture before reading conflicts for resolution", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
@@ -968,14 +945,12 @@ describe("workspaceEngineCapture batch capture", () => {
         (method) => method === "capture.flush" || method === "conflicts.list",
       );
 
-    // MUTATION: remove resolveConflict's daemon flush. The conflict lookup
-    // remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", "conflicts.list"]);
+    expect(relevant, "remove resolveConflict's daemon flush. The conflict lookup remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", "conflicts.list"]);
     await engine.stop();
   });
 
   it("flushes daemon capture before reading a moment for restore", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(new VersionedLoopbackEngine(), requests),
@@ -992,14 +967,12 @@ describe("workspaceEngineCapture batch capture", () => {
           method === "capture.flush" || method === VERSIONED_METHOD.momentsGet,
       );
 
-    // MUTATION: remove restoreFileToBeforeMoment's daemon flush. The moment
-    // read remains, making this order assertion fail on the missing first entry.
-    expect(relevant).toEqual(["capture.flush", VERSIONED_METHOD.momentsGet]);
+    expect(relevant, "remove restoreFileToBeforeMoment's daemon flush. The moment read remains, making this order assertion fail on the missing first entry.").toEqual(["capture.flush", VERSIONED_METHOD.momentsGet]);
     await engine.stop();
   });
 
   it("closes both daemon stores when the final capture flush rejects", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     let settled = true;
     const sessions = mockLiveSessions(loopback, undefined, () => ({
@@ -1019,13 +992,11 @@ describe("workspaceEngineCapture batch capture", () => {
 
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toContain("did not settle");
-    // MUTATION: await the final flush outside try/finally. Its rejection skips
-    // both adapter closes, so this count is zero.
-    expect(closeWorkspace).toHaveBeenCalledTimes(2);
+    expect(closeWorkspace, "await the final flush outside try/finally. Its rejection skips both adapter closes, so this count is zero.").toHaveBeenCalledTimes(2);
   });
 
   it("flushes daemon capture before closing production workspace stores", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, {
@@ -1047,7 +1018,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("mutation proof: installs remote updates buffered during the initial Y.Doc open", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: "engine-capture-test",
@@ -1104,7 +1075,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("settles and retires every live Y.Doc session before stopping the capture", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -1165,11 +1136,11 @@ describe("workspaceEngineCapture batch capture", () => {
     ]);
   });
 
-  // #338. The engine owns the .md: it materializes a changed projection and
+  // The engine owns the.md: it materializes a changed projection and
   // leaves a drifted file alone. The desktop mirrored the settled content
   // over the file anyway, so an edit made outside dohc while the document was
   // open vanished from disk. The desktop no longer writes here at all, and
-  // every case below drives the REAL onSettled against a REAL file; only the
+  // every case below drives the real onSettled against a real file; only the
   // daemon session is a fake, and it calls onSettled exactly where
   // ydocProviderSession's runSettle does.
   function driftFixture(settled: {
@@ -1228,18 +1199,16 @@ describe("workspaceEngineCapture batch capture", () => {
   const EDITOR_TEXT = "typed in dohc\n";
 
   it("keeps an edit made outside dohc when the open document's session closes", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const outside = "written outside dohc\n";
     await write(root, "note.md", outside);
 
-    // MUTATION: restore the mirror write and the file reads "typed in dohc" —
-    // the outside edit is gone from disk.
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
       content: EDITOR_TEXT,
     });
 
-    expect(await readFile(join(root, "note.md"), "utf8")).toBe(outside);
+    expect(await readFile(join(root, "note.md"), "utf8"), "restore the mirror write and the file reads 'typed in dohc' — the outside edit is gone from disk.").toBe(outside);
     expect(states).toEqual(["changed-on-disk"]);
   });
 
@@ -1248,7 +1217,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // it read "no proof of drift" and mirrored 14 bytes over the biggest file in
   // the workspace — reporting "Saved".
   it("keeps an outside edit larger than the capture size cap", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const huge = `${"o".repeat(MAX_ENGINE_CAPTURE_BINARY_BYTES + 1)}\n`;
     await write(root, "note.md", huge);
 
@@ -1266,7 +1235,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // An outside DELETE is an intent, not an accident. Writing the document back
   // is the same overwrite in reverse.
   it("does not recreate a file deleted outside dohc", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
 
     const states = await settleOnClose(root, {
       sha256: sha256Utf8(EDITOR_TEXT),
@@ -1282,7 +1251,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // drift is just as answerable there — the old code returned "Saved" without
   // looking.
   it("reports the drift for an over-cap settle whose content never crossed the wire", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const outside = "written outside dohc\n";
     await write(root, "note.md", outside);
 
@@ -1299,9 +1268,9 @@ describe("workspaceEngineCapture batch capture", () => {
   // the settled artifact, so its size answers the question and its bytes are
   // never read — a close must not wait on an unbounded read. The deny-read ACE
   // is the proof: reading would fail (EPERM), which would report "error"
-  // instead. MUTATION: drop the size check and this reports ["error"].
+  // instead.
   itNonRoot("answers an oversized file from its size, without reading it", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const absolute = join(root, "note.md");
     await write(root, "note.md", "b".repeat(MAX_SETTLED_FILE_BYTES + 1));
     await denyRead(absolute, "file");
@@ -1323,7 +1292,7 @@ describe("workspaceEngineCapture batch capture", () => {
   // that probably holds exactly this document; "error" is the retryable state,
   // and the next settle checks again.
   itNonRoot("reports the retryable error state when the file cannot be read", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const absolute = join(root, "note.md");
     await write(root, "note.md", EDITOR_TEXT);
     await denyRead(absolute, "file");
@@ -1348,8 +1317,8 @@ describe("workspaceEngineCapture batch capture", () => {
   // out there whose bytes matched would otherwise report a save — and arm a
   // self-write suppression — for an artifact that is not in the workspace.
   it("refuses to read the settled file through a folder that leaves the workspace", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
     await write(outside, "note.md", EDITOR_TEXT);
     let linked = true;
     try {
@@ -1382,15 +1351,13 @@ describe("workspaceEngineCapture batch capture", () => {
     await session.close();
     await engine.stop();
 
-    // MUTATION: drop the containment check and the matching file OUTSIDE the
-    // workspace reports ["saved"].
-    expect(states).toEqual(["error"]);
+    expect(states, "drop the containment check and the matching file outside the workspace reports ['saved'].").toEqual(["error"]);
     expect(String(errors[0]?.error)).toContain("outside the workspace");
   });
 
-  // The narrowness guard: the refusal above must fire ONLY on a drifted file.
+  // The narrowness guard: the refusal above must fire only on a drifted file.
   it("still reports a plain saved settle when nothing changed the file", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     await write(root, "note.md", EDITOR_TEXT);
 
     const states = await settleOnClose(root, {
@@ -1405,7 +1372,7 @@ describe("workspaceEngineCapture batch capture", () => {
   it("mutation proof: polls daemon watcher degradation after startup", async () => {
     vi.useFakeTimers();
     try {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-engine-capture-");
       let degraded = false;
       const outcomes: boolean[] = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -1456,14 +1423,14 @@ describe("workspaceEngineCapture batch capture", () => {
     }
   });
 
-  // #874: the engine refusing the workspace's DATABASE is not a degraded
+  // The engine refusing the workspace's database is not a degraded
   // watcher. The outcome carries the fence's classification so the product
   // offers the move-aside rebuild instead of "History paused" — and a later
   // pass that reaches the store clears it.
   it("carries the store refusal on the health outcome and clears it on recovery", async () => {
     vi.useFakeTimers();
     try {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-engine-capture-");
       let refuse = true;
       const outcomes: WorkspaceEngineCaptureFailure[] = [];
       const sessions = mockLiveSessions(new VersionedLoopbackEngine());
@@ -1526,7 +1493,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("mutation proof: counts a secret-only daemon version switch", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedSecretFile({
       workspace: "engine-capture-test",
@@ -1556,7 +1523,7 @@ describe("workspaceEngineCapture batch capture", () => {
   });
 
   it("validates an unknown switch target from metadata without attempting text hydration", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
@@ -1574,7 +1541,7 @@ describe("workspaceEngineCapture batch capture", () => {
 
 });
 
-describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
+describe("workspaceEngineCapture relay sync materialization", () => {
   async function deliverRelayPage<T extends {
     fastForwardedPaths: readonly RelayMaterializedPath[];
   }>(
@@ -1588,7 +1555,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   }
 
   async function protectedVersionFixture(mainText: string) {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedSecretFile({
       workspace: WORKSPACE_ID,
@@ -1612,7 +1579,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   }
 
   it("initializes the main version before the first relay task", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const engine = liveCapture(root, new VersionedLoopbackEngine(), {
       requests,
@@ -1633,7 +1600,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   });
 
   it("settles daemon capture after relay materialization before committing the cursor", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
     let settled = true;
@@ -1710,7 +1677,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   });
 
   it("materializes pull-fast-forwarded text to disk", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     // Simulate the post-pull state: the engine holds remote content the folder
@@ -1744,7 +1711,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   });
 
   it("materializes a pull-fast-forwarded binary path from authoritative bytes", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -1776,7 +1743,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   });
 
   it("materializes a remote delete and reports no disk work when nothing fast-forwarded", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     await write(root, "doomed.md", "here today\n");
@@ -1826,7 +1793,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
   });
 
   it("materializes protected writes and deletes before committing the relay cursor", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     loopback.seedSecretFile({
@@ -1987,11 +1954,11 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
     await engine.stop();
   });
 
-  // Data-safety gate finding: the relay fetch cursor must only commit AFTER
+  // Data-safety gate finding: the relay fetch cursor must only commit after
   // the pulled state is safely on disk. A failed materialization leaves the
   // cursor un-advanced so the next pass retries the same ops.
   it("commits the relay fetch cursor only after disk materialization succeeds", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback);
     loopback.seedTextFile({
@@ -2048,7 +2015,7 @@ describe("workspaceEngineCapture relay sync materialization (0P-B)", () => {
 });
 
 describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundary)", () => {
-  it("throws a TYPED unsupported-name error only when the host is Windows", () => {
+  it("throws a typed unsupported-name error only when the host is Windows", () => {
     // Windows-illegal names that can arrive from a sync peer and cannot be
     // materialized on a Windows disk.
     for (const path of ["nul.md", "notes.md:hidden.md", "DOHC~1.md"]) {
@@ -2078,8 +2045,8 @@ describe("assertGeneratedMarkdownPath host-unsafe rejection (materialize boundar
 });
 
 describe("workspaceEngineCapture recorder", () => {
-  it("records NOTHING without an engine capture (retirement Phase C: opt-out has no recorder)", async () => {
-    const root = await tempRoot();
+  it("records nothing without an engine capture", async () => {
+    const root = await createTestScratch("dohc-engine-capture-");
     const workspace: CreatedWorkspace = {
       workspaceId: "opted-out-no-recorder",
       rootPath: root,
@@ -2108,7 +2075,7 @@ describe("workspaceEngineCapture recorder", () => {
 
 describe("workspaceEngineCapture capture-failure notice", () => {
   it("mutation proof: daemon startup open failure raises the capture outcome", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const { loopback, state } = failableLoopback();
     const outcomes: boolean[] = [];
     const errors: string[] = [];
@@ -2141,7 +2108,7 @@ describe("workspaceEngineCapture capture-failure notice", () => {
   });
 
   it("keeps a workspace without a capture unaffected", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const workspace: CreatedWorkspace = {
       workspaceId: "engine-capture-unflagged-notice",
       rootPath: root,
@@ -2161,7 +2128,7 @@ describe("workspaceEngineCapture capture-failure notice", () => {
 
 describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
   it("registerExpectedEngineEvents reaches the open workspace's capture", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const workspace: CreatedWorkspace = {
       workspaceId: "engine-capture-expected",
       rootPath: root,
@@ -2200,8 +2167,8 @@ describe("createDefaultDiskWriter symlink containment", () => {
   // The engine's own materialization writes (switch/merge/restore) must stay
   // inside the workspace even against adversarial symlinks on disk.
   it("refuses to write through a symlink leaf", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
     await write(outside, "target.md", "original outside content\n");
     await symlink(join(outside, "target.md"), join(root, "notes.md"));
 
@@ -2216,8 +2183,8 @@ describe("createDefaultDiskWriter symlink containment", () => {
   });
 
   it("refuses to mkdir through a symlinked ancestor pointing outside the workspace", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
     await symlink(outside, join(root, "escape"));
 
     const writer = createDefaultDiskWriter(root);
@@ -2229,23 +2196,22 @@ describe("createDefaultDiskWriter symlink containment", () => {
   });
 
   it("writes normally inside the workspace, creating missing directories", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "a", "b", "c.md"), "nested\n");
     expect(await readFile(join(root, "a", "b", "c.md"), "utf8")).toBe("nested\n");
   });
 
   it("writes into a directory whose NAME starts with '..'", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const writer = createDefaultDiskWriter(root);
     await writer.writeTextFile(join(root, "..cache", "c.md"), "cached\n");
-    expect(await readFile(join(root, "..cache", "c.md"), "utf8")).toBe("cached\n");
+    expect(await readFile(join(root, "..cache", "c.md"), "utf8"), "..-segment: a bare '..-prefix' isInside refuses this real contained name.").toBe("cached\n");
   });
 
   it("deleting a symlink leaf removes the link, not its target", async () => {
-    const root = await tempRoot();
-    const outside = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
+    const outside = await createTestScratch("dohc-engine-capture-");
     await write(outside, "keep.md", "must survive\n");
     await symlink(join(outside, "keep.md"), join(root, "gone.md"));
 
@@ -2264,7 +2230,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
 
   it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
     const spawnId = "plugin-spawn-123";
@@ -2308,7 +2274,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("records the canonical path when an authored write uses an in-workspace alias", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const canonical = join(root, "canonical");
     await mkdir(canonical);
     await symlink(
@@ -2335,7 +2301,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("serializes concurrent create-only authored writes so exactly one wins", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const target = join(root, "exclusive.txt");
     const author = {
@@ -2360,10 +2326,10 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("rechecks panel cancellation after an authored write reaches the capture queue", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const realLoopback = new VersionedLoopbackEngine();
-    const entered = deferredVoid();
-    const release = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
     let blocked = false;
     const loopback = new Proxy(realLoopback, {
       get(target, property, receiver) {
@@ -2403,7 +2369,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("enforces the authored capture size limit and reports observed UTF-8 bytes", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const engine = liveCapture(root, new VersionedLoopbackEngine());
     const author = {
       kind: "agent" as const,
@@ -2432,7 +2398,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("mutation proof: daemon author state is set before work and flushed before clear", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, {
@@ -2459,7 +2425,7 @@ describe("workspaceEngineCapture agent attribution", () => {
   });
 
   it("mutation proof: an unsettled flush refuses to clear daemon authorship", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const requests: Request[] = [];
     const loopback = new VersionedLoopbackEngine();
     let settled = false;
@@ -2480,7 +2446,7 @@ describe("workspaceEngineCapture agent attribution", () => {
           request.method === "capture.setAuthor",
       )
       .map((request) => request.method);
-    // The guarantee is that authorship is never CLEARED behind an unsettled
+    // The guarantee is that authorship is never cleared behind an unsettled
     // flush — not how many times the flush was asked. flushCapture now polls
     // for quiescence, as the daemon documents and every Rust consumer does,
     // so pinning the exact call count would fail on the retries while proving
@@ -2569,13 +2535,13 @@ describe("Rust engine session selection", () => {
   }
 
   it("uses the Rust provider session when a store is injected", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const { providerOpened } = await openWith(root);
     expect(providerOpened).toBe(1);
   });
 });
 
-// #493. A Y.Doc session's version binding and its registry entry are decided
+// A Y.Doc session's version binding and its registry entry are decided
 // one daemon round trip apart: `openYDocSession` reads the active version,
 // opens the provider, and only then records the session as live. Off the
 // capture chain, a version operation running inside that gap swept a registry
@@ -2584,22 +2550,14 @@ describe("Rust engine session selection", () => {
 // typed into it settled into that version's lineage and materialized its
 // projection over the folder the operation had just written.
 //
-// Both tests STAGE the interleaving rather than race it. The daemon request
+// Both tests stage the interleaving rather than race it. The daemon request
 // that marks "this version operation is past its live-session sweep" blocks,
-// the open is issued INSIDE that window, and the window is then held open for
+// the open is issued inside that window, and the window is then held open for
 // a full daemon round trip the test drives itself (`listVersions`) — strictly
 // more turns than an unserialized open needs to reach the provider. So an
 // empty provider log at that point is PROOF the open is queued behind the
 // chain, not evidence that it happened to be slower.
 describe("workspaceEngineCapture Y.Doc session ordering against version operations", () => {
-  function deferred(): { promise: Promise<void>; resolve: () => void } {
-    let resolve!: () => void;
-    const promise = new Promise<void>((settle) => {
-      resolve = settle;
-    });
-    return { promise, resolve };
-  }
-
   function recordingProvider(openedVersionIds: string[]) {
     return async (
       options: EngineYdocProviderSessionOptions,
@@ -2626,7 +2584,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   }
 
   it("hydrates a live artifact asset by its workspace-scoped blob after its head is retired", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const path = "drawings/asset-recovery.excalidraw";
     const assetPath = `assets/excalidraw/${"a".repeat(64)}/${"b".repeat(64)}.png`;
@@ -2691,7 +2649,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 
   it("exposes replacement assets after a live lineage resync", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     const path = "drawings/replaced-assets.excalidraw";
     const bytes = Uint8Array.from([0x89, 0x50, 0x4e, 0x47]);
@@ -2783,7 +2741,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 
   it("opens a session against the version a running switch is ENTERING, never the one it is leaving", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -2794,7 +2752,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     const openedVersionIds: string[] = [];
     const switchReachedMaterialization = deferred();
     const releaseSwitch = deferred();
-    // The daemon materializes the entered version INSIDE versions.setActive,
+    // The daemon materializes the entered version inside versions.setActive,
     // so blocking that request holds the switch exactly where the issue puts
     // it: past the live-session sweep, still rewriting the folder.
     const sessions = mockLiveSessions(
@@ -2833,11 +2791,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     // return.
     await engine.listVersions();
     await engine.listVersions();
-    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
-    // reads the active version while set-active is still blocked and opens the
-    // provider on [draftVersionId] — a live session on the version the user
-    // left, which the switch's sweep had already passed and could not vacate.
-    expect(openedVersionIds).toEqual([]);
+    expect(openedVersionIds, "drop the enqueueResult wrapper from openYDocSession. The open reads the active version while set-active is still blocked and opens the provider on [draftVersionId] — a live session on the version the user left, which the switch's sweep had already passed and could not vacate.").toEqual([]);
 
     releaseSwitch.resolve();
     const session = await opening;
@@ -2852,7 +2806,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   // The loopback has no conflict ledger, and mergeVersionIntoMain reads one
   // unconditionally to resume an already-open conflict. An empty page is the
   // honest answer for a workspace that has never conflicted, and it keeps the
-  // merge under test a REAL merge instead of a rejected one.
+  // merge under test a real merge instead of a rejected one.
   class MergeableLoopbackEngine extends VersionedLoopbackEngine {
     override async sendRequest(request: Request): Promise<Response> {
       if (request.method === "conflicts.list") {
@@ -2866,7 +2820,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   }
 
   it("opens a session only after a running merge has finished reading and writing heads", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new MergeableLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -2911,12 +2865,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
     // drives itself, so an unserialized open has provably reached the provider.
     await engine.listVersions();
     await engine.listVersions();
-    // MUTATION: drop the enqueueResult wrapper from openYDocSession. The open
-    // lands INSIDE the merge, so this reads
-    // ["merge:reads-heads", "ydoc:open"] — a session seeded from a head the
-    // merge is in the middle of replacing, and invisible to the sweep that was
-    // supposed to vacate it.
-    expect(order).toEqual(["merge:reads-heads"]);
+    expect(order, "drop the enqueueResult wrapper from openYDocSession. The open lands inside the merge, so this reads ['merge:reads-heads', 'ydoc:open'] — a session seeded from a head the merge is in the middle of replacing, and invisible to the sweep that was supposed to vacate it.").toEqual(["merge:reads-heads"]);
 
     releaseMerge.resolve();
     const session = await opening;
@@ -2928,7 +2877,7 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 
   it("still opens a session on the active version when no version operation is running", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -2959,17 +2908,17 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
   });
 });
 
-// #534, codex P1. The absent-head refusal reads the DISK, and that read is
+// The absent-head refusal reads the disk, and that read is
 // awaited. On a shared workspace a replicated `onRemoteUpdate` can land inside
 // that await: a peer is writing this very path. Two things then stop being
-// true at once — the version DOES have the document, so "not in this version"
+// true at once — the version does have the document, so "not in this version"
 // is false; and the lineage is dirty, so the refusal's `close({settle:false})`
-// is answered with UnsettledClose and the provider escalates it to a SETTLING
+// is answered with UnsettledClose and the provider escalates it to a settling
 // close, materializing the path the refusal was about to call missing. The
 // refusal would create the phantom it exists to prevent.
 describe("workspaceEngineCapture absent-head refusal against replication", () => {
   it("binds instead of refusing when a replicated update reached the session", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -2985,15 +2934,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     const engine = capture(root, {
       rustEngineSessions: mockLiveSessions(loopback),
       openRustYDocProviderSession: async (options) => {
-        // AFTER the open resolves, INSIDE the awaited disk check. A timer beats
+        // After the open resolves, inside the awaited disk check. A timer beats
         // an lstat round trip, so the update lands where the race puts it —
         // which is what makes the recheck's POSITION testable, not just its
         // existence.
-        // Delivered DURING the open, which the generation buffers and replays
+        // Delivered during the open, which the generation buffers and replays
         // the moment it installs — after the daemon has answered
         // head/lineage absent, before the guard runs. That is deterministic.
         // The window codex named (arrival inside the awaited disk check) is the
-        // same defect one tick later, and the guard reads the count ONCE after
+        // same defect one tick later, and the guard reads the count once after
         // that await, so both arrivals take the identical path. Racing an lstat
         // with a timer is not stageable, so this stages the half that is.
         options.onRemoteUpdate(peerUpdate);
@@ -3019,7 +2968,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
       },
     });
 
-    // The path is in NEITHER the version nor on disk — every input the refusal
+    // The path is in neither the version nor on disk — every input the refusal
     // keys on says "missing". Only the peer's update says otherwise.
     const session = await engine.openYDocSession({
       path: "peer-created.md",
@@ -3048,15 +2997,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // Two things must be true of the answer, and #665 changed which refusal
     // carries them. It may never call the path missing — something IS writing
     // it — and it may never leave the surface writable over a session the
-    // daemon still holds (#564, codex r17).
+    // daemon still holds.
     //
-    // The orphan now EVICTS when its close is refused, so the daemon no longer
+    // The orphan now evicts when its close is refused, so the daemon no longer
     // holds the session and the second hazard is gone with it. What remains is
     // the first, and `YDocOpenRacedError` is exactly it: this open's answer is
     // already stale, open it again — and the next open binds the lineage the
     // eviction preserved. The path this test guards is that the refusal is
-    // decided by the REFUSED CLOSE, not by a second look at the disk.
-    const root = await tempRoot();
+    // decided by the refused close, not by a second look at the disk.
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3120,10 +3069,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: drop the `dischargedByEvict` arm (#665) -> the recheck finds
-    // the path still absent and the refusal claims the version does not have a
-    // file a peer is writing into it.
-    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(refusal, "drop the `dischargedByEvict` arm (#665) -> the recheck finds the path still absent and the refusal claims the version does not have a file a peer is writing into it.").toBeInstanceOf(YDocOpenRacedError);
     expect(isYDocPathNotInVersionError(refusal)).toBe(false);
     // The lease is gone, so the surface may fall back — that is what makes the
     // raced refusal safe here where #564 needed the unreleased one.
@@ -3142,7 +3088,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // A handed-out session can never become an orphan: only the absent-head
     // refusal below sets that state, before open returns. Stage daemon death at
     // that boundary through the provider's real reconnect callback instead.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3212,18 +3158,15 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
         (error: unknown) => error,
       );
 
-    // MUTATION: delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.
-    expect(refusal).toBeInstanceOf(YDocOpenRacedError);
+    expect(refusal, "delete `clearDeadYDocSession` from the orphan evict -> the last outcome stays false.").toBeInstanceOf(YDocOpenRacedError);
     expect(opens).toBe(2);
     expect(outcomes).toEqual([false, true]);
-    // MUTATION: drop the `releaseObligation` branch from the wrapper's
-    // `evict()` -> the obligated session's lease remains held forever.
-    expect(evicts).toBe(1);
+    expect(evicts, "drop the `releaseObligation` branch from the wrapper's `evict()` -> the obligated session's lease remains held forever.").toBe(1);
     await engine.stop();
   });
 
   it("does not evict an orphan when its close fails for an unrelated reason", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3309,7 +3252,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     // agent or an external editor can create the path inside that window — and
     // the queued watcher then captures a file the user was just told does not
     // exist. Staged on the close, which is the window.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3361,12 +3304,12 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
   });
 
   it("keeps refusing an uncaptured artifact even when a replicated update arrived", async () => {
-    // Replication-as-existence is safe for a path with NOTHING on disk. It is
-    // NOT safe when the file is there with bytes capture has not ingested: this
+    // Replication-as-existence is safe for a path with nothing on disk. It is
+    // not safe when the file is there with bytes capture has not ingested: this
     // bind carries no seed, so its doc holds only the replicated update, and
-    // settling it would write that OVER the user's file — while this same
+    // settling it would write that over the user's file — while this same
     // capture chain is what keeps the watcher from ingesting those bytes.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3427,7 +3370,7 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
   });
 
   it("refuses an uncaptured artifact again after orphan eviction resurrects its lineage", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
     loopback.seedTextFile({
       workspace: WORKSPACE_ID,
@@ -3485,8 +3428,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
     expect(evicts).toBe(1);
     expect(await readFile(join(root, path), "utf8")).toBe(original);
 
-    // MUTATION: revert to `head === "absent" && lineage === "absent"` -> the
-    // second open binds the resurrected doc and its settle clobbers the file.
     await expect(
       engine.openYDocSession({ path, onRemoteUpdate: () => undefined }),
     ).rejects.toBeInstanceOf(YDocUncapturedArtifactError);

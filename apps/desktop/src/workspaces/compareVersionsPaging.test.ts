@@ -1,39 +1,24 @@
-import { rm } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type {
   SecretFileComparePage,
   SecretFileStore,
 } from "@dohc/workspace-contracts/engine";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
-// #562, codex round 1: the compare surface's protected rows must ride the
-// SAME page discipline as its text rows. The old shape drained every
+import { createTestScratch } from "./testTemp";
+// The compare surface's protected rows must ride the
+// same page discipline as its text rows. The old shape drained every
 // `secrets.compare` page per comparison page and put every remaining
 // protected row on the final one. These drive capture.compareVersions with
 // fake page-shaped stores, so each page's row provenance is exact.
 
 const WORKSPACE_ID = "engine-capture-test";
-
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-compare-paging-");
-  roots.push(root);
-  return root;
-}
 
 interface FakeTextPage {
   entries: Array<{ path: string; status: "added" | "modified" | "deleted" }>;
@@ -84,8 +69,8 @@ function captureWith(
 }
 
 describe("capture.compareVersions pages both sources under one cursor", () => {
-  it("carries ONE engine page of protected rows per compare page", async () => {
-    const root = await tempRoot();
+  it("carries one engine page of protected rows per compare page", async () => {
+    const root = await createTestScratch("dohc-compare-paging-");
     const secretCalls: Array<string | undefined> = [];
     const engine = captureWith(
       root,
@@ -114,9 +99,7 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     engine.start();
 
     const first = await engine.compareVersions("v-1");
-    // MUTATION: restore the drain -> both protected rows land on this page
-    // and a second secrets.compare call rides the same comparison page.
-    expect(first.files).toEqual([
+    expect(first.files, "restore the drain -> both protected rows land on this page and a second secrets.compare call rides the same comparison page.").toEqual([
       { path: ".env-a", status: "modified", protected: true },
     ]);
     expect(first.nextAfterPath).toBe(".env-a");
@@ -137,13 +120,13 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     // The boundary case a UTF-16 comparison gets wrong: the text cursor is
     // U+E000 (one UTF-16 unit, 0xE000), the pending protected path starts
     // with U+10000 (a surrogate pair starting 0xD800). In UTF-16 order the
-    // protected path sorts BELOW the boundary and lands on page one — and
-    // the engine, resuming after the boundary in byte order, serves it AGAIN
+    // protected path sorts below the boundary and lands on page one — and
+    // the engine, resuming after the boundary in byte order, serves it again
     // on page two. In the engine's order (code points) it is past the
     // boundary and appears exactly once.
     const boundary = ".md";
     const astralSecret = "\u{10000}.env";
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-compare-paging-");
     const secretCalls: Array<string | undefined> = [];
     const engine = captureWith(
       root,
@@ -155,7 +138,7 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
             nextAfterPath: boundary,
           },
         ],
-        // A REAL successor row: the pager peeks past a cursor and drops one
+        // A real successor row: the pager peeks past a cursor and drops one
         // with nothing differing behind it, so the boundary under test must
         // be earned.
         [
@@ -187,15 +170,13 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     engine.start();
 
     const first = await engine.compareVersions("v-1");
-    // MUTATION: compare the window in UTF-16 (`path <= boundary`) -> the
-    // protected row rides page one AND page two.
-    expect(first.files.map((file) => file.path)).toEqual(["a.md"]);
+    expect(first.files.map((file) => file.path), "compare the window in UTF-16 (`path <= boundary`) -> the protected row rides page one and page two.").toEqual(["a.md"]);
     expect(first.nextAfterPath).toBe(boundary);
 
     const second = await engine.compareVersions("v-1", {
       afterPath: first.nextAfterPath!,
     });
-    // Code-point order again: "zz.md" (0x7A) sorts BEFORE the U+10000 path.
+    // Code-point order again: "zz.md" (0x7A) sorts before the U+10000 path.
     expect(second.files).toEqual([
       { path: "zz.md", status: "modified", currentText: "main body of zz.md", incomingText: "v-1 body of zz.md" },
       { path: astralSecret, status: "modified", protected: true },

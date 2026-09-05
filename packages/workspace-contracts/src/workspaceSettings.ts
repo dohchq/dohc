@@ -19,8 +19,8 @@ export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 // through one schema.
 
 // The schema bound on `files.attachmentFolderName`. Exported because the
-// settings UI must enforce the SAME bound on its input: mergeWorkspaceSettings
-// re-parses and THROWS on an over-long value, and it is called straight from a
+// settings UI must enforce the same bound on its input: mergeWorkspaceSettings
+// re-parses and throws on an over-long value, and it is called straight from a
 // React change handler — so an unbounded input would turn a long paste into an
 // unhandled exception instead of a rejected edit.
 const WorkspaceAgentsSettings = Schema.Struct({

@@ -640,7 +640,7 @@ function isWorkspaceRelativeRef(ref: string): boolean {
   return parts.every((part) => part.length > 0 && part !== "." && part !== "..");
 }
 
-// The fold's revision order: a higher version wins, and the LOWER nonce wins
+// The fold's revision order: a higher version wins, and the lower nonce wins
 // a version tie. Exported so a canvas adapter can discard a superseded
 // revision the same way the fold would.
 export function revisionDominates(

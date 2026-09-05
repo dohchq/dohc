@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
@@ -15,13 +15,19 @@ import type {
   QueryCollectionRecordsResult,
   WorkspaceActivityEvent,
 } from "../ipc/bridgeContract";
+import { CollectionPage, DRAIN_RECORD_LIMIT } from "./CollectionPage";
 import {
-  CollectionPage,
+  beginCollectionWriteOperation,
+  CollectionFieldWriteHost,
+  collectionWriteFailures,
   CollectionRecordFieldWrite,
   FILE_LOCKED_REPORT_MS,
-  DRAIN_RECORD_LIMIT,
   frontmatterWriteValue,
-} from "./CollectionPage";
+  hasPendingCollectionFieldWrites,
+  resetCollectionFieldWritesForTests,
+  retryCollectionFieldWrite,
+} from "./collections/recordFieldWrites";
+import { beginCollectionLineageOperation } from "./collections/collectionLineageGate";
 import type { UseEngineDoc } from "./collab/useEngineDoc";
 
 // @dnd-kit/dom (BoardView's dependency) references ResizeObserver while its
@@ -44,7 +50,7 @@ vi.hoisted(() => {
 });
 
 // The record write path opens an engine doc session; these tests drive it
-// with a mocked session whose mirror doc is a REAL Y.Doc, so "the change
+// with a mocked session whose mirror doc is a real Y.Doc, so "the change
 // reached the frontmatter map" is asserted on actual CRDT state.
 const docMock = vi.hoisted(() => ({
   current: null as
@@ -99,6 +105,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
   docMock.current = null;
   docMock.inputs = [];
+  // The write queue is module state on purpose (it outlives the page);
+  // tests must not leak a pending head into each other.
+  resetCollectionFieldWritesForTests();
   for (const [name, descriptor] of Object.entries(offsetDescriptors)) {
     if (descriptor) Object.defineProperty(HTMLElement.prototype, name, descriptor);
   }
@@ -212,6 +221,31 @@ function makeBridge(
   };
 }
 
+// The page plus the ONE writer host the shell mounts; rerenders reuse this
+// element so the host is never doubled or dropped.
+function pageWithHost(
+  onNewRecord: (collectionPath: string) => void = () => undefined,
+  onOpenRecord: (recordPath: string) => void = () => undefined,
+  view?: {
+    activeViewName?: string | null;
+    onActiveViewChange?: (viewName: string | null) => void;
+  },
+) {
+  return (
+    <>
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        activeViewName={view?.activeViewName ?? null}
+        onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
+        onNewRecord={onNewRecord}
+        onOpenRecord={onOpenRecord}
+      />
+      <CollectionFieldWriteHost />
+    </>
+  );
+}
+
 function renderPage(
   bridge: ReturnType<typeof makeBridge>,
   onNewRecord: (collectionPath: string) => void = () => undefined,
@@ -222,16 +256,7 @@ function renderPage(
   },
 ) {
   vi.stubGlobal("dohcDesktop", bridge);
-  return render(
-    <CollectionPage
-      workspaceId="ws-1"
-      collectionPath="tasks"
-      activeViewName={view?.activeViewName ?? null}
-      onActiveViewChange={view?.onActiveViewChange ?? (() => undefined)}
-      onNewRecord={onNewRecord}
-      onOpenRecord={onOpenRecord}
-    />,
-  );
+  return render(pageWithHost(onNewRecord, onOpenRecord, view));
 }
 
 describe("CollectionPage", () => {
@@ -342,6 +367,225 @@ describe("CollectionPage", () => {
       sort: [{ field: "title", direction: "desc" }],
       resolveRelations: true,
     });
+  });
+
+  it.each([false, true])(
+    "coalesces settled writes with activity and cancels on unmount (%s)",
+    async (unmount) => {
+      const records = [record("rec-1", "Plan"), record("rec-2", "Ship")].map(
+        (item) => ({
+          ...item,
+          values: [
+            ...item.values,
+            {
+              field: "done",
+              value: false,
+              validation: { status: "valid" as const },
+              resolvedRelations: [],
+            },
+          ],
+        }),
+      );
+      const docs = records.map((item) => {
+        const doc = new Y.Doc();
+        doc.getMap("frontmatter").set("id", item.id);
+        return doc;
+      });
+      const saves: UseEngineDoc["saveState"][] = ["saved", "saved"];
+      docMock.current = (input) => {
+        const index = records.findIndex(
+          (item) => item.path === (input as { path: string }).path,
+        );
+        return engineDocState({ available: true, doc: docs[index]!, saveState: saves[index]! });
+      };
+      const bridge = makeBridge(records, CHECKBOX_SCHEMA);
+      const page = renderPage(bridge);
+      await screen.findByText("Plan");
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
+      vi.useFakeTimers();
+
+      for (const checkbox of screen.getAllByRole("checkbox")) {
+        fireEvent.click(checkbox);
+      }
+      for (let index = 0; index < records.length; index += 1) {
+        expect(docs[index]!.getMap("frontmatter").get("done")).toBe(true);
+        saves[index] = "saving";
+        page.rerender(pageWithHost());
+        saves[index] = "saved";
+        page.rerender(pageWithHost());
+        await act(() => vi.advanceTimersByTimeAsync(50));
+      }
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
+
+      if (unmount) page.unmount();
+      await act(() => vi.advanceTimersByTimeAsync(250));
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(unmount ? 1 : 2);
+    },
+  );
+
+  it("keeps a remote selection after a coalesced refresh acknowledges a local round trip", async () => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    for (let index = 0; index < 2; index += 1) {
+      docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+      page.rerender(pageWithHost());
+      docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+      page.rerender(pageWithHost());
+    }
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    records[0] = {
+      ...records[0]!,
+      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
+    };
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it.each([2, 3])("retries the latest of %i rapid toggles after earlier progress without an index refresh", async (count) => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma", "delta"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(pageWithHost());
+    // The first write settles; the second writer cannot open its session.
+    docMock.current = engineDocState({ available: false, doc, saveState: "saved" });
+    page.rerender(pageWithHost());
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()).toHaveLength(1);
+    if (count === 3) fireEvent.click(screen.getByRole("checkbox", { name: "delta" }));
+    const latest = collectionWriteFailures().at(-1)!;
+    const desired = count === 3 ? ["alpha", "beta", "gamma", "delta"] : ["alpha", "beta", "gamma"];
+    expect(latest.change.value).toEqual(desired);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(latest.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(desired);
+    expect(collectionWriteFailures()).toHaveLength(count === 3 ? 1 : 0);
+    expect(collectionWriteFailures().every((failure) => failure.superseded)).toBe(true);
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["retry", "discard"] as const)("keeps an open multi-select consistent after %s of retained input", async (action) => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    docMock.current = engineDocState({ available: false });
+    const bridge = makeBridge(records, schema);
+    renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(collectionWriteFailures()[0]?.change.value).toEqual(["alpha", "gamma"]);
+
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    docMock.current = engineDocState({ available: true, doc });
+    records[0] = {
+      ...records[0]!,
+      values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
+    };
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+
+    fireEvent.click(screen.getByTestId(`collection-write-${action}`));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    if (action === "retry") {
+      expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value: ["alpha", "gamma"] } });
+      expect(screen.getByTestId("collection-write-retry")).toHaveProperty("disabled", true);
+    } else {
+      expect(collectionWriteFailures()).toEqual([]);
+      expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+      fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+      expect(doc.getMap("frontmatter").get("tags")).toEqual(["beta"]);
+    }
+  });
+
+  it("does not acknowledge a save through an index query that started before it", async () => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+
+    let resolveQuery!: (result: QueryCollectionRecordsResult) => void;
+    bridge.queryCollectionRecords.mockReturnValueOnce(new Promise((resolve) => { resolveQuery = resolve; }));
+    bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+    await act(() => vi.advanceTimersByTimeAsync(250));
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
+
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(pageWithHost());
+    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    page.rerender(pageWithHost());
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    await act(async () => resolveQuery({
+      collection: { path: "tasks", status: "valid", reasons: [] },
+      records,
+      groups: null,
+      nextCursor: null,
+    }));
+
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("retries a failed record query", async () => {
@@ -537,6 +781,7 @@ describe("collection authoring", () => {
 
   it("writes a created select option to the schema before the cell write", async () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
     let releaseWrite!: () => void;
@@ -573,6 +818,126 @@ describe("collection authoring", () => {
       type: "select",
       options: ["Todo", "Later"],
     });
+  });
+
+  it("owns an accepted option edit before its schema write, so a lineage gate waits it out", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    let releaseWrite!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const write = bridge.writeWorkspaceText.getMockImplementation();
+    if (!write) throw new Error("write stub missing");
+    bridge.writeWorkspaceText.mockImplementationOnce(async (payload) => {
+      await gate;
+      return write(payload);
+    });
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByText("Todo"));
+    const addOption = screen.getByLabelText("Add option");
+    fireEvent.change(addOption, { target: { value: "Later" } });
+    fireEvent.keyDown(addOption, { key: "Enter" });
+
+    // The accepted edit is in the global queue before any schema IPC
+    // settles — the whole point: a version or path operation now sees it.
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+
+    let release: (() => void) | null = null;
+    let operation!: Promise<unknown>;
+    act(() => {
+      operation = beginCollectionLineageOperation("ws-1").then(
+        (r) => (release = r),
+      );
+    });
+    // Navigation unmounts the page (the host stays, as in the shell); the
+    // gate must keep waiting while the schema write is in flight, so the
+    // next lineage can never see this edit land on it.
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    await act(async () => {});
+    expect(release).toBeNull();
+    expect(doc.getMap("frontmatter").get("status")).toBeUndefined();
+
+    await act(async () => {
+      releaseWrite();
+    });
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
+    );
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+    await act(async () => {
+      await operation;
+    });
+    expect(release).not.toBeNull();
+    act(() => release!());
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+  });
+
+  it("retains a rejected option edit after the page unmounts and retries it whole", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge([selectRecord()], SELECT_SCHEMA);
+    bridge.writeWorkspaceText.mockImplementationOnce(async () => {
+      throw new Error("Write stopped because this window changed workspaces.");
+    });
+    const page = renderPage(bridge);
+    await screen.findByText("Plan");
+
+    fireEvent.click(screen.getByText("Todo"));
+    const addOption = screen.getByLabelText("Add option");
+    fireEvent.change(addOption, { target: { value: "Later" } });
+    fireEvent.keyDown(addOption, { key: "Enter" });
+    page.rerender(
+      <>
+        {null}
+        <CollectionFieldWriteHost />
+      </>,
+    );
+
+    // The rejection lands after navigation: the accepted value is retained
+    // whole — option included — not lost in an unmounted page's closure.
+    await waitFor(() => expect(collectionWriteFailures()).toHaveLength(1));
+    const failure = collectionWriteFailures()[0]!;
+    expect(failure.change.value).toBe("Later");
+    expect(failure.createOption).toBe("Later");
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+
+    // Retry replays the whole edit: the schema write did not land, so the
+    // option is recreated first, then the value reaches the record.
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(failure.id));
+    await waitFor(() =>
+      expect(doc.getMap("frontmatter").get("status")).toBe("Later"),
+    );
+    expect(lastWrittenSchema(bridge).schema.fields[1]).toEqual({
+      name: "status",
+      type: "select",
+      options: ["Todo", "Later"],
+    });
+    expect(collectionWriteFailures()).toHaveLength(0);
   });
 
   it("creates, renames, and deletes a view through schema rewrites", async () => {
@@ -645,7 +1010,7 @@ const CHECKBOX_SCHEMA: CollectionSchema = {
 };
 
 describe("cell write queue", () => {
-  it("surfaces a failed write, keeps processing, and clears the error on the next attempt", async () => {
+  it("clears a discarded failure and keeps processing later edits", async () => {
     // The session settles without a doc (conflict, deletion, engine off):
     // the head write fails with no detail.
     docMock.current = engineDocState({ available: false });
@@ -670,9 +1035,13 @@ describe("cell write queue", () => {
     const error = await screen.findByTestId("collection-write-error");
     expect(error.textContent).toBe("dohc could not save this change.");
 
+    fireEvent.click(screen.getByTestId("collection-write-discard"));
+    expect(screen.queryByTestId("collection-write-error")).toBeNull();
+
     // The failed write released its queue slot: the next change enqueues,
     // clears the stale message, and reaches its record's doc.
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     fireEvent.click(screen.getByRole("checkbox"));
     await waitFor(() =>
@@ -683,6 +1052,7 @@ describe("cell write queue", () => {
 
   it("surfaces a read-only failure and advances to the next queued write", async () => {
     const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc: firstDoc });
     const base = record("rec-1", "Plan");
     const checkboxRecord: CollectionRecord = {
@@ -707,6 +1077,7 @@ describe("cell write queue", () => {
     expect(firstDoc.getMap("frontmatter").has("done")).toBe(true);
 
     const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-1");
     let writerRender = 0;
     docMock.current = () => {
       writerRender += 1;
@@ -719,16 +1090,7 @@ describe("cell write queue", () => {
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
-    page.rerender(
-      <CollectionPage
-        workspaceId="ws-1"
-        collectionPath="tasks"
-        activeViewName={null}
-        onActiveViewChange={() => undefined}
-        onNewRecord={() => undefined}
-        onOpenRecord={() => undefined}
-      />,
-    );
+    page.rerender(pageWithHost());
 
     const error = await screen.findByTestId("collection-write-error");
     expect(error.textContent).toBe(
@@ -741,6 +1103,7 @@ describe("cell write queue", () => {
 
   it("reports a head write held file-locked past the window and unblocks the queue", async () => {
     const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc: firstDoc });
     const base = record("rec-1", "Plan");
     const checkboxRecord: CollectionRecord = {
@@ -766,6 +1129,7 @@ describe("cell write queue", () => {
 
     vi.useFakeTimers();
     const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-1");
     let writerRender = 0;
     docMock.current = () => {
       writerRender += 1;
@@ -777,16 +1141,7 @@ describe("cell write queue", () => {
           })
         : engineDocState({ available: true, doc: nextDoc });
     };
-    page.rerender(
-      <CollectionPage
-        workspaceId="ws-1"
-        collectionPath="tasks"
-        activeViewName={null}
-        onActiveViewChange={() => undefined}
-        onNewRecord={() => undefined}
-        onOpenRecord={() => undefined}
-      />,
-    );
+    page.rerender(pageWithHost());
 
     // Inside the window: no line yet, the queue waits on main's retries.
     await vi.advanceTimersByTimeAsync(FILE_LOCKED_REPORT_MS - 1);
@@ -802,6 +1157,114 @@ describe("cell write queue", () => {
     await waitFor(() =>
       expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
     );
+  });
+
+  it("keeps a queued edit and finishes it after the page unmounts", async () => {
+    // The queue lives outside the page and the shell hosts the writer:
+    // unmounting the page (a tab switch) with the head save pending must not
+    // drop the edit queued behind it.
+    const withCheckbox = (id: string, title: string): CollectionRecord => {
+      const base = record(id, title);
+      return {
+        ...base,
+        values: [
+          ...base.values,
+          {
+            field: "done",
+            value: false,
+            validation: { status: "valid" },
+            resolvedRelations: [],
+          },
+        ],
+      };
+    };
+    const firstDoc = new Y.Doc();
+    firstDoc.getMap("frontmatter").set("id", "rec-1");
+    const nextDoc = new Y.Doc();
+    nextDoc.getMap("frontmatter").set("id", "rec-2");
+    const docFor = (saveState: UseEngineDoc["saveState"]) => (input: unknown) =>
+      (input as { path: string }).path === "tasks/Plan.md"
+        ? engineDocState({ available: true, doc: firstDoc, saveState })
+        : engineDocState({ available: true, doc: nextDoc });
+    docMock.current = docFor("saved");
+    const bridge = makeBridge(
+      [withCheckbox("rec-1", "Plan"), withCheckbox("rec-2", "Ship")],
+      CHECKBOX_SCHEMA,
+    );
+    vi.stubGlobal("dohcDesktop", bridge);
+    // The host in its own root, standing in for the shell: it must outlive
+    // the page below exactly as the shell outlives a closed tab.
+    const host = render(<CollectionFieldWriteHost />);
+    const page = render(
+      <CollectionPage
+        workspaceId="ws-1"
+        collectionPath="tasks"
+        activeViewName={null}
+        onActiveViewChange={() => undefined}
+        onNewRecord={() => undefined}
+        onOpenRecord={() => undefined}
+      />,
+    );
+    await screen.findByText("Plan");
+
+    const checkboxes = screen.getAllByRole("checkbox");
+    fireEvent.click(checkboxes[0]!);
+    fireEvent.click(checkboxes[1]!);
+    // The head reached its doc and its save is still pending; the second
+    // edit waits behind it.
+    expect(firstDoc.getMap("frontmatter").get("done")).toBe(true);
+    expect(nextDoc.getMap("frontmatter").has("done")).toBe(false);
+
+    page.unmount();
+
+    // The pending head settles only now, after the page is gone.
+    docMock.current = docFor("saving");
+    host.rerender(<CollectionFieldWriteHost />);
+    docMock.current = docFor("saved");
+    host.rerender(<CollectionFieldWriteHost />);
+
+    await waitFor(() =>
+      expect(nextDoc.getMap("frontmatter").get("done")).toBe(true),
+    );
+  });
+
+  it("disables cell editing and says so while a write operation is in progress", async () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const base = record("rec-1", "Plan");
+    const checkboxRecord: CollectionRecord = {
+      ...base,
+      values: [
+        ...base.values,
+        {
+          field: "done",
+          value: false,
+          validation: { status: "valid" },
+          resolvedRelations: [],
+        },
+      ],
+    };
+    const bridge = makeBridge([checkboxRecord], CHECKBOX_SCHEMA);
+    renderPage(bridge);
+    await screen.findByText("Plan");
+
+    let guard!: ReturnType<typeof beginCollectionWriteOperation>;
+    act(() => {
+      guard = beginCollectionWriteOperation("ws-1");
+    });
+    // The header says why, and the cell no longer accepts an edit.
+    await screen.findByTestId("collection-writes-paused");
+    expect(
+      (screen.getByRole("checkbox") as HTMLInputElement).disabled,
+    ).toBe(true);
+
+    act(() => guard.release());
+    await waitFor(() =>
+      expect(screen.queryByTestId("collection-writes-paused")).toBeNull(),
+    );
+    fireEvent.click(screen.getByRole("checkbox"));
+    expect(doc.getMap("frontmatter").get("done")).toBe(true);
   });
 });
 
@@ -1035,6 +1498,7 @@ function person(id: string, name: string): CollectionRecord {
 describe("relation picking", () => {
   it("queries the related collection and writes the picked id through the record's doc", async () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
     const relationRecord: CollectionRecord = {
       id: "rec-1",
@@ -1083,19 +1547,27 @@ describe("CollectionRecordFieldWrite", () => {
     value: "done",
   };
 
-  it("writes the field on the frontmatter map and releases after the save settles", () => {
+  // The writer's three outcomes are distinct callbacks: onSettled (on disk),
+  // onHeldDurably (engine holds it through a lock), onFailed (did NOT reach
+  // the engine — the queue must retain it). Exactly one fires per write.
+  function writerProps() {
+    return {
+      workspaceId: "ws-1",
+      collectionPath: "tasks",
+      change: CHANGE,
+      onPrepared: vi.fn(),
+      onSettled: vi.fn(),
+      onHeldDurably: vi.fn(),
+      onFailed: vi.fn(),
+    };
+  }
+
+  it("writes the field on the frontmatter map and settles after the save lands", () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
 
     expect(docMock.inputs[0]).toEqual({
       workspaceId: "ws-1",
@@ -1105,142 +1577,79 @@ describe("CollectionRecordFieldWrite", () => {
     expect(doc.getMap("frontmatter").get("status")).toBe("done");
     // The session opens in "saved"; releasing on that snapshot would race
     // the staged local-update flush, so the writer must still be waiting.
-    expect(onDone).not.toHaveBeenCalled();
+    expect(props.onSettled).not.toHaveBeenCalled();
 
     docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onDone).not.toHaveBeenCalled();
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onSettled).not.toHaveBeenCalled();
 
     docMock.current = engineDocState({ available: true, doc, saveState: "saved" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onDone).toHaveBeenCalledOnce();
-    expect(onError).not.toHaveBeenCalled();
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onSettled).toHaveBeenCalledOnce();
+    expect(props.onFailed).not.toHaveBeenCalled();
+    expect(props.onHeldDurably).not.toHaveBeenCalled();
   });
 
-  it("surfaces a save error and still releases", () => {
+  it("reports a save error as a failure, never a settle", () => {
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "error",
       saveError: "file too large",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onError).toHaveBeenCalledExactlyOnceWith(
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(
       "dohc could not save this change. file too large",
     );
-    expect(onDone).toHaveBeenCalledOnce();
+    expect(props.onSettled).not.toHaveBeenCalled();
   });
 
-  it("reports the locked file and releases only after the bounded window", () => {
+  it("reports the locked file as durably held only after the bounded window", () => {
     vi.useFakeTimers();
     const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
     docMock.current = engineDocState({ available: true, doc });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    const view = render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    const props = writerProps();
+    const view = render(<CollectionRecordFieldWrite {...props} />);
 
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "file-locked",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     // Inside the window the writer waits on main's own retries.
     vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS - 1);
-    expect(onDone).not.toHaveBeenCalled();
-    expect(onError).not.toHaveBeenCalled();
+    expect(props.onSettled).not.toHaveBeenCalled();
+    expect(props.onHeldDurably).not.toHaveBeenCalled();
 
     // A retry's own saving flip must not restart the window.
     docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     docMock.current = engineDocState({
       available: true,
       doc,
       saveState: "file-locked",
     });
-    view.rerender(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
+    view.rerender(<CollectionRecordFieldWrite {...props} />);
     vi.advanceTimersByTime(1);
-    expect(onError).toHaveBeenCalledExactlyOnceWith(
+    expect(props.onHeldDurably).toHaveBeenCalledExactlyOnceWith(
       "Another program has Plan.md open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.",
     );
-    expect(onDone).toHaveBeenCalledOnce();
+    expect(props.onFailed).not.toHaveBeenCalled();
   });
 
-  it("reports a refusal without touching the doc", () => {
+  it("reports a refusal as a failure without touching the doc", () => {
     docMock.current = engineDocState({ available: false });
-    const onDone = vi.fn();
-    const onError = vi.fn();
-    render(
-      <CollectionRecordFieldWrite
-        workspaceId="ws-1"
-        change={CHANGE}
-        onDone={onDone}
-        onError={onError}
-      />,
-    );
-    expect(onError).toHaveBeenCalledExactlyOnceWith(null);
-    expect(onDone).toHaveBeenCalledOnce();
+    const props = writerProps();
+    render(<CollectionRecordFieldWrite {...props} />);
+    expect(props.onFailed).toHaveBeenCalledExactlyOnceWith(null);
+    expect(props.onSettled).not.toHaveBeenCalled();
   });
 
   it("writes bigints back as numbers when exact, else decimal text", () => {

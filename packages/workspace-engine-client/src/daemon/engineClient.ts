@@ -221,7 +221,7 @@ export class FrameDecoder {
 
   // onFrame lets the caller process each frame inline as it is decoded, so a
   // per-stream cap can halt a coalesced flood mid-buffer instead of letting the
-  // whole batch materialize first. It is invoked OUTSIDE the decode try/catch so
+  // whole batch materialize first. It is invoked outside the decode try/catch so
   // a consumer error propagates verbatim rather than being poisoned into a
   // generic codec error. Returning false aborts decoding of the remaining bytes
   // (used when the client closes mid-buffer; the tail is discarded).
@@ -425,10 +425,10 @@ type EngineClientErrorCode =
 /**
  * The envelope a caller’s request becomes on the wire.
  *
- * NORMALIZE BEFORE MEASURING. The client stamps its own wire id and fills
+ * Normalize before MEASURING. The client stamps its own wire id and fills
  * every nullable field explicitly — the canonical form the wire contract
  * requires (`wire.rs`) and the form the daemon re-encodes when it measures.
- * A caller-shaped request measured as it stands is a DIFFERENT envelope: no
+ * A caller-shaped request measured as it stands is a different envelope: no
  * `type`, no `deadlineMs: null`, no `idempotencyKey: null`, about sixty bytes
  * short. At the frame boundary that gap is the difference between accepting a
  * request and refusing it, so anything that models this bound builds the
@@ -607,7 +607,7 @@ export class EngineClient implements EngineTransport {
   private nextRequestId = 1;
   private readyState = false;
   private closed = false;
-  // WHY the client closed, kept for every request that arrives afterwards. A
+  // Why the client closed, kept for every request that arrives afterwards. A
   // client whose transport died is a relaunching daemon (retriable); a client
   // the caller closed is not. Reporting a bare "closed" for both made callers
   // abandon a recoverable restart.
@@ -736,7 +736,7 @@ export class EngineClient implements EngineTransport {
 
     const wireId = this.nextRequestId++;
     const envelope = requestEnvelope(request, wireId);
-    // MEASURED BEFORE FRAMING. `encodeFrame` refuses an oversized payload with
+    // Measured before FRAMING. `encodeFrame` refuses an oversized payload with
     // a codec error, and every failure on the write path reads as
     // `transport-error` — which is a lie twice over: nothing was transported,
     // and the classification sends a healthy session into the reconnect
@@ -814,7 +814,7 @@ export class EngineClient implements EngineTransport {
   }
 
   // AUDIT-KILLREC again, for the supervisor's wedge kill. Killing a daemon that
-  // stopped answering is a REPLACEMENT, not a shutdown, and this cause is the
+  // stopped answering is a replacement, not a shutdown, and this cause is the
   // only one its in-flight callers will ever see: `notifyProcessExit` returns
   // early once the client is closed, so the process exit that follows cannot
   // re-cause these rejections. Reporting a bare `closed` here told every
@@ -822,7 +822,7 @@ export class EngineClient implements EngineTransport {
   // failed across a restart that was already under way.
   closeUnresponsive(): void {
     if (this.closed) return;
-    // `force` because a wedged daemon must die NOW, not on a timer. The
+    // `force` because a wedged daemon must die now, not on a timer. The
     // ordinary close ends stdin and schedules the kill 2s later, and the
     // supervisor's next act is to report a terminal failure — which the
     // desktop answers with a modal that blocks the event loop. A timer cannot
@@ -889,7 +889,7 @@ export class EngineClient implements EngineTransport {
   };
 
   // Every frame this client has decoded, of any kind. A liveness probe cannot
-  // read its own reply as the only proof of life: the daemon writes ONE output
+  // read its own reply as the only proof of life: the daemon writes one output
   // queue in order, so a probe can sit behind bulk egress it is not allowed to
   // overtake. Bytes arriving for anyone prove the daemon is turning.
   inboundActivity(): number {
@@ -1108,7 +1108,7 @@ export class EngineClient implements EngineTransport {
         "blobStart contains an invalid wire integer.",
       );
     }
-    // Stream ids are unique per session generation but NOT ordered — concurrent
+    // Stream ids are unique per session generation but not ordered — concurrent
     // handlers may announce them out of order. Reject only an id that is still
     // active (a live reassembly collision); a completed id is gone from the map
     // and a reuse simply starts a fresh stream bound to its own known request.
@@ -1189,7 +1189,7 @@ export class EngineClient implements EngineTransport {
 
   private assertBlobCapability(): void {
     // Capabilities are intersection-negotiated: blob streaming requires that the
-    // client requested it AND the engine acknowledged it.
+    // client requested it and the engine acknowledged it.
     if (
       !this.connectOptions.capabilities.includes(BLOB_CAPABILITY) ||
       !this.helloAck?.capabilities.includes(BLOB_CAPABILITY)

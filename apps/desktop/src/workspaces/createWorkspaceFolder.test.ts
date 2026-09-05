@@ -69,8 +69,8 @@ describe("createWorkspaceFolder", () => {
     expect(manifest.workspaceId).toBe("ws-synced-elsewhere");
   });
 
-  // 0P-C gate fix (High): a JOIN creates identity/metadata only. Seeding
-  // .context/me.md into a folder that is about to receive the synced
+  // 0P-C gate fix (High): a JOIN creates identity/metadata only. Seeding.
+  // Context/me.md into a folder that is about to receive the synced
   // workspace's real files would let reconciliation capture boilerplate that
   // then pushes into the remote (or conflicts with the remote's own me.md).
   it("join bootstrap seeds no user files — identity and metadata only", async () => {
@@ -98,7 +98,7 @@ describe("createWorkspaceFolder", () => {
   });
 
   // Failed-first-pull contract (0P-C gate fix): a join that could not
-  // complete its first pull rolls the folder back to EMPTY, so nothing
+  // complete its first pull rolls the folder back to empty, so nothing
   // half-joined is left behind and a retry passes the empty-folder check.
   it("resetFailedJoinFolder returns a failed join's folder to empty", async () => {
     const root = join(base, "failed-join");

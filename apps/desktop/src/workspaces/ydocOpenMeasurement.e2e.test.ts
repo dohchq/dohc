@@ -110,12 +110,7 @@ function bodyText(doc: Y.Doc): Y.XmlText {
 }
 
 it("keeps the bound clear of the recorded healthy range", () => {
-  // MUTATION: tighten YDOC_OPEN_DEADLINE_MS below
-  // RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this
-  // fails by name. It runs without a daemon on purpose: the measurement suite
-  // below skips where none is built, and a bound nobody checks is how a limit
-  // drifts back into the range it rejects.
-  expect(YDOC_OPEN_DEADLINE_MS).toBeGreaterThanOrEqual(
+  expect(YDOC_OPEN_DEADLINE_MS, "tighten YDOC_OPEN_DEADLINE_MS below RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR and this fails by name. It runs without a daemon on purpose: the measurement suite below skips where none is built, and a bound nobody checks is how a limit drifts back into the range it rejects.").toBeGreaterThanOrEqual(
     RECORDED_WIDEST_HEALTHY_OPEN_MS * SLOWEST_HEALTHY_MACHINE_FACTOR,
   );
 });
@@ -265,8 +260,6 @@ it.skipIf(engine.missing)(
 
     expect(measured).toHaveLength(4);
     for (const entry of measured) {
-      // MUTATION: tighten the bound under the measured range and every case
-      // named here fails with the number it measured.
       expect(
         entry.ms,
         `${entry.case} took ${entry.ms.toFixed(1)}ms against a ${YDOC_OPEN_DEADLINE_MS}ms bound`,

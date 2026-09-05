@@ -44,7 +44,7 @@ export function createWritableChatIpcHandler<
   parsePayload: (payload: unknown) => Payload;
   requireContext: (workspaceId: string) => Promise<Context>;
   // The write gate, over the whole context — not just its workspace, because
-  // a file share's right is a LEVEL the context carries (#646 PR2).
+  // a file share's right is a LEVEL the context carries.
   //
   // `null` is a call site stating that this handler has no write to gate:
   // it must be spelled, never defaulted, so a new handler cannot arrive
@@ -85,7 +85,7 @@ export function createMarkChatThreadReadIpcHandler<
 
 // The joined lane's read, as a handler a test can drive without booting
 // Electron. It exists as a seam because the scoping is the whole contract of
-// #640: the registry array grows with every channel the workspace has ever
+// The registry array grows with every channel the workspace has ever
 // joined, and the response must not. Source-text pins cannot show a response
 // size, so this is the layer the size test drives.
 export function createListJoinedSharedChannelsIpcHandler<
@@ -332,7 +332,7 @@ export async function writeChatMessageFromMain<Attachment, Result>(input: {
 }
 
 // A relay-share call that failed because its session was invalid. Whether
-// that says anything about the CURRENT session depends on whose token the
+// that says anything about the current session depends on whose token the
 // relay rejected: a rejection of the credentials still in use is an
 // authoritative sign-out, while a rejection of a token the session already
 // rotated away from says nothing — callers must not clear account-scoped
@@ -375,19 +375,19 @@ export async function readRelayChatShareLanes(input: {
     received?: Array<Record<string, unknown>>;
   }>;
   workspaceId: string | null;
-  // Received shares that belong to ANOTHER local workspace: already joined
+  // Received shares that belong to another local workspace: already joined
   // there. A received grant is
   // account-wide, so without this the lane is the same in every workspace —
   // one account-wide problem with it blanks a workspace that has shares of its
   // own, and an invitation already accepted in Work keeps offering Join in
-  // Personal (#618).
+  // Personal.
   shareIdsClaimedElsewhere: ReadonlySet<string>;
 }): Promise<RelayChatShareLanes> {
   let listing: Awaited<ReturnType<typeof input.fetchListing>>;
   try {
     listing = await input.fetchListing();
   } catch (error) {
-    // Signed-out is authoritative only when the relay rejected the CURRENT
+    // Signed-out is authoritative only when the relay rejected the current
     // credentials. A stale token's rejection — a listing still in flight
     // across a same-account rotation — says nothing about the current
     // session, and clearing cached rows over it is the clobber this
@@ -397,8 +397,8 @@ export async function readRelayChatShareLanes(input: {
     }
     return { state: "unreachable" };
   }
-  // A 200 whose body is not the listing shape is NOT an authoritative
-  // answer. Mapping, row-level validation AND the size cap run inside this
+  // A 200 whose body is not the listing shape is not an authoritative
+  // answer. Mapping, row-level validation and the size cap run inside this
   // guard: a malformed body, an invalid entry field, or an over-cap lane
   // escaping to the contract parse would reject the whole IPC call, which the
   // renderer reads as an unknown listing and clears.
@@ -408,12 +408,12 @@ export async function readRelayChatShareLanes(input: {
       input.workspaceId,
       input.shareIdsClaimedElsewhere,
     );
-    // Size is validated HERE, not by the contract schema. Every row can be
+    // Size is validated here, not by the contract schema. Every row can be
     // valid and the lane still be one dohc cannot list, and the schema sits
     // outside this guard: an over-cap lane reaching it throws, the IPC call
     // rejects, and the renderer clears every cached row -- the clobber this
     // contract exists to prevent, through the one door row validation does
-    // not cover (#608).
+    // not cover.
     //
     // Before the per-row parse, not after: the filter has already run, so the
     // lengths are final, and a relay-controlled body should not be fully
@@ -491,7 +491,7 @@ function mapRelayShareListing(
   const receivedRows = listing.received ?? [];
   // Only real arrays may map. An ITERABLE non-array lane — a string — would
   // iterate per character, filter every one, and manufacture an
-  // authoritative EMPTY answer out of garbage.
+  // authoritative empty answer out of garbage.
   if (!Array.isArray(grantedRows) || !Array.isArray(receivedRows)) {
     throw new Error("relay share listing lanes must be arrays");
   }
@@ -503,9 +503,9 @@ function mapRelayShareListing(
     // from another workspace is managed there.
     if (!selector || workspaceId === null) continue;
     if (row.workspaceId !== workspaceId) continue;
-    // REVOKED grants are the granted lane's tombstones, and they are dropped
+    // Revoked grants are the granted lane's tombstones, and they are dropped
     // rather than listed. The relay keeps returning them to the granter, so
-    // counting them made the cap measure an account's LIFETIME grants: past
+    // counting them made the cap measure an account's lifetime grants: past
     // 4096 the listing stayed over-limit with every grant revoked, new grants
     // were blocked, and revoking more could not reduce the count — a permanent
     // lockout with no user action that helps.
@@ -525,7 +525,7 @@ function mapRelayShareListing(
   for (const row of receivedRows) {
     const selector = chatSelector(row);
     if (!selector) continue;
-    // Scoped to THIS workspace: a share another local workspace already
+    // Scoped to this workspace: a share another local workspace already
     // claimed is managed there, and listing it here would offer a Join that
     // contradicts the claim.
     if (typeof row.shareId === "string" && shareIdsClaimedElsewhere.has(row.shareId)) {
@@ -540,8 +540,8 @@ function mapRelayShareListing(
   return { granted, received };
 }
 
-// A relay 401 acts if and only if it belongs to the CURRENT credentials, and
-// then it acts COMPLETELY — memory, broadcast, persistent store — and
+// A relay 401 acts if and only if it belongs to the current credentials, and
+// then it acts completely — memory, broadcast, persistent store — and
 // immediately, never behind cleanup. A stale request still in flight from a
 // previous session must not wipe the session the user just adopted; a
 // current-session 401 must not leave the saved token behind to report a false
@@ -566,7 +566,7 @@ function sameRelaySession(
 
 // Returns whether the 401 belonged to the current session and was acted on —
 // the caller threads that into RelaySessionError, because only a rejection of
-// the CURRENT credentials is an authoritative sign-out.
+// the current credentials is an authoritative sign-out.
 export async function handleRelayUnauthorized(input: {
   requestCredentials: RelaySessionIdentity;
   currentCredentials: RelaySessionIdentity | null;
@@ -575,7 +575,7 @@ export async function handleRelayUnauthorized(input: {
   // fires only once the store settled (notifyCloudSessionChanged).
   notifySessionChanging: () => void;
   notifyCloudSessionChanged: () => void;
-  // ONE serialized store mutation: the saved record can be NEWER than the
+  // One serialized store mutation: the saved record can be newer than the
   // cache (a completed login poll saves the next session before main adopts
   // it), so the store compares and clears inside its own mutation queue — a
   // login save can never land between the check and the clear.
@@ -594,7 +594,7 @@ export async function handleRelayUnauthorized(input: {
     // The in-memory session is already cleared and broadcast; a store
     // failure must not turn the session error into something else.
   }
-  // Broadcast the FINAL state after the store settled: a status read raced
+  // Broadcast the final state after the store settled: a status read raced
   // by the first broadcast can have seen the expired on-disk session and
   // reported connected — no later event would correct it.
   input.notifyCloudSessionChanged();

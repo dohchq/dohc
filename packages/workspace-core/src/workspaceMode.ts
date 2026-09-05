@@ -1,4 +1,4 @@
-// Single source of truth: TS types AND runtime validators (zod enums in the
+// Single source of truth: TS types and runtime validators (zod enums in the
 // desktop bridge) derive from these tuples, so adding a kind/mode can't drift
 // the type from the runtime check.
 export const WORKSPACE_MODES = [

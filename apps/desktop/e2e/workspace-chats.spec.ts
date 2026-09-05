@@ -13,7 +13,7 @@ import {
 
 // WS-E — CHATS EXPANSION (plan PR 12/13): a flagged workspace gets a Chats
 // view with channels. The default #general channel exists on first use, the
-// composer starts a chat with ONE Enter and no title prompt (untitled chats
+// composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
 // agent messages create unread badges that mark-read clears, and engine
 // search (WS-D) finds channel messages. Unflagged workspaces have no Chats
@@ -82,15 +82,15 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state. Between sessions an
-    // AGENT starts a second chat through the engine daemon over RPC — the
+    // agent starts a second chat through the engine daemon over RPC — the
     // external write path post-cutover (the retired TS in-process store is
     // refused by daemon-owned workspaces). It must arrive UNREAD.
     //
     // What this pins is durability across a relaunch. The live case — an
-    // external write reaching the RUNNING app — needs the CLI endpoint into
+    // external write reaching the running app — needs the CLI endpoint into
     // the app's own daemon, and is covered by "an agent chat written by the
     // CLI while the app runs arrives unread live" in
-    // workspace-chats-feed.spec.ts (#333).
+    // workspace-chats-feed.spec.ts.
     await desktop.close();
     await seedThroughDaemon(
       { workspaceId, rootPath: temp.rootPath },
@@ -299,7 +299,7 @@ test("performance: channel-list first paint and composer send latency", async ()
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Channel-list first paint: click-to-50-painted-rows measured INSIDE the
+    // Channel-list first paint: click-to-50-painted-rows measured inside the
     // page (rAF-polled), so harness polling/CDP overhead does not count
     // against the budget. Includes the lazy view chunk + the IPC round trip.
     const firstPaintMs = await page.evaluate(async () => {

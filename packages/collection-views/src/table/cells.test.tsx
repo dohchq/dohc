@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FIELD_VALUE_REASON_CODES } from "@dohc/workspace-contracts";
 import type { CollectionValue, FieldDefinition } from "@dohc/workspace-contracts";
@@ -161,10 +161,15 @@ describe("FieldCell editing", () => {
   });
 });
 
+function writeEmitter() {
+  let writeId = 0;
+  return vi.fn((_value: CollectionValue, _previousValues?: readonly CollectionValue[]) => ++writeId);
+}
+
 interface EditorCase {
   fieldName: string;
   value: CollectionValue;
-  emit?: (value: CollectionValue) => void;
+  emit?: (value: CollectionValue) => number;
   close?: () => void;
   onCreateOption?: (option: string, nextValue: CollectionValue) => void;
   relationExecutor?: CollectionQueryExecutor;
@@ -173,9 +178,10 @@ interface EditorCase {
 function renderEditor({ fieldName, value, emit, close, onCreateOption, relationExecutor }: EditorCase) {
   return render(
     <CellEditor
+      acknowledgedWriteId={0}
       field={field(fieldName)}
       indexed={indexedValue(fieldName, value)}
-      emit={emit ?? vi.fn()}
+      emit={emit ?? writeEmitter()}
       close={close ?? vi.fn()}
       onCreateOption={onCreateOption}
       relationExecutor={relationExecutor}
@@ -185,7 +191,7 @@ function renderEditor({ fieldName, value, emit, close, onCreateOption, relationE
 
 describe("CellEditor", () => {
   it("commits a text edit on Enter and closes", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const close = vi.fn();
     renderEditor({ fieldName: "title", value: "Old", emit, close });
     const input = screen.getByDisplayValue<HTMLInputElement>("Old");
@@ -196,7 +202,7 @@ describe("CellEditor", () => {
   });
 
   it("commits an emptied text edit as null", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     renderEditor({ fieldName: "title", value: "Old", emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("Old");
     fireEvent.change(input, { target: { value: "" } });
@@ -205,7 +211,7 @@ describe("CellEditor", () => {
   });
 
   it("cancels a text edit on Escape without an event", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const close = vi.fn();
     renderEditor({ fieldName: "title", value: "Old", emit, close });
     const input = screen.getByDisplayValue<HTMLInputElement>("Old");
@@ -216,7 +222,7 @@ describe("CellEditor", () => {
   });
 
   it("parses a number edit and drops an unparseable one", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const { unmount } = renderEditor({ fieldName: "estimate", value: 1, emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("1");
     fireEvent.change(input, { target: { value: "42.5" } });
@@ -235,7 +241,7 @@ describe("CellEditor", () => {
   });
 
   it("commits a date edit", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     renderEditor({ fieldName: "due", value: "2026-09-15", emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("2026-09-15");
     fireEvent.change(input, { target: { value: "2026-10-01" } });
@@ -244,7 +250,7 @@ describe("CellEditor", () => {
   });
 
   it("hands a typed unknown select option to onCreateOption, not emit", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const close = vi.fn();
     const onCreateOption = vi.fn();
     renderEditor({ fieldName: "status", value: "todo", emit, close, onCreateOption });
@@ -257,7 +263,7 @@ describe("CellEditor", () => {
   });
 
   it("picks an existing option typed into the add input instead of forking it", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const onCreateOption = vi.fn();
     renderEditor({ fieldName: "status", value: "todo", emit, onCreateOption });
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
@@ -268,13 +274,13 @@ describe("CellEditor", () => {
   });
 
   it("hands a typed unknown multi-select option with the extended selection", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const onCreateOption = vi.fn();
     renderEditor({ fieldName: "tags", value: ["alpha"], emit, onCreateOption });
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "delta" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "delta"]);
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "delta"], [["alpha"]]);
     expect(emit).not.toHaveBeenCalled();
   });
 
@@ -284,7 +290,7 @@ describe("CellEditor", () => {
   });
 
   it("commits a select choice, empty as null", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const { unmount } = renderEditor({ fieldName: "status", value: "todo", emit });
     fireEvent.change(screen.getByRole("combobox"), { target: { value: "shipped" } });
     expect(emit).toHaveBeenCalledExactlyOnceWith("shipped");
@@ -296,17 +302,208 @@ describe("CellEditor", () => {
     expect(emit).toHaveBeenCalledExactlyOnceWith(null);
   });
 
-  it("toggles multi-select options, adding and removing", () => {
-    const emit = vi.fn();
+  it("compounds multi-select toggles before any refresh lands", () => {
+    // Starting at ["alpha"], toggling beta then alpha must retain beta. The
+    // indexed prop still says ["alpha"] (the host's re-query has not landed),
+    // so deriving each toggle from props would emit [] and erase beta.
+    const emit = writeEmitter();
     renderEditor({ fieldName: "tags", value: ["alpha"], emit });
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta"]);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith([]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
+  });
+
+  it("retires only the discarded toggle while earlier unindexed input remains", () => {
+    const emit = writeEmitter();
+    let discard!: (writeId: number) => void;
+    const unsubscribe = vi.fn();
+    const view = render(<CellEditor
+      field={field("tags")}
+      indexed={indexedValue("tags", ["alpha"])}
+      acknowledgedWriteId={0}
+      subscribeToDiscardedWrites={(listener) => { discard = listener; return unsubscribe; }}
+      emit={emit}
+      close={vi.fn()}
+    />);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    act(() => discard(2));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
+    view.unmount();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the current multi-select selection when a delayed prop refresh repeats a stale value", () => {
+    const emit = writeEmitter();
+    const view = render(
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        acknowledgedWriteId={0}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta"]);
+
+    // A slow index read re-serves ["alpha"] after the beta toggle. The open
+    // editor owns the selection; the stale prop must not erase beta.
+    view.rerender(
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", ["alpha"])}
+        acknowledgedWriteId={0}
+        emit={emit}
+        close={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("includes an observed remote selection in the next multi-select edit", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[]) => (
+      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+
+    view.rerender(editor(["alpha", "beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("combines observed remote additions with a pending local removal", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[]) => (
+      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha", "beta"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
+
+    view.rerender(editor(["alpha", "beta", "gamma"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["gamma"]);
+  });
+
+  it("combines observed remote removals with a pending local addition", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[]) => (
+      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha", "beta"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+
+    view.rerender(editor(["beta"]));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["gamma"]);
+  });
+
+  it("acknowledges earlier toggles without undoing a later toggle of the same option", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[], acknowledgedWriteId = 0) => (
+      <CellEditor acknowledgedWriteId={acknowledgedWriteId} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
+
+    view.rerender(editor(["alpha", "beta"], 1));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(false);
+    view.rerender(editor(["alpha"], 2));
+    view.rerender(editor(["alpha", "beta"], 2));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("retires a completed round trip even when the acknowledged indexed value is unchanged", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[], acknowledgedWriteId: number) => (
+      <CellEditor
+        field={field("tags")}
+        indexed={indexedValue("tags", value)}
+        acknowledgedWriteId={acknowledgedWriteId}
+        emit={emit}
+        close={vi.fn()}
+      />
+    );
+    const view = render(editor(["alpha"], 0));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
+
+    // Both writes finish before one coalesced index query returns.
+    view.rerender(editor(["alpha"], 2));
+    // A later external addition must not match and revive the retired add.
+    view.rerender(editor(["alpha", "beta"], 2));
+    expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("adds a typed unknown multi-select option to the compounded selection", () => {
+    // The add input reads the same live selection as the checkboxes: after a
+    // beta toggle, a typed new option extends ["alpha", "beta"], not props.
+    const emit = writeEmitter();
+    const onCreateOption = vi.fn();
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit, onCreateOption });
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    const input = screen.getByLabelText<HTMLInputElement>("Add option");
+    fireEvent.change(input, { target: { value: "delta" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "beta", "delta"], [["alpha"], ["alpha", "beta"]]);
+  });
+
+  it("supplies every pending predecessor before a third rapid multi-select change", () => {
+    const emit = writeEmitter();
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit });
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(
+      ["beta", "gamma"],
+      [["alpha"], ["alpha", "beta"], ["alpha", "beta", "gamma"]],
+    );
+  });
+
+  it("rebases pending predecessor values on newly observed remote props", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[]) => (
+      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    view.rerender(editor(["alpha", "gamma"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(
+      ["gamma", "beta"],
+      [["alpha", "gamma"], ["alpha", "gamma", "beta"]],
+    );
+  });
+
+  it("keeps the raw malformed indexed value as the base of a repair", () => {
+    const emit = writeEmitter();
+    renderEditor({ fieldName: "tags", value: "malformed", emit });
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(["malformed", "alpha"], ["malformed"]);
   });
 
   it("opens the relation picker against the related collection and emits ids", async () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const executor = vi.fn(async () =>
       makeQueryResult([
         makeRecord("rec-a", [indexedValue("title", "Design")]),
@@ -328,7 +525,7 @@ describe("CellEditor", () => {
   });
 
   it("trims a person edit and commits a whitespace-only one as null", () => {
-    const emit = vi.fn();
+    const emit = writeEmitter();
     const { unmount } = renderEditor({ fieldName: "owner", value: "user-7", emit });
     const input = screen.getByDisplayValue<HTMLInputElement>("user-7");
     fireEvent.change(input, { target: { value: "  user-9  " } });

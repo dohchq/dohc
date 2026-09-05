@@ -400,7 +400,7 @@ switch (mode) {
   // the run facts each one receives so the declared command can report them.
   // "triage" sets the triggering record's Status to Reviewed — even when it
   // already says Reviewed, so a naive loop would re-trigger it forever.
-  // "ping" (on chain-a) and "pong" (on chain-b) each write the OTHER chain
+  // "ping" (on chain-a) and "pong" (on chain-b) each write the other chain
   // collection's counter record, so a change in either collection starts a
   // chain that only dohc's depth cap can stop. Each write carries the run's
   // depth in its value, so every hop writes a genuinely new value.
@@ -453,6 +453,9 @@ switch (mode) {
           stdio: "ignore",
         });
         child.unref();
+        // The test waits on this pid to prove dohc took the whole tree down.
+        const { writeFile } = await import("node:fs/promises");
+        await writeFile(join(ctx.workspaceRoot, "grandchild-heartbeat.pid"), String(child.pid));
       },
     };
     break;

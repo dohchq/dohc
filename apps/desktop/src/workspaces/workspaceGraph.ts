@@ -49,7 +49,7 @@ export interface WorkspaceGraphFileSource {
 
 // One mention of the target file inside a source document: the line that
 // contains the link, trimmed to a readable length, plus the [start, end)
-// character range WITHIN `text` that the link occupies (so the UI can
+// character range within `text` that the link occupies (so the UI can
 // highlight it).
 export interface BacklinkSnippet {
   text: string;
@@ -622,7 +622,7 @@ export function buildMarkdownGraph(
 
 // Replaces every code character (fenced blocks, indented blocks, inline spans)
 // with a space of its own — same length, same newlines. Link scanning then
-// skips code exactly as the graph does (which STRIPS it), but character offsets
+// skips code exactly as the graph does (which strips it), but character offsets
 // stay aligned with the original text so a match position maps straight back to
 // the source line for a snippet.
 function maskBlockCode(text: string): string {
@@ -843,7 +843,7 @@ function buildBacklinkSnippet(
   return { ...windowed, line };
 }
 
-// Inverts the graph for one file: every OTHER document whose links resolve to
+// Inverts the graph for one file: every other document whose links resolve to
 // `targetPath`, with a snippet per mention. Self-links (a doc linking to
 // itself) and unresolved links are excluded — the same rules the graph applies.
 // Pure over an in-memory document map so it is testable without any IPC/FS.
@@ -861,10 +861,10 @@ function computeParsedBacklinks(
     .sort((a, b) => a.path.localeCompare(b.path));
 
   const sources: BacklinkSource[] = [];
-  // Workspace-wide mention budget, decremented across ALL source docs — the
+  // Workspace-wide mention budget, decremented across all source docs — the
   // same bound buildMarkdownGraph applies via processedLinkCandidates. Without
   // it, a large workspace of link-heavy files with few/no matches could scan
-  // up to MAX_GRAPH_LINK_CANDIDATES mentions PER file on every backlinks
+  // up to MAX_GRAPH_LINK_CANDIDATES mentions per file on every backlinks
   // refresh; this keeps the panel's cost bounded like the graph's.
   let remainingLinkCandidates = MAX_GRAPH_LINK_CANDIDATES;
   for (const doc of sortedDocs) {
@@ -965,7 +965,7 @@ async function readGraphText(
 
 // Loads every markdown file in the workspace (bounded by the same file/byte
 // caps the graph enforces) so both the graph and backlinks read from one place.
-// `graphPaths` keeps the FULL scanned set (all kinds) — link resolution indexes
+// `graphPaths` keeps the full scanned set (all kinds) — link resolution indexes
 // against it so a markdown link to a non-markdown file still resolves.
 async function loadGraphDocuments(
   rootPath: string,
@@ -977,13 +977,13 @@ async function loadGraphDocuments(
   omittedFileCount: number;
 }> {
   const listed = source ? await source.list() : await listFiles(rootPath);
-  // Enforce the engine secret floor at the loader so EVERY graph/backlinks
+  // Enforce the engine secret floor at the loader so every graph/backlinks
   // consumer inherits it: a secret- or ignored-classified file (the whole
   // `.env` family, incl. markdown-extensioned variants like `.env.local.md`,
   // and ignored segments) must never be scanned as a link source, indexed as
   // a resolvable node, or surfaced as a backlink entry/snippet. This mirrors
   // search, which fails-closed on the same `classifyEngineFilePath` floor
-  // (workspaceSearch.ts + searchIndex.ts) so "what the graph reads" and "what
+  // (workspaceSearch.ts and the engine's search index) so "what the graph reads" and "what
   // search may reveal" cannot drift apart.
   // Read-aware: mounted shares are readable content, so their markdown
   // joins the graph/backlinks like any other file; secrets stay excluded
@@ -1258,8 +1258,8 @@ export async function readWorkspaceGraph(
   });
 }
 
-// Backlinks read the SAME graph documents and invert the edge derivation: for
-// the open file, find every OTHER file whose links resolve to it. Reuses the
+// Backlinks read the same graph documents and invert the edge derivation: for
+// the open file, find every other file whose links resolve to it. Reuses the
 // graph's link extraction + resolution so a backlink and a graph edge always
 // agree on what points where.
 export async function readWorkspaceBacklinks(

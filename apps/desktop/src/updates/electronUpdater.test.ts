@@ -7,18 +7,9 @@ import {
   type AutoUpdateController,
 } from "./electronUpdater";
 import { initialUpdateState, transition } from "./updateMachine";
+import { deferred } from "../testing/deferred";
 
 type Listener = (...args: unknown[]) => void;
-
-function deferred<T = unknown>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
 
 function fakeUpdater() {
   const listeners = new Map<string, Listener[]>();
@@ -39,7 +30,7 @@ function fakeUpdater() {
       for (const listener of listeners.get(eventName) ?? []) listener(...args);
     },
   };
-  // electron-updater's quitAndInstall is ONE-SHOT (#579 review, r10): a
+  // electron-updater's quitAndInstall is ONE-SHOT: a
   // second call returns without quitting. The double models the latch so a
   // test can never pass by relying on a re-call the dependency ignores.
   let quitAndInstallLatched = false;
@@ -165,7 +156,7 @@ describe("electron updater actions", () => {
     });
   });
 
-  // The latch is pulled ONCE (#579 review, r10). What a second request means
+  // The latch is pulled ONCE. What a second request means
   // changed in r18: it used to be refused, which stranded the update whenever
   // a recovery warning vetoed the first restart's unload. The restart is not
   // lost — electron-updater installs it on the next quit — so a second
@@ -189,16 +180,11 @@ describe("electron updater actions", () => {
     });
     expect(quitForStagedRestart).not.toHaveBeenCalled();
 
-    // MUTATION (staged restart): return accepted:false here instead. The
-    // second Restart reports a generic install failure and nothing ever
-    // finishes the update.
     await expect(controller!.installUpdate()).resolves.toMatchObject({
       accepted: true,
     });
     expect(quitForStagedRestart).toHaveBeenCalledTimes(1);
-    // MUTATION (one-shot): drop the restartStaged branch so quitAndInstall
-    // runs again. electron-updater ignores it, and the app never quits.
-    expect(updater.quitAndInstall).toHaveBeenCalledTimes(1);
+    expect(updater.quitAndInstall, "one-shot: drop the restartStaged branch so quitAndInstall runs again. electron-updater ignores it, and the app never quits.").toHaveBeenCalledTimes(1);
     expect(updater.quitAndInstall).toHaveBeenCalledWith(false, true);
   });
 
@@ -308,22 +294,21 @@ describe("publicUpdateState", () => {
     });
   });
 
-  // #579 review r17: quitAndInstall's latch never clears, so gating install on
+  // quitAndInstall's latch never clears, so gating install on
   // it stranded a ready update for the rest of the run whenever the restart
   // was interrupted — a recovery warning whose "Go back" had nothing to go
   // back to. The restart is not lost; it is finishable by quitting.
-  it("keeps a STAGED restart offerable while blocking a new check", () => {
+  it("keeps a staged restart offerable while blocking a new check", () => {
     const checking = transition(initialUpdateState, { type: "check" });
     const ready = transition(checking, { type: "downloaded", version: "1.0.1" });
 
-    // MUTATION (staged restart offerable): gate canInstall on restartStaged
-    // again. The Restart button disappears for the rest of the app run.
     expect(
       publicUpdateState(ready, {
         currentVersion: "1.0.0",
         channel: "latest",
         restartStaged: true,
       }),
+      "staged restart offerable: gate canInstall on restartStaged again. The Restart button disappears for the rest of the app run.",
     ).toMatchObject({
       status: "ready",
       canInstall: true,

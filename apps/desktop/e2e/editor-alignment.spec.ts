@@ -13,7 +13,7 @@ import {
 // Left-alignment audit for the WYSIWYG editor: the TEXT of every top-level
 // block type must share one left content edge — a straight vertical line down
 // the gutter touches all of it. Decorations (list markers, task checkboxes,
-// the quote bar) hang LEFT of that edge, and framed blocks (code, tables,
+// the quote bar) hang left of that edge, and framed blocks (code, tables,
 // callouts) extend --dohc-editor-block-inset past the column so their inner
 // padding lands their text back on the edge. This spec measures the first
 // text glyph of each block against a plain paragraph's.

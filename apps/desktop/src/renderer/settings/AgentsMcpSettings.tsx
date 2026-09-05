@@ -44,7 +44,7 @@ export function AgentsMcpSettings(props: {
     active: boolean;
     /**
      * True only when this panel started or ended the run itself. An
-     * OBSERVATION may be older than a refresh the shell already has in
+     * observation may be older than a refresh the shell already has in
      * flight, so it must never supersede one.
      */
     mutated: boolean;

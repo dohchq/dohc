@@ -77,7 +77,7 @@ describe("MentionComposer autocomplete", () => {
     expect(options[0]!.getAttribute("data-candidate-id")).toBe("user:you");
   });
 
-  it("completes with Enter and does NOT send while the menu is open", async () => {
+  it("completes with Enter and does not send while the menu is open", async () => {
     const onSend = vi.fn();
     render(<Harness onSend={onSend} />);
     const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;

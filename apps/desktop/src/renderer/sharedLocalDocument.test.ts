@@ -310,7 +310,7 @@ describe("SharedLocalDocument", () => {
       await pending;
       return { status: "written", contentHash: "hash-1" };
     });
-    // A WYSIWYG pane publishes LAZILY: its edit lives in the pending draft,
+    // A WYSIWYG pane publishes lazily: its edit lives in the pending draft,
     // and the snapshot body is still the text this write is landing. Reading
     // the body alone therefore cannot see this newer work.
     buffer.setPendingDraft({

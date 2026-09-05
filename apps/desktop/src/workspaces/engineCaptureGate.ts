@@ -10,8 +10,8 @@ import type {
   EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 
-// THE captureFor gate (single owner): the engine store under .dohc/engine/ is
-// the workspace's sole history recorder. The daemon is REQUIRED, not
+// The captureFor gate (single owner): the engine store under .dohc/engine/ is
+// the workspace's sole history recorder. The daemon is required, not
 // optional: `startRustEngineDaemon` quits the app when it cannot start, before
 // any window exists, so no running workspace can reach here without one.
 export function captureForWorkspace(
@@ -21,9 +21,9 @@ export function captureForWorkspace(
   hooks: WorkspaceCaptureHooks,
   rustEngineSessions: EngineWorkspaceSessions,
 ): WorkspaceCaptureDecision {
-  // A shared view never gets a recorder (#540): it is fed exclusively by
+  // A shared view never gets a recorder: it is fed exclusively by
   // the share's filtered pull, and a watcher would re-journal materialized
-  // files. At EDIT level too: the recipient's edits reach the engine because
+  // files. At edit level too: the recipient's edits reach the engine because
   // the app writes them there itself.
   if (workspace.shareView) {
     return { capture: null, shareView: true };

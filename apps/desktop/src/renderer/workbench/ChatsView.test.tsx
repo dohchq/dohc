@@ -190,10 +190,9 @@ Element.prototype.scrollIntoView = vi.fn();
 
 // The contract listing for a relay that ANSWERED. An unreachable relay
 // resolves `{ joined, relay: { state: "unreachable" } }` instead — never an
-// empty listing — and a missing session resolves `{ state: "signed-out" }`
-// (#551).
-// The joined lane the way main answers it (#640): one entry per channel the
-// CALLER NAMED, carrying the registry row for that channel or null. The fake
+// empty listing — and a missing session resolves `{ state: "signed-out" }`.
+// The joined lane the way main answers it: one entry per channel the
+// caller named, carrying the registry row for that channel or null. The fake
 // below applies this to every joined-lane read, so a fixture states what the
 // registry holds and the scoping is exercised rather than assumed. A fixture
 // that answered its own rows regardless of the payload would certify a
@@ -249,7 +248,7 @@ const cloudSessionCallbacks = new Set<
 >();
 
 // Most tests model a whole transition with one event; "changing" is the
-// default because for a CHANGED key both phases behave the same, and a
+// default because for a changed key both phases behave the same, and a
 // same-key test must say "ready" explicitly to ask for the revalidation.
 function emitCloudSessionChanged(
   sessionKey: string | null,
@@ -521,7 +520,7 @@ describe("ChatsView channels", () => {
     );
   });
 
-  // #640: a channel on screen with no answer in the joined lane is a LOCKED
+  // A channel on screen with no answer in the joined lane is a locked
   // channel, and the create put one on screen. main mints the wire id from the
   // channel's own local id, so no grant can exist for it and the answer is
   // known without asking — which it has to be, because the user is already
@@ -572,7 +571,7 @@ describe("ChatsView channels", () => {
   });
 });
 
-// Journey 3 (#337): the navigator kept an unread badge more than 30s after
+// Journey 3: the navigator kept an unread badge more than 30s after
 // the thread was read. It hands every conversation to the editor, so it never
 // reaches its own mark-read and had no reason to refetch the counts it loaded
 // at mount. The shell reports each landed read through readRevision.
@@ -750,7 +749,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // #551: a relay outage RESOLVES the listing with `relay.state ===
+  // A relay outage resolves the listing with `relay.state ===
   // "unreachable"` — it does not reject. That resolution must not read as
   // "there are no shares": the cached relay-backed rows stand until the relay
   // answers.
@@ -795,7 +794,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // The counterpart that keeps the distinction honest: when the relay ANSWERS
+  // The counterpart that keeps the distinction honest: when the relay answers
   // with no rows, that is the truth, and the cached rows go.
   it("clears cached relay share rows when the relay answers an authoritative empty listing", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -831,8 +830,8 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
-  // #618: keeping the cached rows is only half of honest. An unreachable
-  // listing with NOTHING cached committed no rows and said nothing, so the
+  // Keeping the cached rows is only half of honest. An unreachable
+  // listing with nothing cached committed no rows and said nothing, so the
   // section that lists invitations disappeared and the surface read as "you
   // have no shares".
   it("says dohc could not read the shares when the relay is unreachable, and offers a retry", async () => {
@@ -882,7 +881,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.getByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // #618 codex P2. A refresh nobody asked for that FAILED learned nothing, so
+  // A refresh nobody asked for that failed learned nothing, so
   // it takes no data lane — and it must take no reachability lane either.
   // Claiming one let a background failure outrank the answer already in
   // flight: the listing landed, its rows rendered, and "could not read your
@@ -893,7 +892,7 @@ describe("ChatsView panel navigator unread badges", () => {
       fileThreads: [],
     });
     // The mount's read never settles until this test says so; the background
-    // refresh behind it fails first and therefore holds the NEWER ticket.
+    // refresh behind it fails first and therefore holds the newer ticket.
     let resolveMount!: (value: ReturnType<typeof shareListing>) => void;
     const mountRead = new Promise<ReturnType<typeof shareListing>>((resolve) => {
       resolveMount = resolve;
@@ -936,7 +935,7 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
-  // #618 codex P2. An over-limit listing is NOT an outage: the same request
+  // An over-limit listing is not an outage: the same request
   // answers the same way forever. Reporting it as unreachable gave the
   // surface a Try again that could never work and no way to say what was
   // wrong — the defect #618 exists to fix, for the one condition dohc's own
@@ -980,7 +979,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(notice.textContent).not.toContain("could not read");
   });
 
-  // #618 codex round 3. The failure is account-scoped, and unlike a stale row
+  // The failure is account-scoped, and unlike a stale row
   // it is a PERSISTENT claim: an over-limit answer names the previous
   // account's share counts. Leaving it up shows account A's numbers under
   // account B for as long as B's listing takes — or for good, if it stalls.
@@ -1019,7 +1018,7 @@ describe("ChatsView panel navigator unread badges", () => {
   // Over-limit is non-authoritative for the same reason unreachable is: dohc
   // has no listing it can stand behind, so the cached rows are still the best
   // thing it knows. Without this the new state could quietly become
-  // authoritative and clear them — the #551 clobber, through the door this
+  // authoritative and clear them — the clobber, through the door this
   // round opened.
   it("keeps cached relay share rows when a refresh resolves over-limit", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -1068,7 +1067,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(notice.textContent).toContain("This list may be out of date.");
   });
 
-  // #618 codex round 5. The sibling test above covers a background read that
+  // The sibling test above covers a background read that
   // REJECTED. This one resolves structurally with `unreachable` — the same
   // "learned nothing" fact wearing a different shape — and it must be treated
   // the same. Keying the carve-out on `value === null` covered one of three.
@@ -1098,7 +1097,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(await screen.findByTestId("chats-shares-unreadable")).toBeTruthy();
 
     // The read that was always in flight answers, authoritatively, on an
-    // OLDER ticket.
+    // older ticket.
     resolveMount(
       shareListing({
         received: [
@@ -1119,7 +1118,7 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
-  // The cached rows stay (that is #551), and now they are labelled: they are
+  // The cached rows stay, and now they are labelled: they are
   // real, they are just older than this failure.
   it("marks cached invitations as possibly out of date while the relay is unreachable", async () => {
     bridgeMock.listChatChannels.mockResolvedValue({
@@ -1177,7 +1176,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.queryByTestId("chats-shared-with-you")).toBeNull();
   });
 
-  // Signed-out is the third fact, and it is NOT an outage: the cached relay
+  // Signed-out is the third fact, and it is not an outage: the cached relay
   // rows are account-scoped, so another account's invitations and recipient
   // emails must not survive a logout or account switch.
   it("clears cached relay share rows when the listing resolves signed-out", async () => {
@@ -1219,7 +1218,7 @@ describe("ChatsView panel navigator unread badges", () => {
     });
   });
 
-  // The TRIGGER half of the signed-out pin: logout emits only a session
+  // The trigger half of the signed-out pin: logout emits only a session
   // signal — no rerender, no catch-up refresh, and the activity ping's badge
   // path never asks the relay. The mounted view itself must re-read the
   // listing and drop the previous account's rows.
@@ -1260,7 +1259,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
   // The relay rows are keyed by the SESSION they were read under, so the
   // keep-cached-through-an-outage rule can only ever keep the same account's
-  // rows. The sharpest case: switch accounts, and the NEW account's first
+  // rows. The sharpest case: switch accounts, and the new account's first
   // listing cannot reach the relay — the previous account's invitations and
   // emails must be gone, not preserved.
   it("clears another account's cached relay rows when the new session cannot reach the relay", async () => {
@@ -1300,7 +1299,7 @@ describe("ChatsView panel navigator unread badges", () => {
 
   // The in-flight race the session KEY alone cannot stop: account A's read is
   // still in flight when the user switches to B, B's listing resolves
-  // unreachable FIRST (leaving the relay lane unclaimed), and A's answered
+  // unreachable first (leaving the relay lane unclaimed), and A's answered
   // response lands last. Session keys clear only at commit — the read issued
   // under the old session must be refused outright, or it restores A's rows
   // under B.
@@ -1336,7 +1335,7 @@ describe("ChatsView panel navigator unread badges", () => {
     await waitFor(() => expect(answerShares).toHaveLength(2));
 
     // Switch to account B. Its listing cannot reach the relay and resolves
-    // FIRST — the relay lane stays unclaimed.
+    // first — the relay lane stays unclaimed.
     act(() => emitCloudSessionChanged("session-b"));
     await waitFor(() => expect(answerShares).toHaveLength(3));
     await act(async () => {
@@ -1358,7 +1357,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(screen.queryByTestId("chats-join-shared")).toBeNull();
   });
 
-  // The rows must leave the SCREEN at the signal itself: the new session's
+  // The rows must leave the screen at the signal itself: the new session's
   // listing may never resolve (a stalled relay), and waiting on it would
   // keep showing the previous account's invitations and emails indefinitely.
   it("clears the previous account's rows at the session change, before any listing answers", async () => {
@@ -1396,12 +1395,12 @@ describe("ChatsView panel navigator unread badges", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("chats-join-shared")).toBeNull();
     });
-    // The refresh WAS issued — the clear did not wait on it.
+    // The refresh was issued — the clear did not wait on it.
     expect(shareReads).toBe(2);
   });
 
-  // The signal carries the NEW session's key so a token rotation within the
-  // SAME session invalidates nothing — and asks for nothing. Mid-transition
+  // The signal carries the new session's key so a token rotation within the
+  // same session invalidates nothing — and asks for nothing. Mid-transition
   // the credential cache is deliberately empty, so a listing issued off the
   // same-key event would answer an authoritative signed-out and clear the
   // very rows the same-key rule preserved; a stalled cleanup would hide
@@ -1453,7 +1452,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(shareReads).toBe(1);
   });
 
-  // The other moment of the same-key contract: the READY phase is adoption
+  // The other moment of the same-key contract: the ready phase is adoption
   // end, and it runs exactly one revalidation against the settled session —
   // invitations and revocations from during the reauth must land without
   // waiting for an unrelated refresh.
@@ -1570,7 +1569,7 @@ describe("ChatsView panel navigator unread badges", () => {
     expect(await screen.findByTestId("chats-join-shared")).toBeTruthy();
   });
 
-  // Two lookups can settle in ONE React batch, both reading a null listing
+  // Two lookups can settle in one React batch, both reading a null listing
   // ref. The newer unreachable answer claims only the joined lane; the older
   // answered one must still land its authoritative relay rows — an
   // all-or-nothing claim on the stale joined ticket would silently discard
@@ -1590,7 +1589,7 @@ describe("ChatsView panel navigator unread badges", () => {
     const view = render(navigator(0));
     await waitFor(() => expect(answerShares).toHaveLength(1));
 
-    // A read lands: the catch-up issues a second, NEWER lookup.
+    // A read lands: the catch-up issues a second, newer lookup.
     view.rerender(navigator(1));
     await waitFor(() => expect(answerShares).toHaveLength(2));
 
@@ -1622,7 +1621,7 @@ describe("ChatsView panel navigator unread badges", () => {
   });
 
   // refreshOverview and refreshShares both write channelShares. Without one
-  // order over both, a share lookup issued FIRST can resolve LAST and put the
+  // order over both, a share lookup issued first can resolve last and put the
   // pre-mutation snapshot back — the person you just invited disappearing.
   it("does not let a slow background lookup undo a share the user just made", async () => {
     const teamChannel = channel({
@@ -1684,7 +1683,7 @@ describe("ChatsView panel navigator unread badges", () => {
     );
     await waitFor(() => expect(answerShares).toHaveLength(2));
 
-    // Meanwhile the user shares the channel with someone else, and THAT
+    // Meanwhile the user shares the channel with someone else, and that
     // lookup answers first.
     await user.type(screen.getByTestId("chats-share-email"), "bo@example.com");
     await user.click(screen.getByTestId("chats-share-submit"));
@@ -1753,7 +1752,7 @@ describe("ChatsView hybrid feed", () => {
     expect(onError).not.toHaveBeenCalled();
   });
 
-  // #552: an in-place conversation click is a COMMAND, and the shell must
+  // An in-place conversation click is a COMMAND, and the shell must
   // hear it synchronously in the click. The passive onNavChange report is an
   // effect: it flushes after the microtask queue, and on an exact repeat of
   // the current destination it changes nothing at all — a pending DM lookup
@@ -2577,7 +2576,7 @@ describe("ChatsView live activity refresh", () => {
     });
   });
 
-  // The write lands in a chat the user does NOT have open, so the roll-up
+  // The write lands in a chat the user does not have open, so the roll-up
   // badge on the channel list is the only place it shows. Without the list's
   // own subscription the count waits for a navigation or a relaunch.
   it("raises the channel list's roll-up badge while the list stays on screen", async () => {
@@ -2601,7 +2600,7 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.getByTestId("chats-channel-name").textContent).toBe("general");
   });
 
-  // #545: the DM roll-up sits in the SAME list, but it refreshed only on the
+  // The DM roll-up sits in the same list, but it refreshed only on the
   // 5-second poll — a DM badge lagging beside a live channel badge reads as
   // "no new DMs".
   it("raises the DM roll-up badge the moment a write arrives, not on the next poll", async () => {
@@ -2630,9 +2629,7 @@ describe("ChatsView live activity refresh", () => {
         await vi.advanceTimersByTimeAsync(0);
       });
 
-      // MUTATION: remove `void refreshDms()` from the channels-level activity
-      // branch. With the clock frozen, no other caller exists to sync.
-      expect(bridgeMock.syncDms.mock.calls.length).toBeGreaterThan(syncsBefore);
+      expect(bridgeMock.syncDms.mock.calls.length, "remove `void refreshDms()` from the channels-level activity branch. With the clock frozen, no other caller exists to sync.").toBeGreaterThan(syncsBefore);
       expect(screen.getByTestId("chats-dm-unread").textContent).toBe("2");
       // Nothing navigated: the badge appeared on the list itself.
       expect(screen.getByTestId("chats-channels-heading")).toBeTruthy();
@@ -2665,14 +2662,12 @@ describe("ChatsView live activity refresh", () => {
     );
 
     // The burst lands while that sync is in flight.
-    // MUTATION: revert refreshDms to a plain un-coalesced sync. Each of these
-    // starts its own relay sync and the count below reads syncsBefore + 4.
     act(() => {
       emitWorkspaceActivity();
       emitWorkspaceActivity();
       emitWorkspaceActivity();
     });
-    expect(bridgeMock.syncDms.mock.calls.length).toBe(syncsBefore + 1);
+    expect(bridgeMock.syncDms.mock.calls.length, "revert refreshDms to a plain un-coalesced sync. Each of these starts its own relay sync and the count below reads syncsBefore + 4.").toBe(syncsBefore + 1);
 
     // One trailing pass when the held sync settles — not one per event.
     await act(async () => {
@@ -2689,7 +2684,7 @@ describe("ChatsView live activity refresh", () => {
   // The renderer invariant (AGENTS.md): a slow response for workspace A must
   // never repaint workspace B. The drain made syncDms multi-pass, so the
   // per-pass token check is what stands between a stale relay answer and the
-  // switched list (#582 review).
+  // switched list.
   it("drops a slow DM sync from the workspace the user left", async () => {
     type DmPage = { available: boolean; dms: DmRecord[] };
     let resolveStale!: (value: DmPage) => void;
@@ -2741,14 +2736,11 @@ describe("ChatsView live activity refresh", () => {
       ),
     );
 
-    // MUTATION: delete the per-pass `if (token !== liveToken.current) return;`
-    // inside the drain. This stale answer then repaints the new workspace's
-    // list with the old one's DM and a badge of 9.
     await act(async () => {
       resolveStale({ available: true, dms: [dm({ unreadCount: 9 })] });
       await stale;
     });
-    expect(screen.getByTestId("chats-dm-name").textContent).toBe(
+    expect(screen.getByTestId("chats-dm-name").textContent, "delete the per-pass `if (token !== liveToken.current) return;` inside the drain. This stale answer then repaints the new workspace's list with the old one's DM and a badge of 9.").toBe(
       "carol@example.com",
     );
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
@@ -2757,7 +2749,7 @@ describe("ChatsView live activity refresh", () => {
   // The dead-era yield: a workspace switch during a stalled old-workspace
   // sync must steal the drain's slot, not queue onto it — a queued pass on a
   // sync that never settles would leave the new workspace's DM list empty
-  // forever (#582 review).
+  // forever.
   it("never queues the new workspace's DM sync onto the stalled one it left", async () => {
     type DmPage = { available: boolean; dms: DmRecord[] };
     const leftBehind = new Promise<DmPage>(() => {
@@ -2796,9 +2788,6 @@ describe("ChatsView live activity refresh", () => {
     act(() => emitWorkspaceActivity());
     await waitFor(() => expect(oldReads).toBe(2));
 
-    // MUTATION: weaken the drain's entry guard to `if (active !== null)`.
-    // The switch's own refreshDms then queues onto the dead drain and no
-    // workspace-new sync ever starts — not even the poll can get past it.
     view.rerender(
       <ChatsView
         workspaceId="workspace-new"
@@ -2806,7 +2795,7 @@ describe("ChatsView live activity refresh", () => {
         onError={vi.fn()}
       />,
     );
-    await waitFor(() => expect(newReads).toBeGreaterThan(0), { timeout: 2_000 });
+    await waitFor(() => expect(newReads, "weaken the drain's entry guard to `if (active !== null)`. The switch's own refreshDms then queues onto the dead drain and no workspace-new sync ever starts — not even the poll can get past it.").toBeGreaterThan(0), { timeout: 2_000 });
     expect((await screen.findByTestId("chats-dm-name")).textContent).toBe(
       "carol@example.com",
     );
@@ -2863,7 +2852,7 @@ describe("ChatsView live activity refresh", () => {
   });
 
   // The switch happens while a badge read for the old workspace is still in
-  // flight. Activity in the NEW workspace must not queue a pass onto it: that
+  // flight. Activity in the new workspace must not queue a pass onto it: that
   // pass carries the old workspace's id and the new workspace's liveToken, and
   // the guard would pass while the wrong workspace's channels repaint.
   it("never repaints one workspace's list with the one the user left", async () => {
@@ -3101,7 +3090,7 @@ describe("ChatsView live activity refresh", () => {
   });
 
   // The initial load holds the surface at "loading" until its share lookup
-  // answers. A badge read that lands during that wait is NEWER than the
+  // answers. A badge read that lands during that wait is newer than the
   // snapshot that load is carrying, and dropping it leaves the stale counts on
   // screen until the next event.
   it("keeps a badge result that lands while the first load is still waiting", async () => {
@@ -3144,7 +3133,7 @@ describe("ChatsView live activity refresh", () => {
 
   // The badge drain must not be held by a request that may never return. The
   // grant side lives on the relay behind an unbounded fetch; what this reader
-  // needs — which channels THIS machine joined — is local.
+  // needs — which channels this machine joined — is local.
   it("keeps refreshing badges while the relay-backed share lookup hangs", async () => {
     const joinedRow = {
       shareId: "share-joined",
@@ -3186,7 +3175,7 @@ describe("ChatsView live activity refresh", () => {
     expect(bridgeMock.listChatChannelShares).toHaveBeenCalledTimes(1);
   });
 
-  // Another mounted Chats view joins this workspace's FIRST shared channel.
+  // Another mounted Chats view joins this workspace's first shared channel.
   // The listing then carries a channel this view has no grant row for, and a
   // channel with no grant row reads as this workspace's own: sharing offered
   // on someone else's channel, and a composer on a read-only grant.
@@ -3244,7 +3233,7 @@ describe("ChatsView live activity refresh", () => {
 
   // The other side of that rule. While the share metadata is unresolved there
   // is nothing to correct, and a badge pass that claimed the joined lane
-  // anyway would starve the listing that owns BOTH lanes — leaving "unknown"
+  // anyway would starve the listing that owns both lanes — leaving "unknown"
   // on screen, which locks every channel including this workspace's own.
   it("lets the first share listing settle even when a badge pass ran first", async () => {
     let answerShares!: (value: ReturnType<typeof shareListing>) => void;
@@ -3313,7 +3302,7 @@ describe("ChatsView live activity refresh", () => {
     expect((await screen.findByTestId("chats-channel-name")).textContent).toBe("general");
   });
 
-  // The same rule on the share lanes. A background lookup that REJECTS holds
+  // The same rule on the share lanes. A background lookup that rejects holds
   // no answer about the grants either, and committing "unknown" for it locks
   // every channel — including this workspace's own.
   it("does not lock every channel when a background share lookup rejects", async () => {
@@ -3363,7 +3352,7 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  // ONE listing in flight is what keeps an activity storm off the relay, and
+  // One listing in flight is what keeps an activity storm off the relay, and
   // the slot is the whole mechanism. A drain that has been superseded must not
   // hand it back when it finally gives up, or the next write opens a second
   // listing beside the one already running.
@@ -3622,7 +3611,7 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  // The other half of the same rule: a failed lookup that DOES own both lanes
+  // The other half of the same rule: a failed lookup that does own both lanes
   // must still settle the state, or the share controls wait forever. Unknown
   // fails closed.
   it("commits unknown when the share lookup fails with nothing newer to keep", async () => {
@@ -3650,7 +3639,7 @@ describe("ChatsView live activity refresh", () => {
     expect(screen.queryByTestId("chats-new-thread-composer")).toBeNull();
   });
 
-  // The channel listing syncs joined shared channels BEFORE it reads, and that
+  // The channel listing syncs joined shared channels before it reads, and that
   // sync records a revoked or downgraded grant. Those joined rows are local, so
   // they are answered even while the relay is down — and until they land, the
   // composer stays enabled on a channel main will refuse to accept posts for.
@@ -3731,7 +3720,7 @@ describe("ChatsView live activity refresh", () => {
       deferred[0]({ channels: [channel({ unreadCount: 1 })], fileThreads: [] });
       await Promise.resolve();
     });
-    // The events that arrived mid-read are not lost — they cost ONE catch-up.
+    // The events that arrived mid-read are not lost — they cost one catch-up.
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(3));
     await act(async () => {
       deferred[1]({ channels: [channel({ unreadCount: 5 })], fileThreads: [] });
@@ -4190,8 +4179,8 @@ describe("ChatsView mentions", () => {
     const composer = screen.getByTestId("chats-composer") as HTMLTextAreaElement;
     await user.type(composer, "@agent look");
 
-    // Two Enter keydowns in the SAME tick (no await between): the synchronous
-    // in-flight ref must swallow the second so only ONE send goes out.
+    // Two Enter keydowns in the same tick (no await between): the synchronous
+    // in-flight ref must swallow the second so only one send goes out.
     fireEvent.keyDown(composer, { key: "Enter" });
     fireEvent.keyDown(composer, { key: "Enter" });
     resolveSend({ message: message({ id: "m-new", body: "@agent look" }) });
@@ -4277,7 +4266,7 @@ describe("ChatsView liveness", () => {
     renderView();
 
     await user.click(await screen.findByTestId("chats-channel"));
-    // Navigate back BEFORE the thread list resolves.
+    // Navigate back before the thread list resolves.
     await user.click(screen.getByTestId("chats-channel-back"));
     resolveThreads({ threads: [thread({ title: "Stale thread" })] });
 
@@ -4469,7 +4458,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     bridgeMock.listChatChannelShares.mockRejectedValue(new Error("signed out"));
     renderView();
     await screen.findByTestId("chats-channel-name");
-    // Failing closed is about AUTHORITY, not silence. A listing that did not
+    // Failing closed is about authority, not silence. A listing that did not
     // answer at all locks every affordance below, and it says so — an
     // unexplained blank surface with every channel read-only was #618.
     expect((await screen.findByTestId("chats-shares-unreadable")).textContent).toContain(
@@ -4487,7 +4476,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
-  // #640: the joined lane is answered for what a caller is SHOWING, so the
+  // The joined lane is answered for what a caller is showing, so the
   // caller has to say what that is. It is the channel list plus the
   // invitations under "Shared with you" — the sharing surface decides for each
   // invitation whether this workspace already joined that channel.
@@ -4528,7 +4517,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect([...badgeCall.channelWireIds].sort()).toEqual(["wire-invite", "wire-team"]);
   });
 
-  // A channel the joined lane did not answer for is UNKNOWN, not "no grant".
+  // A channel the joined lane did not answer for is unknown, not "no grant".
   // Unknown fails closed exactly as an unresolved listing does — otherwise a
   // channel that appeared since the last read would be writable on the word of
   // an answer that never covered it.
@@ -4595,7 +4584,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-readonly-note")).toBeNull();
   });
 
-  // refreshShares is deliberately NOT liveToken-guarded, so a share read
+  // refreshShares is deliberately not liveToken-guarded, so a share read
   // issued before a channel was created lands after it. It never named that
   // channel, so it must not drop its answer — replacing the whole lane made
   // the composer vanish under the user.
@@ -4732,7 +4721,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
 
   // Eviction is view-driven, and a read's own scope is not the view. The
   // overview finds the imported channel and answers for it; a share read
-  // issued from the render BEFORE that names only the old channel, and it
+  // issued from the render before that names only the old channel, and it
   // carries the newer ticket. Evicting to that scope took the answer away
   // from a channel that was already on screen — which locks it. Driven by
   // the substitution reviewer; adopted as the pin.
@@ -5101,7 +5090,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     );
   });
 
-  // A revocation that LANDED is a local fact. When the confirming refresh
+  // A revocation that landed is a local fact. When the confirming refresh
   // cannot reach the relay, the keep-cached rule must not resurrect the
   // removed person as a member with a live Remove button.
   it("shows a revoked member gone even when the confirming refresh cannot reach the relay", async () => {
@@ -5153,7 +5142,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     });
   });
 
-  // #618 codex round 4. Over the cap, a NEW grant only deepens the state: the
+  // Over the cap, a new grant only deepens the state: the
   // relay's create path has no matching cap, and the granted rows are empty on
   // an over-limit read so nothing can be removed to make room. A surface that
   // names the constraint and still offers the one action that worsens it is
@@ -5196,8 +5185,8 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(bridgeMock.shareChatChannel).not.toHaveBeenCalled();
   });
 
-  // #618 codex round 5. Only the GRANTED lane can be deepened by a new
-  // outgoing share. A full RECEIVED lane is an inbound backlog the user did
+  // Only the granted lane can be deepened by a new
+  // outgoing share. A full received lane is an inbound backlog the user did
   // not create and cannot clear from here, and blocking their outgoing work
   // over it turns one account-wide problem into a second one.
   it("still allows sharing when only the received lane is over the limit", async () => {
@@ -5276,7 +5265,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     expect(screen.queryByTestId("chats-share-members-unreadable")).toBeNull();
   });
 
-  // A revoke that STARTED under the old session must not spend a commit
+  // A revoke that started under the old session must not spend a commit
   // ticket in the new session's order: its optimistic claim would outrank
   // the new session's own in-flight listing and leave the panel empty after
   // an unreachable follow-up.
@@ -5347,7 +5336,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
       await Promise.resolve();
     });
 
-    // The new session's OWN listing — issued at the switch — answers with
+    // The new session's own listing — issued at the switch — answers with
     // its grant. It must land, not be outranked by the stale revoke's claim.
     await act(async () => {
       answers[0]!(
@@ -5416,7 +5405,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
     await waitFor(() => expect(bridgeMock.listChatChannels).toHaveBeenCalledTimes(2));
     // Regression (CodeRabbit critical): the join-in-flight flag must reset
     // after a successful join even though refreshOverview bumps the liveness
-    // token — the OTHER invitation's Join button re-enables instead of
+    // token — the other invitation's Join button re-enables instead of
     // staying dead for the rest of the session.
     await waitFor(() => {
       const buttons = screen.getAllByTestId("chats-join-shared");
@@ -5660,7 +5649,7 @@ describe("ChatsView shared channels (MU-C4)", () => {
 });
 
 // Direct messages (WS-MU-C3): participants-only conversations behind the
-// collaboration gate. Solo (available:false, no DMs) renders NOTHING — the
+// collaboration gate. Solo (available:false, no DMs) renders nothing — the
 // zero-bloat rule — and the DM conversation is one running thread whose
 // composer sends on Enter (anti-forum).
 describe("ChatsView direct messages", () => {
@@ -6155,7 +6144,7 @@ describe("ChatsView direct messages", () => {
     expect(normallyOpened.className).not.toContain("ring-2");
   });
 
-  // #718: the main-side shared-channel pass is bounded, so a poll that does not
+  // The main-side shared-channel pass is bounded, so a poll that does not
   // name the DM it is showing can refresh sixteen other channels and leave this
   // conversation stale while the surface looks refreshed. The list poll names
   // nothing (it is showing the list); the open-DM refresh names the DM.
@@ -6228,10 +6217,10 @@ describe("ChatsView direct messages", () => {
     expect(screen.queryByTestId("chats-dm-unread")).toBeNull();
   });
 
-  // #742: the placement a participant picked when they accepted has a
+  // The placement a participant picked when they accepted has a
   // visible reverse path. The owner side (shareId null) never accepted a
   // grant into a workspace, so it has nothing to reverse.
-  describe("leaving a conversation (#742)", () => {
+  describe("leaving a conversation", () => {
     it("shows Leave only for a participant's accepted DM, never the owner's own", async () => {
       const user = userEvent.setup();
       bridgeMock.syncDms.mockResolvedValue({ available: true, dms: [dm()] });
@@ -6273,9 +6262,9 @@ describe("ChatsView direct messages", () => {
     it("ends the row, drops the conversation from the list, and returns to Chats on confirm", async () => {
       const user = userEvent.setup();
       const participant = dm({ role: "participant", shareId: "share-dm-1" });
-      // #742 P1-A: listDmRecords deliberately keeps an ended participant row
+      // listDmRecords deliberately keeps an ended participant row
       // readable (connected:false — the same owner-revoked tombstone rule),
-      // so main's real post-leave syncDms response carries BOTH this row AND
+      // so main's real post-leave syncDms response carries both this row and
       // the reappeared pending request for the same shareId. Building the
       // mock through the actual withholdDmsInRequestLanes (not a hand-typed
       // `dms: []`) is what makes this a real flow: a no-op filter would leave
@@ -6316,7 +6305,7 @@ describe("ChatsView direct messages", () => {
       expect(screen.queryByTestId("chats-dm-item")).toBeNull();
     });
 
-    it("clears the composer draft on leave, so the next DM opened starts empty (P1-B)", async () => {
+    it("clears the composer draft on leave, so the next DM opened starts empty", async () => {
       const user = userEvent.setup();
       const leaving = dm({
         channelId: "channel-dm-1",
@@ -6371,7 +6360,7 @@ describe("ChatsView direct messages", () => {
       ).toBe("");
     });
 
-    it("gates Leave on a live placement, not merely a shareId (P2-C)", async () => {
+    it("gates Leave on a live placement, not merely a shareId", async () => {
       const user = userEvent.setup();
       const live = dm({
         channelId: "channel-dm-1",
@@ -6415,7 +6404,7 @@ describe("ChatsView direct messages", () => {
       expect(screen.queryByTestId("chats-dm-leave")).toBeNull();
     });
 
-    it("closes on Escape without navigating away or ending the row (P2-D)", async () => {
+    it("closes on Escape without navigating away or ending the row", async () => {
       const user = userEvent.setup();
       const participant = dm({ role: "participant", shareId: "share-dm-1" });
       bridgeMock.syncDms.mockResolvedValue({
@@ -6442,7 +6431,7 @@ describe("ChatsView direct messages", () => {
       expect(bridgeMock.leaveDm).not.toHaveBeenCalled();
     });
 
-    it("clears a stale leave dialog on navigation away, so opening a different DM never shows it (P2-D belt)", async () => {
+    it("clears a stale leave dialog on navigation away, so opening a different DM never shows it", async () => {
       const user = userEvent.setup();
       const leaving = dm({
         channelId: "channel-dm-1",
@@ -6472,7 +6461,7 @@ describe("ChatsView direct messages", () => {
       await user.click(await screen.findByTestId("chats-dm-leave"));
       await screen.findByTestId("chats-leave-dm-dialog");
 
-      // Navigate away a path OTHER than the dialog's own Escape/Cancel — the
+      // Navigate away a path other than the dialog's own Escape/Cancel — the
       // header Back button — while the dialog is still open.
       await user.click(screen.getByTestId("chats-dm-back"));
       expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
@@ -6485,7 +6474,7 @@ describe("ChatsView direct messages", () => {
       expect(screen.queryByTestId("chats-leave-dm-dialog")).toBeNull();
     });
 
-    // #742 P2-D, round 5: an owner revocation mid-dialog leaves the
+    // An owner revocation mid-dialog leaves the
     // channelId unchanged, so the round-2 belt (keyed only on nav change)
     // would leave the confirmation open — confirming would re-end an
     // already-ended tombstone and promise a request that, for an
@@ -6531,9 +6520,9 @@ describe("ChatsView direct messages", () => {
       }
     });
 
-    // #742 P2 (round 6): Leave during an in-flight send would end the row
+    // Leave during an in-flight send would end the row
     // before sendChatMessage's revalidation, whose rejection then gets
-    // suppressed by goBack's context change (#742 P1-B) — the message
+    // suppressed by goBack's context change — the message
     // vanishes with no warning. Confirm is disabled until the send settles,
     // so the user always sees either the message land or the existing
     // "Could not send" error, never silence.
@@ -6772,7 +6761,7 @@ describe("ChatsView direct messages", () => {
   });
 
   it("clears a stale recipient/draft when backing out of New message and reopening it", async () => {
-    // Backing out of compose without sending must NOT leave the old recipients
+    // Backing out of compose without sending must not leave the old recipients
     // pre-filled — a user who reopens compose and types + sends could otherwise
     // misdirect their message to the wrong person.
     const user = userEvent.setup();

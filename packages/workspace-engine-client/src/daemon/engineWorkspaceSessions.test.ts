@@ -61,17 +61,8 @@ async function tempWorkspace(workspaceId = "workspace-sessions-test") {
   return { workspaceId, rootPath: await tempRoot() };
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T | PromiseLike<T>) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
+function deferred<T>() {
+  return Promise.withResolvers<T>();
 }
 
 class MockClient implements EngineDaemonClient {
@@ -290,9 +281,7 @@ describe("EngineWorkspaceSessions", () => {
       )
       .catch((error: unknown) => error);
 
-    // MUTATION: require rebindStarted in the open-error retry branch. The
-    // first currentClient() failure is returned here instead of the handle.
-    expect(outcome).toBe("workspace-after-restart");
+    expect(outcome, "require rebindStarted in the open-error retry branch. The first currentClient() failure is returned here instead of the handle.").toBe("workspace-after-restart");
     expect(sleeps).toEqual([100]);
   });
 
@@ -344,7 +333,7 @@ describe("EngineWorkspaceSessions", () => {
   // file and ENOENT for a dangling link, so the old `isAlreadyExists` check
   // rethrew the dangling case as a bare errno and answered the file case with
   // "must not be a symlink" -- about a plain file. Presence decides now, and
-  // both name what is actually there (#612).
+  // both name what is actually there.
   it.each([
     [
       "a file",
@@ -360,7 +349,7 @@ describe("EngineWorkspaceSessions", () => {
       async (rootPath: string) => {
         // Measured on this host: a plain mkdir answers EEXIST for a dangling
         // link of either kind, while mkdir{recursive} answers ENOENT. So the
-        // errno an allowlist would have to know differs by CALL, not only by
+        // errno an allowlist would have to know differs by call, not only by
         // platform -- which is the argument for keying on presence instead.
         await symlink(join(rootPath, "nowhere"), join(rootPath, ".dohc"), "dir");
       },
@@ -1368,9 +1357,9 @@ describe("EngineWorkspaceSessions", () => {
     expect(clientLookups).toBeGreaterThanOrEqual(3);
   });
 
-  // The pacing tests above pin the GROWTH of the transport backoff; nothing
+  // The pacing tests above pin the growth of the transport backoff; nothing
   // pinned its ceiling, so the delay could double without limit and the whole
-  // suite stayed green (#678). Three capped delays distinguish a ceiling from
+  // suite stayed green. Three capped delays distinguish a ceiling from
   // a slower uncapped curve, and eight attempts is what it takes to see them.
   it("stops doubling the transport backoff at its ceiling", async () => {
     const workspace = await tempWorkspace("workspace-backoff-ceiling");
@@ -1398,12 +1387,10 @@ describe("EngineWorkspaceSessions", () => {
 
     // Literals, not the exported constant: an expectation that reads the value
     // it pins moves with it, and ships green for any ceiling at all.
-    // MUTATION: raise the clamp -> the tail reads 1600, 3200, 6400 and this
-    // fails. Nothing else in the suite notices.
-    expect(delays).toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
+    expect(delays, "raise the clamp -> the tail reads 1600, 3200, 6400 and this fails. Nothing else in the suite notices.").toEqual([100, 200, 400, 800, 1_000, 1_000, 1_000]);
   });
 
-  // #564: the retry deadline bounds how long one run may keep WAITING on
+  // The retry deadline bounds how long one run may keep waiting on
   // transport recovery. It gates retries only — a healthy first attempt is
   // never rejected, however small the deadline.
   describe("retryDeadlineMs", () => {
@@ -1428,7 +1415,7 @@ describe("EngineWorkspaceSessions", () => {
       const client = new MockClient("handle-deadline");
       // Injected clock: each failed attempt costs 2,500 ms (the shape of a
       // real workspace-open deadline plus overhead). The budget's clock
-      // starts at the FIRST failure (t=2,500), so attempts 2 and 3 are inside
+      // starts at the first failure (t=2,500), so attempts 2 and 3 are inside
       // the 6,000 ms window and the check after attempt 4 is not.
       let nowMs = 0;
       let attempts = 0;
@@ -1452,9 +1439,7 @@ describe("EngineWorkspaceSessions", () => {
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // MUTATION: drop the deadline check -> all six attempts run and the
-      // rejection is EngineWorkspaceRebindError instead.
-      expect(attempts).toBe(4);
+      expect(attempts, "drop the deadline check -> all six attempts run and the rejection is EngineWorkspaceRebindError instead.").toBe(4);
       const message = (outcome as Error).message;
       // The rejection names the constraint, the configured limit with its
       // unit, and the observed wait (AGENTS.md: show agents the limits they
@@ -1469,7 +1454,7 @@ describe("EngineWorkspaceSessions", () => {
       });
     });
 
-    it("bounds a daemon-down OPEN the same way", async () => {
+    it("bounds a daemon-down open the same way", async () => {
       const workspace = await tempWorkspace("workspace-open-deadline");
       let nowMs = 0;
       let clientReads = 0;
@@ -1499,7 +1484,7 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("does not start attempt N+1 on a budget the backoff spent", async () => {
-      // codex round 2: the deadline was checked only BEFORE the backoff. An
+      // The deadline was checked only before the backoff. An
       // attempt ending just inside it could ride the backoff over the line
       // and still start a fresh 2 s open on a spent budget (~8 s observed on
       // a 6 s contract). The clock is re-checked after the backoff.
@@ -1519,7 +1504,7 @@ describe("EngineWorkspaceSessions", () => {
         },
       );
 
-      // Tuned so the BACKOFF is what spends it: attempt 2 ends at 2,550 ms of
+      // Tuned so the backoff is what spends it: attempt 2 ends at 2,550 ms of
       // recovery (inside 2,600) and the 200 ms backoff after it ends at
       // 2,750 ms (outside).
       const outcome = await sessions
@@ -1537,13 +1522,11 @@ describe("EngineWorkspaceSessions", () => {
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // MUTATION: drop the post-backoff re-check -> a third attempt starts on
-      // a budget the backoff had already spent.
-      expect(attempts).toBe(2);
+      expect(attempts, "drop the post-backoff re-check -> a third attempt starts on a budget the backoff had already spent.").toBe(2);
     });
 
     it("bounds the client-churn open ladder the same way", async () => {
-      // codex round 2: churning client generations held a caller through six
+      // Churning client generations held a caller through six
       // full opens — the ladder consulted neither the deadline nor shutdown.
       const workspace = await tempWorkspace("workspace-churn-deadline");
       const first = new MockClient("handle-churn-a");
@@ -1567,15 +1550,12 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: drop the deadline from the churn ladder -> the full
-      // six-open churn runs (12 reads) and rejects with
-      // EngineWorkspaceRebindError.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "drop the deadline from the churn ladder -> the full six-open churn runs (12 reads) and rejects with EngineWorkspaceRebindError.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(reads).toBe(6);
     });
 
     it("bounds an afterReconnect storm, which takes no backoff at all", async () => {
-      // codex round 3: an `afterReconnect` retry skipped the whole waiting
+      // An `afterReconnect` retry skipped the whole waiting
       // block, so it consulted neither gate — six attempts, each paying a
       // 2 s workspace.open, holding the capture chain for ~12 s.
       const workspace = await tempWorkspace("workspace-reconnect-storm");
@@ -1584,7 +1564,7 @@ describe("EngineWorkspaceSessions", () => {
       let attempts = 0;
       // A spy, not a bare stub: this test's NAME asserts "no backoff at all",
       // and with an unobservable stub it could not tell a waiting ladder from
-      // a non-waiting one (review round 8).
+      // a non-waiting one.
       const sleep = vi.fn(async () => {});
       const sessions = new EngineWorkspaceSessions(
         { currentClient: () => client },
@@ -1605,17 +1585,13 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: gate only the transport branch -> six attempts and a
-      // DaemonRefusalError instead.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "gate only the transport branch -> six attempts and a DaemonRefusalError instead.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(attempts).toBe(4);
-      // MUTATION: make `settleAttempt` back off unconditionally -> an
-      // afterReconnect retry waits, which this test's name says it never does.
-      expect(sleep).not.toHaveBeenCalled();
+      expect(sleep, "make `settleAttempt` back off unconditionally -> an afterReconnect retry waits, which this test's name says it never does.").not.toHaveBeenCalled();
     });
 
-    it("bounds an OPEN that keeps refusing with afterReconnect", async () => {
-      // codex round 4: the open ladder's gate only recognised transport and
+    it("bounds an open that keeps refusing with afterReconnect", async () => {
+      // The open ladder's gate only recognised transport and
       // daemon-unavailable errors, so a `workspace.open` refusing with the
       // afterReconnect disposition — which the shipping daemon does — ran
       // six full opens past a spent budget.
@@ -1643,14 +1619,12 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: drop requiresReconnect from daemonMayBeRelaunching -> the
-      // ladder runs every attempt and rejects with the refusal instead.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "drop requiresReconnect from daemonMayBeRelaunching -> the ladder runs every attempt and rejects with the refusal instead.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(4);
     });
 
-    it("calls an exhausted ladder past its budget a DEADLINE, not a transport failure", async () => {
-      // codex round 5: the LAST allowed attempt can start inside the budget
+    it("calls an exhausted ladder past its budget a deadline, not a transport failure", async () => {
+      // The last allowed attempt can start inside the budget
       // and finish outside it. That branch threw the transport error, and
       // main maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument` —
       // so an exhausted ladder downgraded an engine-owned document to the
@@ -1669,7 +1643,7 @@ describe("EngineWorkspaceSessions", () => {
           await sessions.run(
             workspace,
             async () => {
-              // The last allowed attempt STARTS inside the budget (0 ms of
+              // The last allowed attempt starts inside the budget (0 ms of
               // recovery spent) and ends outside it, which is the case this
               // pins.
               nowMs += 3_000;
@@ -1680,13 +1654,11 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: throw the transport error at the terminal attempt -> this
-      // is `{ code: "transport-error" }` and the document downgrades.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "throw the transport error at the terminal attempt -> this is `{ code: 'transport-error' }` and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
     it("retries any method the daemon refuses with afterBackoff, once, after waiting", async () => {
-      // #658. The engine answers `afterBackoff` for a busy store on EVERY
+      // The engine answers `afterBackoff` for a busy store on every
       // method, but only the open ladder and the Y.Doc surfaces collected on
       // it — so a version or chat call reported the kebab-case wire message
       // to the user for a condition that clears by itself. That is exactly
@@ -1697,9 +1669,6 @@ describe("EngineWorkspaceSessions", () => {
       // the commit, so nothing was applied and a second attempt cannot
       // duplicate it.
       //
-      // MUTATION: drop `retryAfterBackoff` from `retryable` -> one attempt
-      // and the refusal reaches the caller. Widen it back to
-      // `requiresBackoff(error)` -> the deadline case below is replayed too.
       const workspace = await tempWorkspace("workspace-run-backoff");
       const sleep = vi.fn(async () => undefined);
       const client = new MockClient("handle-run-backoff");
@@ -1719,29 +1688,20 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(result).toBe("landed");
       expect(attempts).toBe(2);
-      // MUTATION: pass only `retryAfterTransport` as `backoff` -> the retry
-      // is immediate, which is not what `afterBackoff` asks for.
-      expect(sleep).toHaveBeenCalled();
+      expect(sleep, "pass only `retryAfterTransport` as `backoff` -> the retry is immediate, which is not what `afterBackoff` asks for.").toHaveBeenCalled();
     });
 
-    it("does NOT retry a deadline, which shares the afterBackoff disposition", async () => {
+    it("does not retry a deadline, which shares the afterBackoff disposition", async () => {
       // The boundary of the collection above, and the reason it names a CLASS
       // rather than a disposition. `Retryability::AfterBackoff` carries
       // DEADLINE_EXCEEDED as well as OVERLOADED
       // (crates/dohc-engine-protocol/src/error.rs), and the two are not alike:
-      // a busy store never committed, while a deadline interrupts BETWEEN
+      // a busy store never committed, while a deadline interrupts between
       // durable units and leaves work already committed durable. Replaying one
       // is free; replaying the other is a second write.
       //
       // The protocol calls the disposition retryable because retryable
-      // MUTATIONS carry idempotency keys — a promise about the operation, not
-      // about this wrapper, which is handed arbitrary callbacks and cannot
-      // know. That is what `retryTransportErrors` exists to let callers say
-      // for themselves.
       //
-      // MUTATION: restore `requiresBackoff(error)` in place of
-      // `isEngineStoreBusyRefusal(error)` -> attempts is 2 and every caller's
-      // possibly-committed first attempt is replayed for them.
       const workspace = await tempWorkspace("workspace-run-deadline");
       const sleep = vi.fn(async () => undefined);
       const client = new MockClient("handle-run-deadline");
@@ -1768,14 +1728,14 @@ describe("EngineWorkspaceSessions", () => {
       expect(sleep).not.toHaveBeenCalled();
     });
 
-    it("bounds an OPEN the daemon keeps refusing with afterBackoff", async () => {
+    it("bounds an open the daemon keeps refusing with afterBackoff", async () => {
       // Review round 8: `afterBackoff` is the daemon's own "retry, but wait" —
       // it raises it for DeadlineExceeded and Overloaded on any method,
       // including the `workspace.open` this file deadlines at 2 s. The gate
       // recognised only transport, daemon-unavailable and afterReconnect, so
       // the refusal took a bare `continue`: six immediate opens over ~12 s
       // against a 5 s deadline, rejecting with the refusal (which main does
-      // NOT map to engineMayHoldDocument) and applying no backoff at all to an
+      // not map to engineMayHoldDocument) and applying no backoff at all to an
       // overload the daemon had just declared.
       const workspace = await tempWorkspace("workspace-open-backoff");
       let nowMs = 0;
@@ -1807,18 +1767,13 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: restore the bare `continue` for errors outside
-      // daemonMayBeRelaunching -> six opens and a DaemonRefusalError, so the
-      // surface downgrades to the writable plain editor.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens and a DaemonRefusalError, so the surface downgrades to the writable plain editor.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(3);
-      // MUTATION: drop requiresBackoff from the backoff decision -> the ladder
-      // re-opens immediately and amplifies the overload the daemon declared.
-      expect(delays).toEqual([100, 200]);
+      expect(delays, "drop requiresBackoff from the backoff decision -> the ladder re-opens immediately and amplifies the overload the daemon declared.").toEqual([100, 200]);
     });
 
-    it("gates an OPEN that keeps failing with an ordinary error, without waiting", async () => {
-      // Delta review D1: a PARTIAL revert — restoring the bare `continue` only
+    it("gates an open that keeps failing with an ordinary error, without waiting", async () => {
+      // Delta review D1: a partial revert — restoring the bare `continue` only
       // for errors that are neither `daemonMayBeRelaunching` nor
       // `requiresBackoff` — passed the whole suite, so this half of the fix
       // was unpinned. Reachable producers are ordinary: `prepareWorkspace`
@@ -1855,17 +1810,14 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: restore the bare `continue` for errors outside
-      // daemonMayBeRelaunching -> six opens over 12,000 ms on a 4,000 ms
-      // budget, rejecting with the plain Error.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "restore the bare `continue` for errors outside daemonMayBeRelaunching -> six opens over 12,000 ms on a 4,000 ms budget, rejecting with the plain Error.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(opens).toBe(3);
       // Gated, but still immediate: the error class decides only whether to
-      // WAIT, and an ordinary failure has no reason to.
+      // wait, and an ordinary failure has no reason to.
       expect(delays).toEqual([]);
     });
 
-    it("gates an OPEN refused with the immediate disposition", async () => {
+    it("gates an open refused with the immediate disposition", async () => {
       // Delta review D1: `immediate` is the fourth Retryability value and had
       // no test at all. It must be gated like every other retry decision, and
       // must not wait — the daemon said retry now.
@@ -1905,7 +1857,7 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("prefers the deadline to the terminal error when quit races the last attempt", async () => {
-      // Review round 8: `settleAttempt` checks the deadline BEFORE it consults
+      // Review round 8: `settleAttempt` checks the deadline before it consults
       // `shuttingDown`, and the ordering was unpinned — swapping the two
       // passed every test. At quit, on the last allowed attempt with a spent
       // budget, the swap returns the ladder's own transport error, which main
@@ -1924,7 +1876,7 @@ describe("EngineWorkspaceSessions", () => {
             workspace,
             async () => {
               nowMs += 3_000;
-              // Quit arrives while the LAST allowed attempt is in flight.
+              // Quit arrives while the last allowed attempt is in flight.
               if (nowMs >= 6_000) sessions.beginShutdown();
               throw transportFailure();
             },
@@ -1933,13 +1885,11 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: check `shuttingDown` before the lastAttempt deadline branch
-      // -> `{ code: "transport-error" }`, and the document downgrades.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "check `shuttingDown` before the lastAttempt deadline branch -> `{ code: 'transport-error' }`, and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
     });
 
     it("calls an exhausted CHURN ladder past its budget a deadline too", async () => {
-      // codex round 7: the churn ladder ordered its terminal throw AHEAD of
+      // The churn ladder ordered its terminal throw ahead of
       // the deadline check, so a last open that started inside the budget and
       // finished outside it rejected with EngineWorkspaceRebindError. Main
       // maps only EngineWorkspaceRetryDeadlineError to `engineMayHoldDocument`, so
@@ -1976,16 +1926,12 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      // MUTATION: throw the rebind error before the terminal deadline check
-      // -> EngineWorkspaceRebindError, and the document downgrades.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // MUTATION: stop counting churned opens on the budget -> "across 0
-      // attempts" for a wait this ladder is the whole explanation for.
-      expect((outcome as Error).message).toContain("across 2 failed attempts");
+      expect(outcome, "throw the rebind error before the terminal deadline check -> EngineWorkspaceRebindError, and the document downgrades.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect((outcome as Error).message, "stop counting churned opens on the budget -> 'across 0 attempts' for a wait this ladder is the whole explanation for.").toContain("across 2 failed attempts");
     });
 
     it("counts attempts across the whole budget, not one ladder's share", async () => {
-      // codex round 5: the refusal reported the LOCAL ladder's counter, which
+      // The refusal reported the LOCAL ladder's counter, which
       // each `run` resets — so a wait covering several daemon attempts could
       // say "across 1 attempts". False diagnostic data in an error whose job
       // is to tell an agent what happened.
@@ -1999,7 +1945,7 @@ describe("EngineWorkspaceSessions", () => {
 
       const outcome = await sessions
         .withRetryBudget(4_000, async () => {
-          // TWO runs inside one budget. The first is not a retry ladder, so
+          // Two runs inside one budget. The first is not a retry ladder, so
           // it spends one attempt and rejects on its own; the second retries
           // and trips the budget on its second attempt. Three attempts have
           // happened by then — one ladder can only see two.
@@ -2021,12 +1967,8 @@ describe("EngineWorkspaceSessions", () => {
         .catch((error: unknown) => error);
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // MUTATION: report the local `attempt` -> "across 1 attempts", a
-      // number the reader would take for the whole wait.
-      expect((outcome as Error).message).toContain("across 3 failed attempts");
-      // The constraint named is the one the CALLER set. MUTATION: name
-      // `retryDeadlineMs` here -> the refusal points an agent at an option
-      // with no production caller, which it cannot find or change.
+      expect((outcome as Error).message, "report the local `attempt` -> 'across 1 attempts', a number the reader would take for the whole wait.").toContain("across 3 failed attempts");
+      // The constraint named is the one the caller set.
       expect((outcome as Error).message).toContain(
         "withRetryBudget budgetMs limit of 4000ms",
       );
@@ -2041,12 +1983,12 @@ describe("EngineWorkspaceSessions", () => {
     it("reports the recovery window and the total wait as different numbers", async () => {
       // codex on the round-10 head: the budget's clock starts at the first
       // FAILURE, but the message reported that interval as the time waited
-      // "across" an attempt count that INCLUDES the first failure. One number
+      // "across" an attempt count that includes the first failure. One number
       // was being asked to mean two things, and an agent diagnosing a capture
       // chain held for 8s read 6s and looked in the wrong place.
       const workspace = await tempWorkspace("workspace-two-durations");
       const client = new MockClient("handle-two-durations");
-      // A clock that does NOT start at zero. `performance.now()` never does in
+      // A clock that does not start at zero. `performance.now()` never does in
       // a running app, and with a zero origin `startedAtMs: this.now()` and
       // `startedAtMs: 0` are indistinguishable — the region-entry timestamp
       // would be unpinned.
@@ -2061,7 +2003,7 @@ describe("EngineWorkspaceSessions", () => {
           await sessions.run(
             workspace,
             async () => {
-              // A slow FIRST attempt (2s) the budget must not charge, then
+              // A slow first attempt (2s) the budget must not charge, then
               // failures that spend it.
               nowMs += 2_000;
               throw transportFailure();
@@ -2074,8 +2016,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
       // The chain was held for 8s; the recovery window that the limit bounds
-      // opened 2s in. MUTATION: report `measuredMs` as the total wait -> the
-      // message says 6000ms for an 8000ms hold.
+      // opened 2s in.
       expect(deadline.measuredMs).toBe(6_000);
       expect(deadline.totalWaitedMs).toBe(8_000);
       expect(deadline.message).toContain("6000ms since the first failure");
@@ -2083,10 +2024,10 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("does not spend the budget on a slow attempt that was succeeding", async () => {
-      // codex P1: anchored at region entry, this budget rejected work it had
+      // Anchored at region entry, this budget rejected work it had
       // never measured. A legitimately slow open — a large document's lineage
       // resurrection, the slow case #514 fought — spent the whole budget while
-      // SUCCEEDING, and the first blip after it was then refused a retry that
+      // succeeding, and the first blip after it was then refused a retry that
       // would have bound. The measurement on record uses an instant provider
       // stub, so it covers none of that. The clock starts at the first
       // FAILURE instead: what stays bounded is recovery, which is what the
@@ -2117,16 +2058,13 @@ describe("EngineWorkspaceSessions", () => {
         ),
       );
 
-      // MUTATION: anchor the budget at region entry -> the retry is refused
-      // with EngineWorkspaceRetryDeadlineError and the document is downgraded,
-      // for an open that was healthy and simply slow.
-      expect(outcome).toBe("bound");
+      expect(outcome, "anchor the budget at region entry -> the retry is refused with EngineWorkspaceRetryDeadlineError and the document is downgraded, for an open that was healthy and simply slow.").toBe("bound");
       expect(attempts).toBe(2);
     });
 
-    it("refuses the NEXT call when an earlier one recovered past the window", async () => {
+    it("refuses the next call when an earlier one recovered past the window", async () => {
       // codex r15, and it is the bound's own hole. The gates lived on the
-      // failure path, so a call that failed, RECOVERED and returned left the
+      // failure path, so a call that failed, recovered and returned left the
       // budget spent with nothing to notice: the next call started unbounded.
       // In the document open that is the version read recovering and then
       // admitting the provider open past the window — the capture chain held
@@ -2155,8 +2093,6 @@ describe("EngineWorkspaceSessions", () => {
             },
             { retryTransportErrors: true },
           );
-          // MUTATION: check the budget only at region entry and after a
-          // failure -> this call runs, and everything it opens is unbounded.
           return await sessions.run(workspace, async () => {
             secondCall += 1;
             return "unbounded";
@@ -2164,7 +2100,7 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "check the budget only at region entry and after a failure -> this call runs, and everything it opens is unbounded.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(secondCall).toBe(0);
       const deadline = outcome as EngineWorkspaceRetryDeadlineError;
       expect(deadline.constraint).toBe("withRetryBudget budgetMs");
@@ -2174,7 +2110,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(deadline.cause).toMatchObject({ code: "transport-error" });
     });
 
-    it("refuses the NEXT call when quit arrives between two calls", async () => {
+    it("refuses the next call when quit arrives between two calls", async () => {
       // The same gap, reached the other way: `withRetryBudget` checks
       // `shuttingDown` at region entry, so a flag that flips between two calls
       // was never consulted and the region went on holding the chain.
@@ -2196,9 +2132,7 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      // MUTATION: consult `shuttingDown` only at region entry -> the quit
-      // teardown waits behind a call this region had not started yet.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(outcome, "consult `shuttingDown` only at region entry -> the quit teardown waits behind a call this region had not started yet.").toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(secondCall).toBe(0);
     });
 
@@ -2217,7 +2151,7 @@ describe("EngineWorkspaceSessions", () => {
         close: () => undefined,
         async sendRequest(request) {
           opens += 1;
-          // The FIRST open fails, which starts the clock, and the retry
+          // The first open fails, which starts the clock, and the retry
           // succeeds — after the whole window has gone by.
           if (opens === 1) {
             nowMs += 100;
@@ -2245,19 +2179,17 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: check the region only before `openForRun` -> the operation
-      // runs on a spent budget, unbounded.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      expect(outcome, "check the region only before `openForRun` -> the operation runs on a spent budget, unbounded.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(operations).toBe(0);
     });
 
-    // The THIRD await found holding this hole, which is why the check moved to
+    // The third await found holding this hole, which is why the check moved to
     // the doors instead of gaining a third caller. A run that arrives while the
     // entry is closing waits for that close — and a `workspace.close` is a
     // daemon round trip, so the window can go by inside it. The run then walked
     // on into a 2 s `workspace.open` with nothing left to stop it.
     //
-    // What it costs is the OPEN, not the answer: the gate after the rebind
+    // What it costs is the open, not the answer: the gate after the rebind
     // still refuses the operation, so the run fails either way. It fails after
     // holding the capture chain through a 2 s `workspace.open` that had no
     // business starting — which is the hold, and the thing to count.
@@ -2327,10 +2259,7 @@ describe("EngineWorkspaceSessions", () => {
 
       expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
       expect(operations).toBe(0);
-      // MUTATION: check the region only at `run` entry and after the rebind ->
-      // a `workspace.open` is issued on a budget the closing wait had already
-      // spent, and the capture chain waits out its 2 s deadline for nothing.
-      expect(opensAfterClose.count).toBe(0);
+      expect(opensAfterClose.count, "check the region only at `run` entry and after the rebind -> a `workspace.open` is issued on a budget the closing wait had already spent, and the capture chain waits out its 2 s deadline for nothing.").toBe(0);
     });
 
     it("refuses an open that waited out a quit on a closing entry", async () => {
@@ -2372,14 +2301,14 @@ describe("EngineWorkspaceSessions", () => {
 
     it("refuses on time when a stale client never answers its cleanup close", async () => {
       // codex r19, and the r18 class in one more flavor: the doors bound what
-      // STARTS, and this await sat between two of them. When the client churns
+      // starts, and this await sat between two of them. When the client churns
       // mid-open the loser's binding is closed — and a `workspace.close` on a
-      // client that is connected but UNRESPONSIVE never answers, so the region
+      // client that is connected but unresponsive never answers, so the region
       // waited there past its budget and past quit with the gate one line
       // away. Cleanup for a generation nobody will use again does not get to
       // hold the capture chain.
       //
-      // Under the defect this test does not fail, it HANGS: the first cleanup
+      // Under the defect this test does not fail, it hangs: the first cleanup
       // close never settles, so the run never returns and the case becomes the
       // file's timeout.
       const workspace = await tempWorkspace("workspace-stale-close-hangs");
@@ -2420,19 +2349,17 @@ describe("EngineWorkspaceSessions", () => {
         )
         .catch((error: unknown) => error);
 
-      // MUTATION: await the cleanup close -> this never resolves and the
-      // region is held by a daemon request nothing bounds.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
-      // The cleanup was still ISSUED — it is best-effort, not skipped.
+      expect(outcome, "await the cleanup close -> this never resolves and the region is held by a daemon request nothing bounds.").toBeInstanceOf(EngineWorkspaceRetryDeadlineError);
+      // The cleanup was still issued — it is best-effort, not skipped.
       expect(closeStarted).toBeGreaterThan(0);
     });
 
     it("lets a settle armed during the open run after the region ends", async () => {
       // codex r22, and the round-9 asymmetry wearing an async-context coat.
-      // A document open INSTALLS things that outlive it — the settle debounce
+      // A document open installs things that outlive it — the settle debounce
       // timer, the remote-update subscription, the save-state reporter — and a
       // Node timer keeps the async context it was created in. So the session's
-      // later work kept reading as work inside the ABANDONABLE open region,
+      // later work kept reading as work inside the abandonable open region,
       // for the whole life of the session: a settle for an edit the engine had
       // already accepted would be refused by a budget spent during the open.
       // That is the one thing this class must never do to an accepted write.
@@ -2444,7 +2371,7 @@ describe("EngineWorkspaceSessions", () => {
         { now: () => nowMs, sleep: async () => {} },
       );
 
-      // A real timer, armed INSIDE the region, exactly as the provider arms
+      // A real timer, armed inside the region, exactly as the provider arms
       // its settle debounce while the open runs. A plain closure would not
       // reproduce this: it is the timer that carries the context.
       let settle!: Promise<unknown>;
@@ -2472,9 +2399,6 @@ describe("EngineWorkspaceSessions", () => {
         nowMs += 5_000;
       });
 
-      // MUTATION: leave the region live after the task returns -> this settle
-      // reads as abandonable work on a spent budget and rejects with
-      // EngineWorkspaceRetryDeadlineError, losing an accepted update.
       await expect(settle).resolves.toBe("settled");
     });
 
@@ -2518,7 +2442,7 @@ describe("EngineWorkspaceSessions", () => {
     it("keeps running a region whose budget clock never started", async () => {
       // The invariant the gate must not break: a healthy attempt costs the
       // budget nothing, however long it takes, so a region that has not
-      // FAILED yet is never refused for time alone.
+      // failed yet is never refused for time alone.
       const workspace = await tempWorkspace("workspace-healthy-region");
       const client = new MockClient("handle-healthy-region");
       let nowMs = 5_000;
@@ -2550,17 +2474,17 @@ describe("EngineWorkspaceSessions", () => {
     });
   });
 
-  // #564: app quit. Retry waiting ends NOW — an armed backoff resolves, the
+  // App quit. Retry waiting ends now — an armed backoff resolves, the
   // failure that caused it surfaces, and the capture chain behind the run is
   // free within one attempt instead of the full ladder.
   describe("beginShutdown", () => {
-    // Quit ends retry WAITING for a bounded region, and only for one. Every
+    // Quit ends retry waiting for a bounded region, and only for one. Every
     // test below therefore runs its ladder inside `withRetryBudget`, because
     // that is what marks work as abandonable: the document open, which holds
-    // no edit (#533). A budget far past anything these ladders can spend, so
+    // no edit. A budget far past anything these ladders can spend, so
     // the only thing that can stop them is the shutdown gate under test.
     //
-    // Quit arrives from INSIDE the first failure, because a region is now
+    // Quit arrives from inside the first failure, because a region is now
     // refused outright if it tries to start after shutdown began (see
     // `refuses a bounded region that tries to START after shutdown began`).
     // That is also the realistic sequence: the ladder is already running when
@@ -2605,7 +2529,7 @@ describe("EngineWorkspaceSessions", () => {
     });
 
     it("exits the client-churn open ladder", async () => {
-      // codex round 2: beginShutdown resolved the churn ladder's sleep, but
+      // beginShutdown resolved the churn ladder's sleep, but
       // the loop continued without checking — churning generations could
       // hold the chain into the forced-exit timer.
       const workspace = await tempWorkspace("workspace-churn-shutdown");
@@ -2638,7 +2562,7 @@ describe("EngineWorkspaceSessions", () => {
       expect(reads).toBe(2);
     }, 30_000);
 
-    it("stops an OPEN that keeps refusing with afterReconnect", async () => {
+    it("stops an open that keeps refusing with afterReconnect", async () => {
       const workspace = await tempWorkspace("workspace-open-reconnect-quit");
       let opens = 0;
       const sleep = vi.fn(async () => {});
@@ -2665,13 +2589,11 @@ describe("EngineWorkspaceSessions", () => {
             }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      // MUTATION: drop requiresReconnect from the gate -> six opens while the
-      // quit teardown waits on the chain behind them.
-      expect(opens).toBe(1);
+      expect(opens, "drop requiresReconnect from the gate -> six opens while the quit teardown waits on the chain behind them.").toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });
 
-    it("stops an OPEN the daemon keeps refusing with afterBackoff", async () => {
+    it("stops an open the daemon keeps refusing with afterBackoff", async () => {
       // Review round 8, the quit half of the same gap: an `afterBackoff`
       // refusal took a bare `continue`, so beginShutdown() could not end the
       // ladder and the quit teardown waited on the chain behind six opens.
@@ -2701,9 +2623,7 @@ describe("EngineWorkspaceSessions", () => {
             }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      // MUTATION: restore the bare `continue` -> six opens while the quit
-      // teardown waits on the capture chain behind them.
-      expect(opens).toBe(1);
+      expect(opens, "restore the bare `continue` -> six opens while the quit teardown waits on the capture chain behind them.").toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });
 
@@ -2730,9 +2650,7 @@ describe("EngineWorkspaceSessions", () => {
             }, { retryTransportErrors: true }),
         ),
       ).rejects.toBeInstanceOf(DaemonRefusalError);
-      // MUTATION: gate only the transport branch -> the full six-attempt
-      // ladder runs while the quit teardown waits behind it.
-      expect(attempts).toBe(1);
+      expect(attempts, "gate only the transport branch -> the full six-attempt ladder runs while the quit teardown waits behind it.").toBe(1);
     });
 
     it("makes a later transport failure final instead of retried", async () => {
@@ -2761,18 +2679,17 @@ describe("EngineWorkspaceSessions", () => {
             ),
         ),
       ).rejects.toMatchObject({ code: "transport-error" });
-      // MUTATION: drop the shutdown gate -> six attempts with backoff.
-      expect(attempts).toBe(1);
+      expect(attempts, "drop the shutdown gate -> six attempts with backoff.").toBe(1);
       expect(sleep).not.toHaveBeenCalled();
     });
 
-    it("refuses a bounded region that tries to START after shutdown began", async () => {
+    it("refuses a bounded region that tries to start after shutdown began", async () => {
       // codex on the round-9 head, and the other half of the backoff finding:
       // `shuttingDown` was consulted on the FAILURE path only, so a task that
       // never fails never checks it. A document open still queued on the
       // capture chain when `will-quit` fires would enter the region
-      // afterwards, SUCCEED at its first workspace call, and proceed into a
-      // `ydoc.open` whose own bound (#616) outlasts the 3 s forced-exit timer.
+      // afterwards, succeed at its first workspace call, and proceed into a
+      // `ydoc.open` whose own bound outlasts the 3 s forced-exit timer.
       const workspace = await tempWorkspace("workspace-region-after-quit");
       const client = new MockClient("handle-region-after-quit");
       let ran = 0;
@@ -2788,21 +2705,18 @@ describe("EngineWorkspaceSessions", () => {
         })
         .catch((error: unknown) => error);
 
-      // MUTATION: start the task unconditionally -> the region runs, the open
-      // succeeds, and the chain is held into the forced-exit timer.
-      expect(outcome).toBeInstanceOf(EngineWorkspaceShuttingDownError);
+      expect(outcome, "start the task unconditionally -> the region runs, the open succeeds, and the chain is held into the forced-exit timer.").toBeInstanceOf(EngineWorkspaceShuttingDownError);
       expect(ran).toBe(0);
       // It must keep the document READ-ONLY, never downgrade it to the
       // writable plain editor: main answers both open refusals with
-      // `engineMayHoldDocument`. MUTATION: drop it from the predicate -> the surface
-      // takes the disk path #533 closed.
+      // `engineMayHoldDocument`.
       expect(isEngineWorkspaceOpenRefusedError(outcome)).toBe(true);
     });
 
     it("keeps retrying work outside a bounded region at quit", async () => {
-      // codex P1: `beginShutdown` is a global flag doing a scoped job. It must
-      // abandon a pending document OPEN — which holds no edit (#533) — and it
-      // must NOT abandon an already-open document retrying a write the engine
+      // `beginShutdown` is a global flag doing a scoped job. It must
+      // abandon a pending document open — which holds no edit — and it
+      // must not abandon an already-open document retrying a write the engine
       // already accepted. That update lives only in the canonical in-memory
       // Y.Doc, `closeAllEngineYDocSessions` swallows the failure, and
       // `app.exit(0)` then discards it: silent data loss at exit, and the
@@ -2829,10 +2743,8 @@ describe("EngineWorkspaceSessions", () => {
           { retryTransportErrors: true },
         ),
       ).resolves.toBe("landed");
-      // MUTATION: consult `shuttingDown` for every run, not just a bounded
-      // region -> one attempt, the write is abandoned, and the edit is gone.
-      expect(attempts).toBe(3);
-      // It KEEPS its pacing. Quit ends the waiting of abandonable work only,
+      expect(attempts, "consult `shuttingDown` for every run, not just a bounded region -> one attempt, the write is abandoned, and the edit is gone.").toBe(3);
+      // It keeps its pacing. Quit ends the waiting of abandonable work only,
       // and the test below is why.
       expect(sleep).toHaveBeenCalled();
     });
@@ -2840,11 +2752,11 @@ describe("EngineWorkspaceSessions", () => {
     it("paces a live document's retry at quit, so a relaunching daemon can answer", async () => {
       // codex r17 P1. Quit used to make every non-region retry immediate, on
       // the reasoning that it is racing the quit timer. But the daemon it is
-      // racing is RELAUNCHING, and a burst of synchronous attempts all land
+      // racing is relaunching, and a burst of synchronous attempts all land
       // inside that window: six failures in zero elapsed time, a close that
       // `closeAllEngineYDocSessions` swallows, and `app.exit(0)` discarding an
       // edit that lived only in the canonical Y.Doc. Fast-failing a retry is
-      // not racing the timer, it is losing to it. Only WAITING is abandoned at
+      // not racing the timer, it is losing to it. Only waiting is abandoned at
       // quit, and only for work that may be abandoned.
       const workspace = await tempWorkspace("workspace-quit-pacing");
       const client = new MockClient("handle-quit-pacing");
@@ -2863,8 +2775,6 @@ describe("EngineWorkspaceSessions", () => {
 
       // The daemon is relaunching: it refuses for 100 ms, then answers. Only a
       // retry that waits can see the second answer.
-      // MUTATION: return "retry" without backoff at quit -> every attempt runs
-      // at t=0, the write never lands, and the edit is gone at exit.
       await expect(
         sessions.run(
           workspace,
@@ -2902,7 +2812,7 @@ describe("EngineWorkspaceSessions", () => {
     ).rejects.toBeInstanceOf(EngineWorkspaceRebindError);
     expect(
       first.requests.filter((request) => request.method === "workspace.open"),
-      "MUTATION: an unbounded open loop keeps issuing opens forever",
+      "an unbounded open loop keeps issuing opens forever",
     ).toHaveLength(2);
     expect(
       first.requests.filter((request) => request.method === "workspace.close"),

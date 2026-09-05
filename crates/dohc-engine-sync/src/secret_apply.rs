@@ -861,8 +861,8 @@ fn remote_wins(
     // TOMBSTONES INCLUDED — never the materialized `secret_files` tip, which is
     // gone after a winning delete and would let a later older put resurrect a
     // deleted secret. Deterministic content rank
-    // (recorded_at_ms, after_present, ciphertext, iv, tag), mirroring
-    // secretFileStore.ts. The incoming moment is already in the table, so
+    // (recorded_at_ms, after_present, ciphertext, iv, tag), mirroring the TS
+    // store. The incoming moment is already in the table, so
     // `incoming >= latest` materializes iff incoming is the winner (>= keeps a
     // byte-identical redelivery idempotent).
     let latest: Option<(i64, i64, String, String, String)> = tx

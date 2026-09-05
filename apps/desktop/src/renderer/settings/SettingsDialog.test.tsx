@@ -15,6 +15,7 @@ import {
 import { pushOverlay, removeOverlay } from "../guestBlockingUi";
 import { Overlay } from "../Overlay";
 import { SettingsDialog } from "./SettingsDialog";
+import { deferred } from "../../testing/deferred";
 
 const config = {
   command: "dohc-mcp",
@@ -163,17 +164,9 @@ const bridge = {
 
 const writeText = vi.fn(async () => {});
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
-
 function stubClipboard() {
   // navigator.clipboard is a getter-only property in jsdom; define it. Call
-  // AFTER userEvent.setup() so our spy isn't shadowed by userEvent's own stub.
+  // after userEvent.setup() so our spy isn't shadowed by userEvent's own stub.
   Object.defineProperty(navigator, "clipboard", {
     value: { writeText },
     configurable: true,
@@ -343,7 +336,7 @@ describe("SettingsDialog", () => {
 
   it("a zoom broadcast during the initial load is not painted over by it", async () => {
     // The initial Promise.all retains a user-settings snapshot; a zoom pushed
-    // while it is in flight is NEWER and must survive the load resolving.
+    // while it is in flight is newer and must survive the load resolving.
     let pushUserSettings: ((result: DesktopUserSettingsResult) => void) | undefined;
     bridge.onUserSettingsChanged.mockImplementationOnce((listener) => {
       pushUserSettings = listener;
@@ -694,7 +687,7 @@ describe("SettingsDialog", () => {
 
   // #687 on this surface. The note's gate is the RENDERER's live settings
   // value, but the recovery depends on main's open-time decision, and the two
-  // off states differ. Opened with the engine OFF: main built no recorder and
+  // off states differ. Opened with the engine off: main built no recorder and
   // cannot until a restart, so turning the setting on hides the note and
   // enables Test runner over a click that can only fail.
   it("tells the user to restart when this session has no recorder", async () => {
@@ -747,7 +740,7 @@ describe("SettingsDialog", () => {
     expect(bridge.runnerSelfTest).not.toHaveBeenCalled();
   });
 
-  // #687: a shared view materializes no settings file, so the engine reads as
+  // A shared view materializes no settings file, so the engine reads as
   // on by default, while main installs no recorder. The no-recorder branch
   // must not prescribe a restart that cannot make the self-test work.
   it("shows the shared-view note without a restart instruction", async () => {
@@ -771,7 +764,7 @@ describe("SettingsDialog", () => {
     expect(note.textContent).not.toContain("restart");
   });
 
-  // #687 codex round 7: sharedView is a synchronous prop, but
+  // sharedView is a synchronous prop, but
   // sessionRecorderOn only resolves once main's openWorkspace status
   // arrives. In that window a shared view already knows it has no chat to
   // test, but sessionRecorderOn is still undefined — the disabled condition
@@ -1312,7 +1305,7 @@ describe("SettingsDialog", () => {
     });
   });
 
-  // #483: over a settings file dohc cannot read, the dialog's resolved copy
+  // Over a settings file dohc cannot read, the dialog's resolved copy
   // carries the fail-closed opt-out, so saving one unrelated control would
   // land that opt-out on disk and the workspace would look opted out forever.
   // main refuses; the dialog must say so and must not claim a save happened.

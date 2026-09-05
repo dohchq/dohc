@@ -69,7 +69,7 @@ export interface AgentIntegrationOptions {
   // Injectable id seam (oracle/tests) for the AgentRunRecord id. Omitted ⇒ a
   // real randomUUID, identical to today's behavior.
   createId?: () => string;
-  // PR 0N-2: fired after a KNOWN run's terminal status is durably recorded.
+  // Fired after a known run's terminal status is durably recorded.
   // endAgentRun is the single funnel every terminal path goes through
   // (AgentSessionManager finalizeRun, the panel's Stop, the endAgentRun IPC),
   // so run-completion consumers (the try-in-version review card) hook here.
@@ -101,8 +101,8 @@ function isAgentRunRecord(value: unknown): value is AgentRunRecord {
   );
 }
 
-// Both paths resolve .dohc through resolveWorkspaceMetadataDir — a symlinked
-// .dohc (malicious attached workspace) is refused, never followed, so the run
+// Both paths resolve .dohc through resolveWorkspaceMetadataDir — a symlinked.
+// Dohc (malicious attached workspace) is refused, never followed, so the run
 // log can't be planted outside the workspace boundary.
 async function readRuns(rootPath: string): Promise<AgentRunRecord[]> {
   try {
@@ -207,7 +207,7 @@ export function createAgentIntegration(options: AgentIntegrationOptions) {
     const root = authority.rootPath;
     const state = authority.state;
     try {
-      // Only the run that currently OWNS the workspace may clear its live
+      // Only the run that currently owns the workspace may clear its live
       // state. Ending an older run must not unhook a newer run.
       if (state.activeRun?.id === runId) {
         if (state.mcp) {

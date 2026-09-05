@@ -191,7 +191,7 @@ test("switching A->B while panels load never shows A's history or chats in B", a
         '[data-testid="engine-moment-open"][data-moment-path="b-note.md"]',
       ),
     ).toBeVisible();
-    // ...and NEVER any of A's moments or chats.
+    // ...and never any of A's moments or chats.
     await expect(
       page.locator('[data-testid="engine-moment-open"][data-moment-path^="files/doc-"]'),
     ).toHaveCount(0);
