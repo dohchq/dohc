@@ -959,7 +959,7 @@ describe("DohcPluginManifest", () => {
       ["an escaping collection path", { ...automation, collection: "../tasks" }],
       ["an absolute collection path", { ...automation, collection: "/tasks" }],
       ["an empty collection path", { ...automation, collection: "" }],
-      ["a NUL byte in the collection", { ...automation, collection: "ta sks" }],
+      ["a NUL byte in the collection", { ...automation, collection: "ta\0sks" }],
       ["a slash in the handler", { ...automation, handler: "a/b" }],
       ["a missing handler", { id: "triage", collection: "tasks" }],
     ])("refuses %s", (_case, declared) => {

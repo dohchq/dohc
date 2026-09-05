@@ -811,7 +811,7 @@ CREATE TABLE chat_dispatch_pause (
     PRIMARY KEY (workspace_id, thread_id)
 ) STRICT;
 
--- Deferred-chat-parent repair (BEHAVIOR_DELTA §D2). No-op on a fresh store;
+-- Deferred-chat-parent repair. No-op on a fresh store;
 -- keyed to the `v1-chats` ledger row so it runs exactly once per database.
 INSERT OR IGNORE INTO chat_pending_message_parents (
     workspace_id, child_message_id, thread_id, parent_message_id
