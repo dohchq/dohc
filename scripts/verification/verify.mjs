@@ -37,29 +37,56 @@ export function changedFiles(baseCommit, includeUncommitted = false, root = repo
 export async function postgres(output, command = run) {
   const name = `dohc-verify-${randomUUID()}`;
   let id;
-  const stop = () => command("docker", ["rm", "--force", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 });
+  let cancellation;
+  let wake;
+  const interrupt = (signal) => {
+    cancellation ??= new Error(`Verification Postgres interrupted by ${signal}.`);
+    process.exitCode = signal === "SIGINT" ? 130 : 143;
+    wake?.();
+  };
+  const onInt = () => interrupt("SIGINT");
+  const onTerm = () => interrupt("SIGTERM");
+  const listen = () => { process.on("SIGINT", onInt); process.on("SIGTERM", onTerm); };
+  const unlisten = () => { process.off("SIGINT", onInt); process.off("SIGTERM", onTerm); };
+  const checkCancellation = () => { if (cancellation) throw cancellation; };
+  const stop = async () => {
+    // Also protect cleanup when the successfully started database is stopped later.
+    unlisten(); listen();
+    try { return await command("docker", ["rm", "--force", id ?? name], { log: join(output, "postgres-stop.log"), timeoutMs: 30_000 }); }
+    finally { unlisten(); }
+  };
+  listen();
   try {
     const result = await command("docker", ["run", "--detach", "--name", name, "--publish", "127.0.0.1::5432", "--env", "POSTGRES_USER=dohc", "--env", "POSTGRES_PASSWORD=dohc", "--env", "POSTGRES_DB=dohc", "--health-cmd", "pg_isready -U dohc -d dohc", "--health-interval", "1s", "--health-retries", "30", "postgres:17-alpine"], { log: join(output, "postgres-start.log"), timeoutMs: 300_000 });
     const returnedId = result.stdout.trim();
     if (!/^[a-f0-9]{64}$/.test(returnedId)) throw new Error(`Docker returned no container ID. Inspect container ${name}.`);
     id = returnedId;
+    checkCancellation();
     const deadline = Date.now() + 60_000;
     while (true) {
       const remaining = deadline - Date.now();
       if (remaining <= 0) throw new Error("Verification Postgres did not become healthy.");
       const health = await command("docker", ["inspect", "--format", "{{.State.Health.Status}}", id], { timeoutMs: Math.min(10_000, remaining) });
+      checkCancellation();
       if (health.stdout.trim() === "healthy") break;
       if (Date.now() > deadline || health.stdout.trim() === "unhealthy") throw new Error("Verification Postgres did not become healthy.");
-      await new Promise((done) => setTimeout(done, 1000));
+      await new Promise((done) => {
+        const timer = setTimeout(finish, 1000);
+        function finish() { clearTimeout(timer); wake = undefined; done(); }
+        wake = finish;
+        if (cancellation) finish();
+      });
+      checkCancellation();
     }
     const port = (await command("docker", ["port", id, "5432/tcp"], { timeoutMs: 10_000 })).stdout.trim().match(/^127\.0\.0\.1:(\d+)$/)?.[1];
+    checkCancellation();
     if (!port) throw new Error("Docker did not report a loopback Postgres port.");
     return { id, url: `postgres://dohc:dohc@127.0.0.1:${port}/dohc`, stop };
   } catch (error) {
     try { await stop(); }
     catch (cleanupError) { error.cleanupError = `Could not remove verification Postgres ${id ?? name}: ${cleanupError.message}`; }
     throw error;
-  }
+  } finally { unlisten(); }
 }
 
 export async function verify(args) {

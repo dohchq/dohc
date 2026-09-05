@@ -12,6 +12,55 @@ import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
 
+for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+  test(`queued preparation ${signal} removes its lock without touching occupied slots`, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-prepare-queue-"));
+    try {
+      createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+      copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
+      const slots = join(root, ".dohc-dev/slots");
+      const owner = JSON.stringify({ pid: process.pid, start: new Date().toISOString() });
+      for (let index = 1; index <= 4; index++) {
+        const slot = join(slots, `build-slot-${index}`);
+        mkdirSync(slot, { recursive: true });
+        writeFileSync(join(slot, "owner.json"), owner);
+      }
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import cp from 'node:child_process';
+        import {syncBuiltinESMExports} from 'node:module';
+        const exec=cp.execFileSync;
+        cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+        syncBuiltinESMExports();
+        const log=console.log;
+        console.log=(...args)=>{
+          log(...args);
+          if (String(args[0]).includes('waiting for a build slot:')) {
+            queueMicrotask(()=>{
+              if (process.platform === 'win32') {
+                // Node cannot deliver a native catchable signal to itself on Windows.
+                // Emit the event, and emulate default termination only when unhandled.
+                if (!process.emit('${signal}')) process.exit(${status});
+              } else process.kill(process.pid, '${signal}');
+            });
+          }
+        };
+        try { await (await import('./scripts/verification/build.mjs')).prepare(); }
+        catch (error) { console.error(error.message); }
+      `], { cwd: root, encoding: "utf8", timeout: 10_000,
+        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: slots, DOHC_GATE_DISK_FLOOR_GB: "0" } });
+      assert.equal(result.error, undefined);
+      assert.match(result.stdout, /waiting for a build slot:/);
+      assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false, result.stderr);
+      assert.equal(result.status, status, result.stderr);
+      const calls = readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split(/\r?\n/).map(JSON.parse);
+      assert.deepEqual(calls.map(({ command }) => command), ["pnpm"]);
+      for (let index = 1; index <= 4; index++) {
+        assert.equal(readFileSync(join(slots, `build-slot-${index}`, "owner.json"), "utf8"), owner);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
+
 test("command text decodes UTF-8 across pipe chunks while retaining raw log bytes", async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-utf8-pipes-"));
   try {

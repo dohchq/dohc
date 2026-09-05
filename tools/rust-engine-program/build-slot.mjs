@@ -31,8 +31,7 @@ import {
 import { join } from "node:path";
 import { availableParallelism, platform } from "node:os";
 import { randomBytes } from "node:crypto";
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+import { setTimeout as sleep } from "node:timers/promises";
 
 /**
  * The budget this host imposes, or null on a single-tenant host (CI runners
@@ -334,6 +333,7 @@ function claimSlot(dir, name, heartbeatMs, cooperativeCancellation) {
  * on process exit. Throws when `waitMs` elapses with every slot held.
  * With cooperativeCancellation, the caller handles child termination and
  * releases the slot in finally; signals set a nonzero exit code without exiting.
+ * Signals received while waiting reject acquisition so caller cleanup can run.
  */
 export async function acquireBuildSlot({
   root,
@@ -347,7 +347,19 @@ export async function acquireBuildSlot({
   mkdirSync(root, { recursive: true });
   const deadline = Date.now() + waitMs;
   let denied = false;
-  for (;;) {
+  const cancellation = new AbortController();
+  const cancel = (signal, code) => {
+    process.exitCode = code;
+    cancellation.abort(new Error(`Build slot acquisition cancelled by ${signal}.`));
+  };
+  const onSigint = () => cancel("SIGINT", 130);
+  const onSigterm = () => cancel("SIGTERM", 143);
+  if (cooperativeCancellation) {
+    process.on("SIGINT", onSigint);
+    process.on("SIGTERM", onSigterm);
+  }
+  try { for (;;) {
+    cancellation.signal.throwIfAborted();
     for (let i = 1; i <= slots; i += 1) {
       const dir = slotDir(root, i);
       try {
@@ -374,6 +386,9 @@ export async function acquireBuildSlot({
       );
     }
     console.log(`  waiting for a build slot: all ${slots} held — ${holders(root, slots)}`);
-    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())));
+    await sleep(Math.min(pollMs, Math.max(1, deadline - Date.now())), undefined, { signal: cancellation.signal });
+  } } finally {
+    process.off("SIGINT", onSigint);
+    process.off("SIGTERM", onSigterm);
   }
 }
