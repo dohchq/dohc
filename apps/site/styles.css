@@ -1017,6 +1017,7 @@ body {
 
 .reader-window { display: flex; flex-direction: column; }
 .reader-window .device-foot { margin-top: auto; }
+.reader-window .device-foot[hidden] { display: none; }
 
 .reader-view {
   min-height: 250px;

@@ -1080,7 +1080,7 @@ if (readers) {
     history: {
       name: 'History',
       view: `<ul class="reader-history"><li>${WHO('M')}<span><b>Maya</b> moved Pricing page to doing</span><small>12:30</small></li><li>${AGENT_WHO}<span><b>My Agent</b> added 3 tasks</span><small>9:06</small></li><li>${WHO('Y')}<span><b>you</b> edited Plan</span><small>9:04</small></li></ul><p class="reader-note">who changed what · any of it can go back</p>`,
-      foot: 'The same list your agent gets from the CLI. Its changes carry its own name.',
+      foot: '',
     },
   };
 
@@ -1097,6 +1097,7 @@ if (readers) {
     name.textContent = file.name;
     view.innerHTML = file.view;
     foot.textContent = file.foot;
+    foot.hidden = !file.foot;
   };
 
   const show = (key, pick) => {
@@ -1114,7 +1115,6 @@ if (readers) {
 
   // It walks the tree on its own until the visitor touches it. One pick
   // per file, in tree order, then it wraps.
-  const hint = document.querySelector('[data-readers-hint]');
   const tour = picks.filter((pick, index) => picks.findIndex((p) => p.dataset.readerPick === pick.dataset.readerPick) === index);
   let step = 0;
   let tourTimer = 0;
@@ -1124,7 +1124,6 @@ if (readers) {
     if (manual) return;
     manual = true;
     clearTimeout(tourTimer);
-    if (hint) hint.textContent = 'Pick any file in the tree.';
   };
 
   const advance = () => {
