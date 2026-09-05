@@ -1,6 +1,7 @@
 import { AlertTriangle, Plug } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { bridge } from "./bridge";
+import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 
 // The tab surface for a wrapper plugin's embedded web app. The app itself
 // renders in a main-process WebContentsView layered over this page, so this
@@ -14,10 +15,6 @@ type LoadState =
   | { status: "ready"; title: string }
   | { status: "unavailable" }
   | { status: "error"; message: string };
-
-// One failure, one sentence. The page says it when a start fails; the shell
-// says it when a tab path names no app.
-export const PLUGIN_WEB_APP_OPEN_ERROR = "dohc could not open the plugin app";
 
 export function PluginWebAppPage(props: {
   workspaceId: string;

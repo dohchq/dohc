@@ -54,25 +54,20 @@ function RailButton(props: {
   badge?: "danger" | "success";
   // Numeric badge seam (Phase E5.0: search results count while showing).
   count?: number;
-  onClick: () => void;
+  onClick?: () => void;
   // A node, not a component: dohc's views draw a lucide glyph and a plugin's
   // view draws its own icon file.
   icon: ReactNode;
 }) {
-  return (
-    <button
-      type="button"
-      data-testid={props.testId}
-      title={props.label}
-      aria-label={props.label}
-      aria-current={props.active ? "page" : undefined}
-      onClick={props.onClick}
-      className={`relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
-        props.active
-          ? "bg-line/60 text-ink"
-          : "text-subtle hover:bg-line/50 hover:text-ink"
-      }`}
-    >
+  const className = `relative grid size-9 place-items-center rounded-lg transition-colors duration-100 ${
+    props.active
+      ? "bg-line/60 text-ink"
+      : props.onClick
+        ? "text-subtle hover:bg-line/50 hover:text-ink"
+        : "text-subtle"
+  }`;
+  const content = (
+    <>
       {props.active ? (
         <span
           aria-hidden
@@ -100,7 +95,24 @@ function RailButton(props: {
           {props.count > 99 ? "99+" : props.count}
         </span>
       ) : null}
+    </>
+  );
+  return props.onClick ? (
+    <button
+      type="button"
+      data-testid={props.testId}
+      title={props.label}
+      aria-label={props.label}
+      aria-current={props.active ? "page" : undefined}
+      onClick={props.onClick}
+      className={className}
+    >
+      {content}
     </button>
+  ) : (
+    <span data-testid={props.testId} aria-hidden="true" className={className}>
+      {content}
+    </span>
   );
 }
 
@@ -115,8 +127,8 @@ export function ActivityBar(props: {
   // turned off contributes none, so its button leaves the rail with it.
   pluginViews: readonly PluginActivityView[];
   onSelectView: (view: ActivityViewId) => void;
-  onOpenCloud: () => void;
-  onOpenSettings: () => void;
+  onOpenCloud?: () => void;
+  onOpenSettings?: () => void;
 }) {
   return (
     <nav

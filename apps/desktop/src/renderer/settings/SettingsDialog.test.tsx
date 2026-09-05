@@ -115,7 +115,6 @@ const bridge = {
   }),
   installUpdate: vi.fn(async (): Promise<{
     accepted: boolean;
-    completed: boolean;
     state: SettingsUpdateState;
   }> => ({
     accepted: updateReady,

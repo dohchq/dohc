@@ -78,7 +78,7 @@ import {
 } from "../performance/rendererMarks";
 import { bridge } from "./bridge";
 import { useAsyncResponseEffect } from "./useAsyncResponseEffect";
-import { PLUGIN_WEB_APP_OPEN_ERROR } from "./PluginWebAppPage";
+import { PLUGIN_WEB_APP_OPEN_ERROR } from "./pluginWebAppCopy";
 import type { RelayShareTarget } from "./RelayShareDialog";
 import { useSnapshotLane } from "./snapshotLane";
 import { momentDiffSides } from "./workbench/momentDiffSides";
