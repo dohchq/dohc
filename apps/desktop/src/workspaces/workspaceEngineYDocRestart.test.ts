@@ -34,12 +34,19 @@ import {
 } from "./engineYDocSaveSeq";
 
 // The close-retry ladders run at test speed: a rung is 20 ms and the cap
-// 100 ms, so `pastRetryRungs()` covers several rungs in a quarter second. A
-// test that prices the production ladder passes its own `teardownRetryMs`.
+// 100 ms. A test that prices the production ladder passes its own
+// `teardownRetryMs`.
 const TEST_TEARDOWN_RETRY_MS = { initial: 20, cap: 100 };
 
+// The capture exposes no retry hook, so a test that asserts a retry did NOT
+// fire waits past every rung the ladder could have scheduled (initial, then
+// doubling to the cap: 20 + 40 + 80 + 100 ms) and then some. This is the one
+// place a fixed wait remains; it is a bound on the ladder, not a guess.
 async function pastRetryRungs(): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, 300));
+  const { initial, cap } = TEST_TEARDOWN_RETRY_MS;
+  let total = 0;
+  for (let rung = initial; rung < cap; rung *= 2) total += rung;
+  await new Promise((resolve) => setTimeout(resolve, total + cap + 50));
 }
 
 function createWorkspaceEngineCapture(

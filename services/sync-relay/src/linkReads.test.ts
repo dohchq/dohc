@@ -1,5 +1,4 @@
 import { createRequire } from "node:module";
-import { join } from "node:path";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,

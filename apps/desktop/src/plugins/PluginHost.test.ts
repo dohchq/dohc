@@ -47,6 +47,15 @@ const helloPluginRoot = fileURLToPath(
 const tempRoots: string[] = [];
 const hosts: PluginHost[] = [];
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function waitFor(
   predicate: () => boolean | Promise<boolean>,
   message: string,
@@ -1069,6 +1078,9 @@ describe("PluginHost", () => {
         () => statuses.includes("failed"),
         "Malformed activation result did not fail the plugin.",
       );
+      // Node reports an unhandled rejection only after the turn that dropped
+      // it. Let that turn finish before reading the listener.
+      await new Promise((resolve) => setImmediate(resolve));
 
       expect(unhandledRejections).toEqual([]);
       expect(host.getStderrLog("hello-plugin")).toContain(
@@ -1568,11 +1580,13 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
       activationTimeoutMs: 1_000,
     });
+    const startedAt = Date.now();
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
+    // The deadline covers start() itself, not only the wait after it.
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Healthy plugin missed the test activation deadline.",
-      1_000,
+      Math.max(1, 1_000 - (Date.now() - startedAt)),
     );
   });
 
@@ -2240,13 +2254,16 @@ describe("PluginHost", () => {
         if (status === "starting") void host.stop(pluginId);
       },
     });
+    const startedAt = Date.now();
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     // disposedPluginIds only proves shutdown() STARTED disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
-    // actually be gone, which only happens once shutdown() fully completes.
+    // actually be gone, which only happens once shutdown() fully completes,
+    // within the same 5 s the whole start-and-stop must fit.
     await waitFor(
       () => host.getStatus("hello-plugin") === undefined,
       "Plugin was not fully stopped after a listener stopped it on \"starting\".",
+      Math.max(1, 5_000 - (Date.now() - startedAt)),
     );
 
     expect(harness.disposedPluginIds).toContain("hello-plugin");
@@ -2472,16 +2489,14 @@ describe("PluginHost", () => {
       "Heartbeat descendant did not keep writing.",
     );
 
+    const descendantPid = Number(await readFile(join(root, "grandchild-heartbeat.pid"), "utf8"));
+    expect(isProcessAlive(descendantPid)).toBe(true);
+
     await host.stop("hello-plugin");
-    // The heartbeat is a 200 ms interval. Once a full interval passes with no
-    // growth, the writer is gone; a live one would have appended by then.
+    // The detached descendant dies with the tree, not merely goes quiet.
     await waitFor(
-      async () => {
-        const before = (await stat(heartbeatPath)).size;
-        await delay(250);
-        return (await stat(heartbeatPath)).size === before;
-      },
-      "Heartbeat descendant kept writing after the plugin stopped.",
+      () => !isProcessAlive(descendantPid),
+      "Heartbeat descendant survived the plugin stop.",
     );
   }, 15_000);
 

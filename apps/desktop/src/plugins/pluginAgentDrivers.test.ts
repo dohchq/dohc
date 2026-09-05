@@ -357,14 +357,22 @@ describe("plugin agent drivers, through the real plugin process", () => {
         () => events.find((event) => event.kind === "permission-request"),
         "the permission request",
       );
-      // MUTATION (a null policy answers anyway): a resolution arrives that
-      // nobody decided, so the one below is the second.
-      await session.answerPermission("permission-1", "reject_once");
+      // A null policy must not answer. The harness echoes every answer it
+      // receives as a resolution and then completes the turn, so an
+      // automatic answer would show up as a resolution or a completed turn
+      // before the person has said anything.
+      expect(
+        events.some((event) => event.kind === "permission-resolved" || event.kind === "turn-completed"),
+        "a null policy answered the permission itself",
+      ).toBe(false);
+      await session.answerPermission("permission-1", "allow_once");
       const resolved = await until(
         () => events.find((event) => event.kind === "permission-resolved"),
         "the person's answer to reach the harness",
       );
-      expect(resolved).toMatchObject({ decision: "reject_once" });
+      // The one resolution carries the person's decision, not a policy's.
+      expect(events.filter((event) => event.kind === "permission-resolved")).toHaveLength(1);
+      expect(resolved).toMatchObject({ decision: "allow_once" });
 
       await session.dispose();
     },
@@ -454,15 +462,23 @@ describe("plugin agent drivers, through the real plugin process", () => {
       );
       expect(heartbeat.length).toBeGreaterThan(0);
       expect(isAlive(cursor.pid)).toBe(true);
+      const grandchild = JSON.parse(
+        await until(() => textOf(events, "grandchild"), "the harness's grandchild pid"),
+      ) as { pid: number };
+      expect(isAlive(grandchild.pid)).toBe(true);
 
       // dohc stops the plugin. Nothing asks the driver to co-operate.
       await fixture.host.stop("driver-plugin");
 
-      // MUTATION (the spawn teardown skips the broker): the harness keeps
-      // running after the plugin that started it is gone.
+      // The spawn teardown goes through the broker, so the harness and the
+      // detached grandchild it started both die with the plugin.
       await until(
         () => (isAlive(cursor.pid) ? undefined : true),
         "the harness process to die with its plugin",
+      );
+      await until(
+        () => (isAlive(grandchild.pid) ? undefined : true),
+        "the harness's grandchild to die with the tree",
       );
       // The session hears about it as its own failure, not as silence.
       expect(events.at(-1)).toMatchObject({ kind: "error", fatal: true });
