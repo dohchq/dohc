@@ -1,5 +1,4 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   copyFileSync,
@@ -9,6 +8,7 @@ import {
 } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { run as runProcess } from "../../../scripts/verification/process.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const defaultDesktopDir = resolve(scriptDir, "..");
@@ -36,12 +36,13 @@ export function parseTargetArgument(args) {
   return args[1];
 }
 
-export function buildWorkspaceEngine({
+export async function buildWorkspaceEngine({
   repoRoot = defaultRepoRoot,
   desktopDir = defaultDesktopDir,
   platform = process.platform,
   target,
-  runCargo = spawnSync,
+  env = process.env,
+  runCargo = runProcess,
 } = {}) {
   const binaryName = `dohc-workspace-engine${
     target?.includes("-windows-") || (!target && platform === "win32")
@@ -59,24 +60,10 @@ export function buildWorkspaceEngine({
   mkdirSync(resourceDir, { recursive: true });
   rmSync(stagedBinary, { force: true });
 
-  const cargo = runCargo("cargo", cargoArgs, {
+  await runCargo("cargo", cargoArgs, {
     cwd: repoRoot,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
+    env,
   });
-
-  if (cargo.error) {
-    throw new Error("cargo could not build the Rust workspace engine.", {
-      cause: cargo.error,
-    });
-  }
-  if (cargo.status !== 0) {
-    if (cargo.stdout?.trim()) console.error(cargo.stdout.trim());
-    if (cargo.stderr?.trim()) console.error(cargo.stderr.trim());
-    throw new Error(
-      `Rust workspace engine build failed with exit code ${cargo.status}.`,
-    );
-  }
   if (!isFile(builtBinary)) {
     const targetDescription = target ? ` for target ${target}` : "";
     throw new Error(
@@ -99,10 +86,10 @@ if (
   resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
   const { withBuildBudget } = await import("../../../scripts/verification/build.mjs");
-  await withBuildBudget(async (env) => {
+  await withBuildBudget((env) =>
     buildWorkspaceEngine({
       target: parseTargetArgument(process.argv.slice(2)),
-      runCargo: (command, args, options) => spawnSync(command, args, { ...options, env }),
-    });
-  });
+      env,
+    }),
+  );
 }

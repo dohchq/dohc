@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { afterEach, expect, test } from "vitest";
-import { closeElectronApplication } from "./closeElectronApplication";
+import { closeDebugApplication, closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 
 const children: ChildProcess[] = [];
 const descendantPids: number[] = [];
@@ -60,4 +60,29 @@ test("a completed close waits for process exit without reporting a failure", asy
   await closeElectronApplication({ close: async () => { child.kill(); await once(child, "exit"); } }, child);
   expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
   await closeElectronApplication({ close: async () => { throw new Error("already closed"); } }, child);
+});
+
+test("debug shutdown stops its process when screenshot recording rejects and tracing and close hang", async () => {
+  const child = await liveProcess();
+  let traceAttempted = false;
+  let closeAttempted = false;
+  const app = {
+    windows: () => [{ screenshot: async () => { throw new Error("screenshot failed"); } }],
+    context: () => ({ tracing: { stop: () => { traceAttempted = true; return new Promise(() => {}); } } }),
+    close: () => { closeAttempted = true; return new Promise<void>(() => {}); },
+  };
+  await expect(closeDebugApplication(app, child, "unused-output", { artifactTimeoutMs: 25, closeTimeoutMs: 25 })).rejects.toThrow("Electron close timed out");
+  expect(traceAttempted && closeAttempted).toBe(true);
+  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
+});
+
+test("debug shutdown still closes its process when window enumeration fails", async () => {
+  const child = await liveProcess();
+  const failure = new Error("window enumeration failed");
+  const app = {
+    windows: () => { throw failure; },
+    close: async () => { child.kill(); await once(child, "exit"); },
+  };
+  await expect(closeDebugApplication(app, child, "unused-output")).rejects.toBe(failure);
+  expect(child.exitCode !== null || child.signalCode !== null).toBe(true);
 });

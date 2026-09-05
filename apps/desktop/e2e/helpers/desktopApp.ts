@@ -11,7 +11,7 @@ import { assertPrepared } from "../../../../scripts/verification/build.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { electronLaunchArgs } from "../../src/testing/electronLaunchArgs";
-import { closeElectronApplication } from "../../src/testing/closeElectronApplication";
+import { closeElectronApplication } from "../../../../scripts/verification/close-electron.mjs";
 import type { TempWorkspace } from "./workspace";
 
 export interface DesktopLogEntry {

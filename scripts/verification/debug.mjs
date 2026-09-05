@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { prepare, assertPrepared } from "./build.mjs";
 import { repoRoot } from "./process.mjs";
+import { closeDebugApplication } from "./close-electron.mjs";
 
 async function evaluateDebugger(url, expression) {
   const socket = new WebSocket(url);
@@ -41,6 +42,7 @@ const profile = join(directory, "profile");
 const home = join(directory, "home");
 const workspace = join(directory, "workspace");
 let app;
+let processHandle;
 const logs = [];
 try {
   await prepare();
@@ -51,6 +53,7 @@ try {
   delete env.ELECTRON_RUN_AS_NODE;
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
+  processHandle = app.process();
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
   app.process().stdout?.on("data", (text) => record("main.stdout", text));
   app.process().stderr?.on("data", (text) => record("main.stderr", text));
@@ -86,12 +89,15 @@ try {
   });
 } catch (error) { console.error(error.message); logs.push({ source: "launcher", text: String(error) }); process.exitCode = 1; }
 finally {
-  if (app) {
-    for (const page of app.windows()) await page.screenshot({ path: join(directory, "last-screen.png"), timeout: 5000 }).catch(() => undefined);
-    await app.context().tracing.stop({ path: join(directory, "trace.zip") }).catch(() => undefined);
-    await app.close().catch(() => undefined);
+  try {
+    if (app && processHandle) await closeDebugApplication(app, processHandle, directory);
+  } catch (error) {
+    console.error(error.message);
+    logs.push({ source: "cleanup", text: String(error) });
+    process.exitCode = 1;
+  } finally {
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+    console.log(`[debug] Evidence retained at ${directory}`);
   }
-  await mkdir(directory, { recursive: true });
-  await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-  console.log(`[debug] Evidence retained at ${directory}`);
 }
