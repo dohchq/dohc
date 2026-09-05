@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -74,6 +75,8 @@ export interface CreateShareWebHandlerOptions {
   maxSessions?: number;
   viewerAssetsDir?: string;
   handoffRelayTimeoutMs?: number;
+  accountAuth?: AccountAuthConfig;
+  fetchAuth?: RelayFetch;
 }
 
 class ShareWebSessionStore {
@@ -807,7 +810,16 @@ export function createShareWebHandler({
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
   handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+  accountAuth,
+  fetchAuth,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
+  const accountHandler = accountAuth ? createAccountAuthHandler({
+    ...accountAuth,
+    fetchAuth,
+    maxRequestBytes: MAX_EXCHANGE_BODY_BYTES,
+    maxResponseBytes: MAX_RELAY_RESPONSE_BYTES,
+    timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+  }) : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
   const blobProxyLimiter = new ShareWebInFlightLimiter(
@@ -954,6 +966,15 @@ export function createShareWebHandler({
   return async (request: Request): Promise<Response> => {
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+
+    if (pathname.startsWith("/api/account/")) {
+      if (!accountHandler) return refused();
+      const accountResponse = await accountHandler(request);
+      return response(accountResponse.body, {
+        status: accountResponse.status,
+        headers: accountResponse.headers,
+      });
+    }
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
       return serveViewer(pathname);

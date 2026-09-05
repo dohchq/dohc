@@ -158,8 +158,25 @@ test('self-host share viewer waits for relay HTTP readiness', () => {
   )
   assert.equal(
     shareWebDependsOn,
-    '    depends_on:\n      sync-relay:\n        condition: service_healthy',
+    '    depends_on:\n      sync-relay:\n        condition: service_healthy\n      workspace-api:\n        condition: service_started',
   )
+})
+
+test('self-host browser auth shares the secure auth base and exact viewer origin', () => {
+  const compose = readFileSync('docker-compose.self-host.yml', 'utf8')
+  const envExample = readFileSync('.env.self-host.example', 'utf8')
+  const authBase = '${WORKSPACE_API_BASE_URL:?Set WORKSPACE_API_BASE_URL in .env.self-host}'
+  const viewerOrigin = '${DOHC_SHARE_WEB_PUBLIC_ORIGIN:?Set DOHC_SHARE_WEB_PUBLIC_ORIGIN in .env.self-host}'
+  for (const [service, variable, expected] of [
+    ['workspace-api', 'WORKSPACE_API_BASE_URL', authBase],
+    ['sync-relay', 'SYNC_RELAY_AUTH_BASE_URL', authBase],
+    ['workspace-api', 'DOHC_WEB_ORIGIN', viewerOrigin],
+    ['share-web', 'DOHC_SHARE_WEB_PUBLIC_ORIGIN', viewerOrigin],
+    ['share-web', 'DOHC_SHARE_WEB_AUTH_URL', 'http://workspace-api:1786'],
+  ]) {
+    assert.equal(mappingValueAtPath(compose, ['services', service, 'environment', variable]), expected)
+  }
+  assert.equal(new URL(environmentValue(envExample, 'WORKSPACE_API_BASE_URL')).protocol, 'https:')
 })
 
 test('self-host compose starts the public share viewer with one external origin', () => {
