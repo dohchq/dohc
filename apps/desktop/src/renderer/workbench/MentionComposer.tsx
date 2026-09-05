@@ -9,7 +9,7 @@ import {
 import type { WorkspaceHeadingRecord } from "../../ipc/bridgeContract";
 import { formatChatFileReferenceToken } from "./chatFileMentions";
 
-export interface FileMentionCandidate {
+interface FileMentionCandidate {
   path: string;
   label: string;
 }

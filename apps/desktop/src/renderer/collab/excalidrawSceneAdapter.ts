@@ -14,7 +14,7 @@ import {
 } from "@dohc/excalidraw-scene";
 import * as Y from "yjs";
 
-export const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
+const LOCAL_EXCALIDRAW_ORIGIN: unique symbol = Symbol(
   "dohc.localExcalidrawChange",
 );
 

@@ -22,13 +22,6 @@ const PDF_PRINT_OPTIONS: PrintToPDFOptions = {
 
 let exportInFlight = false;
 
-// Exposed for the IPC handler to give an honest "try again" error instead of
-// silently queuing — two concurrent PDF renders would otherwise raced two
-// hidden BrowserWindows against the same in-flight flag.
-export function isDocumentPdfExportInFlight(): boolean {
-  return exportInFlight;
-}
-
 // Renders `html` to a PDF buffer in a hidden, sandboxed, preload-less
 // BrowserWindow — the content is document markdown (a user's or an agent's
 // own text), never trusted with Node or IPC access. The window (and its

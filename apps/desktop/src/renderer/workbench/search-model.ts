@@ -90,7 +90,7 @@ export function applyBatch(model: SearchModel, batch: SearchResultsEvent): Searc
   };
 }
 
-export interface FlatSearchEntry {
+interface FlatSearchEntry {
   path: string;
   entry: SearchResultsEventEntry;
   groupIndex: number;
@@ -157,7 +157,7 @@ export const PREVIEW_LEAD_TRIM_THRESHOLD = 24;
 // Context characters kept immediately before the match after a trim.
 export const PREVIEW_LEAD_CONTEXT_CHARS = 8;
 
-export interface WindowedPreview {
+interface WindowedPreview {
   text: string;
   matchStart: number;
   matchEnd: number;

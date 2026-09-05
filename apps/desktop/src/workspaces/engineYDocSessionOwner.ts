@@ -1,7 +1,3 @@
-import {
-  workspaceRelativePathIsAtOrUnder,
-  workspaceRelativePathsEqual,
-} from "./workspaceRelativePathIdentity";
 
 export interface EngineYDocSessionSender {
   readonly id: number;
@@ -285,7 +281,7 @@ export class EngineYDocSessionOwner<
       (record) =>
         record.state !== "releasing" &&
         record.authorityId === input.authorityId &&
-        workspaceRelativePathsEqual(record.path, input.path),
+        record.path === input.path,
     );
     if (documentInUse) {
       return Promise.resolve({ kind: "refused", reason: "session-in-use" });
@@ -384,7 +380,7 @@ export class EngineYDocSessionOwner<
     return [...this.#records].some(
       (record) =>
         record.authorityId === authorityId &&
-        workspaceRelativePathsEqual(record.path, path),
+        record.path === path,
     );
   }
 
@@ -397,7 +393,7 @@ export class EngineYDocSessionOwner<
       if (
         record.session === null ||
         record.authorityId !== authorityId ||
-        !workspaceRelativePathIsAtOrUnder(record.path, pathOrPrefix)
+        !(record.path === pathOrPrefix || record.path.startsWith(`${pathOrPrefix}/`))
       ) {
         continue;
       }
@@ -516,7 +512,7 @@ export class EngineYDocSessionOwner<
         record !== opening &&
         record.state === "releasing" &&
         record.authorityId === opening.authorityId &&
-        workspaceRelativePathsEqual(record.path, opening.path),
+        record.path === opening.path,
     );
     for (const blocker of blockers) {
       const release = await this.#retire(

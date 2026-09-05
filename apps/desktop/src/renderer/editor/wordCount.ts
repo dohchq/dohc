@@ -66,7 +66,7 @@ export function createDebouncer(
 }
 
 // Spec'd cadence: recompute the counter ~300ms after the last keystroke.
-export const WORD_COUNT_DEBOUNCE_MS = 300;
+const WORD_COUNT_DEBOUNCE_MS = 300;
 
 /** Recompute word/character counts on mount and (debounced) on every doc
  *  change, cancelling the pending run on unmount. Used by OutlinePanel (the

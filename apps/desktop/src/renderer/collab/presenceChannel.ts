@@ -44,7 +44,7 @@ export interface PresenceTransport {
   poll(input: { topic: string; since: number; signal: AbortSignal }): Promise<PresenceSnapshot>;
 }
 
-export interface RelayPresenceTransport {
+interface RelayPresenceTransport {
   publish(input: {
     topic: string;
     clientId: string;
@@ -71,7 +71,7 @@ export type PresenceScope =
   | { kind: "workspace"; workspaceId: string }
   | { kind: "share"; shareId: string };
 
-export interface RelayPresenceConfig {
+interface RelayPresenceConfig {
   baseUrl: string;
   token: string;
   scope: PresenceScope;
@@ -132,7 +132,7 @@ export function createRelayPresenceTransport(
   };
 }
 
-export interface PresenceChannelOptions {
+interface PresenceChannelOptions {
   transport: PresenceTransport;
   topic: string;
   clientId: string;

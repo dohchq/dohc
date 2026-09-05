@@ -4,7 +4,7 @@ import { useCommitOnRelease } from "./useCommitOnRelease";
 
 const KEYBOARD_RESIZE_STEP = 0.05;
 
-export interface EditorGroupLayoutItem {
+interface EditorGroupLayoutItem {
   id: string;
   size: number;
   content: ReactNode;

@@ -32,7 +32,7 @@ export type SlashCommandId =
   | "table"
   | "image";
 
-export type SlashCommandItem = {
+type SlashCommandItem = {
   id: SlashCommandId;
   label: string;
   hint: string;

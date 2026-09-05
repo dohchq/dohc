@@ -135,7 +135,7 @@ function isPermanentDeliveryError(error: unknown): boolean {
   );
 }
 
-export interface EngineYDocBindOptions {
+interface EngineYDocBindOptions {
   // A permanent delivery failure (an oversized update, or a refusal main
   // returned as data). The mirror's edits can no longer reach the engine, so
   // the full canonical state is handed over before anything destroys it. The

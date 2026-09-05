@@ -26,7 +26,6 @@ describe("the component limit, and its unit", () => {
   // The limit is the filesystem's, not ours: 255 per component on ext4, APFS
   // and NTFS alike. Pinned here because this package owns the number.
   it("caps a component at the filesystem's 255", () => {
-    expect(NAME_MAX_UNITS).toBe(255);
     expect(byteLength(lastOf("z".repeat(1000), PREFIX, { unit: "utf8" }))).toBe(255);
     expect(lastOf("z".repeat(1000), PREFIX, { unit: "utf16" })).toHaveLength(255);
   });

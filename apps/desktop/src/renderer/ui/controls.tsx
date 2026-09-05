@@ -13,15 +13,11 @@ function cx(...parts: Array<string | false | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 
-// Class constants exist for call sites that must BRANCH between recipes on a
-// single element (e.g. a Start/Stop toggle, where swapping components would
-// remount the button and drop keyboard focus). Everything else composes the
-// components below.
-export const primaryButtonClass =
+const primaryButtonClass =
   "rounded-lg bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:opacity-50";
-export const secondaryButtonClass =
+const secondaryButtonClass =
   "rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink disabled:opacity-50";
-export const iconButtonClass =
+const iconButtonClass =
   "grid size-6 place-items-center rounded-md text-subtle transition-colors hover:bg-line/50 hover:text-ink disabled:pointer-events-none disabled:opacity-40";
 
 /** Filled brand-accent CTA — at most one per surface. */
@@ -80,15 +76,6 @@ export function Pill({
     >
       {children}
     </span>
-  );
-}
-
-/** Keyboard hint chip — always the mono voice. */
-export function Kbd({ children }: { children: ReactNode }) {
-  return (
-    <kbd className="rounded border border-line bg-bg px-1 font-mono text-[10px] text-subtle">
-      {children}
-    </kbd>
   );
 }
 

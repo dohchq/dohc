@@ -10,9 +10,6 @@ import {
   clampZoomLevel,
   effectiveThemeMode,
   zoomPercent,
-  mergeDesktopUserSettings,
-  parseDesktopUserSettings,
-  userSettingsModified,
 } from "./userSettings";
 import {
   MAX_USER_SETTINGS_FILE_BYTES,
@@ -39,12 +36,12 @@ afterEach(async () => {
 });
 
 describe("desktop user settings model", () => {
-  it("falls back to defaults for missing, foreign, or future shapes", () => {
-    expect(parseDesktopUserSettings(null)).toEqual(DEFAULT_USER_SETTINGS);
-    expect(parseDesktopUserSettings({ version: 2 })).toEqual(DEFAULT_USER_SETTINGS);
-    expect(parseDesktopUserSettings({ version: 1, token: "secret" })).toEqual(
-      DEFAULT_USER_SETTINGS,
-    );
+  it("rejects missing, foreign, or future shapes", () => {
+    expect(DesktopUserSettings.safeParse(null).success).toBe(false);
+    expect(DesktopUserSettings.safeParse({ version: 2 }).success).toBe(false);
+    expect(
+      DesktopUserSettings.safeParse({ version: 1, token: "secret" }).success,
+    ).toBe(false);
   });
 
   it("rejects the removed launch-behavior section instead of keeping a dual schema", () => {
@@ -55,23 +52,6 @@ describe("desktop user settings model", () => {
     };
 
     expect(DesktopUserSettings.safeParse(obsolete).success).toBe(false);
-    expect(parseDesktopUserSettings(obsolete)).toEqual(DEFAULT_USER_SETTINGS);
-  });
-
-  it("merges patches without dropping sibling sections", () => {
-    const next = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-      appearance: { themeMode: "dark", density: "compact", reduceMotion: true },
-    });
-    expect(next.appearance).toEqual({
-      themeMode: "dark",
-      density: "compact",
-      reduceMotion: true,
-      // Untouched by the patch, so the merge keeps the current value.
-      zoomLevel: 0,
-    });
-    expect(next.editor).toEqual(DEFAULT_USER_SETTINGS.editor);
-    expect(userSettingsModified(next)).toBe(true);
-    expect(userSettingsModified(DEFAULT_USER_SETTINGS)).toBe(false);
   });
 
   it("adds runner defaults to settings written before runner support", () => {
@@ -82,7 +62,7 @@ describe("desktop user settings model", () => {
       notifications: DEFAULT_USER_SETTINGS.notifications,
     };
 
-    expect(parseDesktopUserSettings(legacySettings)).toEqual({
+    expect(DesktopUserSettings.parse(legacySettings)).toEqual({
       ...legacySettings,
       profile: {},
       runner: DEFAULT_RUNNER_SETTINGS,
@@ -104,7 +84,7 @@ describe("desktop user settings model", () => {
     };
 
     // The stored appearance choices survive; only the new field fills in.
-    expect(parseDesktopUserSettings(legacySettings).appearance).toEqual({
+    expect(DesktopUserSettings.parse(legacySettings).appearance).toEqual({
       themeMode: "dark",
       density: "compact",
       reduceMotion: true,
@@ -139,9 +119,10 @@ describe("desktop user settings model", () => {
       notifications: DEFAULT_USER_SETTINGS.notifications,
       runner: DEFAULT_RUNNER_SETTINGS,
     };
-    expect(parseDesktopUserSettings(legacy).profile).toEqual({});
+    expect(DesktopUserSettings.parse(legacy).profile).toEqual({});
 
-    const named = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
+    const named = DesktopUserSettings.parse({
+      ...DEFAULT_USER_SETTINGS,
       profile: { preferredName: "  Ice de Vera  " },
     });
     expect(named.profile.preferredName).toBe("Ice de Vera");
@@ -164,17 +145,11 @@ describe("desktop user settings model", () => {
     }
   });
 
-  it("merges runner fields independently and validates timeout bounds", () => {
-    const next = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-      runner: { command: "codex exec", enabled: true },
-    });
-
-    expect(next.runner).toEqual({
-      command: "codex exec",
-      enabled: true,
-      timeoutMinutes: 30,
-    });
-    expect(next.appearance).toEqual(DEFAULT_USER_SETTINGS.appearance);
+  it("validates runner timeout bounds", () => {
+    const next = {
+      ...DEFAULT_USER_SETTINGS,
+      runner: { command: "codex exec", enabled: true, timeoutMinutes: 30 },
+    };
     expect(
       DesktopUserSettings.safeParse({
         ...next,
@@ -207,19 +182,11 @@ describe("desktop user settings model", () => {
       }).success,
     ).toBe(true);
     expect(() =>
-      mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-        runner: { enabled: true },
+      DesktopUserSettings.parse({
+        ...DEFAULT_USER_SETTINGS,
+        runner: { ...DEFAULT_RUNNER_SETTINGS, enabled: true },
       }),
     ).toThrow("Runner command is required when dispatch is enabled.");
-    expect(
-      mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-        runner: { command: "codex exec", enabled: true },
-      }).runner,
-    ).toEqual({
-      command: "codex exec",
-      enabled: true,
-      timeoutMinutes: 30,
-    });
   });
 
   it("resolves system theme from the OS preference", () => {
@@ -233,9 +200,10 @@ describe("desktop user settings model", () => {
 describe("desktop user settings store", () => {
   it("round-trips pretty JSON through the user settings file", async () => {
     const root = await tempRoot();
-    const settings = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
-    });
+    const settings = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+    };
     await writeUserSettingsFile(root, settings);
     expect(await readUserSettingsFile(root)).toEqual({
       settings,
@@ -247,12 +215,14 @@ describe("desktop user settings store", () => {
 
   it("caches reads until the settings writer invalidates them", async () => {
     const root = await tempRoot();
-    const first = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-      appearance: { themeMode: "dark" },
-    });
-    const second = mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-      appearance: { themeMode: "light" },
-    });
+    const first = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" as const },
+    };
+    const second = {
+      ...DEFAULT_USER_SETTINGS,
+      appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "light" as const },
+    };
     await writeUserSettingsFile(root, first);
     expect((await readCachedUserSettingsFile(root)).settings).toEqual(first);
 
@@ -334,11 +304,10 @@ describe("desktop user settings store", () => {
     const outsideSettings = join(outside, USER_SETTINGS_FILE);
     await writeFile(
       outsideSettings,
-      JSON.stringify(
-        mergeDesktopUserSettings(DEFAULT_USER_SETTINGS, {
-          appearance: { themeMode: "dark" },
-        }),
-      ),
+      JSON.stringify({
+        ...DEFAULT_USER_SETTINGS,
+        appearance: { ...DEFAULT_USER_SETTINGS.appearance, themeMode: "dark" },
+      }),
     );
     await unlink(join(root, USER_SETTINGS_FILE));
     await symlink(outsideSettings, join(root, USER_SETTINGS_FILE));

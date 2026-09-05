@@ -80,7 +80,7 @@ export function detectEmojiAutocomplete(
   return found
 }
 
-export type CompleteEmojiShortcode = {
+type CompleteEmojiShortcode = {
   from: number
   to: number
   shortcode: string
@@ -127,7 +127,7 @@ export function detectCompleteEmojiShortcode(
  *  literal the user intentionally left in prose. A remote/unrelated edit does
  *  not carry a ReplaceStep inserting the closing colon at the local cursor, so
  *  it no longer triggers. */
-export function insertedClosingColonAtCursor(
+function insertedClosingColonAtCursor(
   transactions: readonly Transaction[],
   cursorPos: number,
 ): boolean {

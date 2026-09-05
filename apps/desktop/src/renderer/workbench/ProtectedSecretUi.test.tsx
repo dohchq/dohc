@@ -77,7 +77,17 @@ describe("VersionComparePage protected rows", () => {
     });
     bridgeMock.compareWorkspaceVersions.mockResolvedValue({
       files: [
-        { path: ".env", status: "modified", protected: true },
+        // Both sides carry the secret and differ, so a page that fell through
+        // to the text diff would print it as removed and added lines.
+        {
+          path: ".env",
+          status: "modified",
+          protected: true,
+          currentText: `${SECRET_VALUE} before
+`,
+          incomingText: `${SECRET_VALUE} after
+`,
+        },
         {
           path: "notes.md",
           status: "modified",
@@ -104,8 +114,7 @@ describe("VersionComparePage protected rows", () => {
       (section) => section.dataset.comparePath === ".env",
     );
     expect(secretSection?.querySelector('[data-testid="version-compare-protected"]')).toBeTruthy();
-    // The protected section renders NO unified diff body.
-    expect(secretSection?.textContent).not.toContain("old text");
-    expect(secretSection?.textContent).not.toContain("new text");
+    // The protected section renders no diff body at all.
+    expect(secretSection?.querySelector('[data-testid="version-compare-diff-lines"]')).toBeNull();
   });
 });

@@ -26,7 +26,7 @@ import type { PMDocLike } from './inlineAtomPlugin'
 
 export const findReplaceKey = new PluginKey<FindReplaceState>('dohc-find-replace')
 
-export type FindMatch = { from: number; to: number }
+type FindMatch = { from: number; to: number }
 
 export type FindReplaceState = {
   open: boolean

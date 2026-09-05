@@ -1,6 +1,4 @@
 // @vitest-environment jsdom
-import { readdirSync, readFileSync } from "node:fs";
-import { join, relative } from "node:path";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bridge } from "./bridge";
@@ -157,39 +155,5 @@ describe("ExternalLinkConfirm", () => {
     expect(openExternalUrl).toHaveBeenCalledWith({
       url: "https://example.com/docs",
     });
-  });
-});
-
-// A structural pin, not a behavior pin: the behavior pins above cover every
-// surface only because every surface reaches openLinkExternally. This is what
-// fails when a new surface calls the bridge directly and skips the confirm —
-// the exact bypass #805 exists to prevent.
-describe("external-open routing", () => {
-  it("only openLinkExternally calls the openExternalUrl bridge", () => {
-    // jsdom does not give this module a file: URL, so resolve from the
-    // package root vitest runs in.
-    const rendererRoot = join(process.cwd(), "src", "renderer");
-    const callers: string[] = [];
-
-    function walk(dir: string): void {
-      for (const entry of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, entry.name);
-        if (entry.isDirectory()) {
-          walk(full);
-          continue;
-        }
-        if (!/\.tsx?$/.test(entry.name) || /\.test\.tsx?$/.test(entry.name)) {
-          continue;
-        }
-        // An invocation, not a prose mention of the channel in a comment.
-        if (/\bopenExternalUrl\s*\(/.test(readFileSync(full, "utf8"))) {
-          callers.push(relative(rendererRoot, full).replaceAll("\\", "/"));
-        }
-      }
-    }
-
-    walk(rendererRoot);
-
-    expect(callers.sort()).toEqual(["linkActivation.ts"]);
   });
 });

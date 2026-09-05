@@ -5,9 +5,9 @@ import { shareViewTakesLocalWrites, type ShareViewWriteScope } from "./shareWrit
 //
 // main owns this menu, so the renderer cannot add an item back; that is why
 // the reduction below is a security surface and not a convenience. It lives
-// here rather than inside main's IPC closure for the reason `shareChatGate.ts`
-// states: a menu built inline in a 9,000-line closure can only be pinned by
-// reading the source, and a source pin proves position, never behaviour.
+// here rather than inside main's IPC closure because a menu built inline in a
+// 9,000-line closure can only be pinned by reading the source, and a source
+// pin proves position, never behaviour.
 //
 // The menu MIRRORS the write gates behind it. It must offer exactly what those
 // handlers accept, because an item that is refused when clicked is the surface

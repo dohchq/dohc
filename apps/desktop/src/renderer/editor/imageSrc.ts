@@ -75,7 +75,7 @@ export function joinWorkspacePath(docPath: string, src: string): string {
 // True when a normalized workspace path escapes the workspace root — i.e. it is
 // (or begins with) a leftover `..` segment. Such a path must never be minted
 // into a dohc-file:// URL.
-export function escapesWorkspaceRoot(workspacePath: string): boolean {
+function escapesWorkspaceRoot(workspacePath: string): boolean {
   return workspacePath === ".." || workspacePath.startsWith("../");
 }
 

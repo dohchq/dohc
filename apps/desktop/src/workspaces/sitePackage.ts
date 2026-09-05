@@ -3420,7 +3420,7 @@ export function requireExactSiteRoot(
   return site;
 }
 
-export function entryRelativeToSite(
+function entryRelativeToSite(
   site: Pick<SitePackageInfo, "root" | "entryPath">,
 ): string | null {
   if (!site.entryPath) return null;
