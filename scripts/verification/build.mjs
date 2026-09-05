@@ -10,9 +10,10 @@ import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
 
 export const receiptPath = join(repoRoot, ".dohc-dev/verification/build.json");
 export const enginePath = join(repoRoot, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
+const desktopConfigFiles = [".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs"];
 const inputPaths = {
   engine: ["crates", "fuzz", "fixtures", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
-  desktop: ["apps/desktop", "packages", "services", "scripts", "tools", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore"],
+  desktop: ["apps/desktop", "packages", "services", "scripts", "tools", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...desktopConfigFiles],
 };
 
 export function hashFile(path) {
@@ -43,6 +44,7 @@ export function repairOwnedEngineExecutable(path) {
 
 export function sourceFingerprint(kind, root = repoRoot) {
   const paths = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputPaths[kind]], root).split("\0").filter(Boolean);
+  if (kind === "desktop") paths.push(...desktopConfigFiles);
   const hash = createHash("sha256");
   hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version,
     rustflags: process.env.RUSTFLAGS ?? "", encodedRustflags: process.env.CARGO_ENCODED_RUSTFLAGS ?? "" }));

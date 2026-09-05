@@ -44,6 +44,50 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("desktop source identity tracks root pnpm configuration regardless of Git state", () => {
+  const configurations = [
+    [".npmrc", "shared-workspace-lockfile=true\n", "shared-workspace-lockfile=false\n"],
+    [".pnpmfile.cjs", "module.exports = {};\n", "module.exports = { hooks: {} };\n"],
+    [".pnpmfile.mjs", "export default {};\n", "export default { hooks: {} };\n"],
+  ];
+  for (const ignored of [false, true]) {
+    const root = mkdtempSync(join(tmpdir(), "dohc-pnpm-config-"));
+    const git = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+    try {
+      git(["init"]);
+      const excludes = join(root, ".git/info/exclude");
+      writeFileSync(excludes, ignored ? configurations.map(([name]) => name).join("\n") + "\n" : "");
+      git(["config", "core.excludesFile", excludes]);
+      for (const [name, first, second] of configurations) {
+        const path = join(root, name);
+        const absent = sourceFingerprint("desktop", root);
+        writeFileSync(path, first);
+        if (ignored) git(["check-ignore", name]);
+        else assert.equal(git(["ls-files", "--others", "--exclude-standard", "--", name]), name);
+        const created = sourceFingerprint("desktop", root);
+        assert.notEqual(created, absent, `${name} creation (ignored=${ignored})`);
+        writeFileSync(path, second);
+        const edited = sourceFingerprint("desktop", root);
+        assert.notEqual(edited, created, `${name} edit (ignored=${ignored})`);
+        rmSync(path);
+        assert.equal(sourceFingerprint("desktop", root), absent, `${name} disappearance (ignored=${ignored})`);
+
+        writeFileSync(path, first);
+        git(["add", "--force", "--", name]);
+        assert.equal(sourceFingerprint("desktop", root), created, `${name} staged creation`);
+        writeFileSync(path, second);
+        assert.equal(sourceFingerprint("desktop", root), edited, `${name} unstaged edit`);
+        git(["add", "--force", "--", name]);
+        assert.equal(sourceFingerprint("desktop", root), edited, `${name} staged edit`);
+        rmSync(path);
+        assert.equal(sourceFingerprint("desktop", root), absent, `${name} unstaged deletion`);
+        git(["add", "--update", "--", name]);
+        assert.equal(sourceFingerprint("desktop", root), absent, `${name} staged deletion`);
+      }
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  }
+});
+
 test("artifact identity includes nested file bytes and names", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-artifact-"));
   try {
