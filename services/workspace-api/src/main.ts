@@ -4,8 +4,7 @@ import { createServer } from "node:http";
 import { Pool } from "pg";
 
 // The auth host: one Postgres and Better Auth mounted on /api/auth/* (the
-// desktop's device sign-in flow). Every other route is a 404. This file is the
-// only place that reads env.
+// desktop's device sign-in flow). This file is the only place that reads env.
 
 const port = Number(process.env.WORKSPACE_API_PORT ?? 1786);
 const baseURL = process.env.WORKSPACE_API_BASE_URL ?? `http://localhost:${port}`;

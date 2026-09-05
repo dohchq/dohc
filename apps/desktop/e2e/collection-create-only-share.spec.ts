@@ -104,13 +104,12 @@ function logOpForDigest(
 }
 
 // A failed run must not retain the one-time link URL in diagnostics.
-const confidentialTest = test.extend({});
-confidentialTest.use({ screenshot: "off", trace: "off" });
+test.use({ screenshot: "off", trace: "off" });
 
-confidentialTest(
+test(
   "a shared collection reaches a link holder, converges a cross-device edit, and revocation stops it",
   async () => {
-    confidentialTest.setTimeout(180_000);
+    test.setTimeout(180_000);
     const temp = await createTempWorkspace();
     const linkKey = randomBytes(32).toString("base64url");
     const relayExchangeKey = randomBytes(32).toString("base64url");
