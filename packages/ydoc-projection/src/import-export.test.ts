@@ -105,6 +105,49 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it.each(['array', 'map', 'array-map', 'map-array'] as const)(
+    'round-trips depth-128 canonical %s frontmatter',
+    (shape) => {
+      for (const leaf of ['leaf', 'true', 'line one\nline two\n', [], {}]) {
+        let value: unknown = leaf
+        for (let depth = 127; depth >= 0; depth -= 1) {
+          const array = shape === 'array'
+            || (shape === 'array-map' && depth % 2 === 0)
+            || (shape === 'map-array' && depth % 2 === 1)
+          value = array ? [value] : { key: value }
+        }
+        const original = markdownToYDoc('Body remains.\n')
+        original.getMap('frontmatter').set('value', value)
+        const markdown = yDocToMarkdown(original)
+        const restored = markdownToYDoc(markdown)
+        try {
+          expect(getDohcYDocFrontmatter(restored)).toEqual({ value })
+          expect(yDocToMarkdown(restored)).toBe(markdown)
+        } finally {
+          original.destroy()
+          restored.destroy()
+        }
+      }
+    },
+  )
+
+  it('keeps malformed and over-parser-limit frontmatter visible as body text', () => {
+    const overLimit = `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.\n`
+    for (const [markdown, visible] of [
+      [overLimit, 'depth-limit-leaf'],
+      ['---\nvalue: [unterminated\n---\nBody remains.\n', 'unterminated'],
+    ]) {
+      const restored = markdownToYDoc(markdown!)
+      try {
+        expect(getDohcYDocFrontmatter(restored)).toEqual({})
+        expect(yDocToMarkdown(restored)).toContain(visible)
+        expect(yDocToMarkdown(restored)).toContain('Body remains.')
+      } finally {
+        restored.destroy()
+      }
+    }
+  })
+
   it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
     const doc = markdownToYDoc(markdown)
     expect(getDohcYDocFrontmatter(doc))
