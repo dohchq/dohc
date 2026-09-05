@@ -22,7 +22,6 @@ import { runInKeyedLane } from "../keyedLane";
 const MOVE_IN_PROGRESS = "MOVE_IN_PROGRESS";
 const MOVE_IN_PROGRESS_TEMP = `${MOVE_IN_PROGRESS}.tmp`;
 const MOVE_COMPLETE = "MOVE_COMPLETE";
-// SQLITE_SOURCE_FILES in rehearsal_harness.rs is the source of truth for names.
 // Move transient SHM first, durable WAL and journal next, and the database last.
 const ENGINE_STORE_FILES = [
   "engine.db-shm",

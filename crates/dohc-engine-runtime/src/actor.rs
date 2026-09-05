@@ -16,7 +16,7 @@
 //! [`blocking_recv`](tokio::sync::mpsc::Receiver::blocking_recv), so the
 //! blocking SQLite work never occupies a runtime worker. Replies come back on
 //! [`tokio::sync::oneshot`] channels. The tokio channels are runtime-agnostic
-//! for their blocking API, so the CAL-1 synchronous call sites keep working
+//! for their blocking API, so the the synchronous call sites keep working
 //! outside any runtime, while the async methods drive the loop from within one.
 //!
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
@@ -93,9 +93,9 @@ use dohc_engine_files::{
     materialize_secret_one, probe_projection_target,
 };
 use dohc_engine_storage::{
-    CompoundWrite, Document, EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus,
-    MaterializationJob, MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage,
-    StorageError, TxnOutcome, WriteOutcome, hex_sha256, put_binary_blob, upsert_projection_job,
+    EngineStore, FaultAction, FaultInjector, FaultPoint, JobStatus, MaterializationJob,
+    MaterializationJobSpec, MaterializationOperation, NoFaults, Preimage, StorageError, TxnOutcome,
+    hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
     ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
@@ -121,7 +121,6 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc::sync_channel as std_sync_channel;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::{self, OwnedPermit};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -228,27 +227,6 @@ impl LifecycleState {
             _ => LifecycleState::Closed,
         }
     }
-}
-
-/// A cheap, comparable snapshot of the store's row counts — enough for
-/// durability/convergence assertions without exposing the connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct StoreSnapshot {
-    pub documents: i64,
-    pub journal_entries: i64,
-    pub request_ledger: i64,
-    pub migration_ledger: i64,
-}
-
-/// The outcome of a cancellable multi-unit run ([`ActorHandle::run_units`]).
-/// `committed` is the number of units that reached a durable commit; `cancelled`
-/// reports whether the run stopped early at a between-unit cancellation point.
-/// The store always holds exactly the committed prefix — cancellation never
-/// tears a unit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UnitsOutcome {
-    pub committed: usize,
-    pub cancelled: bool,
 }
 
 /// Actor-owned snapshot used to establish one daemon Y.Doc session without
@@ -1316,30 +1294,9 @@ enum CaptureIndexing {
 }
 
 enum Command {
-    Write {
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-        reply: oneshot::Sender<Result<WriteOutcome, StorageError>>,
-    },
-    Read {
-        doc_id: String,
-        reply: oneshot::Sender<Result<Option<Document>, StorageError>>,
-    },
-    Snapshot {
-        reply: oneshot::Sender<Result<StoreSnapshot, StorageError>>,
-    },
     BindShadowClone {
         token: String,
         reply: oneshot::Sender<Result<bool, StorageError>>,
-    },
-    /// A long operation: a sequence of bounded units (one compound write each,
-    /// one transaction each). The worker checks `token` Before each unit and
-    /// stops cooperatively at that between-unit boundary.
-    RunUnits {
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<UnitsOutcome, StorageError>>,
     },
     VersionedTextWrite {
         input: WriteText,
@@ -2551,7 +2508,7 @@ impl WorkspaceActor {
     /// the worker drains and exits. From an async runtime that briefly parks the
     /// executor thread; a future `close_async` could yield instead (noted for a
     /// later shard). A worker wedged inside a fault gate must be released by the
-    /// caller before close (same contract as CAL-1).
+    /// caller before close (same contract as the storage writer).
     pub fn close(&mut self) -> Result<(), RuntimeError> {
         let Some(worker) = self.worker.take() else {
             return Ok(());
@@ -2603,82 +2560,7 @@ impl ActorHandle {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    // --- Synchronous API (CAL-1 call sites; must be used outside a runtime) ---
-
-    /// Issue a compound write through the actor's single writer, blocking the
-    /// calling thread for the result. For synchronous callers that are not on a
-    /// tokio runtime; the async loop is unaffected.
-    pub fn write(
-        &self,
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteOutcome, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Write {
-                write,
-                faults,
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Enqueue a compound write without waiting for its result, failing fast
-    /// with [`RuntimeError::Overloaded`] if the bounded queue is full. This is
-    /// the observable-backpressure path (the protocol's `OVERLOADED`). The
-    /// result is not delivered to the caller.
-    pub fn try_submit_write(
-        &self,
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<(), RuntimeError> {
-        // A single-slot reply channel is created and immediately dropped; the
-        // worker's later `reply.send` fails harmlessly.
-        let (reply, _reply_rx) = oneshot::channel();
-        match self.tx.try_send(Command::Write {
-            write,
-            faults,
-            reply,
-        }) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(RuntimeError::Overloaded),
-            Err(TrySendError::Closed(_)) => Err(RuntimeError::ActorUnavailable),
-        }
-    }
-
-    /// Read a document by id, blocking the calling thread.
-    pub fn read(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Read {
-                doc_id: doc_id.to_owned(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Snapshot the store's row counts, blocking the calling thread.
-    pub fn snapshot(&self) -> Result<StoreSnapshot, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::Snapshot { reply })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
+    // --- Synchronous API (must be used outside a runtime) ---
 
     /// Capture a text file on the actor's writer, blocking the calling thread.
     pub fn capture_ingest_blocking(
@@ -3080,44 +2962,6 @@ impl ActorHandle {
     }
 
     // --- Async API (drives the tokio loop from within a runtime) ---
-
-    /// Async compound write. Awaits queue space (bounded backpressure) and the
-    /// worker's reply.
-    pub async fn write_async(
-        &self,
-        write: CompoundWrite,
-        faults: Arc<dyn FaultInjector>,
-    ) -> Result<WriteOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Write {
-                write,
-                faults,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Async read.
-    pub async fn read_async(&self, doc_id: &str) -> Result<Option<Document>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::Read {
-                doc_id: doc_id.to_owned(),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
 
     /// Stamp a fresh shadow database or verify an existing shadow binding on
     /// the actor-owned connection before the workspace can accept writes.
@@ -6482,85 +6326,9 @@ impl ActorHandle {
             }
         }
     }
-
-    /// Run a long operation as a sequence of bounded units, cancellable at each
-    /// between-unit boundary via `token`. Returns how many units committed.
-    ///
-    /// The worker checks the token before each unit's transaction; once a
-    /// unit's `BEGIN IMMEDIATE` starts it always runs to COMMIT/ROLLBACK
-    ///  — cancellation never tears a unit, so the store holds
-    /// exactly the committed prefix.
-    pub async fn run_units(
-        &self,
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-    ) -> Result<UnitsOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RunUnits {
-                units,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
-    }
-
-    /// Run a long operation under a deadline. The units execute on the writer
-    /// thread; if `deadline` elapses first, the shared `token` is cancelled
-    /// (stopping the run at the next between-unit boundary) and
-    /// [`RuntimeError::DeadlineExceeded`] is returned. Work already committed
-    /// before the deadline stays durable — exactly-once ack semantics.
-    pub async fn run_units_with_deadline(
-        &self,
-        units: Vec<CompoundWrite>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        deadline: std::time::Duration,
-    ) -> Result<UnitsOutcome, RuntimeError> {
-        // The deadline bounds the whole operation, including enqueue: under a
-        // full command queue `send().await` can block past the deadline, so the
-        // wait for queue space is inside the timed select too.
-        let deadline_at = tokio::time::Instant::now() + deadline;
-        let (reply, reply_rx) = oneshot::channel();
-
-        tokio::select! {
-            biased;
-            sent = self.tx.send(Command::RunUnits {
-                units,
-                faults,
-                token: token.clone(),
-                reply,
-            }) => sent.map_err(|_| RuntimeError::ActorUnavailable)?,
-            () = tokio::time::sleep_until(deadline_at) => {
-                // Never admitted; nothing was cancelled to observe.
-                token.cancel();
-                return Err(RuntimeError::DeadlineExceeded);
-            }
-        }
-
-        tokio::select! {
-            biased;
-            result = reply_rx => result
-                .map_err(|_| RuntimeError::ActorUnavailable)?
-                .map_err(RuntimeError::Storage),
-            () = tokio::time::sleep_until(deadline_at) => {
-                // Deadline first: ask the run to stop at its next between-unit
-                // boundary. The in-flight unit (if any) still finishes durably.
-                token.cancel();
-                Err(RuntimeError::DeadlineExceeded)
-            }
-        }
-    }
 }
 
-/// Debug-only guard: the synchronous `write`/`read`/`snapshot` API uses
+/// Debug-only guard: the synchronous `*_blocking` API uses
 /// `blocking_send`/`blocking_recv`, which panic inside a tokio runtime (the
 /// product runs on tokio). Catch the misuse cheaply in debug builds with a
 /// clear message instead of an opaque tokio panic in production; use the async
@@ -6569,7 +6337,7 @@ impl ActorHandle {
 fn debug_assert_sync_context() {
     debug_assert!(
         tokio::runtime::Handle::try_current().is_err(),
-        "synchronous ActorHandle API called from within a tokio runtime; use the async API (write_async/read_async/run_units)"
+        "synchronous ActorHandle API called from within a tokio runtime; use the async API"
     );
 }
 
@@ -8204,31 +7972,8 @@ fn worker_main(
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            Command::Write {
-                write,
-                faults,
-                reply,
-            } => {
-                let outcome = store.commit_compound(&write, faults.as_ref());
-                let _ = reply.send(outcome);
-            }
-            Command::Read { doc_id, reply } => {
-                let _ = reply.send(store.read_document(&doc_id));
-            }
-            Command::Snapshot { reply } => {
-                let _ = reply.send(snapshot(&store));
-            }
             Command::BindShadowClone { token, reply } => {
                 let _ = reply.send(store.bind_shadow_clone_token(&token));
-            }
-            Command::RunUnits {
-                units,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = run_units(&mut store, units, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
             }
             Command::VersionedTextWrite {
                 input,
@@ -8859,7 +8604,6 @@ fn worker_main(
                         &workspace_id,
                         &from_version_id,
                         &to_version_id,
-                        now_ms,
                         faults.as_ref(),
                         |tx| {
                             journal_secret_fork_outbound_in_tx(
@@ -15899,16 +15643,6 @@ fn conflict_open_on_store(
     }
     let outcome = store.write_with(faults, |tx| {
         let inserted = insert_text_conflict_if_absent(tx, conflict)?;
-        if inserted {
-            tx.execute(
-                "INSERT INTO replication_journal (doc_id, op_kind, created_at_ms) \
-                 VALUES (?1, 'conflict.open', ?2)",
-                params![conflict.conflict_id, conflict.created_at_ms],
-            )
-            .map_err(|error| {
-                dohc_engine_domain::DomainError::Storage(StorageError::persist_public(error))
-            })?;
-        }
         Ok::<_, dohc_engine_domain::DomainError>(inserted)
     })?;
     match outcome {
@@ -16011,56 +15745,6 @@ fn map_fold_error(error: dohc_engine_sync::SyncError) -> dohc_engine_domain::Dom
             dohc_engine_storage::StorageError::corrupt_public(other),
         ),
     }
-}
-
-/// Execute a run of bounded units, checking `token` Between units. Each unit is
-/// one compound write (one transaction). Stops early and reports `cancelled` if
-/// the token trips at a boundary; a storage error aborts the run and surfaces.
-fn run_units(
-    store: &mut EngineStore,
-    units: Vec<CompoundWrite>,
-    faults: &dyn FaultInjector,
-    token: &CancellationToken,
-) -> Result<UnitsOutcome, StorageError> {
-    let mut committed = 0usize;
-    for unit in units {
-        // Cancellation point is between units, before the next transaction.
-        if token.is_cancelled() {
-            return Ok(UnitsOutcome {
-                committed,
-                cancelled: true,
-            });
-        }
-        match store.commit_compound(&unit, faults)? {
-            WriteOutcome::Acked { .. } => committed += 1,
-            // A crash fault ends the run at a durable boundary. An
-            // after-commit-before-ack crash already durably committed this
-            // unit, so count it — otherwise `committed` undercounts what the
-            // database actually holds and breaks retry/progress accounting.
-            WriteOutcome::Crashed { committed: durable } => {
-                if durable {
-                    committed += 1;
-                }
-                return Ok(UnitsOutcome {
-                    committed,
-                    cancelled: token.is_cancelled(),
-                });
-            }
-        }
-    }
-    Ok(UnitsOutcome {
-        committed,
-        cancelled: false,
-    })
-}
-
-fn snapshot(store: &EngineStore) -> Result<StoreSnapshot, StorageError> {
-    Ok(StoreSnapshot {
-        documents: store.document_count()?,
-        journal_entries: store.journal_len()?,
-        request_ledger: store.request_ledger_len()?,
-        migration_ledger: store.migration_ledger_len()?,
-    })
 }
 
 #[cfg(test)]

@@ -483,57 +483,6 @@ describe("single-use authenticated link handoff", () => {
     expect(codeCount(database)).toBe(2);
   });
 
-  it("reopens the normalized handoff schema without losing a live code", async () => {
-    const state = await setup();
-    const minted = await mint(state);
-    const codeHash = hashLinkHandoffCode(String(minted.code));
-
-    const storageIndex = storages.indexOf(state.storage);
-    expect(storageIndex).toBeGreaterThanOrEqual(0);
-    storages.splice(storageIndex, 1);
-    state.storage.close();
-
-    const reopened = openSyncRelayStorage(state.dbPath);
-    storages.push(reopened);
-    const database = inspect(state.dbPath, true);
-    expect(
-      database
-        .prepare("PRAGMA table_info(sync_relay_link_handoff_codes)")
-        .all()
-        .map((column) => String(column.name)),
-    ).toContain("result_grant_id");
-    expect(
-      database
-        .prepare(
-          `SELECT name FROM sqlite_schema
-           WHERE type = 'index'
-             AND name = 'idx_sync_relay_link_handoff_codes_result_grant'`,
-        )
-        .get(),
-    ).toEqual({ name: "idx_sync_relay_link_handoff_codes_result_grant" });
-
-    const first = reopened.redeemLinkHandoffCode({
-      codeHash,
-      principalUserId: RECIPIENT,
-      redeemedAtMs: state.now.value,
-      mintGrantId: () => "reopened-dependent-grant",
-      guard: () => true,
-    });
-    expect(first).toMatchObject({ ok: true, grant: { access: "view" } });
-    const retry = reopened.redeemLinkHandoffCode({
-      codeHash,
-      principalUserId: RECIPIENT,
-      redeemedAtMs: state.now.value,
-      mintGrantId: () => {
-        throw new Error("receipt retry minted a second grant");
-      },
-      guard: () => {
-        throw new Error("receipt retry re-authorized the bearer code");
-      },
-    });
-    expect(retry).toEqual(first);
-  });
-
   it("revalidates the exact capability and generation inside the mint transaction", async () => {
     const base = await setup();
     const database = inspect(base.dbPath);

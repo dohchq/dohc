@@ -29,8 +29,9 @@ dohc-engine-files = { path = "../dohc-engine-files", features = ["fault-injectio
 rusqlite = { version = "0.40", features = ["bundled"] }
 
 [dev-dependencies]
-# Drives the async actor-loop traces (cancellation + deadline). The synchronous
-# CAL-1 traces need no runtime; these exercise the tokio command path.
+# The durability traces write through the versioning domain.
+dohc-engine-domain = { path = "../dohc-engine-domain" }
+# Drives the actor traces through the tokio command path.
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros"] }
 
 # Inherit the workspace Rust policy lints (unsafe_code = "forbid", clippy).

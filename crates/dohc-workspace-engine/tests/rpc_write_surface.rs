@@ -4409,22 +4409,6 @@ async fn rollback_request_id_replay_is_a_no_op_and_reuse_mismatch_is_refused() {
     let after_replay = moments(&transport, &handle, 6).await.len();
     // Rollback removes the target moment and appends one compensating moment.
     assert_eq!(after_replay, 2);
-    let mut legacy_flip = params.clone();
-    legacy_flip["legacyBeforeText"] = json!("a different legacy preimage");
-    let legacy_mismatch = transport
-        .call(
-            RequestContext::unbounded(),
-            request(
-                39,
-                "versionedText.rollback",
-                Some(handle.clone()),
-                legacy_flip,
-            ),
-        )
-        .await
-        .expect_err("rollback legacy-preimage mismatch");
-    assert_eq!(legacy_mismatch.message, "idempotency-key-reuse-mismatch");
-
     let mut flipped = params.clone();
     flipped["origin"] = json!("api");
     let origin_flip = transport

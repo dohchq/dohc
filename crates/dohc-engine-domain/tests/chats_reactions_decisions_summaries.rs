@@ -344,7 +344,12 @@ fn reaction_without_verified_relay_author_stays_out_of_replication_log() {
         })
         .expect("reaction operation count");
     assert_eq!(reaction_ops, 0);
-    assert_eq!(store.request_ledger_len().expect("request ledger"), 1);
+    assert_eq!(
+        store
+            .table_row_count("engine_requests")
+            .expect("request ledger"),
+        1
+    );
 
     let mut verified = input;
     verified.replication_author_id = Some("local-user".to_owned());
@@ -404,7 +409,12 @@ fn reaction_rejects_mismatched_relay_author_before_writing() {
         })
         .expect("reaction counts");
     assert_eq!(counts, (0, 0));
-    assert_eq!(store.request_ledger_len().expect("request ledger"), 0);
+    assert_eq!(
+        store
+            .table_row_count("engine_requests")
+            .expect("request ledger"),
+        0
+    );
 }
 
 #[test]

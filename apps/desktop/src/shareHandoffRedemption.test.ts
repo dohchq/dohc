@@ -5,6 +5,7 @@ import {
   type ShareHandoffIntent,
 } from "./shareHandoffIngress";
 
+import { deferred } from "./testing/deferred";
 const CODE_A = "A".repeat(43);
 const CODE_B = `${"b".repeat(42)}_`;
 const RELAY_A = "https://relay-a.example";
@@ -49,14 +50,6 @@ function response(status: number, body: unknown): Response {
     status,
     headers: { "content-type": "application/json" },
   });
-}
-
-function deferred<ResponseValue>() {
-  let resolve!: (value: ResponseValue) => void;
-  const promise = new Promise<ResponseValue>((accept) => {
-    resolve = accept;
-  });
-  return { promise, resolve };
 }
 
 async function harness(options?: {

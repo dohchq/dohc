@@ -253,12 +253,7 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
         .expect("project successor");
     assert_eq!(projection.content, "local truth");
 
-    let (local_ops, inactive, pending, dead_resolve): (
-        Vec<(i64, String, serde_json::Value)>,
-        i64,
-        i64,
-        i64,
-    ) = store
+    let (local_ops, inactive, pending): (Vec<(i64, String, serde_json::Value)>, i64, i64) = store
         .read_with(|conn| {
             let local_ops = conn
                 .prepare(
@@ -296,21 +291,11 @@ async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_r
                     [WS],
                     |row| row.get(0),
                 )?,
-                conn.query_row(
-                    "SELECT COUNT(*) FROM replication_journal \
-                     WHERE doc_id=?1 AND op_kind='conflict.resolve'",
-                    [&conflict_id],
-                    |row| row.get(0),
-                )?,
             ))
         })
         .expect("inspect compound resolution");
     assert_eq!(inactive, 1, "the predecessor remains addressable");
     assert_eq!(pending, 0, "a positioned bundle drains in its transaction");
-    assert_eq!(
-        dead_resolve, 0,
-        "the old payload-free journal is not transport"
-    );
     assert_eq!(local_ops.len(), 1);
     assert_eq!(local_ops[0].0, 1);
     assert_eq!(local_ops[0].1, "conflict.resolve");
@@ -756,10 +741,6 @@ async fn an_absent_path_resolution_uses_the_derived_live_lease() {
                         [WS],
                         |row| row.get::<_, i64>(0),
                     )
-                    .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
-                    conn.query_row("SELECT COUNT(*) FROM replication_journal", [], |row| {
-                        row.get::<_, i64>(0)
-                    })
                     .map_err(dohc_engine_storage::StorageError::corrupt_public)?,
                 ))
             })

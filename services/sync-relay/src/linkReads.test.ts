@@ -1180,39 +1180,10 @@ describe("relay capability reads", () => {
     const forward = await json(
       await h(linkRequest(link.capability, "/sync/link/current")),
     );
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const replayed = await json(
-      await handler(reopened)(linkRequest(link.capability, "/sync/link/current")),
-    );
-    const expectedFiles = [
-      {
-        path: "docs/first.md",
-        blobSha256: firstSnapshotSha,
-        contentKind: "text",
-      },
-      {
-        path: "docs/pending.md",
-        blobSha256: localWriteSha,
-        contentKind: "text",
-      },
-    ];
-
-    expect({ forward: forward.files, replayed: replayed.files }).toEqual({
-      forward: expectedFiles,
-      replayed: expectedFiles,
-    });
+    expect(forward.files).toEqual([
+      { path: "docs/first.md", blobSha256: firstSnapshotSha, contentKind: "text" },
+      { path: "docs/pending.md", blobSha256: localWriteSha, contentKind: "text" },
+    ]);
   });
 
   it("refuses contradictory path aliases from current state and startup replay", async () => {
@@ -1301,21 +1272,6 @@ describe("relay capability reads", () => {
 
     await expectConsistentDenial(h);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    await expectConsistentDenial(handler(reopened));
   });
 
   it.each(["path", "beforePath"] as const)(
@@ -1395,37 +1351,6 @@ describe("relay capability reads", () => {
       expect(sharedBlob.status).toBe(200);
       expect(await sharedBlob.text()).toBe("# shared\n");
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      const reopenedHandler = handler(reopened);
-      const restartedCurrent = await json(
-        await reopenedHandler(linkRequest(seeded.capability, "/sync/link/current")),
-      );
-      expect(restartedCurrent.files).toEqual(expectedFiles);
-      expect(
-        await denialBytes(
-          await reopenedHandler(
-            linkRequest(seeded.capability, `/sync/link/blobs/${forgedSha}`),
-          ),
-        ),
-      ).toBe(`404:${LINK_REFUSAL_BODY}`);
-      const restartedSharedBlob = await reopenedHandler(
-        linkRequest(seeded.capability, `/sync/link/blobs/${seeded.sharedSha}`),
-      );
-      expect(restartedSharedBlob.status).toBe(200);
-      expect(await restartedSharedBlob.text()).toBe("# shared\n");
     },
   );
 
@@ -1504,21 +1429,6 @@ describe("relay capability reads", () => {
 
     await assertReadAgreement(h, forwardFiles);
 
-    const dbPath = storagePaths.get(storage);
-    if (!dbPath) throw new Error("missing inspection path");
-    storage.close();
-    storages.splice(storages.indexOf(storage), 1);
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    await assertReadAgreement(handler(reopened));
   });
 
   it.each([
@@ -1754,21 +1664,6 @@ describe("relay capability reads", () => {
 
       await assertNoInventedFile(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      await assertNoInventedFile(handler(reopened));
     },
   );
 
@@ -1873,21 +1768,6 @@ describe("relay capability reads", () => {
       expect(JSON.stringify(delta)).not.toContain(noncanonicalPath);
       await assertReadAgreement(h);
 
-      const dbPath = storagePaths.get(storage);
-      if (!dbPath) throw new Error("missing inspection path");
-      storage.close();
-      storages.splice(storages.indexOf(storage), 1);
-      const legacy = new InspectionDatabaseSync(dbPath);
-      legacy.exec("DROP TABLE sync_relay_current_files");
-      legacy.prepare(
-        "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-      ).run("current-files-seed-v1");
-      legacy.close();
-
-      const reopened = openSyncRelayStorage(dbPath);
-      storages.push(reopened);
-      storagePaths.set(reopened, dbPath);
-      await assertReadAgreement(handler(reopened));
     },
   );
 
@@ -2064,158 +1944,6 @@ describe("relay capability reads", () => {
       expect(narrowOnRead).toBe(false);
     },
   );
-
-  it("streams the accepted current fold once when reopening a pre-table database", async () => {
-    const originalStorage = await newStorage();
-    const originalHandler = handler(originalStorage);
-    const seeded = await seed(originalHandler);
-    const acceptedContent = "accepted before migration\n";
-    const staleContent = "stale before migration\n";
-    const acceptedSha = await putBlob(originalHandler, acceptedContent);
-    await putBlob(originalHandler, staleContent);
-    await appendMoments(originalHandler, [
-      moment(3, "docs/shared.md", acceptedContent, 1_300, {
-        objectId: "object-shared",
-        beforePath: "docs/shared.md",
-        beforeContent: "# shared\n",
-      }),
-      moment(4, "docs/shared.md", staleContent, 1_400, {
-        objectId: "object-shared",
-        beforePath: "docs/shared.md",
-        beforeContent: "# shared\n",
-      }),
-    ]);
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
-
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const databasePrototype = InspectionDatabaseSync.prototype as InspectionDatabase;
-    const nativePrepare = databasePrototype.prepare;
-    const migrationAll = vi.fn(() => {
-      throw new Error("current-files migration materialized its full result set");
-    });
-    let migrationStatement: ReturnType<InspectionDatabase["prepare"]> | undefined;
-    const migrationIterate = vi.fn((...params: unknown[]) => {
-      if (!migrationStatement) throw new Error("migration iterator has no statement");
-      return migrationStatement.iterate(...params);
-    });
-    const prepareSpy = vi
-      .spyOn(databasePrototype, "prepare")
-      .mockImplementation(function (this: InspectionDatabase, sql: string) {
-        const statement = nativePrepare.call(this, sql);
-        if (
-          !sql.includes("FROM sync_relay_log log") ||
-          !sql.includes("ORDER BY log.relay_seq")
-        ) {
-          return statement;
-        }
-        migrationStatement = statement;
-        return new Proxy(statement, {
-          get(target, property) {
-            if (property === "all") return migrationAll;
-            if (property === "iterate") return migrationIterate;
-            const value = Reflect.get(target, property, target) as unknown;
-            return typeof value === "function" ? value.bind(target) : value;
-          },
-        });
-      });
-    let reopened: SyncRelayStorage;
-    try {
-      reopened = openSyncRelayStorage(dbPath);
-    } finally {
-      prepareSpy.mockRestore();
-    }
-    expect(migrationAll).not.toHaveBeenCalled();
-    expect(migrationIterate).toHaveBeenCalledOnce();
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const reopenedHandler = handler(reopened);
-    const firstProjection = await json(
-      await reopenedHandler(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(firstProjection.files).toEqual([{
-      path: "docs/shared.md",
-      blobSha256: acceptedSha,
-      contentKind: "text",
-    }]);
-    reopened.close();
-    storages.splice(storages.indexOf(reopened), 1);
-
-    const openedAgain = openSyncRelayStorage(dbPath);
-    storages.push(openedAgain);
-    storagePaths.set(openedAgain, dbPath);
-    const secondProjection = await json(
-      await handler(openedAgain)(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(secondProjection.files).toEqual(firstProjection.files);
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      expect(inspection.prepare(
-        `SELECT migration_id FROM sync_relay_migrations
-         WHERE migration_id = 'current-files-seed-v1'`,
-      ).all()).toHaveLength(1);
-    } finally {
-      inspection.close();
-    }
-  });
-
-  it("backfills only rows above a preexisting epoch floor", async () => {
-    const originalStorage = await newStorage();
-    const originalHandler = handler(originalStorage);
-    const seeded = await seedThenRotate(originalHandler);
-    const recreatedContent = "recreated before migration\n";
-    const recreatedSha = await putBlob(originalHandler, recreatedContent);
-    await appendMoments(
-      originalHandler,
-      [
-        moment(0, "docs/shared.md", recreatedContent, 1_300, {
-          objectId: "object-recreated-before-migration",
-        }),
-      ],
-      {
-        originId: "origin-b",
-        identity: { replicationEpoch: EPOCH_2, streamIdentity: STREAM_2 },
-      },
-    );
-    const dbPath = storagePaths.get(originalStorage);
-    if (!dbPath) throw new Error("missing inspection path");
-    originalStorage.close();
-    storages.splice(storages.indexOf(originalStorage), 1);
-
-    const legacy = new InspectionDatabaseSync(dbPath);
-    legacy.exec("DROP TABLE sync_relay_current_files");
-    legacy.prepare(
-      "DELETE FROM sync_relay_migrations WHERE migration_id = ?",
-    ).run("current-files-seed-v1");
-    legacy.close();
-
-    const reopened = openSyncRelayStorage(dbPath);
-    storages.push(reopened);
-    storagePaths.set(reopened, dbPath);
-    const projection = await json(
-      await handler(reopened)(
-        linkRequest(seeded.capability, "/sync/link/current"),
-      ),
-    );
-    expect(projection.files).toEqual([{
-      path: "docs/shared.md",
-      blobSha256: recreatedSha,
-      contentKind: "text",
-    }]);
-    expect(JSON.stringify(projection)).not.toContain(seeded.sharedSha);
-  });
 
   it("does not update durable link usage on metadata, log, or blob reads", async () => {
     const storage = await newStorage();

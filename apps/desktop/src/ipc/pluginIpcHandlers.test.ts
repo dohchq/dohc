@@ -4,6 +4,7 @@ import { registerPluginIpcHandlers } from "./pluginIpcHandlers";
 import type { PluginPipeline } from "../plugins/PluginPipeline";
 import type { RegisteredPlugin } from "../plugins/pluginPanelRegistration";
 
+import { deferred } from "../testing/deferred";
 const directOperations = vi.hoisted(() => ({
   addOffer: vi.fn(),
   listOffers: vi.fn(),
@@ -196,14 +197,6 @@ const validPayloads: Record<string, unknown> = {
     confirmationToken: "00000000-0000-4000-8000-000000000000",
   },
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 function createHarness(options: { afterWorkspaceWork?: () => void } = {}) {
   const log: string[] = [];

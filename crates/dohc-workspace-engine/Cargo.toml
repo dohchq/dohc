@@ -27,7 +27,6 @@ fs4 = "1.1.0"
 getrandom = "0.4"
 sha2 = "0.11"
 file-id = "0.2"
-filetime = { version = "0.2", optional = true }
 tokio = { version = "1", features = [
   "io-std",
   "io-util",
@@ -43,9 +42,9 @@ tokio-util = "0.7"
 libc = "0.2"
 
 [features]
-# Compiles the harness-only marker writers (e.g.
-# `write_rehearsal_token_for_harness`); production builds must not enable it.
-harness = ["dep:filetime"]
+# Compiles the test-only probe and marker hooks (`CaptureApplyProbe`,
+# `*_for_harness`); production builds must not enable it.
+harness = []
 
 [dev-dependencies]
 # `test-util` gives the driver-loop tests paused virtual time, so they can
@@ -54,13 +53,9 @@ harness = ["dep:filetime"]
 tokio = { version = "1", features = ["test-util"] }
 dohc-engine-testkit = { path = "../dohc-engine-testkit" }
 proptest = "1"
-# Self-dependency so integration tests (tests/shadow_replay.rs) compile the
-# library with the harness-only marker writers; production builds never do.
+# Self-dependency so integration tests compile the library with the
+# harness-only hooks; production builds never do.
 dohc-workspace-engine = { path = ".", features = ["harness"] }
 
 [lints]
 workspace = true
-
-[[bin]]
-name = "dohc-rehearsal-harness"
-required-features = ["harness"]

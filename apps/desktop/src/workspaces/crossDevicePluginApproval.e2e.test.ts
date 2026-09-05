@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { stop as stopEsbuild } from "esbuild";
-import { afterAll, beforeAll, expect, it } from "vitest";
+import { afterAll, beforeAll, expect, it, vi } from "vitest";
 import { openLiveDaemonWorkspace } from "../../e2e/helpers/daemonSeed";
 import { spawnSyncRelay } from "../../e2e/helpers/syncRelay";
 import { PluginHost, type PluginHostOptions } from "../plugins/PluginHost";
@@ -350,11 +350,12 @@ async function waitFor(
   message: () => string,
   timeoutMs = 60_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(message());
-    await new Promise<void>((resolve) => setTimeout(resolve, 20));
-  }
+  await vi.waitFor(
+    () => {
+      if (!condition()) throw new Error(message());
+    },
+    { timeout: timeoutMs, interval: 20 },
+  );
 }
 
 function statusOf(device: Device): string | undefined {

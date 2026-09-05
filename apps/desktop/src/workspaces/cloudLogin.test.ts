@@ -7,6 +7,7 @@ import {
   type CloudLoginStore,
   type InvalidSessionMarker,
 } from "./cloudLogin";
+import { deferred } from "../testing/deferred";
 
 function memoryStore(): CloudLoginStore & {
   saved: CloudCredentials | null;
@@ -53,14 +54,6 @@ function fakeFetch(routes: Record<string, Route>) {
     });
   }) as typeof fetch;
   return { impl, calls };
-}
-
-function deferred<Value>() {
-  let resolve!: (value: Value) => void;
-  const promise = new Promise<Value>((next) => {
-    resolve = next;
-  });
-  return { promise, resolve };
 }
 
 const DEVICE = {

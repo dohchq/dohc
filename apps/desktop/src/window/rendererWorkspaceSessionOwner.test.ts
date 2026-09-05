@@ -4,11 +4,7 @@ import {
   RendererWorkspaceSessionOwner,
   type RendererWorkspaceSession,
 } from "./rendererWorkspaceSessionOwner";
-
-function deferred() {
-  const { promise, resolve, reject } = Promise.withResolvers<void>();
-  return { promise, resolve, reject };
-}
+import { deferred } from "../testing/deferred";
 
 function sender(id: number) {
   let destroyed = false;

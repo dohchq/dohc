@@ -1,10 +1,9 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { databaseOpLogPath } from "@dohc/workspace-core";
 import type { MomentAuthor } from "@dohc/workspace-contracts/engine";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { createTestScratch } from "../workspaces/testTemp";
+import { describe, expect, it, vi } from "vitest";
 import {
   localWorkspaceSdkDatabaseEditor,
   localWorkspaceSdkReads,
@@ -15,8 +14,7 @@ import {
 } from "./pluginSdkHost";
 import { createPluginPanelSdkAuthorityRegistry } from "./pluginPanelSdkAuthority";
 
-const roots: string[] = [];
-
+import { createTestScratch } from "../workspaces/testTemp";
 interface AuthoredWrite {
   path: string;
   text: string;
@@ -44,12 +42,6 @@ async function seedDatabase(
   }
 }
 
-async function workspaceRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-plugin-sdk-host-");
-  roots.push(root);
-  return root;
-}
-
 function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostContext {
   const controller = new AbortController();
   return {
@@ -72,15 +64,9 @@ function context(root: string, writes: AuthoredWrite[] = []): PluginSdkHostConte
   };
 }
 
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
 describe("invokePluginSdkHost", () => {
   it("reports only the routed plugin capabilities", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
 
     await expect(invokePluginSdkHost(context(root), "capabilities")).resolves.toEqual({
       files: { read: true, list: true, write: true, watch: false },
@@ -97,7 +83,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("reports collections.edit only with the write seam and write authority", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const seam = {
       setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
       createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
@@ -118,7 +104,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("reports databases.edit on workspace authority alone, without an engine capture", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const unavailable = { ...context(root), writeAvailable: async () => false };
 
     await expect(
@@ -130,7 +116,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("reports unavailable engine capture honestly and still refuses direct writes", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const unavailable = {
       ...context(root),
       writeAvailable: async () => false,
@@ -149,7 +135,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("routes file reads, file lists, and workspace searches through the site host", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     await mkdir(join(root, "notes"));
     await writeFile(
       join(root, "notes", "router.txt"),
@@ -173,7 +159,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("forwards the workspace owner's read authority", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     await mkdir(join(root, "notes"));
     await writeFile(join(root, "notes", "recipient-only.txt"), "disk copy\n");
     const hostContext: PluginSdkHostContext = {
@@ -208,7 +194,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("forwards host-derived attribution to authored writes", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const writes: AuthoredWrite[] = [];
     const hostContext = context(root, writes);
 
@@ -243,7 +229,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("rejects a non-boolean overwrite before writing", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const writes: AuthoredWrite[] = [];
 
     await expect(
@@ -259,7 +245,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("accepts overwrite false", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const writes: AuthoredWrite[] = [];
 
     await expect(
@@ -273,7 +259,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("ignores plugin-supplied write attribution", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const writes: AuthoredWrite[] = [];
 
     await invokePluginSdkHost(context(root, writes), "files.write", {
@@ -310,7 +296,7 @@ describe("invokePluginSdkHost", () => {
       "files.write cannot overwrite live documents. Use a dohc document editing capability so locks, history, and collaboration are preserved.",
     ],
   ])("refuses raw writes to %s", async (path, message) => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
 
     const error = await invokePluginSdkHost(context(root), "files.write", {
       path,
@@ -322,7 +308,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("rejects methods outside the plugin capability subset", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
 
     await expect(
       invokePluginSdkHost(context(root), "provenance.record", { summary: "x" }),
@@ -330,7 +316,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("routes collection reads through the main-supplied read port", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const hostContext: PluginSdkHostContext = {
       ...context(root),
       reads: {
@@ -366,7 +352,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("attributes collection writes to the plugin agent, never the request", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const calls: unknown[] = [];
     const hostContext: PluginSdkHostContext = {
       ...context(root),
@@ -433,7 +419,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("attributes an automation run's collection writes to the automation with the claim id plus write ordinal as the key", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const calls: unknown[] = [];
     const tasksCollection = {
       path: "tasks",
@@ -502,7 +488,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("refuses an automation-tagged collection write whose run no longer resolves", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const seam = {
       setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
       createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
@@ -528,7 +514,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("refuses collection writes without write authority or a write seam", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const seam = {
       setRecordFields: vi.fn(async () => ({ path: "tasks/one.md" })),
       createRecord: vi.fn(async () => ({ path: "tasks/two.md", recordId: "rec_2" })),
@@ -552,7 +538,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("reads a database snapshot through the site host", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     await seedDatabase(root, "data/app.sqlite", "start");
 
     await expect(
@@ -565,7 +551,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("records the plugin, not the user, as the author of a database edit", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     await seedDatabase(root, "data/app.sqlite", "start");
 
     await invokePluginSdkHost(context(root), "databases.edit", {
@@ -596,7 +582,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("refuses database edits from a read-only workspace authority", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     await seedDatabase(root, "data/app.sqlite", "start");
     const readOnly = { ...context(root), isWritable: () => false };
 
@@ -625,7 +611,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("validates a ui.open target and serves it only to a panel request path", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const panel: PluginSdkHostContext = {
       ...context(root),
       requestPath: "panel",
@@ -651,7 +637,7 @@ describe("invokePluginSdkHost", () => {
   // The renderer answers ui.theme for a panel before it reaches main, so
   // both paths refuse here — and say why rather than "unsupported method".
   it("refuses ui.theme by name on either request path", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const paths: PluginSdkHostContext[] = [
       context(root),
       { ...context(root), requestPath: "panel" },
@@ -668,7 +654,7 @@ describe("invokePluginSdkHost", () => {
   describe("ui.openWebApp", () => {
     async function panelWithWebApps(): Promise<PluginSdkHostContext> {
       return {
-        ...context(await workspaceRoot()),
+        ...context(await createTestScratch("dohc-plugin-sdk-host-")),
         requestPath: "panel",
         declaredWebApps: [
           { id: "preview", instanced: true },
@@ -690,7 +676,7 @@ describe("invokePluginSdkHost", () => {
     });
 
     it("refuses the request path with no renderer behind it", async () => {
-      const root = await workspaceRoot();
+      const root = await createTestScratch("dohc-plugin-sdk-host-");
       await expect(
         invokePluginSdkHost(
           {
@@ -773,7 +759,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("refuses writes from a read-only or stopped panel authority", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const readOnly = { ...context(root), isWritable: () => false };
     await expect(
       invokePluginSdkHost(readOnly, "files.write", {
@@ -797,7 +783,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("rechecks writability for a still-live host context", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     let writable = true;
     const registry = createPluginPanelSdkAuthorityRegistry();
     registry.register({
@@ -839,7 +825,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("routes child-process methods through the spawn-scoped broker context", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const hostContext = context(root);
     hostContext.invokeChildProcess = vi.fn(async () => ({ childId: "child-1" }));
 
@@ -856,7 +842,7 @@ describe("invokePluginSdkHost", () => {
   });
 
   it("rejects an in-flight router operation when its spawn signal aborts", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const controller = new AbortController();
     const hostContext = context(root);
     hostContext.signal = controller.signal;
@@ -883,7 +869,7 @@ describe("invokePluginSdkHost", () => {
     // engine capture names the specific reason ("Plugin panel is no longer
     // active.") a queued write was cancelled, and that message must reach
     // the caller as-is, not be replaced by a generic one.
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const controller = new AbortController();
     const started = Promise.withResolvers<void>();
     const hostContext = context(root);
@@ -914,7 +900,7 @@ describe("invokePluginSdkHost", () => {
     // Panel-driven SDK calls never supply invokeChildProcess — only a
     // plugin's own routeSdkRequest path may broker child processes on its
     // behalf.
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-plugin-sdk-host-");
     const panelContext: PluginSdkHostContext = {
       ...context(root),
       requestPath: "panel",

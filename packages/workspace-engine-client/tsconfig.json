@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "incremental": false,
-    "lib": ["DOM", "DOM.Iterable", "ES2022", "ES2024.String"],
+    "lib": ["DOM", "DOM.Iterable", "ES2022", "ES2024.String", "ES2024.Promise"],
     "types": ["node"]
   },
   "include": ["src/**/*.ts"]

@@ -13,16 +13,7 @@ import {
   type PluginHostStartResult,
   type PluginHostSurfaceLease,
 } from "./pluginHostOwnership";
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from "../testing/deferred";
 
 class FakePluginHost implements OwnedPluginHost {
   readonly records = new Map<string, PluginHostRecordToken>();

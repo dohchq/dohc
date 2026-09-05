@@ -5,10 +5,7 @@ import {
   type RendererWorkspaceSession,
 } from "./window/rendererWorkspaceSessionOwner";
 
-function deferred() {
-  return Promise.withResolvers<void>();
-}
-
+import { deferred } from "./testing/deferred";
 const sender = {
   id: 17,
   isDestroyed: () => false,

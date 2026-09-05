@@ -1899,7 +1899,8 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         FOREIGN KEY (proposal_id)
           REFERENCES sync_relay_share_proposals(proposal_id) ON DELETE CASCADE
       ) STRICT;
-
+    `);
+    db.exec(`
       CREATE TABLE IF NOT EXISTS sync_relay_migrations (
         migration_id TEXT PRIMARY KEY,
         completed_at_ms INTEGER NOT NULL
@@ -1907,84 +1908,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     `);
     initializeSessionHostControlSchema(db);
     initializeLiveDocumentAuthoritySchema(db);
-    const shareColumns = db
-      .prepare("PRAGMA table_info(sync_relay_shares)")
-      .all()
-      .map((row) => String(row.name));
-    const sessionColumns = db
-      .prepare("PRAGMA table_info(sync_relay_link_sessions)")
-      .all()
-      .map((row) => String(row.name));
-    const principalColumns = db
-      .prepare("PRAGMA table_info(sync_relay_link_principals)")
-      .all()
-      .map((row) => String(row.name));
-    const grantSchema = db
-      .prepare(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_grants'",
-      )
-      .get();
-    const principalSchema = db
-      .prepare(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_link_principals'",
-      )
-      .get();
-    const discussionSchema = db
-      .prepare(
-        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_share_discussion_messages'",
-      )
-      .get();
-    const principalSchemaSql = String(principalSchema?.sql ?? "");
-    const discussionSchemaSql = String(discussionSchema?.sql ?? "");
-    let normalizedShareSchemaReplaced = false;
-    if (
-      shareColumns.includes("recipient_user_id") ||
-      !String(grantSchema?.sql ?? "").includes("'link'") ||
-      !shareColumns.includes("link_writes_paused_at_ms") ||
-      !shareColumns.includes("discussion_revision") ||
-      !sessionColumns.includes("principal_id") ||
-      !principalColumns.includes("storage_bytes") ||
-      !principalColumns.includes("discussion_revision") ||
-      !principalSchemaSql.includes(
-        `length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      ) ||
-      !principalSchemaSql.includes(
-        `length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
-      ) ||
-      !discussionSchemaSql.includes("discussion_revision") ||
-      !discussionSchemaSql.includes("author_kind IN ('owner', 'named', 'link')") ||
-      !discussionSchemaSql.includes(
-        `length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}`,
-      ) ||
-      !discussionSchemaSql.includes(
-        `length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}`,
-      ) ||
-      !discussionSchemaSql.includes(
-        `length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}`,
-      ) ||
-      !discussionSchemaSql.includes(
-        `length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}`,
-      ) ||
-      !discussionSchemaSql.includes(
-        "instr(body, char(0)) = 0",
-      )
-    ) {
-      normalizedShareSchemaReplaced = true;
-      // Pre-launch replacement. Discussion authority is one normalized model:
-      // the share pause, grant, protected principal, session binding, and
-      // message provenance must never exist in mixed schema generations.
-      db.exec(`
-        DROP TABLE IF EXISTS sync_relay_share_discussion_messages;
-        DROP TABLE IF EXISTS sync_relay_link_handoff_codes;
-        DROP TABLE IF EXISTS sync_relay_link_sessions;
-        DROP TABLE IF EXISTS sync_relay_link_principals;
-        DROP TABLE IF EXISTS sync_relay_link_usage;
-        DROP TABLE IF EXISTS sync_relay_link_credentials;
-        DROP TABLE IF EXISTS sync_relay_share_grants;
-        DROP TABLE IF EXISTS sync_relay_shares;
-        ${NORMALIZED_SHARE_SCHEMA_SQL}
-      `);
-    }
     db.exec(`
       CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
         ON sync_relay_link_handoff_codes(result_grant_id)
@@ -2164,109 +2087,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
         );
       END;
     `);
-    const workspaceUsageMigrationId = "workspace-usage-backfill-v1";
-    const workspaceUsageBackfilled = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(workspaceUsageMigrationId);
-    if (
-      normalizedShareSchemaReplaced ||
-      Number(workspaceUsageBackfilled?.complete ?? 0) === 0
-    ) {
-      db.exec(`
-        DELETE FROM sync_relay_workspace_usage;
-        WITH usage_rows(workspace_id, bytes) AS (
-          SELECT workspace_id, byte_length FROM sync_relay_blobs
-          UNION ALL
-          SELECT workspace_id, length(CAST(payload_json AS BLOB)) FROM sync_relay_log
-          UNION ALL
-          SELECT workspace_id, length(CAST(envelope_json AS BLOB))
-          FROM sync_relay_key_envelopes
-          UNION ALL
-          SELECT workspace_id, length(CAST(envelope_json AS BLOB))
-          FROM sync_relay_key_envelope_history
-          UNION ALL
-          SELECT workspace_id,
-                 length(CAST(replication_epoch AS BLOB)) +
-                 length(CAST(stream_identity AS BLOB))
-          FROM sync_relay_epoch_supersessions
-          UNION ALL
-          SELECT share.workspace_id, message.storage_bytes
-          FROM sync_relay_share_discussion_messages AS message
-          JOIN sync_relay_shares AS share ON share.share_id = message.share_id
-          UNION ALL
-          SELECT share.workspace_id, principal.storage_bytes
-          FROM sync_relay_link_principals AS principal
-          JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
-          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-        )
-        INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
-        SELECT workspace.workspace_id, COALESCE(SUM(usage_rows.bytes), 0)
-        FROM sync_relay_workspaces AS workspace
-        LEFT JOIN usage_rows ON usage_rows.workspace_id = workspace.workspace_id
-        GROUP BY workspace.workspace_id;
-      `);
-      db.prepare(
-        `INSERT INTO sync_relay_migrations (migration_id, completed_at_ms)
-         VALUES (?, ?)
-         ON CONFLICT(migration_id) DO NOTHING`,
-      ).run(workspaceUsageMigrationId, Date.now());
-    }
-    // Lazy additive migration (0P sync-hardening item 4): dbs created before the
-    // blob retention window gain created_at_ms on open. Existing rows default to
-    // 0, so a legacy unreferenced blob is immediately past any grace window and
-    // still collectible — the new protection only applies to blobs uploaded
-    // with a real timestamp going forward.
-    const blobColumns = db
-      .prepare("PRAGMA table_info(sync_relay_blobs)")
-      .all()
-      .map((row) => String(row.name));
-    if (!blobColumns.includes("created_at_ms")) {
-      db.exec(
-        "ALTER TABLE sync_relay_blobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0",
-      );
-    }
-    // R10b lazy additive migration: existing relay databases predate sync
-    // identity. Both columns stay nullable so legacy workspaces remain unset
-    // until the first identity-bearing request claims them.
-    const workspaceColumns = db
-      .prepare("PRAGMA table_info(sync_relay_workspaces)")
-      .all()
-      .map((row) => String(row.name));
-    if (!workspaceColumns.includes("replication_epoch")) {
-      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN replication_epoch TEXT");
-    }
-    if (!workspaceColumns.includes("stream_identity")) {
-      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN stream_identity TEXT");
-    }
-    if (!workspaceColumns.includes("epoch_log_floor")) {
-      db.exec("ALTER TABLE sync_relay_workspaces ADD COLUMN epoch_log_floor INTEGER");
-    }
-    const timestampMigrationId = "recorded-at-safe-integer-v1";
-    const timestampValidated = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(timestampMigrationId);
-    if (Number(timestampValidated?.complete ?? 0) === 0) {
-      const invalidTimestamp = db
-        .prepare(
-          `SELECT EXISTS(
-             SELECT 1 FROM sync_relay_log
-             WHERE recorded_at_ms != CAST(recorded_at_ms AS INTEGER)
-                OR recorded_at_ms < -9007199254740991
-                OR recorded_at_ms > 9007199254740991
-           ) AS invalid`,
-        )
-        .get();
-      if (Number(invalidTimestamp?.invalid ?? 0) !== 0) {
-        throw new Error("sync relay log contains a timestamp outside the integer wire contract");
-      }
-      db.prepare(
-        "INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)",
-      ).run(timestampMigrationId, Date.now());
-    }
     db.exec("COMMIT");
   } catch (error) {
     try {
@@ -2274,14 +2094,6 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
     } catch {}
     throw error;
   }
-  // After the schema transaction commits, each in its own transaction. The
-  // seeds scan existing log rows, and holding the schema-init write lock for
-  // those scans stalls every other opener against SYNC_RELAY_BUSY_TIMEOUT_MS
-  // on the first open after a deploy. Each transaction is still atomic: a
-  // crash part-way leaves its migration unrecorded and the next open redoes it.
-  seedObjectPaths(db);
-  seedVersionSnapshotBlobs(db);
-  seedCurrentFiles(db);
 }
 
 // Where a `moment.append` payload says its object is after the op: the
@@ -2387,120 +2199,6 @@ const VERSION_SNAPSHOT_BLOB_INSERT_SQL = `
     workspace_id, relay_seq, version_id, blob_sha256
   ) VALUES (?, ?, ?, ?)
   ON CONFLICT(workspace_id, relay_seq, blob_sha256) DO NOTHING`;
-
-// #646 PR2 one-time seed. `sync_relay_object_paths` is maintained at insert
-// time, so without this every moment.append already in the log would resolve
-// to "the relay has never seen this object" — and the share filter would deny
-// chat on every file shared before this deployment, forever. The scan reads
-// the log in relay order and lets the last moment for each object win, which
-// is the same rule the insert-time upsert applies.
-function seedObjectPaths(db: SqliteDb): void {
-  const migrationId = "object-paths-seed-v1";
-  const seeded = db
-    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
-    .get(migrationId);
-  if (Number(seeded?.complete ?? 0) !== 0) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    // Re-read under the write lock: two processes can open the same database
-    // at once, both see the marker absent, and only one may do the work.
-    const claimed = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(migrationId);
-    if (Number(claimed?.complete ?? 0) !== 0) {
-      db.exec("COMMIT");
-      return;
-    }
-    const upsert = db.prepare(OBJECT_PATH_UPSERT_SQL);
-    const rows = db
-      .prepare(
-        `SELECT workspace_id, payload_json, relay_seq FROM sync_relay_log
-         WHERE op_kind = 'moment.append'
-         ORDER BY relay_seq`,
-      )
-      .all();
-    for (const row of rows) {
-      const resolved = objectPathFromMomentPayload(String(row.payload_json));
-      if (!resolved) continue;
-      upsert.run(
-        String(row.workspace_id),
-        resolved.objectId,
-        resolved.path,
-        Number(row.relay_seq),
-      );
-    }
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
-      migrationId,
-      Date.now(),
-    );
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
-
-function seedVersionSnapshotBlobs(db: SqliteDb): void {
-  const migrationId = "version-snapshot-blobs-seed-v1";
-  const seeded = db
-    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
-    .get(migrationId);
-  if (Number(seeded?.complete ?? 0) !== 0) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const claimed = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(migrationId);
-    if (Number(claimed?.complete ?? 0) !== 0) {
-      db.exec("COMMIT");
-      return;
-    }
-    const insert = db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
-    const rows = db
-      .prepare(
-        `SELECT log.workspace_id, log.payload_json, log.recorded_at_ms, log.relay_seq
-         FROM sync_relay_log log
-         WHERE log.op_kind = 'version.create'
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_version_snapshot_blobs candidate
-             WHERE candidate.workspace_id = log.workspace_id
-               AND candidate.relay_seq = log.relay_seq
-           )
-         ORDER BY log.relay_seq`,
-      )
-      .all();
-    for (const row of rows) {
-      const workspaceId = String(row.workspace_id);
-      const payloadJson = String(row.payload_json);
-      const versionId = versionIdFromVersionCreatePayload(payloadJson);
-      if (!versionId) continue;
-      const shas = referencedBlobShas("version.create", payloadJson, {
-        workspaceId,
-        recordedAtMs: Number(row.recorded_at_ms),
-      });
-      for (const sha256 of new Set(shas)) {
-        insert.run(workspaceId, Number(row.relay_seq), versionId, sha256);
-      }
-    }
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
-      migrationId,
-      Date.now(),
-    );
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
 
 interface CurrentFileStatements {
   get: ReturnType<SqliteDb["prepare"]>;
@@ -2654,57 +2352,6 @@ function applyCurrentFileOp(
     payload.payloadAfterContentKind === "binary" ? "binary" : "text",
     relaySeq,
   );
-}
-
-function seedCurrentFiles(db: SqliteDb): void {
-  const migrationId = "current-files-seed-v1";
-  const seeded = db
-    .prepare("SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete")
-    .get(migrationId);
-  if (Number(seeded?.complete ?? 0) !== 0) return;
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    const claimed = db
-      .prepare(
-        "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id=?) AS complete",
-      )
-      .get(migrationId);
-    if (Number(claimed?.complete ?? 0) !== 0) {
-      db.exec("COMMIT");
-      return;
-    }
-    const statements = currentFileStatements(db);
-    const rows = db
-      .prepare(
-        `SELECT log.workspace_id, log.op_kind, log.payload_json, log.relay_seq
-         FROM sync_relay_log log
-         JOIN sync_relay_workspaces workspace
-           ON workspace.workspace_id = log.workspace_id
-         WHERE log.op_kind IN ('version.create', 'moment.append')
-           AND log.relay_seq > COALESCE(workspace.epoch_log_floor, 0)
-         ORDER BY log.relay_seq`,
-      )
-      .iterate();
-    for (const row of rows) {
-      applyCurrentFileOp(
-        statements,
-        String(row.workspace_id),
-        String(row.op_kind),
-        String(row.payload_json),
-        Number(row.relay_seq),
-      );
-    }
-    db.prepare("INSERT INTO sync_relay_migrations (migration_id,completed_at_ms) VALUES (?,?)").run(
-      migrationId,
-      Date.now(),
-    );
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
 }
 
 function currentFileSelectorClause(selectorPaths: readonly string[]): {
