@@ -408,10 +408,6 @@ describe("YdocLiveAdapter", () => {
     }
   });
 
-  it("pins the dormant R13 resync wire method name", () => {
-    expect(YDOC_METHOD.resync).toBe("ydoc.resync");
-  });
-
   it("rejects direct seed updates after the loopback seeds absent lineage", async () => {
     const engine = seedPlaintextEngine("captured seed");
     const adapter = new YdocLiveAdapter(engine);

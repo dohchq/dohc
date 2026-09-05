@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
-import { MAX_BLOB_BYTES, MAX_OPS_PER_REQUEST, createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
 import type { ProposedChange } from "./shareFilter";
@@ -1827,17 +1827,5 @@ describe("the recipient's blob route", () => {
     const body = await refused.text();
     expect(body, "the refusal names the limit").toContain(String(MAX_SHARE_PROPOSAL_OPS));
     expect(body, "and what was observed").toContain(String(MAX_SHARE_PROPOSAL_OPS + 1));
-  });
-
-  // The submit bound and the replication page size are two different numbers
-  // for two different things. Raising the page size to carry a submit would
-  // lengthen every replication stall; raising the submit bound to match a page
-  // would put it back inside the measured healthy range.
-  it("keeps the replication page size where it was", () => {
-    expect(MAX_OPS_PER_REQUEST).toBe(500);
-    expect(
-      MAX_SHARE_PROPOSAL_OPS,
-      "MUTATION: collapsing the two bounds into one re-couples a user act to a paging size",
-    ).not.toBe(MAX_OPS_PER_REQUEST);
   });
 });

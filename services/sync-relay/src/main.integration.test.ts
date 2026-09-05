@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { type IncomingMessage, request as httpRequest } from "node:http";
+import { createServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,15 @@ import { LINK_EXCHANGE_BUCKET_CAPACITY } from "./linkSecurity";
 // the test files here spawn a relay child, and the rest keep the tighter default
 // (#372).
 vi.setConfig({ testTimeout: 90_000, hookTimeout: 30_000 });
+
+// Some sandboxes refuse loopback listens with EPERM. Every test below spawns
+// a relay that listens, so decide once here and report the whole suite as
+// skipped instead of skipping inside each test.
+const loopbackListenDenied = await new Promise<boolean>((resolve) => {
+  const server = createServer();
+  server.once("error", (error: NodeJS.ErrnoException) => resolve(error.code === "EPERM"));
+  server.listen(0, "127.0.0.1", () => server.close(() => resolve(false)));
+});
 
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";
@@ -239,19 +249,9 @@ async function spawnRunningRelay(
     });
     child.on("exit", (code) => {
       clearTimeout(timeout);
-      if (/listen EPERM/u.test(stderr)) {
-        reject(new ListenPermissionError(stderr));
-        return;
-      }
       reject(new Error(`sync relay exited before listening: ${code}\nstdout:\n${stdout}\nstderr:\n${stderr}`));
     });
   });
-}
-
-class ListenPermissionError extends Error {
-  constructor(stderr: string) {
-    super(`loopback listen denied by test environment\n${stderr}`);
-  }
 }
 
 function authHeaders(extra?: HeadersInit): Headers {
@@ -354,25 +354,16 @@ async function settleWithin<T>(
   }
 }
 
-describe("sync relay main process", () => {
+describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 
-  it("force-closes a stalled streamed response after the shutdown grace period", { timeout: 15_000 }, async (context) => {
+  it("force-closes a stalled streamed response after the shutdown grace period", { timeout: 15_000 }, async () => {
     const relayRoot = await tempRoot("relay-stalled-shutdown");
-    let relay: RunningRelay;
-    try {
-      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
-          TEST_SHUTDOWN_GRACE_PERIOD_MS,
-        ),
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+        TEST_SHUTDOWN_GRACE_PERIOD_MS,
+      ),
+    });
 
     let streamedResponse: IncomingMessage | undefined;
     const clientRequest = httpRequest(
@@ -415,22 +406,13 @@ describe("sync relay main process", () => {
     }
   });
 
-  it("shuts down promptly when no responses are active", async (context) => {
+  it("shuts down promptly when no responses are active", async () => {
     const relayRoot = await tempRoot("relay-quiet-shutdown");
-    let relay: RunningRelay;
-    try {
-      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-        SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
-          TEST_SHUTDOWN_GRACE_PERIOD_MS,
-        ),
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
+        TEST_SHUTDOWN_GRACE_PERIOD_MS,
+      ),
+    });
     const exited = waitForExit(relay.child);
 
     sendTerminationSignal(relay.child);
@@ -444,23 +426,14 @@ describe("sync relay main process", () => {
     });
   });
 
-  it("ignores a second SIGTERM while shutdown is in progress", async (context) => {
+  it("ignores a second SIGTERM while shutdown is in progress", async () => {
     const relayRoot = await tempRoot("relay-double-sigterm");
-    let relay: RunningRelay;
-    try {
-      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-        SYNC_RELAY_TEST_AUTH: "0",
-        SYNC_RELAY_BIND: "127.0.0.1",
-        BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
-        POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+      SYNC_RELAY_TEST_AUTH: "0",
+      SYNC_RELAY_BIND: "127.0.0.1",
+      BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
+      POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+    });
     const exited = waitForExit(relay.child);
 
     sendDoubleTerminationSignal(relay.child);
@@ -474,21 +447,12 @@ describe("sync relay main process", () => {
     });
   });
 
-  it("survives a response error during a pipe and cancels the source stream", async (context) => {
+  it("survives a response error during a pipe and cancels the source stream", async () => {
     const relayRoot = await tempRoot("relay-response-error");
-    let relay: RunningRelay;
-    try {
-      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-        SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE: "1",
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+      SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE: "1",
+    });
 
     const requestSettled = new Promise<void>((resolve) => {
       const request = httpRequest(
@@ -514,20 +478,11 @@ describe("sync relay main process", () => {
     expect((await fetch(`${relay.baseUrl}/health`)).status).toBe(200);
   });
 
-  it("streams response headers and first body chunk before completion", async (context) => {
+  it("streams response headers and first body chunk before completion", async () => {
     const relayRoot = await tempRoot("relay-streamed-response");
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
-        SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
+    });
 
     const chunks: Buffer[] = [];
     let responseEnded = false;
@@ -597,18 +552,9 @@ describe("sync relay main process", () => {
   // user's chat authorship. The relay derives the pusher's identity from the
   // bearer session and rejects any chat op claiming a different author, atomically
   // — the log stays empty. The honest self-authored push is admitted.
-  it("rejects forged chat authorship over real HTTP and admits the honest author", async (context) => {
+  it("rejects forged chat authorship over real HTTP and admits the honest author", async () => {
     const relayRoot = await tempRoot("relay-authorship");
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
 
     const alice = "user-alice";
     const mallory = "user-mallory";
@@ -713,18 +659,9 @@ describe("sync relay main process", () => {
   // client streaming an oversized body is cut off mid-upload (413 and/or a
   // destroyed socket) instead of being fully buffered, and the server stays
   // healthy afterwards.
-  it("rejects an oversized streamed body before buffering it and stays healthy", async (context) => {
+  it("rejects an oversized streamed body before buffering it and stays healthy", async () => {
     const relayRoot = await tempRoot("relay-stream-cap");
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"));
     const claim = await postJson(baseUrl, "/sync/workspaces", { workspaceId: WORKSPACE_ID });
     expect(claim.status).toBe(200);
 
@@ -796,21 +733,12 @@ describe("sync relay main process", () => {
     expect(anonymous.status).toBe(401);
   });
 
-  it("caps link exchanges at 4096 bytes before buffering the route body", async (context) => {
+  it("caps link exchanges at 4096 bytes before buffering the route body", async () => {
     const relayRoot = await tempRoot("link-exchange-cap");
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
-        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
-        DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: "integration-relay-exchange-key-at-least-32",
+    });
 
     const workspaceId = "workspace-link-exchange-cap";
     expect((await postJson(baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
@@ -871,22 +799,13 @@ describe("sync relay main process", () => {
     expect(small.status).toBe(200);
   });
 
-  it("keeps keyed forwarded client addresses in separate exchange buckets", async (context) => {
+  it("keeps keyed forwarded client addresses in separate exchange buckets", async () => {
     const relayRoot = await tempRoot("keyed-exchange-buckets");
     const relayExchangeKey = "integration-relay-exchange-key-at-least-32";
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
-        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
-        DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+    });
 
     const secret = await seedExchangeLink(baseUrl, "workspace-keyed-exchange-buckets");
     const firstClientStatuses = await Promise.all(
@@ -925,21 +844,12 @@ describe("sync relay main process", () => {
     });
   });
 
-  it("ignores a forwarded client address when no exchange key is configured", async (context) => {
+  it("ignores a forwarded client address when no exchange key is configured", async () => {
     const relayRoot = await tempRoot("unkeyed-exchange-bucket");
-    let baseUrl: string;
-    try {
-      baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
-        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
-        DOHC_RELAY_EXCHANGE_KEY: undefined,
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_EXCHANGE_KEY: undefined,
+    });
 
     const secret = await seedExchangeLink(baseUrl, "workspace-unkeyed-exchange-bucket");
     const firstClientStatuses = await Promise.all(
@@ -965,21 +875,12 @@ describe("sync relay main process", () => {
     });
   });
 
-  it("emits a canonical public URL without writing its bearer to process output", async (context) => {
+  it("emits a canonical public URL without writing its bearer to process output", async () => {
     const relayRoot = await tempRoot("share-web-origin-url");
-    let relay: RunningRelay;
-    try {
-      relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-        DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
-        DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123/",
-      });
-    } catch (error) {
-      if (error instanceof ListenPermissionError) {
-        context.skip();
-        return;
-      }
-      throw error;
-    }
+    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
+      DOHC_RELAY_LINK_KEY: "integration-link-key-with-at-least-thirty-two-bytes",
+      DOHC_RELAY_SHARE_WEB_ORIGIN: "http://127.0.0.1:48123/",
+    });
 
     const workspaceId = "workspace-canonical-share-url";
     expect((await postJson(relay.baseUrl, "/sync/workspaces", { workspaceId })).status).toBe(200);
@@ -1168,24 +1069,16 @@ describe("sync relay startup guards", () => {
   ] as const)(
     "permits an HTTP %s public origin in %s",
     (label, nodeEnv, origin) => {
-      it("starts", async (context) => {
+      it.skipIf(loopbackListenDenied)("starts", async () => {
         const relayRoot = await tempRoot(
           `loopback-share-web-origin-${nodeEnv}-${label.replaceAll(" ", "-")}`,
         );
-        try {
-          expect(
-            await spawnRelay(join(relayRoot, "relay.sqlite"), {
-              NODE_ENV: nodeEnv,
-              DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
-            }),
-          ).toMatch(/^http:\/\//u);
-        } catch (error) {
-          if (error instanceof ListenPermissionError) {
-            context.skip();
-            return;
-          }
-          throw error;
-        }
+        expect(
+          await spawnRelay(join(relayRoot, "relay.sqlite"), {
+            NODE_ENV: nodeEnv,
+            DOHC_RELAY_SHARE_WEB_ORIGIN: origin,
+          }),
+        ).toMatch(/^http:\/\//u);
       });
     },
   );
@@ -1307,25 +1200,17 @@ describe("sync relay startup guards", () => {
     );
   });
 
-  it("starts in test with a 32-character or unset relay exchange key", async (context) => {
+  it.skipIf(loopbackListenDenied)("starts in test with a 32-character or unset relay exchange key", async () => {
     for (const [label, relayExchangeKey] of [
       ["minimum-relay-exchange-key", "x".repeat(32)],
       ["unset-relay-exchange-key", undefined],
     ] as const) {
       const relayRoot = await tempRoot(label);
-      try {
-        expect(
-          await spawnRelay(join(relayRoot, "relay.sqlite"), {
-            DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
-          }),
-        ).toMatch(/^http:\/\//u);
-      } catch (error) {
-        if (error instanceof ListenPermissionError) {
-          context.skip();
-          return;
-        }
-        throw error;
-      }
+      expect(
+        await spawnRelay(join(relayRoot, "relay.sqlite"), {
+          DOHC_RELAY_EXCHANGE_KEY: relayExchangeKey,
+        }),
+      ).toMatch(/^http:\/\//u);
     }
   });
 });

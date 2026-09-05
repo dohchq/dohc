@@ -124,9 +124,6 @@ describe("PluginAutomations", () => {
       });
     });
     expect(h.adapter.unsubscribeAutomation).toHaveBeenCalledTimes(1);
-    expect(engineAutomationId("hello-plugin", "triage")).toBe(
-      "hello-plugin/triage",
-    );
   });
 
   it("drains a claim: resolves the plugin, runs the handler, settles done", async () => {

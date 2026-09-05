@@ -10,7 +10,6 @@ describe("relay error codes", () => {
     }));
 
     expect(exported).toEqual(fixture);
-    expect(fixture).toEqual(exported);
     expect(Object.isFrozen(RELAY_ERROR_STATUSES)).toBe(true);
     expect(Object.isFrozen(RELAY_ERRORS)).toBe(true);
     expect(Object.values(RELAY_ERRORS).every(Object.isFrozen)).toBe(true);

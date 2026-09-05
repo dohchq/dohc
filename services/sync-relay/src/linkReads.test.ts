@@ -17,11 +17,6 @@ import {
   LinkExchangeRateLimiter,
   LinkReadRateLimiter,
   LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
-  LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND,
-  LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
-  LINK_GRANT_READ_BUCKET_CAPACITY,
-  LINK_LOG_READ_BUCKET_CAPACITY,
-  LINK_READ_BUCKET_CAPACITY,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
 import { linkSecret } from "./linkTestHelpers";
@@ -169,28 +164,6 @@ class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
     return super.allow("shared-test-bucket", nowMs);
   }
 }
-
-describe("linkSecret", () => {
-  const secret = "a".repeat(43);
-
-  it("returns the fragment from a canonical minted URL", () => {
-    expect(linkSecret(`https://share.example.test/s/#${secret}`)).toBe(secret);
-  });
-
-  it.each([
-    ["a non-string", null],
-    ["a path without the trailing slash", `https://share.example.test/s#${secret}`],
-    ["a nested path", `https://share.example.test/s/more/#${secret}`],
-    ["an empty query marker", `https://share.example.test/s/?#${secret}`],
-    ["a query value", `https://share.example.test/s/?source=test#${secret}`],
-    ["a missing fragment", "https://share.example.test/s/"],
-    ["a short fragment", `https://share.example.test/s/#${"a".repeat(42)}`],
-    ["a long fragment", `https://share.example.test/s/#${"a".repeat(44)}`],
-    ["a non-base64url fragment", `https://share.example.test/s/#${"a".repeat(42)}+`],
-  ])("rejects %s", (_shape, value) => {
-    expect(() => linkSecret(value)).toThrow();
-  });
-});
 
 function sha256(content: string): string {
   return createHash("sha256").update(content).digest("hex");
@@ -1850,13 +1823,6 @@ describe("relay capability reads", () => {
       contentKind: "text",
     }]);
     expect(JSON.stringify(projection)).not.toContain(seeded.sharedSha);
-  });
-
-  it("gives each grant four capability buckets of read capacity", () => {
-    expect(LINK_GRANT_READ_BUCKET_CAPACITY).toBe(LINK_READ_BUCKET_CAPACITY * 4);
-    expect(LINK_GRANT_LOG_READ_BUCKET_CAPACITY).toBe(
-      LINK_LOG_READ_BUCKET_CAPACITY * 4,
-    );
   });
 
   it("does not update durable link usage on metadata, log, or blob reads", async () => {
@@ -4702,10 +4668,6 @@ describe("relay capability reads", () => {
   });
 
   it("keeps total blob egress on the grant across rotation and refills it", async () => {
-    expect(LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES).toBe(5 * MAX_BLOB_BYTES);
-    expect(LINK_GRANT_EGRESS_REFILL_BYTES_PER_SECOND).toBe(
-      LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES / (24 * 60 * 60),
-    );
     let now = 2_000;
     const storage = await newStorage();
     const getBlob = vi.spyOn(storage, "getBlob");

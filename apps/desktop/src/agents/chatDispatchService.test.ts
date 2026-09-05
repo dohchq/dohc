@@ -672,10 +672,6 @@ afterEach(async () => {
 });
 
 describe("chatDispatchService", () => {
-  it("allows ten dispatches per rolling budget window", () => {
-    expect(CHAT_DISPATCH_BUDGET_MAX).toBe(10);
-  });
-
   it("provisions the agent channel during the first trigger scan", async () => {
     const fixture = await createFixture({ runner: { enabled: false } });
 

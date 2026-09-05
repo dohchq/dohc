@@ -6,6 +6,7 @@ import { createTestScratch } from "./testTemp";
 import {
   getSitePackage as getKnownSitePackage,
   listSitePackages as listKnownSitePackages,
+  requireExactSiteRoot,
   sharedStaticEntryRelativeToSite,
   shareMountRootForSite,
   type SitePackageInfo,
@@ -4094,6 +4095,34 @@ describe("listSitePackages", () => {
     // reference locally at all — the bogus path is never even considered.
     expect(manifestOf(site)?.assets).not.toContain(
       "base-trim-external/ /evil.example/app.js",
+    );
+  });
+});
+
+describe("requireExactSiteRoot", () => {
+  it("rejects a stale nested root before starting its detected ancestor", async () => {
+    await mkdir(join(root, "ancestor", "stale-child"), { recursive: true });
+    await writeFile(
+      join(root, "ancestor", "package.json"),
+      JSON.stringify({ scripts: { dev: "vite --host 127.0.0.1" } }),
+    );
+
+    const requestedRoot = "ancestor/stale-child";
+    const sites = await listSitePackages(root);
+    const detected = await getSitePackage(root, requestedRoot, sites);
+    expect(detected?.root).toBe("ancestor");
+
+    expect(() => requireExactSiteRoot(detected, requestedRoot)).toThrow(
+      `Not a detected site: ${requestedRoot}`,
+    );
+
+    const exact = await getSitePackage(root, "ancestor", sites);
+    expect(() => requireExactSiteRoot(exact, "ancestor")).not.toThrow();
+  });
+
+  it("uses the requested root in the missing-site error", () => {
+    expect(() => requireExactSiteRoot(null, "gone")).toThrow(
+      "Not a detected site: gone",
     );
   });
 });

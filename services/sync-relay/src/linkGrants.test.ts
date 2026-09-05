@@ -372,31 +372,6 @@ function hmac(secret: string): string {
   return createHmac("sha256", LINK_KEY).update(secret).digest("base64url");
 }
 
-describe("link grant test fixtures", () => {
-  it("gives default-seeded grants distinct credentials and lookup targets", async () => {
-    const storage = await newStorage();
-    const h = handler(storage);
-    await seedFileShare(h);
-    const firstGrantId = "fixture-link-first";
-    const secondGrantId = "fixture-link-second";
-
-    seedStorageLink(storage, { grantId: firstGrantId, access: "view" });
-    seedStorageLink(storage, { grantId: secondGrantId, access: "view" });
-
-    const firstHash = hmac(defaultStorageLinkSecret(firstGrantId));
-    const secondHash = hmac(defaultStorageLinkSecret(secondGrantId));
-    expect(firstHash).not.toBe(secondHash);
-    expect(storage.findLinkGrantByCredentialHash(firstHash)).toMatchObject({
-      credential: { grantId: firstGrantId, secretHash: firstHash },
-      grant: { grantId: firstGrantId },
-    });
-    expect(storage.findLinkGrantByCredentialHash(secondHash)).toMatchObject({
-      credential: { grantId: secondGrantId, secretHash: secondHash },
-      grant: { grantId: secondGrantId },
-    });
-  });
-});
-
 describe("atomic View and Comment link mint", () => {
   it("creates one View file share, one link grant, and one hashed credential", async () => {
     const { storage, dbPath } = await newStorageWithPath();

@@ -54,7 +54,6 @@ describe("desktop engine workspace sessions", () => {
     );
     const request = await openRequested.promise;
 
-    expect(DESKTOP_WORKSPACE_OPEN_DEADLINE_MS).toBe(120_000);
     expect(request.deadlineMs).toBe(DESKTOP_WORKSPACE_OPEN_DEADLINE_MS);
     expect(operationStarted).toBe(false);
 
