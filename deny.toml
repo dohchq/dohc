@@ -5,8 +5,8 @@
 # current cargo-deny config schema (version = 2 tables).
 
 [graph]
-# The two targets the gate runs on: native Windows x64 and Linux x64 via WSL.
-# macOS has no gate run yet.
+# The targets `cargo deny` checks: native Windows x64 and Linux x64 via WSL,
+# the two the gate runs on day to day.
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",

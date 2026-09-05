@@ -63,7 +63,7 @@ Copy that line into the pull request.
 CI is dispatch-only, so the gate runs locally. Run it on native Windows x64,
 then again from WSL for Linux x64 (a WSL-native clone gives realistic
 filesystem semantics; `/mnt/c` works). Run `pnpm typecheck` and `pnpm test`
-on both as well. macOS has no native gate run; produce one before any Mac
+on both as well. macOS has no routine gate run; produce one before any Mac
 distribution.
 
 ## Native target

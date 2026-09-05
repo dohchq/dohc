@@ -60,9 +60,9 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "../..");
 
 // The machine's build budget. On the shared dev box the gate refuses to
-// start under the free-space floor, takes
-// one of the four build slots before any cargo runs, and caps its compiler
-// and test parallelism to its share of the cores. A single-tenant host (CI)
+// start under the free-space floor, takes one of the four build slots before
+// any cargo runs, and caps its compiler and test parallelism to its share of
+// the cores. A single-tenant host (CI)
 // has no slot root and runs uncapped. Incremental compilation is off on both:
 // a full-workspace gate never reuses incremental caches, it only pays their
 // disk — the dev loop keeps its own setting.

@@ -4,9 +4,9 @@
 //! compaction, per-document leases, the base-once replicated lineage, idempotent
 //! and echo-suppressed `ydoc.update` replication apply, and the settle pipeline
 //! (Y.Doc → artifact content with provenance, materialized through R04's job
-//! pipeline). It enforces the five binding yrs constraints the yrs spike
-//! established (`crates/yrs-spike/SPIKE_REPORT.md`); see [`ydoc`] for the
-//! per-constraint enforcement.
+//! pipeline). It enforces the yrs spike's four caveats
+//! (`crates/yrs-spike/SPIKE_REPORT.md`) plus the shared root schema; see
+//! [`ydoc`] for the per-constraint enforcement.
 //!
 //! # Two regimes (do not conflate)
 //!

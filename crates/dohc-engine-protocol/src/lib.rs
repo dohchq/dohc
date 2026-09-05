@@ -27,9 +27,6 @@
 //!   in-flight concurrency, deadlines, cooperative cancellation, and typed
 //!   `OVERLOADED` backpressure errors — replacing the retired accelerator
 //!   spike's thread-per-request model.
-//!
-//! The crate is standalone (no repo-level Cargo workspace yet; R02 owns
-//! that) and is not reachable from any product code path.
 
 #![forbid(unsafe_code)]
 

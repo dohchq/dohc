@@ -613,8 +613,9 @@ impl StoreCaptureSink {
             .ok_or(ESCAPES_ROOT)
     }
 
-    // The blocking actor calls below carry no timeout. The capture driver that
-    // owns this sink handles stalls.
+    // The blocking actor calls below carry no timeout. The capture driver runs
+    // this sink on its own thread and cancels between operations, not inside
+    // one.
     fn ingest_text(
         &self,
         path: &str,

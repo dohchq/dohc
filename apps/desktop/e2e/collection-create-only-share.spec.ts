@@ -11,9 +11,8 @@ import { createTempWorkspace } from "./helpers/workspace";
 //
 // Relay-direct: collections ride the file share substrate, a cross-device
 // granter edit converges to a link holder, and revocation stops every
-// collection operation over the share. The create-only grant cases arrive
-// with the share-links Phase 5 policy; the recipient-desktop case waits on
-// #995.
+// collection operation over the share. The create-only grant itself is
+// specified in that plan and not yet built.
 
 const GRANTER_TOKEN = "test:e2e-granter";
 const RECIPIENT_TOKEN = "test:e2e-recipient";
