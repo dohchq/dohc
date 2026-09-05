@@ -142,7 +142,8 @@ export async function launchDesktopApp(input: {
     const launchedApp = app;
     const launchedProcess = processHandle;
     await writeFile(join(artifacts, "instance.json"), JSON.stringify({
-      pid: launchedProcess.pid, root: desktopRoot, userDataDir,
+      launcherPid: launchedProcess.pid, electronPid: await launchedApp.evaluate(() => process.pid),
+      root: desktopRoot, userDataDir,
       workspace: input.workspace.rootPath, build,
     }, null, 2));
     return {

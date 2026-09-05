@@ -2,8 +2,37 @@ import { createRequire } from "node:module";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
+import assert from "node:assert/strict";
 import { prepare, assertPrepared } from "./build.mjs";
 import { repoRoot } from "./process.mjs";
+
+async function evaluateDebugger(url, expression) {
+  const socket = new WebSocket(url);
+  let timer;
+  try {
+    return await new Promise((resolve, reject) => {
+      timer = setTimeout(() => reject(new Error(`Debugger evaluation timed out: ${url}`)), 5000);
+      socket.addEventListener("error", () => reject(new Error(`Debugger connection failed: ${url}`)), { once: true });
+      socket.addEventListener("close", () => reject(new Error(`Debugger connection closed: ${url}`)), { once: true });
+      socket.addEventListener("open", () => {
+        try {
+          socket.send(JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
+        } catch (error) { reject(error); }
+      }, { once: true });
+      socket.addEventListener("message", (event) => {
+        try {
+          const message = JSON.parse(String(event.data));
+          if (message.id !== 1) return;
+          if (message.error || message.result?.exceptionDetails) reject(new Error(JSON.stringify(message)));
+          else resolve(message.result.result.value);
+        } catch (error) { reject(error); }
+      });
+    });
+  } finally {
+    clearTimeout(timer);
+    socket.close();
+  }
+}
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
 const { _electron: electron } = require("playwright");
@@ -31,14 +60,24 @@ try {
   await app.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
   const mainPort = await app.evaluate(() => process.debugPort);
   const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0];
-  const instance = { root: repoRoot, supervisorPid: process.pid, electronPid: app.process().pid, workspace, profile, home,
+  const instance = { root: repoRoot, supervisorPid: process.pid, launcherPid: app.process().pid,
+    electronPid: await app.evaluate(() => process.pid), workspace, profile, home,
     mainInspector: `http://127.0.0.1:${mainPort}/json/list`, rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`, build: assertPrepared(), directory };
-  for (const address of [instance.mainInspector, instance.rendererInspector]) {
+  const debuggerTargets = {};
+  for (const [kind, address] of [["main", instance.mainInspector], ["renderer", instance.rendererInspector]]) {
     const response = await fetch(address, { signal: AbortSignal.timeout(5000) });
-    if (!response.ok || !(await response.json()).some((target) => target.webSocketDebuggerUrl)) throw new Error(`Debugger endpoint is unavailable: ${address}`);
+    if (!response.ok) throw new Error(`Debugger endpoint is unavailable: ${address}`);
+    const target = (await response.json()).find((target) => target.webSocketDebuggerUrl && (kind === "main" || target.type === "page"));
+    if (!target) throw new Error(`Debugger endpoint is unavailable: ${address}`);
+    debuggerTargets[kind] = target.webSocketDebuggerUrl;
   }
   await writeFile(join(directory, "instance.json"), JSON.stringify(instance, null, 2) + "\n");
   console.log(JSON.stringify(instance, null, 2));
+  if (process.argv.includes("--probe")) {
+    assert.equal(await evaluateDebugger(debuggerTargets.main, "process.pid"), instance.electronPid);
+    assert.equal(await evaluateDebugger(debuggerTargets.renderer, "typeof document"), "object");
+    console.log("[debug] Independent debugger connections verified the Electron PID and renderer context.");
+  }
   console.log("Close the debug app or press Ctrl+C to stop this session and save its evidence.");
   await new Promise((done) => {
     const stop = () => { process.off("SIGINT", stop); process.off("SIGTERM", stop); done(); };
