@@ -40,17 +40,22 @@ export async function verify(args) {
   if (!["smoke", "e2e", "pr", "plan"].includes(mode)) throw new Error("Use smoke, e2e, plan --base <ref>, or pr --base <ref>.");
   const baseIndex = args.indexOf("--base");
   const base = baseIndex >= 0 ? args[baseIndex + 1] : null;
+  const jobIndex = args.indexOf("--job");
+  const job = jobIndex < 0 ? null : args[jobIndex + 1];
+  if (jobIndex >= 0 && (mode !== "pr" || !["rust", "js"].includes(job))) throw new Error("--job rust|js is available only for PR verification.");
   if (["pr", "plan"].includes(mode) && (!base || base.startsWith("--"))) throw new Error("Supply --base <ref> for PR gate selection.");
   const files = base ? [...new Set([
     ...git(["diff", "--name-only", `${base}...HEAD`]).split(/\r?\n/),
     ...(mode === "plan" ? git(["diff", "--name-only", "HEAD"]).split(/\r?\n/).concat(git(["ls-files", "--others", "--exclude-standard"]).split(/\r?\n/)) : []),
   ])].filter(Boolean) : [];
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
-  const gates = selectedGates(files, workflow);
+  const requiredGates = selectedGates(files, workflow);
+  if (job && !requiredGates[job]) throw new Error(`The ${job} job is not selected by this diff.`);
+  const gates = Object.fromEntries(Object.entries(requiredGates).map(([name, needed]) => [name, needed && (!job || name === job)]));
   if (mode === "plan") { console.log(JSON.stringify({ base, files, gates }, null, 2)); return; }
   const output = join(repoRoot, ".agent-artifacts/verification", `${new Date().toISOString().replaceAll(":", "-")}-${randomUUID().slice(0, 8)}`);
   mkdirSync(output, { recursive: true });
-  const report = { version: 1, mode, root: repoRoot, base, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "", gates, steps: [], output, verdict: "RUNNING" };
+  const report = { version: 1, mode, scope: job ?? "all", root: repoRoot, base, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "", requiredGates, gates, steps: [], output, verdict: "RUNNING" };
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   const startSource = { engine: sourceFingerprint("engine"), desktop: sourceFingerprint("desktop") };
@@ -106,7 +111,7 @@ export async function verify(args) {
   finally {
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
-    save(); console.log(`[verification] ${report.verdict}: ${reportPath}`);
+    save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
   }
 }
 

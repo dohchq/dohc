@@ -49,6 +49,9 @@ The JavaScript gate uses a dedicated Postgres container and requires the normall
 The Rust gate uses the repository build budget and checks its summary verdict.
 The runner removes its Postgres container by the recorded container ID.
 
+To schedule jobs separately, use `pnpm verify:pr --base origin/main --job js` and `--job rust`.
+Each report states its scope. Both selected jobs must pass on the same commit before claiming a complete PR gate.
+
 Read `result.json` before reporting a pass. Include the commit, gates, and evidence directory in the PR.
 Repeat affected checks after review fixes. Evidence from another commit does not prove the new commit.
 
