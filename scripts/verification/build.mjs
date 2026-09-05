@@ -158,7 +158,7 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   try { writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx" }); }
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
-  await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "install.log") });
+  await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
   const receipt = readJson(receiptPath) ?? { version: 1 };
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
     if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);

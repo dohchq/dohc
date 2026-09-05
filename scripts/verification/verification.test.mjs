@@ -15,9 +15,14 @@ test("standalone preparation installs frozen dependencies before building, seali
   const root = mkdtempSync(join(tmpdir(), "dohc-prepare-install-"));
   try {
     const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const output = join(root, ".dohc-dev/verification");
+    mkdirSync(output, { recursive: true });
+    writeFileSync(join(output, "install.log"), "verifier install output");
     const first = invoke();
     assert.equal(first.error, undefined);
     assert.equal(first.status, 0, first.stderr);
+    assert.equal(readFileSync(join(output, "install.log"), "utf8"), "verifier install output");
+    assert.equal(readFileSync(join(output, "prepare-install.log"), "utf8"), "preparation install output");
     assert.match(first.stdout, /"desktopPrepared":true/);
     assert.equal(readFileSync(join(root, "apps/desktop/dist/built.txt"), "utf8"), "new-lock");
     const calls = () => readFileSync(join(root, ".dohc-dev/calls.jsonl"), "utf8").trim().split("\n").map(JSON.parse);

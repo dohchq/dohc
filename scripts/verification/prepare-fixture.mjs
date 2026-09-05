@@ -25,10 +25,11 @@ export function createPrepareFixture(root, buildSource) {
     export const git=(args,root=repoRoot)=>execFileSync('git',args,{cwd:root,encoding:'utf8'}).trim();
     export const readJson=path=>existsSync(path)?JSON.parse(readFileSync(path,'utf8')):null;
     export const pnpm=args=>['pnpm',args];
-    export async function run(command,args) {
+    export async function run(command,args,{log}={}) {
       const put=(path,bytes)=>{mkdirSync(dirname(path),{recursive:true});writeFileSync(path,bytes);};
       appendFileSync(join(repoRoot,'.dohc-dev/calls.jsonl'),JSON.stringify({command,args})+'\\n');
       if(command==='pnpm' && args[0]==='install') {
+        put(log,'preparation install output');
         assert.deepEqual(args,['install','--frozen-lockfile']);
         assert.ok(existsSync(join(repoRoot,'.dohc-dev/verification/build.json.lock')));
         if(process.env.FIXTURE_INSTALL_FAIL==='1') throw new Error('frozen install rejected');
