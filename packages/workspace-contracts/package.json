@@ -15,7 +15,6 @@
     "./live-documents": "./src/liveDocuments.ts",
     "./relay": "./src/relay.ts",
     "./relay-values": "./src/relayValues.ts",
-    "./conformance": "./src/conformance.ts",
     "./workspace-settings": "./src/workspaceSettings.ts",
     "./workspace-settings-values": "./src/workspaceSettingsValues.ts"
   },
