@@ -369,6 +369,62 @@ describe("CollectionPage", () => {
     });
   });
 
+  it.each([false, true])(
+    "coalesces settled writes with activity and cancels on unmount (%s)",
+    async (unmount) => {
+      const records = [record("rec-1", "Plan"), record("rec-2", "Ship")].map(
+        (item) => ({
+          ...item,
+          values: [
+            ...item.values,
+            {
+              field: "done",
+              value: false,
+              validation: { status: "valid" as const },
+              resolvedRelations: [],
+            },
+          ],
+        }),
+      );
+      const docs = records.map((item) => {
+        const doc = new Y.Doc();
+        doc.getMap("frontmatter").set("id", item.id);
+        return doc;
+      });
+      const saves: UseEngineDoc["saveState"][] = ["saved", "saved"];
+      docMock.current = (input) => {
+        const index = records.findIndex(
+          (item) => item.path === (input as { path: string }).path,
+        );
+        return engineDocState({ available: true, doc: docs[index]!, saveState: saves[index]! });
+      };
+      const bridge = makeBridge(records, CHECKBOX_SCHEMA);
+      const page = renderPage(bridge);
+      await screen.findByText("Plan");
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
+      vi.useFakeTimers();
+
+      for (const checkbox of screen.getAllByRole("checkbox")) {
+        fireEvent.click(checkbox);
+      }
+      for (let index = 0; index < records.length; index += 1) {
+        expect(docs[index]!.getMap("frontmatter").get("done")).toBe(true);
+        saves[index] = "saving";
+        page.rerender(pageWithHost());
+        saves[index] = "saved";
+        page.rerender(pageWithHost());
+        await act(() => vi.advanceTimersByTimeAsync(50));
+      }
+      expect(hasPendingCollectionFieldWrites()).toBe(false);
+      bridge.emitWorkspaceActivity({ workspaceId: "ws-1", paths: ["tasks/Plan.md"] });
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledOnce();
+
+      if (unmount) page.unmount();
+      await act(() => vi.advanceTimersByTimeAsync(250));
+      expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(unmount ? 1 : 2);
+    },
+  );
+
   it("retries a failed record query", async () => {
     const bridge = makeBridge([record("rec-1", "Plan")]);
     bridge.queryCollectionRecords.mockRejectedValueOnce(

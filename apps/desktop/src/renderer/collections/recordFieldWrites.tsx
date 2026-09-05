@@ -53,6 +53,8 @@ export function CollectionRecordFieldWrite({
   onPrepared,
   onPreparationStarted,
   onMutationStarted,
+  onApplied,
+  onDurabilityConfirmed,
   onSettled,
   onHeldDurably,
   onFailed,
@@ -68,6 +70,8 @@ export function CollectionRecordFieldWrite({
   onPrepared: () => void;
   onPreparationStarted?: (controller: AbortController) => () => void;
   onMutationStarted?: () => () => void;
+  onApplied?: () => void;
+  onDurabilityConfirmed?: (message: string) => void;
   // The engine confirmed the save settled: the change is on disk.
   onSettled: () => void;
   // The settle committed but the file is locked: the engine holds the write
@@ -169,6 +173,7 @@ export function CollectionRecordFieldWrite({
       return;
     }
     applied.current = true;
+    onApplied?.();
     doc.transact(() => {
       doc
         .getMap(FRONTMATTER_FIELD)
@@ -181,6 +186,7 @@ export function CollectionRecordFieldWrite({
     change,
     createOption,
     onFailed,
+    onApplied,
   ]);
 
   useEffect(() => {
@@ -197,14 +203,15 @@ export function CollectionRecordFieldWrite({
       case "file-locked":
         // The engine journal owns this edit and keeps retrying the file.
         // Arm once so intermediate "saving" events cannot restart the window.
-        if (lockedReport.current === null) {
-          lockedReport.current = setTimeout(() => {
-            const file =
-              change.recordPath.split("/").at(-1) ?? change.recordPath;
-            onHeldDurably(
-              `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`,
-            );
-          }, FILE_LOCKED_REPORT_MS);
+        {
+          const file = change.recordPath.split("/").at(-1) ?? change.recordPath;
+          const message = `Another program has ${file} open, so dohc can't update it on disk. This change is saved and dohc retries until the file is free.`;
+          onDurabilityConfirmed?.(message);
+          if (lockedReport.current === null) {
+            lockedReport.current = setTimeout(() => {
+              onHeldDurably(message);
+            }, FILE_LOCKED_REPORT_MS);
+          }
         }
         return;
       case "error":
@@ -224,6 +231,7 @@ export function CollectionRecordFieldWrite({
     change.recordPath,
     onSettled,
     onHeldDurably,
+    onDurabilityConfirmed,
     onFailed,
   ]);
 
@@ -275,6 +283,7 @@ export const MAX_COLLECTION_WRITE_STATUSES = 100;
 let queue: readonly CollectionFieldWrite[] = [];
 let failures: readonly CollectionWriteFailure[] = [];
 let nextWriteId = 0;
+let appliedWrite: { id: number; durableMessage: string | null; stalled: boolean } | null = null;
 const statuses = new Map<string, CollectionWriteStatus>();
 // Workspaces whose cell edits a path/lineage operation paused, refcounted:
 // Explorer's runChanges and a version restore can overlap, and editing
@@ -303,6 +312,8 @@ const STALE_LINEAGE_MESSAGE =
   "This workspace changed versions or restored earlier work. Copy your unsaved value before discarding it.";
 const SUPERSEDED_MESSAGE =
   "A newer edit replaced this value. Copy your unsaved value before discarding it.";
+const SAVE_UNCONFIRMED_MESSAGE =
+  "dohc has not confirmed this save yet. Keep dohc open until saving finishes.";
 
 function sameField(left: CollectionFieldWrite, right: CollectionFieldWrite): boolean {
   return left.workspaceId === right.workspaceId &&
@@ -419,6 +430,7 @@ function completeCollectionFieldWritePreparation(id: number): void {
 function completeCollectionFieldWrite(id: number): void {
   const head = queue[0];
   if (head?.id !== id) return;
+  if (appliedWrite?.id === id) appliedWrite = null;
   queue = queue.slice(1);
   const key = keyFor(head.workspaceId, head.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
@@ -433,12 +445,14 @@ function completeCollectionFieldWrite(id: number): void {
 function failCollectionFieldWrite(id: number, message: string | null): void {
   const head = queue[0];
   if (head?.id !== id) return;
+  if (appliedWrite?.id === id) appliedWrite = null;
   queue = queue.slice(1);
   const line = message ?? "dohc could not save this change.";
   failures = [...failures, {
     ...head,
     message: line,
-    superseded: queue.some((write) => sameField(write, head)),
+    superseded: queue.some((write) => sameField(write, head)) ||
+      failures.some((failure) => failure.id > head.id && sameField(failure, head)),
   }];
   const key = keyFor(head.workspaceId, head.collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
@@ -514,18 +528,29 @@ export function useCollectionWriteFailures(): readonly CollectionWriteFailure[] 
   return useSyncExternalStore(subscribe, collectionWriteFailures);
 }
 
-// A queue that stops moving (a hung engine) must not hold a boundary
-// hostage: the caller moves every queued write into the retained failures,
-// where each keeps its value and its retry.
-export function abandonPendingCollectionFieldWrites(message: string): void {
+// Unapplied input can become a retained failure. An applied head stays under
+// its writer until a real save result; a timeout cannot prove it is unsaved.
+// The exclusion matches the workspace-admission drain.
+export function abandonPendingCollectionFieldWrites(message: string, exceptWorkspaceId?: string): void {
   if (queue.length === 0) return;
-  for (const write of queue) schemaPreparations.get(write.id)?.abort();
-  failures = [...failures, ...queue.map((write, index) => ({
+  const abandoned = queue.filter((write) =>
+    write.workspaceId !== exceptWorkspaceId && write.id !== appliedWrite?.id,
+  );
+  for (const write of abandoned) schemaPreparations.get(write.id)?.abort();
+  failures = [...failures, ...abandoned.map((write) => ({
     ...write,
     message,
-    superseded: queue.slice(index + 1).some((later) => sameField(write, later)),
+    superseded: queue.some((later) => later.id > write.id && sameField(write, later)),
   }))];
-  queue = [];
+  const abandonedIds = new Set(abandoned.map((write) => write.id));
+  queue = queue.filter((write) => !abandonedIds.has(write.id));
+  if (appliedWrite && queue[0]?.workspaceId !== exceptWorkspaceId) {
+    if (appliedWrite.durableMessage !== null) {
+      holdCollectionFieldWriteDurably(appliedWrite.id, appliedWrite.durableMessage);
+      return;
+    }
+    appliedWrite.stalled = true;
+  }
   notify();
 }
 
@@ -693,6 +718,7 @@ export function resetCollectionFieldWritesForTests(): void {
   schemaMutations.clear();
   schemaPreparations.clear();
   nextWriteId = 0;
+  appliedWrite = null;
   notify();
 }
 
@@ -777,8 +803,16 @@ function CollectionWriteFailureRow({
 export function CollectionFieldWriteHost() {
   const head = useSyncExternalStore(subscribe, () => queue[0] ?? null);
   const retained = useCollectionWriteFailures();
+  const saveUnconfirmed = useSyncExternalStore(subscribe, () => appliedWrite?.stalled ?? false);
   return (
     <>
+      <span role="status" aria-live="polite" className="sr-only">
+        {retained.length > 0
+          ? retained.length === 1
+            ? "1 unsaved collection change needs attention."
+            : `${retained.length} unsaved collection changes need attention.`
+          : saveUnconfirmed ? SAVE_UNCONFIRMED_MESSAGE : ""}
+      </span>
       {head === null ? null : (
         <CollectionRecordFieldWrite
           key={head.id}
@@ -796,6 +830,16 @@ export function CollectionFieldWriteHost() {
             };
           }}
           onMutationStarted={() => retainSchemaMutation(head.workspaceId)}
+          onApplied={() => {
+            if (queue[0]?.id === head.id) {
+              appliedWrite = { id: head.id, durableMessage: null, stalled: false };
+            }
+          }}
+          onDurabilityConfirmed={(message) => {
+            if (appliedWrite?.id !== head.id) return;
+            appliedWrite.durableMessage = message;
+            if (appliedWrite.stalled) holdCollectionFieldWriteDurably(head.id, message);
+          }}
           onSettled={() => completeCollectionFieldWrite(head.id)}
           onHeldDurably={(message) =>
             holdCollectionFieldWriteDurably(head.id, message)
@@ -803,14 +847,19 @@ export function CollectionFieldWriteHost() {
           onFailed={(message) => failCollectionFieldWrite(head.id, message)}
         />
       )}
-      {retained.length === 0 ? null : (
+      {retained.length === 0 && !saveUnconfirmed ? null : (
         <div
           data-testid="collection-write-failures"
           className="dohc-popover fixed bottom-3 right-3 z-50 flex max-h-80 w-80 flex-col gap-2 overflow-auto rounded-xl border border-line bg-panel p-3"
         >
           <span className="text-sm font-semibold text-ink">
-            Unsaved collection changes
+            {retained.length > 0 ? "Unsaved collection changes" : "Saving collection changes"}
           </span>
+          {saveUnconfirmed ? (
+            <span data-testid="collection-save-unconfirmed" className="text-[12px] text-ink">
+              {SAVE_UNCONFIRMED_MESSAGE}
+            </span>
+          ) : null}
           {retained.map((failure) => (
             <CollectionWriteFailureRow key={failure.id} failure={failure} />
           ))}

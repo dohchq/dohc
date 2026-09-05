@@ -5005,10 +5005,11 @@ export function DesktopWorkspaceShell(props: {
       });
       if (cancelled) return;
       if (settled.stalled) {
-        // A hung queue must not hold admission hostage or lose the values:
-        // every queued write becomes a retained failure with its retry.
+        // Unapplied input from other workspaces becomes retained failures.
+        // Applied writes remain owned until the engine confirms their save.
         abandonPendingCollectionFieldWrites(
           "dohc could not finish saving this change. Retry it, or discard the unsaved change.",
+          workspaceId,
         );
       }
       if (settled.stalled || settled.failed > 0) {

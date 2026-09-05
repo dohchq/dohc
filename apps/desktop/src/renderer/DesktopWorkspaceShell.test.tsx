@@ -140,6 +140,7 @@ import {
   collectionWritesPaused,
   discardCollectionFieldWrite,
   enqueueCollectionFieldWrite,
+  hasPendingCollectionFieldWrites,
   resetCollectionFieldWritesForTests,
 } from "./collections/recordFieldWrites";
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
@@ -4511,6 +4512,42 @@ describe("workspace admission over collection writes", () => {
     field: "done",
     value: true,
   };
+
+  it("keeps the destination workspace's queued edit when the previous workspace times out", async () => {
+    const harness = admissionHarness();
+    const oldOpen = deferred<void>();
+    const nextOpen = deferred<void>();
+    harness.openGates.set("tasks/one.md", oldOpen.promise);
+    harness.openGates.set("tasks/two.md", nextOpen.promise);
+    const view = render(harness.shell(WORKSPACE));
+    await waitFor(() => expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"));
+    act(() => {
+      enqueueCollectionFieldWrite(WORKSPACE.workspaceId, "tasks", RECORD_EDIT);
+      enqueueCollectionFieldWrite(OTHER_WORKSPACE.workspaceId, "tasks", { ...RECORD_EDIT, recordPath: "tasks/two.md" });
+    });
+    await waitFor(() => expect(harness.bridge.openEngineYDocSession).toHaveBeenCalled());
+    harness.bridge.openWorkspace.mockClear();
+    vi.useFakeTimers();
+    try {
+      view.rerender(harness.shell(OTHER_WORKSPACE));
+      await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+      expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual([WORKSPACE.workspaceId]);
+      expect(hasPendingCollectionFieldWrites()).toBe(true);
+      expect(harness.bridge.openWorkspace).not.toHaveBeenCalled();
+      act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(harness.bridge.openWorkspace).toHaveBeenCalledWith({ workspaceId: OTHER_WORKSPACE.workspaceId }));
+    await act(async () => { oldOpen.resolve(); nextOpen.resolve(); });
+    await waitFor(() => expect(harness.bridge.applyEngineYDocUpdate).toHaveBeenCalled());
+    act(() => {
+      const sessionId = harness.sessions.get("tasks/two.md")!;
+      for (const listener of [...harness.saveListeners]) listener({ sessionId, state: "saved", seq: 1 });
+    });
+    await waitFor(() => expect(hasPendingCollectionFieldWrites()).toBe(false));
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
 
   it("holds B's open until A's queued collection write settles", async () => {
     const harness = admissionHarness();

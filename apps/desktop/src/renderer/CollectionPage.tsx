@@ -161,11 +161,14 @@ export function CollectionPage({
   // Invalidation: refresh when a settled batch touches this collection's
   // folder (or arrives without path detail), on the shell's trailing-edge
   // coalescing cadence. The store's token makes the refresh latest-wins.
-  useEffect(() => {
-    const coalescer = createActivityCoalescer(() => {
+  const refreshCoalescer = useMemo(
+    () => createActivityCoalescer(() => {
       void store.refresh();
       void refreshDetails();
-    });
+    }),
+    [store, refreshDetails],
+  );
+  useEffect(() => {
     const prefix = `${collectionPath}/`;
     const unsubscribe = bridge().onWorkspaceActivity(
       (event: WorkspaceActivityEvent) => {
@@ -182,14 +185,14 @@ export function CollectionPage({
         ) {
           return;
         }
-        coalescer.schedule();
+        refreshCoalescer.schedule();
       },
     );
     return () => {
-      coalescer.cancel();
+      refreshCoalescer.cancel();
       unsubscribe();
     };
-  }, [store, refreshDetails, workspaceId, collectionPath]);
+  }, [refreshCoalescer, workspaceId, collectionPath]);
 
   // Board and calendar place every record, so they cannot stop at the
   // engine's first page: once a page settles with a cursor, ask for the
@@ -233,15 +236,14 @@ export function CollectionPage({
   const onCellChange = writesPaused ? undefined : enqueueCellChange;
   const writeStatus = useCollectionWriteStatus(workspaceId, collectionPath);
   const writeError = writeStatus.error;
-  // The index updates when the engine applies a settled write; re-read then
-  // instead of waiting for the activity event.
+  // Settled writes can precede activity events; both share one refresh burst.
   const settledWrites = writeStatus.settled;
   const seenSettledWrites = useRef(settledWrites);
   useEffect(() => {
     if (settledWrites === seenSettledWrites.current) return;
     seenSettledWrites.current = settledWrites;
-    void store.refresh();
-  }, [settledWrites, store]);
+    refreshCoalescer.schedule();
+  }, [settledWrites, refreshCoalescer]);
 
   const newRecord = useCallback(
     () => onNewRecord(collectionPath),

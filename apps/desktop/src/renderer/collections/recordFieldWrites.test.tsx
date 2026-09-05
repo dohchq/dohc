@@ -136,6 +136,7 @@ describe("retained failures", () => {
 
     // Actionable with only the host mounted — no CollectionPage anywhere.
     screen.getByTestId("collection-write-failures");
+    expect(screen.getByRole("status").textContent).toContain("1 unsaved collection change needs attention.");
     screen.getByTestId("collection-write-retry");
     expect(
       screen.getByTestId("collection-write-discard").textContent,
@@ -463,6 +464,106 @@ describe("abandoned schema preparation", () => {
     expect(admitted).toBe(false);
     await act(async () => { finishWrite({ status: "written" }); await writing; await beginning; });
     expect(admitted).toBe(true);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+});
+
+describe("abandonPendingCollectionFieldWrites", () => {
+  it("keeps an applied head owned and abandons only its unapplied tail", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    enqueue({ ...CHANGE, recordId: "rec-2", recordPath: "tasks/two.md" });
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    expect(collectionWriteFailures().map((failure) => failure.change.recordId)).toEqual(["rec-2"]);
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    expect(doc.getMap("frontmatter").get("status")).toBe("done");
+    act(() => discardCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    expect(screen.getByRole("status").textContent).toContain("dohc has not confirmed this save yet.");
+    expect(screen.getByTestId("collection-save-unconfirmed")).toBeTruthy();
+    settleHead(host, doc);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(0);
+    expect(screen.getByRole("status").textContent).toBe("");
+  });
+
+  it("turns the owned applied head into a failure only when the save actually fails", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    expect(collectionWriteFailures()).toHaveLength(0);
+    docMock.current = engineDocState({ available: true, doc, saveState: "error", saveError: "save failed" });
+    host.rerender(<CollectionFieldWriteHost />);
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()[0]?.change).toEqual(CHANGE);
+    expect(collectionWriteFailures()[0]?.message).toContain("save failed");
+  });
+
+  it("keeps a later failure from being overwritten when the retained applied head then fails", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    enqueue({ ...CHANGE, value: "newer" });
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    docMock.current = engineDocState({ available: true, doc, saveState: "error" });
+    host.rerender(<CollectionFieldWriteHost />);
+    const older = collectionWriteFailures().find((failure) => failure.change.value === "done")!;
+    expect(older.superseded).toBe(true);
+    act(() => retryCollectionFieldWrite(older.id));
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+  });
+
+  it("uses witnessed file-lock durability when the drain times out before the lock-report timer", async () => {
+    vi.useFakeTimers();
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    const draining = settleCollectionFieldWrites(undefined, { stallMs: 20_000 });
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    host.rerender(<CollectionFieldWriteHost />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+    await expect(draining).resolves.toEqual({ stalled: true, failed: 0 });
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()).toHaveLength(0);
+  });
+
+  it("excludes the same workspace as an admission drain", () => {
+    docMock.current = engineDocState({ opening: true });
+    render(<CollectionFieldWriteHost />);
+    enqueue();
+    act(() => {
+      enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE);
+      abandonPendingCollectionFieldWrites("stalled", "ws-2");
+    });
+    expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual(["ws-1"]);
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    act(() => abandonPendingCollectionFieldWrites("now ws-2"));
+    expect(collectionWriteFailures().map((failure) => failure.workspaceId)).toEqual(["ws-1", "ws-2"]);
+  });
+
+  it("finishes a previously stalled head when the engine later confirms durable file-lock ownership", () => {
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc });
+    const host = render(<CollectionFieldWriteHost />);
+    enqueue();
+    act(() => abandonPendingCollectionFieldWrites("stalled"));
+    expect(hasPendingCollectionFieldWrites()).toBe(true);
+    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    host.rerender(<CollectionFieldWriteHost />);
     expect(hasPendingCollectionFieldWrites()).toBe(false);
     expect(collectionWriteFailures()).toHaveLength(0);
   });
