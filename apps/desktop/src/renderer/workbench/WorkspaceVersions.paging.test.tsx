@@ -12,6 +12,14 @@ import {
   VersionMergeDialog,
   conflictCountCopy,
 } from "./WorkspaceVersions";
+import { beginCollectionLineageOperation } from "../collections/collectionLineageGate";
+import {
+  beginCollectionWriteOperation,
+  collectionWriteFailures,
+  collectionWritesPaused,
+  enqueueCollectionFieldWrite,
+  resetCollectionFieldWritesForTests,
+} from "../collections/recordFieldWrites";
 
 function conflict(id: string): WorkspaceVersionConflict {
   return {
@@ -62,7 +70,100 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  resetCollectionFieldWritesForTests();
   vi.unstubAllGlobals();
+});
+
+describe.each(["review", "merge"] as const)("%s conflict resolution write boundary", (surface) => {
+  const remaining = { conflicts: [], nextAfterConflictId: null };
+
+  async function openSurface(beginLineageOperation: () => Promise<() => void>, changed: () => void) {
+    const conflicts = [conflict("c-1")];
+    bridgeMock.listWorkspaceVersionConflicts.mockResolvedValue({ conflicts, nextAfterConflictId: null });
+    bridgeMock.mergeWorkspaceVersion.mockResolvedValue({
+      mergedFileCount: 0, unchangedFileCount: 0, conflictCount: 1, conflicts, nextAfterConflictId: null,
+    });
+    // The initial merge's gate has already released when its conflict cards appear.
+    const mergeBegin = vi.fn().mockResolvedValueOnce(() => {}).mockImplementation(beginLineageOperation);
+    const mergeChanged = vi.fn().mockImplementationOnce(() => {}).mockImplementation(changed);
+    const view = render(surface === "review" ? (
+      <ConflictReviewDialog workspaceId="ws-1" beginLineageOperation={beginLineageOperation}
+        onWorkspaceStateChanged={changed} onClose={() => {}} />
+    ) : (
+      <VersionMergeDialog workspaceId="ws-1"
+        source={{ id: "v-1", name: "Feature", kind: "named", createdAtMs: 1, canMergeIntoMain: true }}
+        activeTabDirty={false} beginLineageOperation={mergeBegin}
+        onWorkspaceStateChanged={mergeChanged} onClose={() => {}} />
+    ));
+    if (surface === "merge") fireEvent.click(screen.getByTestId("version-merge-confirm"));
+    await settle();
+    return view;
+  }
+
+  it("refuses resolution over retained input without advancing its lineage", async () => {
+    const changed = vi.fn();
+    await openSurface(() => beginCollectionLineageOperation("ws-1"), changed);
+    const paused = beginCollectionWriteOperation("ws-1");
+    enqueueCollectionFieldWrite("ws-1", "tasks", {
+      recordId: "rec-1", recordPath: "tasks/one.md", field: "done", value: true,
+    });
+    paused.release();
+    const failure = collectionWriteFailures()[0];
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    await settle();
+
+    expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    expect(collectionWriteFailures()).toEqual([failure]);
+    expect(screen.getByTestId("version-conflict-error").textContent).toContain("Retry or discard it");
+    expect(collectionWritesPaused("ws-1")).toBe(false);
+  });
+
+  it.each([false, true])("holds the pause through successful resolution (unmount during IPC: %s)", async (unmount) => {
+    let finishFlush!: () => void;
+    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    let finishResolution!: (value: typeof remaining) => void;
+    bridgeMock.resolveWorkspaceVersionConflict.mockReturnValue(new Promise((resolve) => { finishResolution = resolve; }));
+    const changed = vi.fn(() => { expect(collectionWritesPaused("ws-1")).toBe(true); });
+    const view = await openSurface(() => beginCollectionLineageOperation("ws-1", () => flush), changed);
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    expect(collectionWritesPaused("ws-1")).toBe(true);
+    expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
+
+    await act(async () => { finishFlush(); await flush; });
+    expect(bridgeMock.resolveWorkspaceVersionConflict).toHaveBeenCalledExactlyOnceWith({
+      workspaceId: "ws-1", conflictId: "c-1", resolution: { kind: "keep-current" },
+    });
+    expect(collectionWritesPaused("ws-1")).toBe(true);
+    if (unmount) view.unmount();
+    await act(async () => { finishResolution(remaining); });
+    expect(changed).toHaveBeenCalledOnce();
+    expect(collectionWritesPaused("ws-1")).toBe(false);
+  });
+
+  it("cancels before issuing resolution if the dialog closes during the drain", async () => {
+    let finishFlush!: () => void;
+    const flush = new Promise<void>((resolve) => { finishFlush = resolve; });
+    const changed = vi.fn();
+    const view = await openSurface(() => beginCollectionLineageOperation("ws-1", () => flush), changed);
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    view.unmount();
+    await act(async () => { finishFlush(); await flush; });
+    expect(bridgeMock.resolveWorkspaceVersionConflict).not.toHaveBeenCalled();
+    expect(changed).not.toHaveBeenCalled();
+    expect(collectionWritesPaused("ws-1")).toBe(false);
+  });
+
+  it("releases the pause without announcing a failed resolution", async () => {
+    bridgeMock.resolveWorkspaceVersionConflict.mockRejectedValue(new Error("Resolution refused"));
+    const changed = vi.fn();
+    await openSurface(() => beginCollectionLineageOperation("ws-1"), changed);
+    fireEvent.click(screen.getByTestId("version-conflict-keep-current"));
+    await settle();
+    expect(screen.getByTestId("version-conflict-error").textContent).toBe("Resolution refused");
+    expect(changed).not.toHaveBeenCalled();
+    expect(collectionWritesPaused("ws-1")).toBe(false);
+  });
 });
 
 describe("conflictCountCopy", () => {
@@ -83,7 +184,7 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -105,7 +206,7 @@ describe("ConflictReviewDialog paging", () => {
           : { conflicts: [conflict("c-2")], nextAfterConflictId: null },
     );
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -137,7 +238,7 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -180,7 +281,7 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: null,
     });
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -228,7 +329,7 @@ describe("ConflictReviewDialog paging", () => {
       nextAfterConflictId: "c-2",
     });
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}
@@ -262,7 +363,7 @@ describe("ConflictReviewDialog paging", () => {
       },
     );
     render(
-      <ConflictReviewDialog
+      <ConflictReviewDialog beginLineageOperation={async () => () => {}}
         workspaceId="ws-1"
         onWorkspaceStateChanged={() => {}}
         onClose={() => {}}

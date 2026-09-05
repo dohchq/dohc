@@ -10,6 +10,7 @@
 import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
+import type { CollectionValue } from "@dohc/workspace-contracts";
 import type { UseEngineDoc } from "../collab/useEngineDoc";
 import {
   abandonPendingCollectionFieldWrites,
@@ -22,9 +23,11 @@ import {
   FILE_LOCKED_REPORT_MS,
   hasPendingCollectionFieldWrites,
   resetCollectionFieldWritesForTests,
+  remapCollectionFieldWritePaths,
   retryCollectionFieldWrite,
   settleCollectionFieldWrites,
   useCollectionWritesBlockingAdmission,
+  useCollectionWriteStatus,
 } from "./recordFieldWrites";
 import { beginCollectionLineageOperation } from "./collectionLineageGate";
 import { serializeCollectionSchema } from "./schemaAuthoring";
@@ -87,6 +90,66 @@ function settleHead(host: ReturnType<typeof render>, doc: Y.Doc) {
 }
 
 describe("retained failures", () => {
+  it.each<{ name: string; base: CollectionValue; current: CollectionValue | undefined }>([
+    { name: "scalar", base: "alpha", current: "alpha" },
+    { name: "duplicate list", base: ["alpha", "alpha"], current: ["alpha", "alpha"] },
+    { name: "nested list", base: [["alpha", null]], current: [["alpha", null]] },
+    { name: "mapping", base: { choices: ["alpha", { enabled: true }], count: 2 }, current: { count: 2, choices: ["alpha", { enabled: true }] } },
+    { name: "missing value", base: null, current: undefined },
+    { name: "empty selection", base: [], current: null },
+    { name: "reordered valid selection", base: ["alpha", "beta"], current: ["beta", "alpha"] },
+  ])("retries a repair over an unchanged $name", ({ base, current }) => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const value = ["gamma"];
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
+      undefined, undefined, undefined, { selectionBase: base }); });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    if (current !== undefined) doc.getMap("frontmatter").set("tags", current);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
+    settleHead(host, doc);
+    expect(collectionWriteFailures()).toEqual([]);
+  });
+
+  it.each<{ name: string; base: CollectionValue; current: CollectionValue }>([
+    { name: "scalar", base: "alpha", current: "beta" },
+    { name: "duplicate list", base: ["alpha", "alpha"], current: ["alpha", "beta"] },
+    { name: "nested list", base: [["alpha", null]], current: [["alpha", "beta"]] },
+    { name: "mapping", base: { choices: ["alpha", { enabled: true }] }, current: { choices: ["alpha", { enabled: false }] } },
+  ])("retains a repair for copying after its flagged $name changes", ({ base, current }) => {
+    docMock.current = engineDocState({ available: false });
+    render(<CollectionFieldWriteHost />);
+    const value = ["gamma"];
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
+      undefined, undefined, undefined, { selectionBase: base }); });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", current);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(current);
+    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value } });
+  });
+
+  it("allows a retry whose desired flagged value is already present", () => {
+    docMock.current = engineDocState({ available: false });
+    const host = render(<CollectionFieldWriteHost />);
+    const value = ["alpha", "alpha", "gamma"];
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
+      undefined, undefined, undefined, { selectionBase: ["alpha", "alpha"] }); });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", [...value]);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    settleHead(host, doc);
+    expect(collectionWriteFailures()).toEqual([]);
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(value);
+  });
+
   it.each(["addition", "removal", "duplicate"] as const)("keeps a retry copy-only after a collaborator's %s", (operation) => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
@@ -694,6 +757,38 @@ describe("abandoned schema preparation", () => {
 });
 
 describe("abandonPendingCollectionFieldWrites", () => {
+  it.each(["rename", "delete"] as const)("clears the old completed file-lock status after collection %s", (operation) => {
+    vi.useFakeTimers();
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    docMock.current = engineDocState({ available: true, doc, saveState: "file-locked" });
+    render(<CollectionFieldWriteHost />);
+    const observer = renderHook(() => ({
+      original: useCollectionWriteStatus("ws-1", "tasks"),
+      moved: useCollectionWriteStatus("ws-1", "archive/tasks"),
+      otherWorkspace: useCollectionWriteStatus("ws-2", "tasks"),
+    }));
+    enqueue();
+    act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
+    act(() => { enqueueCollectionFieldWrite("ws-2", "tasks", CHANGE); });
+    act(() => vi.advanceTimersByTime(FILE_LOCKED_REPORT_MS));
+    expect(hasPendingCollectionFieldWrites()).toBe(false);
+    expect(collectionWriteFailures()).toEqual([]);
+    const lockedStatus = observer.result.current.original;
+    const otherStatus = observer.result.current.otherWorkspace;
+    expect(lockedStatus.error).not.toBeNull();
+    expect(lockedStatus.settled).toBe(1);
+    expect(otherStatus.error).not.toBeNull();
+    act(() => remapCollectionFieldWritePaths("ws-1", (path) =>
+      path === "tasks" || path.startsWith("tasks/")
+        ? operation === "rename" ? `archive/${path}` : null
+        : path,
+    ));
+    expect(observer.result.current.moved).toEqual(operation === "rename" ? lockedStatus : { error: null, settled: 0 });
+    expect(observer.result.current.original).toEqual({ error: null, settled: 0 });
+    expect(observer.result.current.otherWorkspace).toEqual(otherStatus);
+  });
+
   it("observes admission blockers from other workspaces through retention and discard", () => {
     const observer = renderHook(() => useCollectionWritesBlockingAdmission("ws-2"));
     expect(observer.result.current).toBe(false);

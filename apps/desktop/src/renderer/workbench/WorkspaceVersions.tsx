@@ -955,7 +955,6 @@ export function VersionMergeDialog(props: {
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setStage(
         remaining.conflicts.length > 0 || remaining.nextAfterConflictId !== null
@@ -967,7 +966,7 @@ export function VersionMergeDialog(props: {
           : { stage: "resolved-all" },
       );
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
@@ -1096,6 +1095,8 @@ export function VersionMergeDialog(props: {
               <div className="mt-3">
                 <ConflictList
                   workspaceId={workspaceId}
+                  beginLineageOperation={props.beginLineageOperation}
+                  onWorkspaceStateChanged={props.onWorkspaceStateChanged}
                   conflicts={stage.conflicts}
                   hasMore={stage.nextAfterConflictId !== null}
                   onLoadMore={loadMoreConflicts}
@@ -1322,6 +1323,8 @@ function chooseCombineSeed(candidates: SeedCandidate[]): CombineSeed {
 // hand-written combined copy survives being collapsed.
 function ConflictResolver(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflict: WorkspaceVersionConflict;
   sourceName: string;
   expanded: boolean;
@@ -1383,7 +1386,7 @@ function ConflictResolver(props: {
     () => () => {
       liveToken.current += 1;
     },
-    [],
+    [workspaceId, conflict.conflictId],
   );
 
   // The combined copy in state is NEVER over the apply cap. Every value it can
@@ -1427,18 +1430,24 @@ function ConflictResolver(props: {
       const token = ++liveToken.current;
       setBusy(true);
       setError(null);
+      let releaseOperation: (() => void) | null = null;
       try {
+        releaseOperation = await props.beginLineageOperation();
+        if (token !== liveToken.current) return;
         const result = await bridge().resolveWorkspaceVersionConflict({
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
         });
+        props.onWorkspaceStateChanged();
         if (token !== liveToken.current) return;
         props.onResolved(result);
       } catch (caught) {
         if (token !== liveToken.current) return;
         setError(ipcErrorMessage(caught, "Could not apply that choice."));
         setBusy(false);
+      } finally {
+        releaseOperation?.();
       }
     },
     [conflict.conflictId, props, workspaceId],
@@ -1631,6 +1640,8 @@ function ConflictResolver(props: {
 // the window with the first page of what remains.
 function ConflictList(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
+  onWorkspaceStateChanged: () => void;
   conflicts: WorkspaceVersionConflict[];
   // Whether a continuation exists past the loaded window.
   hasMore: boolean;
@@ -1679,6 +1690,8 @@ function ConflictList(props: {
         <ConflictResolver
           key={conflict.conflictId}
           workspaceId={props.workspaceId}
+          beginLineageOperation={props.beginLineageOperation}
+          onWorkspaceStateChanged={props.onWorkspaceStateChanged}
           conflict={conflict}
           sourceName={props.sourceNameFor(conflict)}
           expanded={conflict.conflictId === openId}
@@ -2014,6 +2027,7 @@ export function VersionComparePage(props: {
 // looks the same everywhere.
 export function ConflictReviewDialog(props: {
   workspaceId: string;
+  beginLineageOperation: () => Promise<() => void>;
   // Pass the version that is active NOW when this operation set it. The
   // shell needs the boundary before it can judge answers still in flight,
   // and a lookup it has to await is a window those answers slip through.
@@ -2083,7 +2097,6 @@ export function ConflictReviewDialog(props: {
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
-      props.onWorkspaceStateChanged();
       windowGeneration.current += 1;
       setState({
         status: "ready",
@@ -2092,7 +2105,7 @@ export function ConflictReviewDialog(props: {
         resolvedAny: true,
       });
     },
-    [props],
+    [],
   );
 
   const loadMoreConflicts = useCallback(async () => {
@@ -2176,6 +2189,8 @@ export function ConflictReviewDialog(props: {
           {state.status === "ready" && conflicts.length > 0 ? (
             <ConflictList
               workspaceId={workspaceId}
+              beginLineageOperation={props.beginLineageOperation}
+              onWorkspaceStateChanged={props.onWorkspaceStateChanged}
               conflicts={conflicts}
               hasMore={hasMoreConflicts}
               onLoadMore={loadMoreConflicts}

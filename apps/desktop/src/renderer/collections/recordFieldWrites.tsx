@@ -362,9 +362,26 @@ const SAVE_UNCONFIRMED_MESSAGE =
 const CHANGED_SELECTION_MESSAGE =
   "This selection changed since your edit. Copy your unsaved value before discarding it.";
 
+function sameCollectionValue(left: unknown, right: CollectionValue): boolean {
+  if (Object.is(left, right)) return true;
+  if (left === null || right === null || typeof left !== "object" || typeof right !== "object") return false;
+  if (Array.isArray(right)) {
+    return Array.isArray(left) && left.length === right.length &&
+      right.every((value, index) => sameCollectionValue(left[index], value));
+  }
+  if (Array.isArray(left)) return false;
+  const keys = Object.keys(right);
+  return keys.length === Object.keys(left).length && keys.every((key) =>
+    Object.hasOwn(left, key) && sameCollectionValue((left as Record<string, unknown>)[key], right[key]!),
+  );
+}
+
 function sameSelectionValue(left: unknown, right: CollectionValue): boolean {
   const a = left ?? [];
   const b = right ?? [];
+  // Flagged values can still be repaired. An unchanged raw value is safe
+  // to retry even when it is not a valid selection yet.
+  if (sameCollectionValue(a, b)) return true;
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   const expected = new Set(b);
   return a.length === b.length && new Set(a).size === a.length &&
@@ -642,6 +659,17 @@ export function remapCollectionFieldWritePaths(
   };
   queue = queue.map(remap);
   failures = failures.map(remap);
+  // Completed file-locked writes still have a status after leaving the queue.
+  const movedStatuses: Array<[string, CollectionWriteStatus]> = [];
+  for (const [key, status] of statuses) {
+    const [statusWorkspaceId, collectionPath] = JSON.parse(key) as [string, string];
+    if (statusWorkspaceId !== workspaceId) continue;
+    const projectedPath = project(collectionPath);
+    if (projectedPath === collectionPath) continue;
+    statuses.delete(key);
+    if (projectedPath !== null) movedStatuses.push([keyFor(workspaceId, projectedPath), status]);
+  }
+  for (const [key, status] of movedStatuses) statuses.set(key, status);
   notify();
 }
 
