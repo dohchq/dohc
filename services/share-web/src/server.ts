@@ -1283,6 +1283,13 @@ export function createShareWebHandler({
           )
         : null;
       if (isBlob && !releaseBlobProxy) return refused(429, refreshedCookieHeaders);
+      const releaseActivityHold = isLog
+        ? activityHoldLimiter.acquire(
+            sessionKey(authenticated.discriminator, authenticated.token),
+            authenticated.session.grantId,
+          )
+        : null;
+      if (isLog && !releaseActivityHold) return refused(429, refreshedCookieHeaders);
 
       try {
         const readCapabilityToken = authenticated.session.capabilityToken;
@@ -1340,6 +1347,8 @@ export function createShareWebHandler({
       } catch {
         releaseBlobProxy?.();
         return refused(503, refreshedCookieHeaders);
+      } finally {
+        releaseActivityHold?.();
       }
     }
 

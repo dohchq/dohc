@@ -680,7 +680,7 @@ pub fn acknowledge(
     let outcome = store.write_with(&NoFaults, |tx| {
         let parent = read_parent(tx, outbox_id)?.ok_or(OwnerOutboxError::NotFound)?;
         require_workspace(workspace_id, &parent.binding.workspace_id)?;
-        if parent.state != OwnerOutboxState::Active {
+        if parent.state == OwnerOutboxState::Quarantined {
             return Err(OwnerOutboxError::Frozen);
         }
         let mut statement = tx
@@ -1527,6 +1527,16 @@ mod tests {
         )
         .expect("quarantine");
         let pending = read_pending(&store, "workspace-1", &outbox).expect("pending");
+        assert!(matches!(
+            acknowledge(
+                &mut store,
+                "workspace-1",
+                &outbox,
+                &[receipt(&pending.entries[0])]
+            ),
+            Err(OwnerOutboxError::Frozen)
+        ));
+        let pending = read_pending(&store, "workspace-1", &outbox).expect("still quarantined");
         assert_eq!(pending.state, OwnerOutboxState::Quarantined);
         assert_eq!(pending.base_update, b"base update");
         assert_eq!(pending.entries[0].update, b"one");
@@ -1542,6 +1552,74 @@ mod tests {
         let pending = read_pending(&store, "workspace-1", &result.outbox_id).expect("pending");
         assert_eq!(pending.entries.len(), 1);
         assert_eq!(pending.entries[0].update, b"one");
+    }
+
+    #[test]
+    fn sealed_receipt_prefix_leaves_limit_triggering_update_and_durable_seal() {
+        for age_limit in [false, true] {
+            let (dir, mut store) = store("owner-outbox-sealed-receipt");
+            let mut first = input("key-1", b"one", 10);
+            if age_limit {
+                first.limits.max_pending_age_ms = 10;
+            } else {
+                first.limits.max_pending_bytes = 6;
+            }
+            let mut second = first.clone();
+            second.append_key = "key-2".to_owned();
+            second.update = b"two".to_vec();
+            second.created_at_ms = if age_limit { 20 } else { 11 };
+            let appended = append(&mut store, "workspace-1", first).expect("first append");
+            assert_eq!(appended.state, OwnerOutboxState::Active);
+            let id = appended.outbox_id;
+            let pending = read_pending(&store, "workspace-1", &id).expect("in-flight prefix");
+            let in_flight_receipt = receipt(&pending.entries[0]);
+            let sealed = append(&mut store, "workspace-1", second).expect("limit append");
+            assert_eq!(sealed.state, OwnerOutboxState::Sealed);
+
+            let acknowledged = acknowledge(&mut store, "workspace-1", &id, &[in_flight_receipt])
+                .expect("matching in-flight receipt after sealing");
+            assert_eq!(acknowledged.acknowledged, 1);
+            assert_eq!(acknowledged.pending_bytes, 3);
+            drop(store);
+            let mut store = EngineStore::open(&dir.join("engine.db"), 1).expect("reopen");
+            let pending = read_pending(&store, "workspace-1", &id).expect("sealed recovery");
+            assert_eq!(pending.state, OwnerOutboxState::Sealed);
+            assert_eq!(pending.base_update, b"base update");
+            assert_eq!(pending.pending_bytes, 3);
+            assert_eq!(pending.entries.len(), 1);
+            assert_eq!(pending.entries[0].sequence, 2);
+            assert_eq!(pending.entries[0].update, b"two");
+            assert!(matches!(
+                append(&mut store, "workspace-1", input("key-3", b"three", 21)),
+                Err(OwnerOutboxError::Frozen)
+            ));
+        }
+    }
+
+    #[test]
+    fn sealed_queue_still_rejects_nonprefix_and_changed_digest_receipts() {
+        let (_dir, mut store) = store("owner-outbox-sealed-mismatch");
+        let id = append(&mut store, "workspace-1", input("key-1", b"one", 10))
+            .expect("first")
+            .outbox_id;
+        let mut second = input("key-2", b"two", 11);
+        second.limits.max_pending_bytes = 6;
+        append(&mut store, "workspace-1", second).expect("seal");
+        let pending = read_pending(&store, "workspace-1", &id).expect("pending");
+        let mut changed_digest = receipt(&pending.entries[0]);
+        changed_digest.update_digest = "0".repeat(64);
+        for mismatched in [receipt(&pending.entries[1]), changed_digest] {
+            assert!(matches!(
+                acknowledge(&mut store, "workspace-1", &id, &[mismatched]),
+                Err(OwnerOutboxError::ReceiptMismatch)
+            ));
+        }
+        let pending = read_pending(&store, "workspace-1", &id).expect("unchanged recovery");
+        assert_eq!(pending.state, OwnerOutboxState::Sealed);
+        assert_eq!(pending.pending_bytes, 6);
+        assert_eq!(pending.entries.len(), 2);
+        assert_eq!(pending.entries[0].update, b"one");
+        assert_eq!(pending.entries[1].update, b"two");
     }
 
     #[test]
