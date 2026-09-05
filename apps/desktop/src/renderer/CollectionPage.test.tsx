@@ -436,6 +436,7 @@ describe("CollectionPage", () => {
     }];
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge(records, schema);
     const page = renderPage(bridge);
@@ -453,6 +454,7 @@ describe("CollectionPage", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(2);
 
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
     records[0] = {
       ...records[0]!,
       values: [{ field: "tags", value: ["alpha", "beta"], validation: { status: "valid" }, resolvedRelations: [] }],
@@ -461,6 +463,43 @@ describe("CollectionPage", () => {
     await act(() => vi.advanceTimersByTimeAsync(250));
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it.each([2, 3])("retries the latest of %i rapid toggles after earlier progress without an index refresh", async (count) => {
+    const schema: CollectionSchema = {
+      ...SCHEMA,
+      fields: [...SCHEMA.fields, { name: "tags", type: "multi-select", options: ["alpha", "beta", "gamma", "delta"] }],
+    };
+    const records: CollectionRecord[] = [{
+      ...record("rec-1", "Plan"),
+      values: [{ field: "tags", value: ["alpha"], validation: { status: "valid" }, resolvedRelations: [] }],
+    }];
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    const bridge = makeBridge(records, schema);
+    const page = renderPage(bridge);
+    fireEvent.click(await screen.findByRole("button", { name: "alpha" }));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    docMock.current = engineDocState({ available: true, doc, saveState: "saving" });
+    page.rerender(pageWithHost());
+    // The first write settles; the second writer cannot open its session.
+    docMock.current = engineDocState({ available: false, doc, saveState: "saved" });
+    page.rerender(pageWithHost());
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()).toHaveLength(1);
+    if (count === 3) fireEvent.click(screen.getByRole("checkbox", { name: "delta" }));
+    const latest = collectionWriteFailures().at(-1)!;
+    const desired = count === 3 ? ["alpha", "beta", "gamma", "delta"] : ["alpha", "beta", "gamma"];
+    expect(latest.change.value).toEqual(desired);
+    docMock.current = engineDocState({ available: true, doc });
+    act(() => retryCollectionFieldWrite(latest.id));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(desired);
+    expect(collectionWriteFailures().every((failure) => failure.superseded)).toBe(true);
+    expect(bridge.queryCollectionRecords).toHaveBeenCalledTimes(1);
   });
 
   it.each(["retry", "discard"] as const)("keeps an open multi-select consistent after %s of retained input", async (action) => {
@@ -517,6 +556,7 @@ describe("CollectionPage", () => {
     }];
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
     docMock.current = engineDocState({ available: true, doc });
     const bridge = makeBridge(records, schema);
     const page = renderPage(bridge);

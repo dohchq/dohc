@@ -102,8 +102,7 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
     const value = ["gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
-      undefined, undefined, undefined, { selectionBase: base }); });
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     if (current !== undefined) doc.getMap("frontmatter").set("tags", current);
@@ -123,8 +122,7 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     render(<CollectionFieldWriteHost />);
     const value = ["gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
-      undefined, undefined, undefined, { selectionBase: base }); });
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", current);
@@ -138,8 +136,7 @@ describe("retained failures", () => {
     docMock.current = engineDocState({ available: false });
     const host = render(<CollectionFieldWriteHost />);
     const value = ["alpha", "alpha", "gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
-      undefined, undefined, undefined, { selectionBase: ["alpha", "alpha"] }); });
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [["alpha", "alpha"]] }); });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", [...value]);
@@ -155,8 +152,7 @@ describe("retained failures", () => {
     const host = render(<CollectionFieldWriteHost />);
     const base = ["alpha", "beta"];
     const value = [...base, "gamma"];
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
-      undefined, undefined, undefined, { selectionBase: base }); });
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [base] }); });
     const failure = collectionWriteFailures()[0]!;
     const doc = new Y.Doc();
     const remote = operation === "addition" ? [...base, "delta"] : operation === "removal" ? ["beta"] : ["alpha", "alpha"];
@@ -178,8 +174,8 @@ describe("retained failures", () => {
     const host = render(<CollectionFieldWriteHost />);
     const value = ["alpha", "gamma"];
     const onDiscarded = vi.fn();
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value },
-      undefined, undefined, undefined, { selectionBase: ["alpha"], onDiscarded }); });
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", { ...CHANGE, field: "tags", value, previousValues: [["alpha"]] },
+      undefined, undefined, undefined, onDiscarded); });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", current === "base" ? ["alpha"] : value);
@@ -197,7 +193,7 @@ describe("retained failures", () => {
     const onDiscarded = vi.fn();
     const onIndexed = vi.fn();
     act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", CHANGE,
-      undefined, undefined, onIndexed, { onDiscarded }); });
+      undefined, undefined, onIndexed, onDiscarded); });
     act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
     expect(onDiscarded).not.toHaveBeenCalled();
     const failureId = collectionWriteFailures()[0]!.id;
@@ -626,21 +622,23 @@ describe("abandoned schema preparation", () => {
     contentHash: "same-schema-in-both-versions",
   };
 
-  it("does not prepare a retried option after the selection changes during the schema read", async () => {
+  it.each(["initial", "retry"] as const)("does not prepare an %s option write after the selection changes during the schema read", async (attempt) => {
     let finishRead!: (value: typeof read) => void;
     const readWorkspaceText = vi.fn(() => new Promise<typeof read>((resolve) => { finishRead = resolve; }));
     const writeWorkspaceText = vi.fn(async () => ({ status: "written" }));
     vi.stubGlobal("dohcDesktop", { readWorkspaceText, writeWorkspaceText });
-    docMock.current = engineDocState({ available: false });
-    render(<CollectionFieldWriteHost />);
-    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
-      ...CHANGE, field: "tags", value: ["alpha", "gamma"],
-    }, "gamma", undefined, undefined, { selectionBase: ["alpha"] }); });
     const doc = new Y.Doc();
     doc.getMap("frontmatter").set("id", "rec-1");
     doc.getMap("frontmatter").set("tags", ["alpha"]);
-    docMock.current = engineDocState({ available: true, doc });
-    act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    docMock.current = engineDocState({ available: attempt === "initial", doc });
+    render(<CollectionFieldWriteHost />);
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
+      ...CHANGE, field: "tags", value: ["alpha", "gamma"], previousValues: [["alpha"]],
+    }, "gamma"); });
+    if (attempt === "retry") {
+      docMock.current = engineDocState({ available: true, doc });
+      act(() => retryCollectionFieldWrite(collectionWriteFailures()[0]!.id));
+    }
     expect(readWorkspaceText).toHaveBeenCalledOnce();
     doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
     await act(async () => finishRead({ ...read, text: serializeCollectionSchema({
@@ -650,6 +648,46 @@ describe("abandoned schema preparation", () => {
     expect(writeWorkspaceText).not.toHaveBeenCalled();
     expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
     expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, createOption: "gamma" });
+  });
+
+  it("retains an initial option value when the selection changes during the schema write", async () => {
+    let finishWrite!: (value: { status: "written" }) => void;
+    const writeWorkspaceText = vi.fn(() => new Promise<{ status: "written" }>((resolve) => { finishWrite = resolve; }));
+    vi.stubGlobal("dohcDesktop", {
+      readWorkspaceText: vi.fn(async () => ({ ...read, text: serializeCollectionSchema({
+        name: null, description: null,
+        fields: [{ name: "tags", type: "multi-select", options: ["alpha", "beta"] }], views: [],
+      }) })),
+      writeWorkspaceText,
+    });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha"]);
+    docMock.current = engineDocState({ available: true, doc });
+    render(<CollectionFieldWriteHost />);
+    const value = ["alpha", "gamma"];
+    act(() => { enqueueCollectionFieldWrite("ws-1", "tasks", {
+      ...CHANGE, field: "tags", value, previousValues: [["alpha"]],
+    }, "gamma"); });
+    await waitFor(() => expect(writeWorkspaceText).toHaveBeenCalledOnce());
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    await act(async () => finishWrite({ status: "written" }));
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, createOption: undefined, change: { value } });
+  });
+
+  it("retains an initial selection if the document changed while its session opened", () => {
+    docMock.current = engineDocState({ opening: true });
+    const host = render(<CollectionFieldWriteHost />);
+    const value = ["alpha", "gamma"];
+    enqueue({ ...CHANGE, field: "tags", value, previousValues: [["alpha"]] });
+    const doc = new Y.Doc();
+    doc.getMap("frontmatter").set("id", "rec-1");
+    doc.getMap("frontmatter").set("tags", ["alpha", "beta"]);
+    docMock.current = engineDocState({ available: true, doc });
+    host.rerender(<CollectionFieldWriteHost />);
+    expect(doc.getMap("frontmatter").get("tags")).toEqual(["alpha", "beta"]);
+    expect(collectionWriteFailures()[0]).toMatchObject({ recoveryOnly: true, change: { value } });
   });
 
   it.each(["removed", "renamed", "number", "multi-select"] as const)(

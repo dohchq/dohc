@@ -204,9 +204,9 @@ function MultiSelectEditor({
   value: CollectionValue;
   acknowledgedWriteId: number;
   subscribeToDiscardedWrites?: (listener: (writeId: number) => void) => () => void;
-  emit: (value: CollectionValue) => number;
+  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: () => void;
-  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
 }) {
   const [selection, setSelection] = useState(() => ({
     observed: asTextArray(value),
@@ -229,15 +229,17 @@ function MultiSelectEditor({
     };
     setSelection(current);
   }
-  const selected = current.pending.reduce(
-    (previous, change) => [
-      ...previous.filter((option) => !change.removed.includes(option)),
-      ...change.added.filter((option) => !previous.includes(option)),
-    ],
-    current.observed,
-  );
+  const previousValues: CollectionValue[] = [value];
+  let selected = current.observed;
+  for (const change of current.pending) {
+    selected = [
+      ...selected.filter((option) => !change.removed.includes(option)),
+      ...change.added.filter((option) => !selected.includes(option)),
+    ];
+    previousValues.push(selected);
+  }
   const select = (next: string[]) => {
-    const writeId = emit(next);
+    const writeId = emit(next, previousValues);
     setSelection({
       ...current,
       pending: [...current.pending, {
@@ -283,7 +285,7 @@ function MultiSelectEditor({
               ? selected
               : [...selected, option];
             if (isNew) {
-              onCreateOption(option, next);
+              onCreateOption(option, next, previousValues);
               close();
             } else {
               select(next);
@@ -305,7 +307,7 @@ export interface CellEditorProps {
    * Receives the edited value. The host applies it through its own write
    * path and returns a monotonically increasing edit id; this package never writes.
    */
-  emit: (value: CollectionValue) => number;
+  emit: (value: CollectionValue, previousValues?: readonly CollectionValue[]) => number;
   close: () => void;
   /**
    * Select and multi-select editors offer to add a typed value the field's
@@ -313,7 +315,7 @@ export interface CellEditorProps {
    * and only then write `nextValue` to the cell; this package never writes.
    * Absent means editors only pick existing options.
    */
-  onCreateOption?: (option: string, nextValue: CollectionValue) => void;
+  onCreateOption?: (option: string, nextValue: CollectionValue, previousValues?: readonly CollectionValue[]) => void;
   /**
    * Runs the relation picker's queries against a relation field's related
    * collection. The table never opens a relation editor without one.

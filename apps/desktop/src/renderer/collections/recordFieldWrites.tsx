@@ -52,7 +52,6 @@ export function CollectionRecordFieldWrite({
   collectionPath,
   change,
   createOption,
-  retryBaseValue,
   onPrepared,
   onPreparationStarted,
   onMutationStarted,
@@ -68,7 +67,6 @@ export function CollectionRecordFieldWrite({
   // A select option the schema must contain before the cell value writes;
   // undefined for a plain edit or once the schema write landed.
   createOption?: string;
-  retryBaseValue?: CollectionValue;
   // The option's schema write landed: the queue clears it from the entry so
   // a later failure's retry does not redo a landed schema write.
   onPrepared: () => void;
@@ -120,7 +118,7 @@ export function CollectionRecordFieldWrite({
       return;
     }
     prepStarted.current = true;
-    if (retryChangesSelection(docState.doc.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value)) {
+    if (selectionChangedSinceEdit(docState.doc.getMap(FRONTMATTER_FIELD).get(change.field), change.previousValues, change.value)) {
       onFailed(CHANGED_SELECTION_MESSAGE, true);
       return;
     }
@@ -130,7 +128,7 @@ export function CollectionRecordFieldWrite({
       workspaceId,
       collectionPath,
       mutate: (schema) => {
-        selectionChanged = retryChangesSelection(docState.doc?.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value);
+        selectionChanged = selectionChangedSinceEdit(docState.doc?.getMap(FRONTMATTER_FIELD).get(change.field), change.previousValues, change.value);
         if (selectionChanged) throw new Error(CHANGED_SELECTION_MESSAGE);
         const next = addSelectOption(schema, change.field, createOption);
         const field = next.fields.find((entry) => entry.name === change.field);
@@ -182,7 +180,7 @@ export function CollectionRecordFieldWrite({
     onMutationStarted,
     onFailed,
     preparationAbort,
-    retryBaseValue,
+    change.previousValues,
   ]);
 
   useEffect(() => {
@@ -202,7 +200,7 @@ export function CollectionRecordFieldWrite({
       );
       return;
     }
-    if (retryChangesSelection(doc.getMap(FRONTMATTER_FIELD).get(change.field), retryBaseValue, change.value)) {
+    if (selectionChangedSinceEdit(doc.getMap(FRONTMATTER_FIELD).get(change.field), change.previousValues, change.value)) {
       onFailed(CHANGED_SELECTION_MESSAGE, true);
       return;
     }
@@ -221,7 +219,6 @@ export function CollectionRecordFieldWrite({
     createOption,
     onFailed,
     onApplied,
-    retryBaseValue,
   ]);
 
   useEffect(() => {
@@ -282,12 +279,7 @@ export type CollectionFieldWrite = {
   // Settlement committed the index; a query started after this callback can
   // acknowledge the edit. An already-running query cannot.
   onIndexed?: () => void;
-  recovery?: {
-    // The indexed multi-select value presented when this input was accepted.
-    selectionBase?: CollectionValue;
-    onDiscarded?: () => void;
-  };
-  retry?: boolean;
+  onDiscarded?: () => void;
   // A select option the collection's schema must gain before the cell value
   // writes. Cleared when that schema write lands, so a retry after a later
   // failure replays only what did not land. Undefined for a plain edit.
@@ -380,7 +372,7 @@ function sameSelectionValue(left: unknown, right: CollectionValue): boolean {
   const a = left ?? [];
   const b = right ?? [];
   // Flagged values can still be repaired. An unchanged raw value is safe
-  // to retry even when it is not a valid selection yet.
+  // to replace even when it is not a valid selection yet.
   if (sameCollectionValue(a, b)) return true;
   if (!Array.isArray(a) || !Array.isArray(b)) return false;
   const expected = new Set(b);
@@ -388,8 +380,9 @@ function sameSelectionValue(left: unknown, right: CollectionValue): boolean {
     expected.size === b.length && a.every((value) => typeof value === "string" && expected.has(value));
 }
 
-function retryChangesSelection(current: unknown, base: CollectionValue | undefined, desired: CollectionValue): boolean {
-  return base !== undefined && !sameSelectionValue(current, base) && !sameSelectionValue(current, desired);
+function selectionChangedSinceEdit(current: unknown, previousValues: readonly CollectionValue[] | undefined, desired: CollectionValue): boolean {
+  return previousValues !== undefined && !previousValues.some((base) => sameSelectionValue(current, base)) &&
+    !sameSelectionValue(current, desired);
 }
 
 function sameField(left: CollectionFieldWrite, right: CollectionFieldWrite): boolean {
@@ -472,17 +465,12 @@ export function enqueueCollectionFieldWrite(
   createOption?: string,
   lineage = collectionWriteLineage(workspaceId),
   onIndexed?: () => void,
-  recovery?: CollectionFieldWrite["recovery"],
+  onDiscarded?: () => void,
 ): boolean {
-  return enqueueWrite({ workspaceId, collectionPath, change, createOption, lineage, onIndexed, recovery });
-}
-
-function enqueueWrite(input: Omit<CollectionFieldWrite, "id">): boolean {
-  const { workspaceId, collectionPath, lineage } = input;
   nextWriteId += 1;
   const key = keyFor(workspaceId, collectionPath);
   const current = statuses.get(key) ?? EMPTY_STATUS;
-  const write = { ...input, id: nextWriteId };
+  const write = { id: nextWriteId, workspaceId, collectionPath, change, createOption, lineage, onIndexed, onDiscarded };
   if (pausedWorkspaces.has(workspaceId) || lineage !== collectionWriteLineage(workspaceId)) {
     const message = lineage !== collectionWriteLineage(workspaceId)
       ? STALE_LINEAGE_MESSAGE
@@ -567,7 +555,8 @@ export function retryCollectionFieldWrite(id: number): void {
   if (pausedWorkspaces.has(failure.workspaceId)) return;
   if (failure.superseded || failure.recoveryOnly || failure.lineage !== collectionWriteLineage(failure.workspaceId)) return;
   failures = failures.filter((entry) => entry.id !== id);
-  enqueueWrite({ ...failure, retry: true });
+  enqueueCollectionFieldWrite(failure.workspaceId, failure.collectionPath, failure.change,
+    failure.createOption, failure.lineage, failure.onIndexed, failure.onDiscarded);
 }
 
 /** The user's explicit decision to drop a retained failure's value. */
@@ -575,7 +564,7 @@ export function discardCollectionFieldWrite(id: number): void {
   const discarded = failures.find((entry) => entry.id === id);
   if (!discarded) return;
   failures = failures.filter((entry) => entry.id !== id);
-  discarded.recovery?.onDiscarded?.();
+  discarded.onDiscarded?.();
   const key = keyFor(discarded.workspaceId, discarded.collectionPath);
   const current = statuses.get(key);
   if (current?.error === discarded.message) {
@@ -905,7 +894,6 @@ export function CollectionFieldWriteHost() {
           collectionPath={head.collectionPath}
           change={head.change}
           createOption={head.createOption}
-          retryBaseValue={head.retry ? head.recovery?.selectionBase : undefined}
           onPrepared={() => completeCollectionFieldWritePreparation(head.id)}
           onPreparationStarted={(controller) => {
             schemaPreparations.set(head.id, controller);

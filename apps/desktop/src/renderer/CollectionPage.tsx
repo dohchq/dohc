@@ -255,18 +255,12 @@ export function CollectionPage({
       const key = JSON.stringify([change.recordId, change.recordPath, change.field]);
       enqueueCollectionFieldWrite(workspaceId, collectionPath, change, createOption, lineage, () => {
         completedEdits.current.set(key, Math.max(completedEdits.current.get(key) ?? 0, editId));
-      }, {
-        selectionBase: details?.schema.fields.find((field) => field.name === change.field)?.type === "multi-select"
-          ? state.records.find((record) => record.id === change.recordId && record.path === change.recordPath)
-            ?.values.find((value) => value.field === change.field)?.value ?? null
-          : undefined,
-        onDiscarded: () => {
-          for (const listener of discardListeners.current) listener(editId);
-        },
+      }, () => {
+        for (const listener of discardListeners.current) listener(editId);
       });
       return editId;
     },
-    [workspaceId, collectionPath, lineage, details?.schema.fields, state.records],
+    [workspaceId, collectionPath, lineage],
   );
   // File and version operations disable new edits until their paths settle.
   const writesPaused = useCollectionWritesPaused(workspaceId);
@@ -335,6 +329,7 @@ export function CollectionPage({
           recordPath: create.recordPath,
           field: create.field,
           value: create.value,
+          ...(create.previousValues ? { previousValues: create.previousValues } : {}),
         },
         create.option,
       );
@@ -525,10 +520,11 @@ export function CollectionPage({
             sort={state.query.sort ?? []}
             visibleFields={activeView?.visibleFields ?? null}
             onSortChange={(sort) => void store.setQuery({ sort })}
-            onCellChange={onCellChange}
+            onCellChange={enqueueCellChange}
+            editingDisabled={writesPaused}
             acknowledgedWriteId={acknowledgedWriteId}
             subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-            onCreateOption={writesPaused ? undefined : createOption}
+            onCreateOption={createOption}
             onOpenRecord={openRecord}
             relationExecutor={executor}
             onNearEnd={loadNextPage}

@@ -163,7 +163,7 @@ describe("FieldCell editing", () => {
 
 function writeEmitter() {
   let writeId = 0;
-  return vi.fn((_value: CollectionValue) => ++writeId);
+  return vi.fn((_value: CollectionValue, _previousValues?: readonly CollectionValue[]) => ++writeId);
 }
 
 interface EditorCase {
@@ -280,7 +280,7 @@ describe("CellEditor", () => {
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "delta" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "delta"]);
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "delta"], [["alpha"]]);
     expect(emit).not.toHaveBeenCalled();
   });
 
@@ -309,9 +309,9 @@ describe("CellEditor", () => {
     const emit = writeEmitter();
     renderEditor({ fieldName: "tags", value: ["alpha"], emit });
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta"]);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
   });
 
   it("retires only the discarded toggle while earlier unindexed input remains", () => {
@@ -332,7 +332,7 @@ describe("CellEditor", () => {
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(false);
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
     view.unmount();
     expect(unsubscribe).toHaveBeenCalledOnce();
   });
@@ -349,7 +349,7 @@ describe("CellEditor", () => {
       />,
     );
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta"]);
 
     // A slow index read re-serves ["alpha"] after the beta toggle. The open
     // editor owns the selection; the stale prop must not erase beta.
@@ -364,7 +364,7 @@ describe("CellEditor", () => {
     );
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("includes an observed remote selection in the next multi-select edit", () => {
@@ -377,7 +377,7 @@ describe("CellEditor", () => {
     view.rerender(editor(["alpha", "beta"]));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("combines observed remote additions with a pending local removal", () => {
@@ -387,13 +387,13 @@ describe("CellEditor", () => {
     );
     const view = render(editor(["alpha", "beta"]));
     fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
-    expect(emit).toHaveBeenLastCalledWith(["beta"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["beta"]);
 
     view.rerender(editor(["alpha", "beta", "gamma"]));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["gamma"]);
   });
 
   it("combines observed remote removals with a pending local addition", () => {
@@ -408,7 +408,7 @@ describe("CellEditor", () => {
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "alpha" }).checked).toBe(false);
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "gamma" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["gamma"]);
   });
 
   it("acknowledges earlier toggles without undoing a later toggle of the same option", () => {
@@ -419,7 +419,7 @@ describe("CellEditor", () => {
     const view = render(editor(["alpha"]));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
 
     view.rerender(editor(["alpha", "beta"], 1));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(false);
@@ -427,12 +427,11 @@ describe("CellEditor", () => {
     view.rerender(editor(["alpha", "beta"], 2));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("retires a completed round trip even when the acknowledged indexed value is unchanged", () => {
-    let writeId = 0;
-    const emit = vi.fn(() => ++writeId);
+    const emit = writeEmitter();
     const editor = (value: string[], acknowledgedWriteId: number) => (
       <CellEditor
         field={field("tags")}
@@ -445,7 +444,7 @@ describe("CellEditor", () => {
     const view = render(editor(["alpha"], 0));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha"]);
 
     // Both writes finish before one coalesced index query returns.
     view.rerender(editor(["alpha"], 2));
@@ -453,7 +452,7 @@ describe("CellEditor", () => {
     view.rerender(editor(["alpha", "beta"], 2));
     expect(screen.getByRole<HTMLInputElement>("checkbox", { name: "beta" }).checked).toBe(true);
     fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
-    expect(emit).toHaveBeenLastCalledWith(["alpha", "beta", "gamma"]);
+    expect(emit.mock.calls.at(-1)?.[0]).toEqual(["alpha", "beta", "gamma"]);
   });
 
   it("adds a typed unknown multi-select option to the compounded selection", () => {
@@ -466,7 +465,41 @@ describe("CellEditor", () => {
     const input = screen.getByLabelText<HTMLInputElement>("Add option");
     fireEvent.change(input, { target: { value: "delta" } });
     fireEvent.keyDown(input, { key: "Enter" });
-    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "beta", "delta"]);
+    expect(onCreateOption).toHaveBeenCalledExactlyOnceWith("delta", ["alpha", "beta", "delta"], [["alpha"], ["alpha", "beta"]]);
+  });
+
+  it("supplies every pending predecessor before a third rapid multi-select change", () => {
+    const emit = writeEmitter();
+    renderEditor({ fieldName: "tags", value: ["alpha"], emit });
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "gamma" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(
+      ["beta", "gamma"],
+      [["alpha"], ["alpha", "beta"], ["alpha", "beta", "gamma"]],
+    );
+  });
+
+  it("rebases pending predecessor values on newly observed remote props", () => {
+    const emit = writeEmitter();
+    const editor = (value: string[]) => (
+      <CellEditor acknowledgedWriteId={0} field={field("tags")} indexed={indexedValue("tags", value)} emit={emit} close={vi.fn()} />
+    );
+    const view = render(editor(["alpha"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "beta" }));
+    view.rerender(editor(["alpha", "gamma"]));
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(
+      ["gamma", "beta"],
+      [["alpha", "gamma"], ["alpha", "gamma", "beta"]],
+    );
+  });
+
+  it("keeps the raw malformed indexed value as the base of a repair", () => {
+    const emit = writeEmitter();
+    renderEditor({ fieldName: "tags", value: "malformed", emit });
+    fireEvent.click(screen.getByRole("checkbox", { name: "alpha" }));
+    expect(emit).toHaveBeenLastCalledWith(["alpha"], ["malformed"]);
   });
 
   it("opens the relation picker against the related collection and emits ids", async () => {

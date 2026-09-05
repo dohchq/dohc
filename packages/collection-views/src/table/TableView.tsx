@@ -23,6 +23,8 @@ export interface CollectionCellChange {
   recordPath: string;
   field: string;
   value: CollectionValue;
+  /** Observed value and pending local predecessor values for this edit. */
+  previousValues?: readonly CollectionValue[];
 }
 
 /**
@@ -36,6 +38,7 @@ export interface CollectionOptionCreate {
   field: string;
   option: string;
   value: CollectionValue;
+  previousValues?: readonly CollectionValue[];
 }
 
 export interface TableViewProps {
@@ -47,6 +50,8 @@ export interface TableViewProps {
   visibleFields?: readonly string[] | null;
   onSortChange?: (sort: CollectionQuerySort[]) => void;
   onCellChange?: (change: CollectionCellChange) => number;
+  /** Pause controls while keeping the open editor and its draft mounted. */
+  editingDisabled?: boolean;
   /** Highest saved edit id reflected in this record's queried field value. */
   acknowledgedWriteId?: (record: CollectionRecord, field: string) => number;
   /** Explicitly discarded edit ids retire local input without claiming a save. */
@@ -96,6 +101,7 @@ export function TableView({
   visibleFields,
   onSortChange,
   onCellChange,
+  editingDisabled = false,
   acknowledgedWriteId,
   subscribeToDiscardedWrites,
   onCreateOption,
@@ -119,6 +125,7 @@ export function TableView({
           // without an executor the cell stays read-only. Checkboxes commit
           // through onChange and never open an editor.
           const editable =
+            !editingDisabled &&
             onCellChange !== undefined &&
             field.type !== "checkbox" &&
             (field.type !== "relation" || relationExecutor !== undefined);
@@ -132,7 +139,7 @@ export function TableView({
                   indexed={context.getValue()}
                   personLabel={personLabel}
                   onChange={
-                    onCellChange
+                    onCellChange && !editingDisabled
                       ? (value) =>
                           onCellChange({
                             recordId: context.row.original.id,
@@ -157,7 +164,7 @@ export function TableView({
           );
         }),
       ),
-    [fields, onCellChange, personLabel, relationExecutor],
+    [fields, onCellChange, editingDisabled, personLabel, relationExecutor],
   );
 
   const table = useTable({
@@ -173,6 +180,7 @@ export function TableView({
   const editingRow = editingRowIndex >= 0 ? rows[editingRowIndex] : undefined;
   const editingField =
     editing === null ? undefined : fields.find((field) => field.name === editing.field);
+  const editingValue = editingRow?.original.values.find((entry) => entry.field === editingField?.name);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   // Keep the edited row mounted while it is scrolled out of the virtual
@@ -293,7 +301,7 @@ export function TableView({
               );
             })}
             {editing && editingRow && editingField && onCellChange ? (
-              <div
+              <fieldset
                 // One editor for every cell type, drawn in an overlay above
                 // the rows and anchored to the cell's top edge. Growing
                 // downward from there, a tall editor (a multi-select's
@@ -303,7 +311,11 @@ export function TableView({
                 // editor's inputs to the next cell's value.
                 key={`${editing.recordId}:${editing.field}`}
                 data-cell-editor=""
-                className="absolute z-10 rounded border border-line bg-panel p-1 shadow-md"
+                disabled={editingDisabled}
+                onBlurCapture={(event) => {
+                  if (editingDisabled) event.stopPropagation();
+                }}
+                className="absolute z-10 m-0 min-w-0 rounded border border-line bg-panel p-1 shadow-md"
                 style={{
                   top: editingRowIndex * ROW_HEIGHT,
                   left:
@@ -317,33 +329,33 @@ export function TableView({
                   field={editingField}
                   acknowledgedWriteId={acknowledgedWriteId?.(editingRow.original, editingField.name) ?? 0}
                   subscribeToDiscardedWrites={subscribeToDiscardedWrites}
-                  indexed={editingRow.original.values.find(
-                    (entry) => entry.field === editingField.name,
-                  )}
-                  emit={(value) =>
+                  indexed={editingValue}
+                  emit={(value, previousValues) =>
                     onCellChange({
                       recordId: editingRow.original.id,
                       recordPath: editingRow.original.path,
                       field: editingField.name,
                       value,
+                      ...(previousValues === undefined ? {} : { previousValues }),
                     })
                   }
                   close={() => setEditing(null)}
                   onCreateOption={
                     onCreateOption
-                      ? (option, value) =>
+                      ? (option, value, previousValues) =>
                           onCreateOption({
                             recordId: editingRow.original.id,
                             recordPath: editingRow.original.path,
                             field: editingField.name,
                             option,
                             value,
+                            ...(previousValues === undefined ? {} : { previousValues }),
                           })
                       : undefined
                   }
                   relationExecutor={relationExecutor}
                 />
-              </div>
+              </fieldset>
             ) : null}
           </div>
         </div>
