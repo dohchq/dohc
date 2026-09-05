@@ -9,10 +9,6 @@ Scripts that run and guard the Rust workspace engine gate. `run-rust-checks.mjs`
 | `run-rust-checks.mjs` | Rust policy gate: tree provenance (the commit the run examined, read at every step boundary; a tree that moves between two readings fails the verdict and names the step, a tree already dirty at the start is recorded), native target, fixture drift, `fmt --check`, `clippy -D warnings`, `build --workspace`, `test --workspace` (`cargo nextest run`), `doctests` (`cargo test --doc` — nextest runs no doctests by design), the collab crash tier (`cargo nextest run -p dohc-engine-collab --features fault-injection` — those tests are compiled out of the plain workspace run), plus `cargo deny check` / `cargo audit` when installed (skip-with-warning when absent). A required step that SKIPs fails the verdict. On a host with a build-slot root it enforces the machine budget (WINDOWS_DEV.md): disk preflight, slot acquisition, capped jobs and test threads. Prints a pass/fail summary with per-step seconds and a pasteable evidence line. |
 | `native-target.mjs` | The gate's first step, importable so it can be tested: asks rustc through cargo what it compiled for. See [Native target](#native-target). |
 
-Banked soak artifacts live in `soak-evidence/`; see
-[`soak-evidence/README.md`](soak-evidence/README.md) for the provenance block
-every artifact carries, which files predate it, and the residual gap.
-
 ## Requirements
 
 - Node >= 22 (repo uses v24). The runner scripts themselves import nothing
