@@ -77,14 +77,16 @@ describe("VersionComparePage protected rows", () => {
     });
     bridgeMock.compareWorkspaceVersions.mockResolvedValue({
       files: [
-        // Text sides are seeded so the page must refuse to render them, not
-        // merely have nothing to render.
+        // Both sides carry the secret and differ, so a page that fell through
+        // to the text diff would print it as removed and added lines.
         {
           path: ".env",
           status: "modified",
           protected: true,
-          currentText: SECRET_VALUE,
-          incomingText: SECRET_VALUE,
+          currentText: `${SECRET_VALUE} before
+`,
+          incomingText: `${SECRET_VALUE} after
+`,
         },
         {
           path: "notes.md",

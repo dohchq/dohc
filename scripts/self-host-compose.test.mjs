@@ -50,6 +50,15 @@ test('share-web reaches the relay over the compose network and publishes one ori
   )
 })
 
+test('the relay keeps its database on a named volume', () => {
+  assert.ok(relay.volumes.includes('dohc_self_host_sync_relay:/data'))
+  assert.ok('dohc_self_host_sync_relay' in compose.volumes)
+})
+
+test('share-web binds every interface so its published port is reachable', () => {
+  assert.equal(shareWeb.environment.DOHC_SHARE_WEB_BIND, '0.0.0.0')
+})
+
 test('the example env names every variable compose requires', () => {
   const interpolations = readFileSync('docker-compose.self-host.yml', 'utf8').matchAll(
     /\$\{([A-Z_]+):\?/g,

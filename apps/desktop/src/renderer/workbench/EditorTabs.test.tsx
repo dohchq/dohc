@@ -172,7 +172,7 @@ describe("EditorTabs strip scrolling", () => {
     const strip = screen.getByRole("tablist");
     expect(strip.className).toContain("overflow-x-auto");
     expect(strip.className).toContain("overflow-y-hidden");
-    // Scrollbar-hiding hook — styles.test.ts asserts the rule itself.
+    // The class is the hook the scrollbar-hiding rule in styles.css targets.
     expect(strip.className).toContain("dohc-tab-strip");
   });
 

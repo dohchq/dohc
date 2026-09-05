@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AUTOMATION_RUN_DEADLINE_MS,
   PluginAutomations,
-  engineAutomationId,
   type AutomationEngineAdapter,
   type PluginAutomationRunOutcome,
   type PluginAutomationsOptions,
