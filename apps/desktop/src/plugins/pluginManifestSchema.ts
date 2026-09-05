@@ -181,13 +181,11 @@ const PluginWebApp = z.object({
 }).strict();
 
 // An agent driver this plugin contributes: one harness dohc can talk to,
-// registered beside the built-in drivers and shown in the same probe list.
-// Core ships three drivers for two harnesses, and a harness plugin declares
-// one — plus, at most, a variant or two of that same harness (an adapter
-// transport beside a native one). Eight leaves that measured shape room and
-// still reads as a list. The workspace-wide registration cap, not this one,
-// is what keeps the merged driver list inside the bound its IPC contract
-// carries (pluginAgentDrivers.ts).
+// registered in the driver registry and shown in the probe list.
+// A harness plugin declares one driver, plus at most a variant or two of the
+// same harness. Eight leaves that room and still reads as a list. The
+// workspace-wide registration cap, not this one, keeps the merged driver list
+// inside the bound its IPC contract carries (pluginAgentDrivers.ts).
 export const MAX_PLUGIN_DRIVERS = 8;
 
 // A driver id names its driver in the driver registry, in the Settings probe

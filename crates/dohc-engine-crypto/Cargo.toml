@@ -4,7 +4,7 @@ version.workspace = true
 edition = "2024"
 rust-version.workspace = true
 publish.workspace = true
-description = "Secret-file crypto for the workspace engine: AES-256-GCM AEAD, the workspace data-key envelope, and zeroizing plaintext and key types."
+description = "Secret-file crypto for the workspace engine: AES-256-GCM AEAD and zeroizing plaintext and key types."
 
 [features]
 # Exposes the deterministic, caller-supplied-IV `seal_with_iv`. OFF by default:
@@ -24,14 +24,10 @@ test-util = []
 # vendored via `sha2`. Parameters (256-bit key, 96-bit nonce, 128-bit tag) are
 # identical to Node's `aes-256-gcm`, which the cross-engine fixtures prove.
 aes-gcm = "0.11"
-# scrypt KDF for the passphrase-wrapped data-key envelope (N=2^17, r=8, p=1),
-# byte-matching Node's `crypto.scrypt` in `secretKeyEnvelope.ts`.
-scrypt = { version = "0.12", default-features = false }
 # CSPRNG for random IVs and fresh data keys (safe wrapper; keeps forbid-unsafe).
 getrandom = "0.4"
 # Best-effort in-memory scrubbing of plaintext/key material on drop.
 zeroize = { version = "1", features = ["zeroize_derive"] }
-# Envelope JSON (parsed/emitted in the exact TS field order for parity).
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

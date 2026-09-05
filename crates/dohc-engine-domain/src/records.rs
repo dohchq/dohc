@@ -212,14 +212,6 @@ pub struct InbandBinary {
     pub bytes: Option<Vec<u8>>,
 }
 
-/// A binary head's metadata without its bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BinaryHeadMeta {
-    pub object_id: String,
-    pub sha256: String,
-    pub byte_length: i64,
-}
-
 /// Stable file-object identity, independent of any version-local path alias.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileObjectRecord {

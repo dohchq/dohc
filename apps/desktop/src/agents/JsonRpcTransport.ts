@@ -78,8 +78,6 @@ function normalizeError(error: unknown): JsonRpcError {
   return new JsonRpcError(-32603, "JSON-RPC handler failed.");
 }
 
-export { resolveSpawnCommand } from "../process/windowsSpawn";
-
 export class JsonRpcTransport {
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string | number, PendingRequest>();

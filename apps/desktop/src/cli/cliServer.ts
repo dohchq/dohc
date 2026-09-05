@@ -30,7 +30,6 @@ import type {
   CollectionRecord,
 } from "@dohc/workspace-contracts/collection";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
-import { LINKED_CHAT_STORE_RELATIVE_PATH } from "@dohc/workspace-contracts/engine";
 import type {
   ChannelThreadSummary,
   ChatChannelSummary,
@@ -51,7 +50,6 @@ import {
 } from "@dohc/workspace-engine-client";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { createRequire } from "node:module";
 import { createServer, type Server, type Socket } from "node:net";
 import {
   chmod,
@@ -122,25 +120,6 @@ try {
 }
 `;
 
-interface EngineSqliteStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number };
-}
-
-interface EngineSqliteDb {
-  exec(sql: string): void;
-  prepare(sql: string): EngineSqliteStatement;
-  close(): void;
-}
-
-interface SqliteModule {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => EngineSqliteDb;
-}
-
 type CliGranularChatMessageSearchResult = Pick<
   GranularChatMessageSearchResult,
   "threadId" | "messageId" | "text"
@@ -208,7 +187,7 @@ export interface CliWorkspaceContext extends CliRegistryWorkspace {
     target: { channelId: string } | { threadId: string },
     authorUserId: string | undefined,
   ): Promise<void>;
-  daemonReads?: {
+  daemonReads: {
     queryChatMessagesGranular(input: {
       query: string;
       limit: number;
@@ -300,12 +279,6 @@ class CliCommandError extends Error {
     super(message.startsWith("dohc:") ? message : `dohc: ${message}`);
     this.name = "CliCommandError";
   }
-}
-
-const requireModule = createRequire(import.meta.url);
-
-function nodeSqlite(): SqliteModule {
-  return requireModule("node:sqlite") as SqliteModule;
 }
 
 export async function resolveCliWorkspace(
@@ -980,29 +953,10 @@ async function queryFtsCandidates(
   onDebug?: (message: string) => void,
 ): Promise<{ threadIds: Set<string>; messageIds: Set<string> } | null> {
   if ([...query.trim()].length < 3) return null;
-  if (
-    context.daemonReads &&
-    [...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS
-  ) {
-    return null;
-  }
+  if ([...query.trim()].length > MAX_GRANULAR_CHAT_QUERY_CHARS) return null;
   let response: CliGranularChatMessageSearchResponse;
   try {
-    // The daemon is the only reader. It is unconditionally present -- main.ts
-    // quits the app if startRustEngineDaemon fails, before the CLI server is
-    // even registered -- so the legacy branch here, which opened a second
-    // sqlite connection to the daemon-owned engine.db, was unreachable.
-    //
-    // Thrown rather than silently degraded: a missing daemon reader is an
-    // invariant violation, and the old fallback quietly became a second
-    // writer-adjacent connection to a database the daemon owns.
-    const daemonReads = context.daemonReads;
-    if (!daemonReads) {
-      throw new Error(
-        "CLI workspace context has no daemon reader; the engine daemon is required.",
-      );
-    }
-    response = await daemonReads.queryChatMessagesGranular({
+    response = await context.daemonReads.queryChatMessagesGranular({
       query,
       limit: MAX_FTS_CANDIDATES,
     });
@@ -1030,65 +984,20 @@ async function queryFtsCandidates(
 async function humanUnreadFileThreadIds(
   context: CliWorkspaceContext,
 ): Promise<Set<string>> {
-  if (context.daemonReads) {
-    const threadIds = new Set<string>();
-    let afterThreadId: string | undefined;
-    for (;;) {
-      const rows = await context.daemonReads.listUnreadFileThreads({
-        pageLimit: 500,
-        ...(afterThreadId ? { afterThreadId } : {}),
-      });
-      for (const row of rows) threadIds.add(row.threadId);
-      if (rows.length < 500) return threadIds;
-      const next = rows.at(-1)?.threadId;
-      if (!next || next === afterThreadId) {
-        throw new Error("Daemon unread-file pagination did not advance.");
-      }
-      afterThreadId = next;
+  const threadIds = new Set<string>();
+  let afterThreadId: string | undefined;
+  for (;;) {
+    const rows = await context.daemonReads.listUnreadFileThreads({
+      pageLimit: 500,
+      ...(afterThreadId ? { afterThreadId } : {}),
+    });
+    for (const row of rows) threadIds.add(row.threadId);
+    if (rows.length < 500) return threadIds;
+    const next = rows.at(-1)?.threadId;
+    if (!next || next === afterThreadId) {
+      throw new Error("Daemon unread-file pagination did not advance.");
     }
-  }
-  const { DatabaseSync } = nodeSqlite();
-  let db: EngineSqliteDb | null = null;
-  try {
-    db = new DatabaseSync(
-      join(context.rootPath, LINKED_CHAT_STORE_RELATIVE_PATH),
-      { readOnly: true },
-    );
-    const rows = db.prepare(
-      `SELECT t.thread_id,
-              (SELECT COUNT(*) FROM chat_messages m
-               WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.thread_id)
-                AS message_count,
-              COALESCE((SELECT rs.last_read_sequence FROM chat_thread_read_state rs
-                        WHERE rs.workspace_id = t.workspace_id AND rs.thread_id = t.thread_id), 0)
-                AS last_read_sequence
-       FROM chat_threads t
-       WHERE t.workspace_id = ?
-         AND t.channel_id IS NULL
-         AND t.linked_object_id IS NOT NULL`,
-    ).all(context.workspaceId);
-    const ids = new Set<string>();
-    for (const row of rows) {
-      const messageCount = row.message_count;
-      const lastReadSequence = row.last_read_sequence;
-      if (
-        typeof row.thread_id !== "string" || row.thread_id.length === 0 ||
-        typeof messageCount !== "number" ||
-        !Number.isSafeInteger(messageCount) ||
-        messageCount < 0 ||
-        typeof lastReadSequence !== "number" ||
-        !Number.isSafeInteger(lastReadSequence) ||
-        lastReadSequence < 0
-      ) {
-        throw new CliCommandError("chat store contains invalid read state");
-      }
-      if (messageCount > Math.min(lastReadSequence, messageCount)) {
-        ids.add(row.thread_id);
-      }
-    }
-    return ids;
-  } finally {
-    db?.close();
+    afterThreadId = next;
   }
 }
 

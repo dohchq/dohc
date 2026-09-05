@@ -76,7 +76,6 @@ function providerSession(
       throw new Error("settleNow is not used by this IPC adapter fixture");
     }),
     applyLocalUpdate: vi.fn((_update, onArmed) => onArmed?.()),
-    applyExternalMarkdownEdit: vi.fn(async () => ({ supported: true })),
     readArtifactAsset: vi.fn(async (descriptor) => ({
       descriptor,
       bytes: new Uint8Array([1, 2, 3]),

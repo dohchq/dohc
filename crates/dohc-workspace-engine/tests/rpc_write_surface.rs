@@ -106,6 +106,24 @@ async fn call(
         .result
 }
 
+/// The first `search.queryPage` page for the active version.
+async fn search(
+    transport: &InProcessTransport<EngineService>,
+    handle: &WorkspaceHandle,
+    id: u64,
+    query: &str,
+) -> Value {
+    let mut page = call(
+        transport,
+        handle,
+        id,
+        "search.queryPage",
+        json!({ "query": query }),
+    )
+    .await;
+    page["results"].take()
+}
+
 async fn write(
     transport: &InProcessTransport<EngineService>,
     handle: &WorkspaceHandle,
@@ -4730,44 +4748,16 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
         "fts-write",
     )
     .await;
-    let hit = call(
-        &transport,
-        &handle,
-        3,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let hit = search(&transport, &handle, 3, "uniqueterm").await;
     assert!(!hit.as_array().expect("results").is_empty());
     call(&transport, &handle, 4, "versionedText.rename", json!({ "versionId": "main", "fromPath": "alpha.md", "toPath": "beta.md", "origin": "api", "requestId": "fts-rename" })).await;
-    let renamed = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let renamed = search(&transport, &handle, 5, "uniqueterm").await;
     assert_eq!(renamed[0]["path"], "beta.md");
     let deleted = call(&transport, &handle, 6, "versionedText.delete", json!({ "versionId": "main", "path": "beta.md", "origin": "api", "requestId": "fts-delete" })).await;
-    let gone = call(
-        &transport,
-        &handle,
-        7,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let gone = search(&transport, &handle, 7, "uniqueterm").await;
     assert!(gone.as_array().expect("results").is_empty());
     call(&transport, &handle, 8, "versionedText.rollback", json!({ "versionId": "main", "path": "beta.md", "mutationMomentId": deleted["moment"]["momentId"], "origin": "restore" })).await;
-    let restored = call(
-        &transport,
-        &handle,
-        9,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let restored = search(&transport, &handle, 9, "uniqueterm").await;
     assert_eq!(restored[0]["path"], "beta.md");
     std::fs::write(scratch.path().join("beta.md"), b"uniqueterm").expect("matching preimage");
     call(
@@ -4778,14 +4768,7 @@ async fn fts_is_maintained_in_each_mutation_transaction() {
         json!({ "versionId": "main", "path": "beta.md", "bytes": [0, 255], "origin": "api" }),
     )
     .await;
-    let binary_gone = call(
-        &transport,
-        &handle,
-        11,
-        "search.query",
-        json!({ "versionId": "main", "query": "uniqueterm" }),
-    )
-    .await;
+    let binary_gone = search(&transport, &handle, 11, "uniqueterm").await;
     assert!(binary_gone.as_array().expect("results").is_empty());
 }
 
@@ -4831,14 +4814,7 @@ async fn degraded_policy_write_invalidates_healthy_state_and_rebuilds_after_rest
         json!({ "workspaceId": workspace_id, "versionId": "main" }),
     )
     .await;
-    let results = call(
-        &transport,
-        &handle,
-        6,
-        "search.query",
-        json!({ "versionId": "main", "query": "degraded-window-needle" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 6, "degraded-window-needle").await;
     assert!(
         results
             .as_array()
@@ -5049,14 +5025,7 @@ async fn deduped_text_write_does_not_resurrect_a_moved_fts_row() {
     .await;
     let replay = call(&transport, &handle, 4, "versionedText.write", params).await;
     assert_eq!(replay["deduped"], true);
-    let results = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "unique-replay-term" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 5, "unique-replay-term").await;
     let paths: Vec<&str> = results
         .as_array()
         .expect("results")
@@ -5100,14 +5069,7 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
         }),
     )
     .await;
-    let before = call(
-        &transport,
-        &handle,
-        4,
-        "search.query",
-        json!({ "versionId": "main", "query": "live-text-search-needle" }),
-    )
-    .await;
+    let before = search(&transport, &handle, 4, "live-text-search-needle").await;
     assert_eq!(before[0]["path"], "replayed.md");
 
     let replay = call(
@@ -5119,14 +5081,7 @@ async fn replayed_binary_write_does_not_delete_live_text_fts_row() {
     )
     .await;
     assert_eq!(replay["deduped"], true);
-    let after = call(
-        &transport,
-        &handle,
-        6,
-        "search.query",
-        json!({ "versionId": "main", "query": "live-text-search-needle" }),
-    )
-    .await;
+    let after = search(&transport, &handle, 6, "live-text-search-needle").await;
     assert_eq!(after[0]["path"], "replayed.md");
 }
 
@@ -5156,14 +5111,7 @@ async fn search_ensure_index_is_idempotent() {
         .await;
         assert_eq!(ensured, json!({}));
     }
-    let results = call(
-        &transport,
-        &handle,
-        5,
-        "search.query",
-        json!({ "versionId": "main", "query": "explicit-rebuild" }),
-    )
-    .await;
+    let results = search(&transport, &handle, 5, "explicit-rebuild").await;
     assert!(
         results
             .as_array()
@@ -5318,14 +5266,7 @@ async fn merge_classifies_and_never_inlines_the_merged_body() {
     assert_eq!(merged["status"], "merged");
     assert!(merged["snapshot"].get("text").is_none());
     assert!(merged["moment"]["momentId"].is_string());
-    let indexed = call(
-        &transport,
-        &handle,
-        4,
-        "search.query",
-        json!({ "versionId": "main", "query": "incoming" }),
-    )
-    .await;
+    let indexed = search(&transport, &handle, 4, "incoming").await;
     assert_eq!(indexed[0]["path"], "merge.md");
 }
 

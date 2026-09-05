@@ -82,7 +82,6 @@ import {
 } from "node:fs/promises";
 import type { Stats } from "node:fs";
 import { basename, dirname, join, sep } from "node:path";
-import { hasLegacyAppImport } from "./sourceScanner";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -1604,7 +1603,6 @@ type SiteCheck = {
   path?: string;
 };
 
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
 const SITE_SCAN_IGNORED_NAMES = new Set([
   ".cache",
   ".dohc",
@@ -1620,20 +1618,6 @@ const SITE_SCAN_IGNORED_NAMES = new Set([
   "node_modules",
 ]);
 const SITE_BUILD_OUTPUT_NAMES = ["dist", "build", "out"];
-const SITE_SOURCE_EXTENSIONS = new Set([
-  ".html",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".mts",
-  ".cts",
-  ".ts",
-  ".tsx",
-  ".css",
-]);
-const MAX_SITE_TEST_BYTES = 2 * 1024 * 1024;
-const MAX_SITE_SCAN_DEPTH = 100;
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -1642,23 +1626,9 @@ function relativeJoin(prefix: string, name: string): string {
   return prefix && prefix !== "." ? `${prefix}/${name}` : name;
 }
 
-function hasLegacyAppsSegment(path: string): boolean {
-  return path
-    .split(/[\\/]+/)
-    .filter(Boolean)
-    .some((segment) => segment.toLowerCase() === LEGACY_APPS_SEGMENT);
-}
-
-function sitePathAllowed(path: string): { ok: true } | { ok: false; reason: string } {
-  if (hasLegacyAppsSegment(path)) {
-    return { ok: false, reason: `site tools do not operate on legacy ${LEGACY_APPS_SEGMENT} paths` };
-  }
-  return { ok: true };
-}
-
 function isIgnoredSitePath(path: string): boolean {
   if (!path) return false;
-  if (hasIgnoredSegment(path) || hasLegacyAppsSegment(path)) return true;
+  if (hasIgnoredSegment(path)) return true;
   return path
     .split("/")
     .filter(Boolean)
@@ -2065,10 +2035,6 @@ export async function detectSites(
       ? await safeResolve(ctx, args.path, "read")
       : { ok: true as const, absolute: ctx.root, normalized: "", realRelative: "" };
   if (!start.ok) return { ok: false as const, reason: start.reason };
-  // Where the scan really lands decides the rule: `sites ->.apps`
-  // spells an ordinary folder and reads the legacy tree site tools disown.
-  const allowed = sitePathAllowed(start.realRelative);
-  if (!allowed.ok) return allowed;
 
   const info = await lstat(start.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `path not found: ${args.path ?? "."}` };
@@ -2134,8 +2100,6 @@ export async function createSite(
   const root = await safeResolve(ctx, args.path);
   if (!root.ok) return { ok: false as const, reason: root.reason };
   if (!root.normalized) return { ok: false as const, reason: "site path must name a folder" };
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const recordable = await ensureRecordable(ctx);
   if (recordable) return recordable;
 
@@ -2285,8 +2249,6 @@ for (const file of ["index.html", "styles.css", "script.js"]) {
   for (const file of files) {
     const resolved = await safeResolve(ctx, file.path);
     if (!resolved.ok) return { ok: false as const, reason: resolved.reason };
-    const fileAllowed = sitePathAllowed(resolved.realRelative);
-    if (!fileAllowed.ok) return fileAllowed;
     if (
       resolved.normalized !== root.normalized &&
       !resolved.normalized.startsWith(`${root.normalized}/`)
@@ -2354,8 +2316,6 @@ async function resolveSiteRoot(ctx: ToolContext, siteRoot: string) {
       reason: `site root is a mounted share (read-only): ${siteRoot} — copy it into your own files to run it`,
     };
   }
-  const allowed = sitePathAllowed(root.realRelative);
-  if (!allowed.ok) return allowed;
   const info = await lstat(root.absolute).catch(() => null);
   if (!info) return { ok: false as const, reason: `site root not found: ${siteRoot}` };
   if (!info.isDirectory()) return { ok: false as const, reason: `site root is not a directory: ${siteRoot}` };
@@ -2403,74 +2363,8 @@ export async function testSite(ctx: ToolContext, args: { siteRoot: string }) {
     });
   }
 
-  const legacyImport = await findLegacyAppImport(root.absolute, root.normalized);
-  checks.push(
-    legacyImport
-      ? {
-          name: "no-legacy-sdk-import",
-          ok: false,
-          path: legacyImport.path,
-          message:
-            legacyImport.reason === "too-large"
-              ? "Site source is too large for MCP static validation."
-              : "Sites must use normal web files or @dohc/sdk, not the legacy app SDK.",
-        }
-      : {
-          name: "no-legacy-sdk-import",
-          ok: true,
-          message: "No legacy app SDK import found in scanned site source.",
-        },
-  );
-
   const ok = checks.every((check) => check.ok);
   return { ok, site, checks };
-}
-
-async function findLegacyAppImport(
-  absolute: string,
-  root: string,
-): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-  let totalBytes = 0;
-  async function walk(
-    currentAbsolute: string,
-    currentRoot: string,
-    depth: number,
-  ): Promise<{ path: string; reason: "legacy-import" | "too-large" } | null> {
-    if (depth > MAX_SITE_SCAN_DEPTH) return null;
-    if (isIgnoredSitePath(currentRoot)) return null;
-    let dirents;
-    try {
-      dirents = await readdir(currentAbsolute, { withFileTypes: true });
-    } catch {
-      return null;
-    }
-    for (const dirent of dirents) {
-      const rel = relativeJoin(currentRoot, dirent.name);
-      if (dirent.isSymbolicLink() || isIgnoredSitePath(rel)) continue;
-      const child = join(currentAbsolute, dirent.name);
-      if (dirent.isDirectory()) {
-        const found = await walk(child, rel, depth + 1);
-        if (found) return found;
-        continue;
-      }
-      if (!dirent.isFile() || !SITE_SOURCE_EXTENSIONS.has(fileExtension(dirent.name))) continue;
-      const info = await stat(child);
-      if (totalBytes + info.size > MAX_SITE_TEST_BYTES) {
-        return { path: rel, reason: "too-large" };
-      }
-      totalBytes += info.size;
-      if (hasLegacyAppImport(await readFile(child, "utf8"))) {
-        return { path: rel, reason: "legacy-import" };
-      }
-    }
-    return null;
-  }
-  return walk(absolute, root, 0);
-}
-
-function fileExtension(path: string): string {
-  const index = path.lastIndexOf(".");
-  return index >= 0 ? path.slice(index).toLowerCase() : "";
 }
 
 export async function buildSite(ctx: ToolContext, args: { siteRoot: string }) {

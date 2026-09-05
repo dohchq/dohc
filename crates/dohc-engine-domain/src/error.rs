@@ -237,7 +237,7 @@ impl DomainError {
             DomainError::IdempotencyKeyReuseMismatch => "idempotency-key-reuse-mismatch",
             DomainError::StateCorrupt { .. } => "state-corrupt",
             // Delegates to the crypto taxonomy: `decrypt-failed`, `key-corrupt`,
-            // `invalid-text`, `invalid-input`, `unwrap-failed`.
+            // `invalid-text`, `invalid-input`.
             DomainError::Crypto(err) => err.code(),
             DomainError::SecretMomentNotFound => "moment-not-found",
             DomainError::Chat { code, .. } => code,

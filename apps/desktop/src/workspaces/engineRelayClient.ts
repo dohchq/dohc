@@ -10,7 +10,6 @@ import {
   type CommitRelayCursorResult,
   type MaterializeRelayPullPage,
   type ProbeRelayWorkspaceResult,
-  type RelayWorkspaceBootstrapResult,
   type RelayWorkspaceIdentity,
   type PullSharedChannelResult,
   MAX_REPORTED_REFUSALS,
@@ -26,7 +25,6 @@ import {
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
 import type { ShareAccess } from "@dohc/security-contract/share-selector";
-import { probeRelayWorkspace } from "./relayWorkspaceProbe";
 import {
   DaemonRefusalError,
   decodeKeyEnvelopeResult,
@@ -44,8 +42,6 @@ import {
   type EngineDaemonClientSource,
   type EngineWorkspace,
 } from "@dohc/workspace-engine-client/daemon";
-
-export type RelayTransportMode = "typescript" | "daemon";
 
 export class MixedRelayTransportError extends Error {
   readonly workspaceId: string;
@@ -65,7 +61,6 @@ interface RelayOpenConfiguration {
 }
 
 interface RelayRoute {
-  readonly mode: RelayTransportMode;
   readonly baseUrl: string;
   readonly locations: Map<string, RelayOpenConfiguration>;
 }
@@ -100,10 +95,10 @@ export function allowInsecureLoopbackRelayForTests(
 }
 
 /**
- * Process-lifetime authority for the relay implementation used by a logical
- * workspace + relay origin. A live route can refresh its bearer token, but it
- * cannot mix implementations or origins. A legitimate relay change releases
- * the route only after its daemon workspace session has closed.
+ * Process-lifetime authority for the relay origin used by a logical
+ * workspace. A live route can refresh its bearer token, but it cannot change
+ * origin. A legitimate relay change releases the route only after its daemon
+ * workspace session has closed.
  */
 export class RelayTransportRouteGuard {
   private readonly routes = new Map<string, RelayRoute>();
@@ -112,17 +107,10 @@ export class RelayTransportRouteGuard {
     workspaceId: string;
     rootPath: string;
     relay: Pick<SyncRelayConnection, "baseUrl" | "token">;
-    mode: RelayTransportMode;
     allowInsecureLoopbackForTests?: boolean;
   }): void {
     const baseUrl = normalizedRelayUrl(input.relay.baseUrl);
     const existing = this.routes.get(input.workspaceId);
-    if (existing && existing.mode !== input.mode) {
-      throw new MixedRelayTransportError(
-        input.workspaceId,
-        `already uses ${existing.mode}; refusing ${input.mode}`,
-      );
-    }
     if (existing && existing.baseUrl !== baseUrl) {
       throw new MixedRelayTransportError(
         input.workspaceId,
@@ -132,48 +120,30 @@ export class RelayTransportRouteGuard {
     const route =
       existing ??
       {
-        mode: input.mode,
         baseUrl,
         locations: new Map<string, RelayOpenConfiguration>(),
       };
     if (!existing) this.routes.set(input.workspaceId, route);
-    if (input.mode === "daemon") {
-      route.locations.set(input.rootPath, {
-        baseUrl,
-        bearerToken: input.relay.token,
-        ...(input.allowInsecureLoopbackForTests
-          ? { allowInsecureLoopbackForTests: true }
-          : {}),
-      });
-    }
+    route.locations.set(input.rootPath, {
+      baseUrl,
+      bearerToken: input.relay.token,
+      ...(input.allowInsecureLoopbackForTests
+        ? { allowInsecureLoopbackForTests: true }
+        : {}),
+    });
   }
 
-  modeFor(workspaceId: string): RelayTransportMode | null {
-    return this.routes.get(workspaceId)?.mode ?? null;
+  isBound(workspaceId: string): boolean {
+    return this.routes.has(workspaceId);
   }
 
-  releaseWorkspace(
-    workspaceId: string,
-    expectedMode?: RelayTransportMode,
-  ): void {
-    if (
-      expectedMode !== undefined &&
-      this.routes.get(workspaceId)?.mode !== expectedMode
-    ) {
-      return;
-    }
+  releaseWorkspace(workspaceId: string): void {
     this.routes.delete(workspaceId);
   }
 
-  releaseLocation(
-    workspaceId: string,
-    rootPath: string,
-    expectedMode?: RelayTransportMode,
-  ): void {
+  releaseLocation(workspaceId: string, rootPath: string): void {
     const route = this.routes.get(workspaceId);
-    if (!route || (expectedMode !== undefined && route.mode !== expectedMode)) {
-      return;
-    }
+    if (!route) return;
     route.locations.delete(rootPath);
     if (route.locations.size === 0) this.routes.delete(workspaceId);
   }
@@ -186,30 +156,7 @@ export class RelayTransportRouteGuard {
     workspaceId: string,
     rootPath: string,
   ): RelayOpenConfiguration | null {
-    const route = this.routes.get(workspaceId);
-    if (!route || route.mode !== "daemon") return null;
-    return route.locations.get(rootPath) ?? null;
-  }
-}
-
-export async function probeWorkspaceRelay(
-  routes: RelayTransportRouteGuard,
-  input: {
-    workspaceId: string;
-    relay: SyncRelayConnection;
-  },
-): Promise<RelayWorkspaceBootstrapResult> {
-  routes.bind({
-    ...input,
-    rootPath: `relay-probe:${input.workspaceId}`,
-    mode: "typescript",
-  });
-  try {
-    return await probeRelayWorkspace(input);
-  } finally {
-    // Mode-conditional cleanup cannot tear down a daemon route that replaced
-    // the transient probe route while its HTTP request was in flight.
-    routes.releaseWorkspace(input.workspaceId, "typescript");
+    return this.routes.get(workspaceId)?.locations.get(rootPath) ?? null;
   }
 }
 
@@ -263,42 +210,10 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
       "workspace.open params",
     );
     const relay = this.routes.relayForOpen(workspaceId, rootPath);
-    const decorated: Request = {
+    return await this.client.sendRequest({
       ...request,
       params: relay ? { ...params, relay } : params,
-    };
-    try {
-      return await this.client.sendRequest(decorated);
-    } catch (error) {
-      // S1's byte-identical shared session layer carries the later
-      // dispatch-recovery open option. RPC-E's deny-unknown-fields open shape
-      // predates it. Retry only this rejected open without the later option;
-      // a merged daemon that supports the option succeeds above and preserves
-      // the false value (running dispatch claims survive a sidecar rebind).
-      const refusal =
-        typeof error === "object" &&
-        error !== null &&
-        "wireError" in error &&
-        typeof error.wireError === "object" &&
-        error.wireError !== null
-          ? error.wireError
-          : null;
-      if (
-        relay &&
-        refusal &&
-        "code" in refusal &&
-        refusal.code === "INVALID_PARAMS" &&
-        "recoverRunningDispatches" in params
-      ) {
-        const { recoverRunningDispatches: _laterOpenOption, ...openParams } =
-          params;
-        return await this.client.sendRequest({
-          ...request,
-          params: { ...openParams, relay },
-        });
-      }
-      throw error;
-    }
+    });
   }
 
   close(): void {
@@ -710,7 +625,6 @@ export class EngineRelayClient {
     };
     this.routes.bind({
       ...input,
-      mode: "daemon",
       allowInsecureLoopbackForTests:
         this.allowInsecureLoopbackForTests ||
         allowInsecureLoopbackRelayForTests(input.relay.baseUrl),
@@ -1264,14 +1178,10 @@ export class EngineRelayClient {
         descriptor !== null &&
         !this.hasBoundLocation(workspaceId, descriptor.rootPath)
       ) {
-        this.routes.releaseLocation(
-          workspaceId,
-          descriptor.rootPath,
-          "daemon",
-        );
+        this.routes.releaseLocation(workspaceId, descriptor.rootPath);
       }
       if (!this.hasBoundWorkspace(workspaceId)) {
-        this.routes.releaseWorkspace(workspaceId, "daemon");
+        this.routes.releaseWorkspace(workspaceId);
       }
     });
   }
@@ -1340,11 +1250,7 @@ export class EngineRelayClient {
       this.boundWorkspaces.delete(candidateKey);
       this.activeLocations.delete(candidateKey);
       if (!this.hasBoundLocation(candidate.workspaceId, candidate.rootPath)) {
-        this.routes.releaseLocation(
-          candidate.workspaceId,
-          candidate.rootPath,
-          "daemon",
-        );
+        this.routes.releaseLocation(candidate.workspaceId, candidate.rootPath);
       }
     }
   }

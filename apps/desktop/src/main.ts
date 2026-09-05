@@ -622,9 +622,9 @@ import {
   type WorkspaceActivityScope,
 } from "./ipc/workspaceActivityBroadcast";
 import { WorkspaceFileListingCache } from "./workspaces/workspaceFileListingCache";
+import { probeRelayWorkspace } from "./workspaces/relayWorkspaceProbe";
 import {
   EngineRelayClient,
-  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
   type EngineRelayWorkspaceClient,
@@ -717,7 +717,6 @@ import { PluginWorkspaceEvents } from "./plugins/pluginWorkspaceEvents";
 import { createPluginPanelSdkEventEmitter } from "./plugins/pluginPanelSdkEvent";
 import { PluginSurfaceHostLifecycle } from "./plugins/pluginSurfaceHostLifecycle";
 import { createPluginAgentDrivers } from "./plugins/pluginAgentDrivers";
-import { BUILT_IN_AGENT_DRIVER_IDS } from "./agents/AgentDriver";
 import { pluginDataDir } from "./plugins/pluginLocalState";
 import { pluginIdToSafePath } from "./plugins/pluginSourceSnapshot";
 import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
@@ -1041,8 +1040,8 @@ function createPluginWorkspaceRuntimeParts(
     workspaceRoot: workspace.rootPath,
   });
   // This workspace's plugin-contributed agent drivers. They join the driver
-  // registry the agent session manager builds, so a plugin driver is chosen,
-  // probed, and stopped exactly like one dohc ships.
+  // registry the agent session manager builds, which chooses, probes, and
+  // stops them.
   let pluginHostRef: PluginHost | null = null;
   const pluginDrivers = createPluginAgentDrivers({
     host: {
@@ -1057,7 +1056,6 @@ function createPluginWorkspaceRuntimeParts(
         return pluginHostRef.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    reservedDriverIds: BUILT_IN_AGENT_DRIVER_IDS,
   });
   // This workspace's plugin file subscriptions, fed by the settled watcher
   // batch (see onWatcherBatch) — the same feed the pipeline reads.
@@ -3499,15 +3497,8 @@ async function workspaceAgentDefaults(
 let cachedAgentSessions: AgentSessionManager | null = null;
 async function agentSessionManager(): Promise<AgentSessionManager> {
   if (!cachedAgentSessions) {
-    const [{ createAgentDriverRegistry }, { createDesktopAgentDrivers }, { createAgentSessionManager }] =
-      await Promise.all([
-        import("./agents/AgentDriver"),
-        import("./agents/AgentProcessDrivers"),
-        import("./agents/AgentSessionManager"),
-      ]);
+    const { createAgentSessionManager } = await import("./agents/AgentSessionManager");
     cachedAgentSessions = createAgentSessionManager({
-      registry: createAgentDriverRegistry(createDesktopAgentDrivers(process.env)),
-      // A workspace's plugin drivers join its registry beside the built-ins.
       pluginDriversFor: (workspaceId) =>
         pluginWorkspaceRuntimes.current(workspaceId)?.agentDrivers.list() ?? [],
       agentDefaultsFor: workspaceAgentDefaults,
@@ -4994,6 +4985,7 @@ async function openCliWorkspace(
   }
   const store = linkedChatStoreFor(workspace);
   const daemon = rustEngineDaemon;
+  if (!daemon) throw new Error("The workspace engine is not running.");
   // The CLI's collection writes ride the same seam plugin SDK edits take,
   // resolved per write under the physical workspace's authority, so a
   // retired-and-reattached workspace refuses instead of falling through to
@@ -5011,38 +5003,31 @@ async function openCliWorkspace(
     dispatchStore: agentDispatchStoreHandleFor(workspace).store,
     readOnly: Boolean(sharedViewOf(workspace.workspaceId)),
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
-    ...(daemon
-      ? {
-          daemonReads: {
-            async queryChatMessagesGranular(input: {
-              query: string;
-              limit: number;
-            }) {
-              return decodeGranularChatMessageSearchResponse(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  WORKSPACE_METHOD.searchQueryChatMessagesGranular,
-                  input,
-                ),
-              );
-            },
-            async listUnreadFileThreads(input: {
-              pageLimit: number;
-              afterThreadId?: string;
-            }) {
-              return decodeUnreadFileThreads(
-                await daemon.requestWorkspace(
-                  workspace.rootPath,
-                  workspace.workspaceId,
-                  CHATS_METHOD.readStateListUnreadFileThreads,
-                  input,
-                ),
-              );
-            },
-          },
-        }
-      : {}),
+    daemonReads: {
+      async queryChatMessagesGranular(input: { query: string; limit: number }) {
+        return decodeGranularChatMessageSearchResponse(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            WORKSPACE_METHOD.searchQueryChatMessagesGranular,
+            input,
+          ),
+        );
+      },
+      async listUnreadFileThreads(input: {
+        pageLimit: number;
+        afterThreadId?: string;
+      }) {
+        return decodeUnreadFileThreads(
+          await daemon.requestWorkspace(
+            workspace.rootPath,
+            workspace.workspaceId,
+            CHATS_METHOD.readStateListUnreadFileThreads,
+            input,
+          ),
+        );
+      },
+    },
     // Engine-backed collection reads and writes for the CLI/MCP verbs.
     // withEngineAdapter derives the attachment (and share-view session mode)
     // from the registered workspace itself — the renderer collection routes'
@@ -7896,7 +7881,7 @@ function registerIpcHandlers(
     let probe: RelayWorkspaceBootstrapResult;
     let authorityBinding: DesktopWorkspaceAuthorityBinding | null = null;
     try {
-      probe = await probeWorkspaceRelay(relayTransportRoutes, {
+      probe = await probeRelayWorkspace({
         workspaceId: parsed.workspaceId,
         relay,
       });
@@ -13144,7 +13129,13 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
     assertTrustedSender(event);
     const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
+    const workspace = requireWorkspace(input.workspaceId);
+    // Every driver is plugin-contributed, and workspace open only warms the
+    // plugin runtime in the background. A probe that ran ahead of it would
+    // answer "no drivers" and the caller would cache that for its lifetime.
+    if (!sharedViewOf(workspace.workspaceId)) {
+      await pluginWorkspaceRuntimes.ensure(workspace);
+    }
     const sessions = await agentSessionManager();
     await sessions.probeDrivers(input.workspaceId);
     return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));

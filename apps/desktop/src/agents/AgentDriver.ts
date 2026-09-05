@@ -1,13 +1,6 @@
-export type AgentDriverId = "claude-acp" | "generic-acp" | (string & {});
+import type { PluginJsonValue } from "@dohc/sdk/node";
 
-/**
- * The driver ids dohc ships. A plugin may not take one, and the plugin driver
- * registry refuses one that tries (pluginAgentDrivers.ts).
- *
- * Codex is not here: it left this process for `apps/desktop/plugins/codex`,
- * and the id it holds now is a plugin's to take like any other.
- */
-export const BUILT_IN_AGENT_DRIVER_IDS = ["claude-acp", "generic-acp"] as const;
+export type AgentDriverId = string;
 
 export interface PermissionOption {
   optionId: string;
@@ -97,7 +90,7 @@ export interface AgentSessionStartInput {
   workspaceRoot: string;
   mode: "approval-required" | "auto-accept-edits" | "full-access";
   model?: string;
-  resumeCursor?: unknown;
+  resumeCursor?: PluginJsonValue;
   mcp: { command: string; args: string[]; env?: Record<string, string> };
   onEvent: (event: AgentEvent) => void;
   permissionPolicy?: (event: Extract<AgentEvent, { kind: "permission-request" }>) => PermissionDecision | null;
@@ -106,7 +99,7 @@ export interface AgentSessionStartInput {
 
 export interface AgentSession {
   readonly sessionId: string;
-  readonly resumeCursor: unknown;
+  readonly resumeCursor?: PluginJsonValue;
   prompt(input: {
     text: string;
     attachments?: Array<{ type: "image"; pathOrUrl: string }>;
@@ -124,14 +117,6 @@ export interface AgentDriver {
   readonly displayName: string;
   probe(env?: Record<string, string | undefined>): Promise<AgentProbe>;
   startSession(input: AgentSessionStartInput): Promise<AgentSession>;
-}
-
-export function selectPermissionOption(
-  options: PermissionOption[],
-  decision: PermissionDecision,
-): PermissionOption | null {
-  if (decision === "cancel") return null;
-  return options.find((option) => option.kind === decision) ?? null;
 }
 
 export function createAgentDriverRegistry(drivers: AgentDriver[]) {

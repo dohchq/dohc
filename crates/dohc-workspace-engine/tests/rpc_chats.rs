@@ -1819,12 +1819,21 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
     assert_eq!(reserved_message.code, ErrorCode::InvalidParams);
     // Prime the durable search state. The next stable-policy query will not run
     // the repair rebuild, so only write-time indexing can expose the new message.
+    // `search.queryPage` reads the active version, so bootstrap main first.
     call(
         &transport,
         &first_handle,
         &mut id,
-        "search.query",
-        json!({ "versionId": "main", "query": "search seed", "nowMs": 1002 }),
+        "versions.ensureMain",
+        json!({ "workspaceId": "rpc-chat-first" }),
+    )
+    .await;
+    call(
+        &transport,
+        &first_handle,
+        &mut id,
+        "search.queryPage",
+        json!({ "query": "search seed", "nowMs": 1002 }),
     )
     .await;
     call(
@@ -1846,14 +1855,14 @@ async fn chat_rpc_surface_is_bounded_scoped_and_covers_dispatch_lifecycle() {
         &transport,
         &first_handle,
         &mut id,
-        "search.query",
-        json!({ "versionId": "main", "query": "r2indexsentinel", "nowMs": 1004 }),
+        "search.queryPage",
+        json!({ "query": "r2indexsentinel", "nowMs": 1004 }),
     )
     .await;
     // Mutation guard: removing the send-message FTS upsert must make this fail;
     // no policy transition occurs between the priming and asserting queries.
     assert!(
-        write_time_search
+        write_time_search["results"]
             .as_array()
             .expect("search results")
             .iter()

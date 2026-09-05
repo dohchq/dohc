@@ -14,10 +14,10 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::search::{
     CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET, FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
-    FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET, SearchCandidate, SearchPageDisposition, SearchSurface,
-    ensure_search_index_for_version, query_chat_messages_granular,
-    query_chat_messages_granular_bounded, query_search_index, query_search_index_keyset,
-    search_workspace, search_workspace_page, upsert_file_search_index,
+    FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET, SHORT_QUERY_PAGE_ROW_BUDGET, SearchCandidate,
+    SearchPageDisposition, SearchSurface, ensure_search_index_for_version,
+    query_chat_messages_granular_bounded, query_search_index_keyset, search_workspace_page,
+    upsert_file_search_index,
 };
 use dohc_engine_storage::{
     EngineStore, FaultPoint, NoFaults, Preimage, TxnOutcome, hex_sha256, put_binary_blob,
@@ -33,6 +33,8 @@ use std::path::Path;
 const WS: &str = "ws-1";
 const V: &str = "v-main";
 const NO_FAULTS: NoFaults = NoFaults;
+/// The daemon's granular chat response budget.
+const GRANULAR_BYTE_BUDGET: usize = 256 * 1024;
 
 fn open(db: &Path, now: i64) -> EngineStore {
     EngineStore::open(db, now).expect("open")
@@ -156,8 +158,45 @@ fn run_search(
     query: &str,
 ) -> Vec<dohc_engine_runtime::SearchResult> {
     store
-        .read_with(|conn| search_workspace(conn, root, WS, V, query, Some(100), 999))
+        .read_with(|conn| {
+            search_workspace_page(conn, root, WS, V, query, Some(100), 999, None, None)
+        })
         .expect("search")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
+}
+
+/// First keyset page of policy-filtered candidates, with the daemon's budgets.
+fn candidates(
+    conn: &rusqlite::Connection,
+    root: &Path,
+    query: &str,
+) -> Result<Option<Vec<SearchCandidate>>, dohc_engine_runtime::SearchError> {
+    Ok(query_search_index_keyset(
+        conn,
+        root,
+        WS,
+        V,
+        query,
+        100,
+        None,
+        FILE_SEARCH_RESULT_SOURCE_BYTE_BUDGET,
+        FILE_SEARCH_PAGE_SOURCE_BYTE_BUDGET,
+        SHORT_QUERY_PAGE_ROW_BUDGET,
+    )?
+    .map(|batch| batch.candidates))
+}
+
+fn granular(
+    conn: &rusqlite::Connection,
+    query: &str,
+) -> Result<
+    Vec<dohc_engine_runtime::search::GranularChatMessageSearchResult>,
+    dohc_engine_runtime::SearchError,
+> {
+    Ok(query_chat_messages_granular_bounded(conn, WS, query, 100, GRANULAR_BYTE_BUDGET)?.results)
 }
 
 #[test]
@@ -625,13 +664,6 @@ fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
         page.results
     );
 
-    let compatibility_results = run_search(&store, &root, "needle");
-    assert_eq!(
-        compatibility_results.len(),
-        10,
-        "the unpaged wrapper must consume every bounded actor page"
-    );
-
     let mut cursor = page.continuation;
     let mut generation = Some(page.generation);
     let mut paged_results = page.results.len();
@@ -1012,7 +1044,7 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
     // The raw candidate query also fails the file half closed while the chat
     // half is populated.
     let candidates = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, "needle", 100))
+        .read_with(|conn| candidates(conn, &root, "needle"))
         .expect("query")
         .expect("some");
     assert!(
@@ -1023,7 +1055,7 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
 
     // Chat-only granular query is entirely unaffected by the file policy.
     let chat_hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "needle", 100))
+        .read_with(|conn| granular(conn, "needle"))
         .expect("granular");
     assert!(
         !chat_hits.is_empty(),
@@ -1066,8 +1098,7 @@ fn read_your_writes_same_txn_no_torn_index() {
         .write_with(&NO_FAULTS, |tx| {
             upsert_file_search_index(tx, &root, WS, V, "obj-d", "d.md", "delta needle")?;
             // Read-your-writes: the just-upserted row is visible in the same txn.
-            let candidates =
-                query_search_index(tx, &root, WS, V, "delta", 100)?.unwrap_or_default();
+            let candidates = candidates(tx, &root, "delta")?.unwrap_or_default();
             Ok::<bool, dohc_engine_runtime::SearchError>(
                 candidates
                     .iter()
@@ -1178,33 +1209,40 @@ fn bounds_query_length_and_limit() {
     // At the primitive: an over-long query fails closed (Some(empty)), never the
     // `None` fallback sentinel — so an adapter cannot turn it into a linear scan.
     let overlong = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, &long, 100))
+        .read_with(|conn| candidates(conn, &root, &long))
         .expect("q");
     assert_eq!(
         overlong,
         Some(Vec::new()),
         "over-long query must fail closed, not fall back"
     );
-    // A too-short query under a healthy policy stays the fallback sentinel (None).
+    // A too-short query under a healthy policy is served by the bounded linear scan.
     let short = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, "ne", 100))
-        .expect("q");
+        .read_with(|conn| candidates(conn, &root, "ne"))
+        .expect("q")
+        .expect("some");
     assert!(
-        short.is_none(),
-        "sub-trigram query keeps the None fallback sentinel"
+        short
+            .iter()
+            .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md")),
+        "sub-trigram query is served by the linear scan"
     );
 
     // limit <= 0 short-circuits.
     let none = store
-        .read_with(|conn| search_workspace(conn, &root, WS, V, "needle", Some(0), 30))
+        .read_with(|conn| {
+            search_workspace_page(conn, &root, WS, V, "needle", Some(0), 30, None, None)
+        })
         .expect("search");
-    assert!(none.is_empty());
+    assert!(none.results.is_empty());
 
     // A positive limit caps the result count.
     let capped = store
-        .read_with(|conn| search_workspace(conn, &root, WS, V, "needle", Some(1), 30))
+        .read_with(|conn| {
+            search_workspace_page(conn, &root, WS, V, "needle", Some(1), 30, None, None)
+        })
         .expect("search");
-    assert_eq!(capped.len(), 1);
+    assert_eq!(capped.results.len(), 1);
 }
 
 // ------------------------------------------------ 7. FTS5 config / trigram parity
@@ -1228,7 +1266,7 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
     // Trigram tokenizer default is case-insensitive: a lowercase query matches
     // mixed-case text (the FTS prefilter must not drop the true match).
     let hits = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, "needle", 100))
+        .read_with(|conn| candidates(conn, &root, "needle"))
         .expect("query")
         .expect("some");
     assert!(
@@ -1236,23 +1274,26 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
             .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md"))
     );
 
-    // A 3-char query is served (min trigram length); a 2-char one is not.
+    // A 3-char query is served by the trigram index; a 2-char one by the
+    // bounded linear scan, which is also case-insensitive.
     let three = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, "cap", 100))
+        .read_with(|conn| candidates(conn, &root, "cap"))
         .expect("q3");
     assert!(three.is_some());
     let two = store
-        .read_with(|conn| query_search_index(conn, &root, WS, V, "ca", 100))
-        .expect("q2");
+        .read_with(|conn| candidates(conn, &root, "ca"))
+        .expect("q2")
+        .expect("some");
     assert!(
-        two.is_none(),
-        "sub-trigram query falls back (None) under a healthy policy"
+        two.iter()
+            .any(|c| matches!(c, SearchCandidate::File { path, .. } if path == "a.md")),
+        "sub-trigram query is served by the linear scan under a healthy policy"
     );
 }
 
 // -------------------------------- 8. read_with rebuild is atomic across a crash
 
-/// The P1 regression: `search_workspace`/`ensure` can run on an autocommit
+/// The P1 regression: `search_workspace_page`/`ensure` can run on an autocommit
 /// (`read_with`) connection. A crash MID-rebuild — after the chat FTS wipe,
 /// before the rebuild inserts — must not leave a torn/empty generation. The
 /// savepoint inside `ensure_search_index_for_version` is what guarantees this on
@@ -1320,7 +1361,7 @@ fn read_with_rebuild_is_atomic_across_mid_rebuild_crash() {
     assert_eq!(state_rows, 0, "no torn generation may be certified");
     // The granular reader (which never calls ensure) sees the intact rows.
     let hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "needle", 100))
+        .read_with(|conn| granular(conn, "needle"))
         .expect("granular");
     assert!(
         !hits.is_empty(),
@@ -1409,7 +1450,7 @@ fn legacy_certified_store_backfills_missing_chat_fts_on_first_search() {
         .expect("simulate legacy certified store");
 
     let before = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "backfill", 100))
+        .read_with(|conn| granular(conn, "backfill"))
         .expect("pre-upgrade granular query");
     assert!(
         before.is_empty(),
@@ -1612,14 +1653,14 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     ));
 
     let title_hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "roadmap", 100))
+        .read_with(|conn| granular(conn, "roadmap"))
         .expect("thread-title search");
     assert_eq!(title_hits.len(), 1);
     assert_eq!(title_hits[0].thread_id, "replicated-thread");
     assert_eq!(title_hits[0].message_id, None);
 
     let message_hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "quasar", 100))
+        .read_with(|conn| granular(conn, "quasar"))
         .expect("message search");
     assert_eq!(
         message_hits.len(),
@@ -1667,7 +1708,7 @@ fn parked_replicated_message_is_findable_after_thread_promotion() {
     apply_chat_envelope(&mut store, &thread, &NO_FAULTS).expect("promote message");
 
     let hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "comet", 100))
+        .read_with(|conn| granular(conn, "comet"))
         .expect("promoted message search");
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].message_id.as_deref(), Some("parked-message"));
@@ -1730,12 +1771,12 @@ fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
     }
 
     let title_hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "constellation", 100))
+        .read_with(|conn| granular(conn, "constellation"))
         .expect("shared title search");
     assert_eq!(title_hits.len(), 1);
     assert_eq!(title_hits[0].message_id, None);
     let message_hits = store
-        .read_with(|conn| query_chat_messages_granular(conn, WS, "supernova", 100))
+        .read_with(|conn| granular(conn, "supernova"))
         .expect("shared message search");
     assert_eq!(message_hits.len(), 1);
     assert_eq!(

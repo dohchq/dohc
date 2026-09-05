@@ -7,7 +7,7 @@
 use dohc_engine_domain::{
     DomainError, VersionedTextStore, WriteBinaryFile, WriteText, write_binary_file_in_tx,
 };
-use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
+use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace_page};
 use dohc_engine_storage::{EngineStore, NoFaults, Preimage, hex_sha256, put_binary_blob};
 use dohc_engine_testkit::ScratchDir;
 
@@ -80,20 +80,50 @@ fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
         .expect("commit rebuild");
 
     let text_hits = store
-        .read_with(|conn| search_workspace(conn, &root, WS, V, "findabletextneedle", Some(100), 9))
+        .read_with(|conn| {
+            search_workspace_page(
+                conn,
+                &root,
+                WS,
+                V,
+                "findabletextneedle",
+                Some(100),
+                9,
+                None,
+                None,
+            )
+        })
         .expect("text search");
     assert!(
-        text_hits.iter().any(|r| r.path == "note.md"),
+        text_hits
+            .results
+            .iter()
+            .any(|keyed| keyed.result.path == "note.md"),
         "the text file must still index/search after a binary snapshot exists"
     );
 
     // The binary head must not be searchable by its path (TS deletes its FTS row;
     // the Rust rebuild excludes it explicitly via `content_kind IS NOT 'binary'`).
     let bin_hits = store
-        .read_with(|conn| search_workspace(conn, &root, WS, V, "uniquebinaryname", Some(100), 9))
+        .read_with(|conn| {
+            search_workspace_page(
+                conn,
+                &root,
+                WS,
+                V,
+                "uniquebinaryname",
+                Some(100),
+                9,
+                None,
+                None,
+            )
+        })
         .expect("binary search");
     assert!(
-        !bin_hits.iter().any(|r| r.path == "uniquebinaryname.md"),
+        !bin_hits
+            .results
+            .iter()
+            .any(|keyed| keyed.result.path == "uniquebinaryname.md"),
         "a binary head must not appear in the file search index, got {bin_hits:?}"
     );
 }

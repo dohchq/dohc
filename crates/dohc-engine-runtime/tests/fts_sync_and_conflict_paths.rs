@@ -6,7 +6,7 @@ use dohc_engine_domain::{
     CreateNamedVersion, ResolveConflictKind, ResolveTextConflict, TextConflict, TextSnapshot,
     VersionedTextStore, WriteText,
 };
-use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace};
+use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace_page};
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
@@ -93,9 +93,23 @@ fn search_store_version(
 ) -> Vec<SearchResult> {
     store
         .read_with(|connection| {
-            search_workspace(connection, root, WS, version_id, query, Some(100), now_ms)
+            search_workspace_page(
+                connection,
+                root,
+                WS,
+                version_id,
+                query,
+                Some(100),
+                now_ms,
+                None,
+                None,
+            )
         })
         .expect("search workspace")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
 }
 
 fn envelope(
@@ -382,17 +396,23 @@ async fn search_actor(
     now_ms: i64,
 ) -> Vec<SearchResult> {
     actor
-        .search(
+        .search_page(
             root.to_path_buf(),
             WS.to_owned(),
             VERSION.to_owned(),
             query.to_owned(),
             Some(100),
             now_ms,
+            None,
+            None,
             CancellationToken::new(),
         )
         .await
         .expect("actor search")
+        .results
+        .into_iter()
+        .map(|keyed| keyed.result)
+        .collect()
 }
 
 fn local_conflict(
@@ -629,20 +649,23 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
         .expect("reopen actor for lazy search")
         .actor;
     let hits = actor
-        .search(
+        .search_page(
             scratch.path().to_path_buf(),
             WS.to_owned(),
             NAMED.to_owned(),
             NEEDLE.to_owned(),
             Some(100),
             1_500,
+            None,
+            None,
             CancellationToken::new(),
         )
         .await
         .expect("first named-version search");
     assert_eq!(
-        hits.iter()
-            .map(|result| result.path.as_str())
+        hits.results
+            .iter()
+            .map(|keyed| keyed.result.path.as_str())
             .collect::<Vec<_>>(),
         [PATH],
         "the first search must lazily build the copied version's complete index"
