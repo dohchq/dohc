@@ -212,9 +212,13 @@ function MultiSelectEditor({
   const observed = asTextArray(value);
   let current = selection;
   if (!sameSelection(observed, selection.observed)) {
-    const acknowledged = selection.pending.findLastIndex((change) =>
-      sameSelection(change.value, observed),
-    );
+    let acknowledged = -1;
+    for (let index = selection.pending.length - 1; index >= 0; index -= 1) {
+      if (sameSelection(selection.pending[index]!.value, observed)) {
+        acknowledged = index;
+        break;
+      }
+    }
     current = {
       observed,
       pending: selection.pending.slice(acknowledged + 1),
