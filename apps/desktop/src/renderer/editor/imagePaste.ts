@@ -8,7 +8,7 @@ import { documentDir } from "./imageSrc";
 //
 // Bytes are written into the workspace at a location chosen by the workspace's
 // attachment setting (see AttachmentSettings), then an image node is inserted
-// whose src is the path RELATIVE to the document's folder — the same lossless
+// whose src is the path relative to the document's folder — the same lossless
 // form the markdown stores and imageSrc resolves at render time.
 
 // Where pasted/uploaded attachments are saved (workspace setting, modeled on
@@ -32,7 +32,7 @@ const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
   folderName: DEFAULT_ATTACHMENT_FOLDER,
 };
 
-// Coerces a stored folder name to a single path segment the WRITER will accept.
+// Coerces a stored folder name to a single path segment the writer will accept.
 //
 // The folder name is user input that becomes one segment of the write path, so
 // "safe" here means exactly one thing: whatever we return, writeWorkspaceAsset
@@ -40,7 +40,7 @@ const DEFAULT_ATTACHMENT_SETTINGS: AttachmentSettings = {
 // which rejects more than traversal — reserved names (`.dohc`,
 // `shared-with-me`), ignored ones (`node_modules`, `.git`), percent-encoded
 // traversal (`%2e%2e`), and Windows dot/space aliases. Re-deriving that list
-// here would drift; instead we ASK the same validator, and require the path it
+// here would drift; instead we ask the same validator, and require the path it
 // normalizes to be the segment we passed in (so a name that decodes into
 // several segments, like `a%2fb`, is rejected rather than quietly widening the
 // target). Anything it refuses falls back to "assets" — a rejected name must
@@ -61,7 +61,7 @@ export function sanitizeAttachmentFolderName(name: string): string {
 // path, the chosen filename, and the setting:
 //   - writePath:   workspace-relative path (from the root) the bytes land at,
 //                  the form writeWorkspaceAsset expects.
-//   - relativeSrc: the path RELATIVE to the document's folder that goes into
+//   - relativeSrc: the path relative to the document's folder that goes into
 //                  the image node / markdown (`assets/x.png`, `x.png`, or
 //                  `../attachments/x.png`).
 export function computeAttachmentPaths(
@@ -137,7 +137,7 @@ export type PickedImage = {
 // Opens the native picker and resolves with the chosen images ([] = cancelled).
 type PickImages = () => Promise<readonly PickedImage[]>;
 
-// The ONE shape the write+insert path consumes, so a pasted File, a dropped
+// The one shape the write+insert path consumes, so a pasted File, a dropped
 // File, and a natively-picked file all travel the exact same code below. Bytes
 // stay lazy (`read()`) because a File's bytes still have to be pulled off disk,
 // while a picked image already carries them.
@@ -171,7 +171,7 @@ export type ImagePasteContext = {
   // Current document's workspace-relative path (e.g. `notes/plan.md`).
   docPath: string;
   writeAsset: WriteWorkspaceAsset;
-  // Where saved attachments go — READ AT USE TIME, never cached by the editor.
+  // Where saved attachments go — read AT use time, never cached by the editor.
   //
   // The setting lives in workspace settings, which the user can change (in the
   // settings dialog) while this editor stays mounted, and which differs per
@@ -191,7 +191,7 @@ export type ImagePasteContext = {
   pickImages?: PickImages;
 };
 
-// Reads the attachment setting for THIS write. A failed/absent read is not an
+// Reads the attachment setting for this write. A failed/absent read is not an
 // error: attachments fall back to the per-document default rather than the
 // paste dying.
 async function resolveAttachmentSettings(
@@ -226,7 +226,7 @@ export function slugifyBaseName(name: string): string {
 // Short, stable content hash (twin FNV-1a lanes → base36). Same bytes → same
 // filename, so re-pasting one image dedupes rather than piling up
 // near-identical files. Two independently-seeded 32-bit lanes give a ~64-bit
-// effective space: the filename is the ONLY guard against two DIFFERENT images
+// effective space: the filename is the only guard against two different images
 // with the same slug overwriting each other, and a 32-bit hash's birthday
 // bound (~65k images per slug) is reachable for default screenshot names — so
 // the extra lane keeps dedup from silently becoming data loss.
@@ -810,7 +810,7 @@ function rebasePositionAfterDocumentChange(
 // too large are skipped with a quiet console warning. Insertions walk forward
 // from the starting position so multiple images land in order.
 //
-// The ONE write+insert pathway: paste, drop (in-editor and pane-level), and the
+// The one write+insert pathway: paste, drop (in-editor and pane-level), and the
 // `/image` native picker all funnel through here, so the attachment-location
 // setting and the document-relative src are applied identically for every entry
 // point rather than being reimplemented per-surface.
@@ -913,12 +913,12 @@ export function dragCarriesFiles(dataTransfer: DataTransfer | null): boolean {
 // ProseMirror's handleDrop only ever runs for drops that land ON the
 // ProseMirror element, because ProseMirror is also the only thing that
 // preventDefault()s `dragover`, and it only does so for events reaching
-// `view.dom`. The document pane is strictly BIGGER than view.dom — the same
+// `view.dom`. The document pane is strictly bigger than view.dom — the same
 // scroller also holds the page top-matter (icon, title, properties). A file
 // dropped up there hit Chromium's default file handling instead (which Electron
 // then denies as a navigation), so it silently did nothing.
 //
-// These two handlers make the WHOLE pane accept image files and route them into
+// These two handlers make the whole pane accept image files and route them into
 // the same placeImageFiles path. They deliberately do nothing for drags without
 // files, so an in-editor block/image reorder still belongs entirely to
 // ProseMirror.

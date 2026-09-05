@@ -21,7 +21,7 @@ describe("buildRipgrepArgs", () => {
     expect(args).toContain("--json");
     expect(args).toContain("--no-config");
     expect(args).toContain("--no-ignore-messages");
-    // Defense-in-depth exclusions are ALWAYS present, at any nesting depth.
+    // Defense-in-depth exclusions are always present, at any nesting depth.
     for (const glob of ["!**/.dohc/**", "!**/.git/**", "!**/node_modules/**"]) {
       const at = args.indexOf(glob);
       expect(at, `${glob} present`).toBeGreaterThan(0);
@@ -29,7 +29,7 @@ describe("buildRipgrepArgs", () => {
     }
     expect(args.slice(args.indexOf("--max-filesize"))[1]).toBe("2M");
     expect(args.slice(args.indexOf("--max-count"))[1]).toBe("200");
-    // The query is ALWAYS the single element after `--`: a query like
+    // The query is always the single element after `--`: a query like
     // "--pre=/bin/sh" can never read as a flag.
     expect(args.slice(-2)).toEqual(["--", "needle"]);
   });
@@ -59,7 +59,7 @@ describe("buildRipgrepArgs", () => {
     expect(args).not.toContain("--ignore-case");
   });
 
-  it("appends the built-in exclusions AFTER user globs (last-match-wins keeps them authoritative)", () => {
+  it("appends the built-in exclusions after user globs (last-match-wins keeps them authoritative)", () => {
     const args = buildRipgrepArgs({
       query: "x",
       includeGlob: "*.md",
@@ -70,7 +70,7 @@ describe("buildRipgrepArgs", () => {
     expect(args[include - 1]).toBe("-g");
     expect(args[exclude - 1]).toBe("-g");
     // rg glob precedence is last-match-wins: a user include glob placed
-    // AFTER the built-ins would re-include .git/node_modules/.dohc content.
+    // after the built-ins would re-include.git/node_modules/.dohc content.
     // The built-ins must come last so they always win.
     for (const builtIn of ["!**/.dohc/**", "!**/.git/**", "!**/node_modules/**"]) {
       expect(args.indexOf(builtIn), `${builtIn} after user globs`).toBeGreaterThan(include);
@@ -78,7 +78,7 @@ describe("buildRipgrepArgs", () => {
     }
   });
 
-  it("always excludes secret-classified .env paths, case-insensitively, after user globs (PR 08)", () => {
+  it("always excludes secret-classified .env paths, case-insensitively, after user globs", () => {
     const args = buildRipgrepArgs({ query: "x", includeGlob: "*.env" });
     const include = args.indexOf("*.env");
     for (const glob of ["!**/*.env", "!**/.env/**"]) {
@@ -283,7 +283,7 @@ describe("startRipgrepSearch (real rg)", () => {
     const batches = await runSearch(root, { query: "sentinelvalue" });
     const entries = batches.flatMap((b) => b.entries);
     const paths = entries.map((e) => e.path).sort();
-    // The real file AND the dotfile (explorer parity), never the reserved
+    // The real file and the dotfile (explorer parity), never the reserved
     // dirs or anything through the symlink.
     expect(paths).toEqual([".hidden.md", "notes/real.md"]);
     expect(batches.at(-1)).toMatchObject({ done: true, limitHit: false });
@@ -292,12 +292,12 @@ describe("startRipgrepSearch (real rg)", () => {
     expect(real.preview.slice(real.matchStart, real.matchEnd)).toBe("sentinelvalue");
   });
 
-  // Regression (codex E5.0 review, P1): rg glob precedence is last-match-
-  // wins, so with the built-in exclusions placed BEFORE the user include
+  // Regression: rg glob precedence is last-match-
+  // wins, so with the built-in exclusions placed before the user include
   // glob, includeGlob '**/.git/**' — and even benign filters '*', '**/*',
   // 'config' — surfaced planted .git/node_modules content (e.g. credential
   // tokens in .git/config remote URLs). Both layers are pinned here: the
-  // built-ins now come last in the argv AND toSearchEntries drops ignored
+  // built-ins now come last in the argv and toSearchEntries drops ignored
   // segments regardless of argv shape.
   it("include globs can never re-include .git/.dohc/node_modules content", async () => {
     const root = await makeRoot();
@@ -319,7 +319,7 @@ describe("startRipgrepSearch (real rg)", () => {
       ).toEqual([]);
     }
     // Benign filters still work: '*.md' narrows to the markdown file, a user
-    // exclude still excludes, and 'config' finds the REAL file named config.
+    // exclude still excludes, and 'config' finds the real file named config.
     const md = await runSearch(root, { query: "plantedsecret", includeGlob: "*.md" });
     expect(md.flatMap((b) => b.entries).map((e) => e.path)).toEqual(["real.md"]);
     const named = await runSearch(root, { query: "plantedsecret", includeGlob: "config" });
@@ -397,7 +397,7 @@ describe("startRipgrepSearch (real rg)", () => {
     }
   });
 
-  // Regression: ONE rg match event carries one entry per SUBMATCH, and a
+  // Regression: one rg match event carries one entry per submatch, and a
   // long prose line against a short query carries hundreds. The batch cap
   // must hold per batch regardless (an oversized batch fails the IPC
   // contract parse — this once wedged the app mid-keystroke).
@@ -817,7 +817,7 @@ describe("mountScopedIncludeGlob", () => {
     expect(mountScopedIncludeGlob("Shared-With-Me/alex/**")).toBe(
       "shared-with-me/alex/**",
     );
-    // Recursive "**/"-prefixed globs are NOT root-anchored and do match
+    // Recursive "**/"-prefixed globs are not root-anchored and do match
     // mounted files — they scope under the projection.
     expect(mountScopedIncludeGlob("**/*.md")).toBe("shared-with-me/**/*.md");
     expect(mountScopedIncludeGlob("**/docs/**/*.md")).toBe(

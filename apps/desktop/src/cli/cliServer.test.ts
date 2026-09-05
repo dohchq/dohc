@@ -1571,7 +1571,7 @@ describe("CLI socket server", () => {
     });
   });
 
-  // #718: the shared-channel pass a write triggers must cover the channel that
+  // The shared-channel pass a write triggers must cover the channel that
   // was written, and it only can when the write names its own target. A CLI
   // send that reports a bare workspace leaves the message to the rotation.
   it("names the chat target of every message-bearing CLI write", async () => {
@@ -1610,8 +1610,8 @@ describe("CLI socket server", () => {
     ).toEqual(expect.any(String));
   });
 
-  // #731: no renderer poll runs the sync pass behind the CLI or MCP, so a chat
-  // read must AWAIT it itself. `onReadEffect` stands in for what a real pass
+  // No renderer poll runs the sync pass behind the CLI or MCP, so a chat
+  // read must await it itself. `onReadEffect` stands in for what a real pass
   // pulls from a peer — it lands in the store only if the read genuinely waits
   // on the hook before it serves results.
   it("awaits the sync pass before a chat read serves its result", async () => {
@@ -1728,7 +1728,7 @@ describe("CLI socket server", () => {
     expect(errors).toEqual([expect.objectContaining({ message: "relay unreachable" })]);
   });
 
-  // #749 review: the CLI client itself gives up after its own 30 s response
+  // The CLI client itself gives up after its own 30 s response
   // timeout. An unbounded await of a hanging sync pass would exceed that and
   // kill the read entirely — worse than the stale read a bound leaves behind.
   it("serves local rows within budget when the sync pass hangs past it", async () => {
@@ -1767,9 +1767,9 @@ describe("CLI socket server", () => {
     expect(elapsedMs).toBeLessThan(5_000);
   });
 
-  // #749 review: a detached pass past the budget stays running. Without
+  // A detached pass past the budget stays running. Without
   // coalescing, a slow relay behind a stream of reads starts one detached
-  // pass PER READ — main.ts's serializer only stops them running
+  // pass per read — main.ts's serializer only stops them running
   // concurrently, not from queueing up unboundedly.
   it("coalesces concurrent chat reads for the same workspace onto one pass", async () => {
     if (!store) throw new Error("Store is not available");
@@ -1791,7 +1791,7 @@ describe("CLI socket server", () => {
     if (!first.ok) throw new Error(first.reason);
     if (!second.ok) throw new Error(second.reason);
 
-    // Two reads raced the budget, but only ONE of them actually started the
+    // Two reads raced the budget, but only one of them actually started the
     // hook — the second joined its race instead of starting a second pass.
     expect(calls.reads).toBe(1);
   });
@@ -2086,8 +2086,6 @@ describe("CLI socket server", () => {
   });
 
   it("retries transient run-message provenance failures until the link persists", async () => {
-    // MUTATION: restore the single best-effort attempt -> no provenance row is
-    // stored after the first transient daemon failure.
     await seedDispatchThread("thread_retry");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2130,8 +2128,6 @@ describe("CLI socket server", () => {
   });
 
   it("keeps retrying an exhausted provenance link until the posted reply is linked", async () => {
-    // MUTATION: remove the recovery enqueue after the third foreground failure
-    // -> the durable chat reply remains permanently absent from the run ledger.
     await seedDispatchThread("thread_recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2183,8 +2179,6 @@ describe("CLI socket server", () => {
   });
 
   it("persists pending provenance across shutdown without reporting it settled", async () => {
-    // MUTATION: clear the queue and call onRunMessageLinkSettled from close()
-    // -> the durable file is absent and shutdown falsely reports recovery.
     await seedDispatchThread("thread_restart_recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2269,8 +2263,6 @@ describe("CLI socket server", () => {
   });
 
   it("restores available provenance links past an unavailable workspace", async () => {
-    // MUTATION: return from restore when one workspace is absent -> the valid
-    // link later in the file is never re-armed during this app session.
     const posted = await post({
       actor: "human",
       title: "Existing message",
@@ -2355,8 +2347,6 @@ describe("CLI socket server", () => {
   });
 
   it("bounds the provenance recovery queue and abandons after its attempt cap", async () => {
-    // MUTATION: remove the size and attempt limits -> both links enter the
-    // queue and the first continues retrying after the asserted cap.
     const originalDispatch = dispatchStore;
     const abandoned: string[] = [];
     context = {
@@ -2426,8 +2416,6 @@ describe("CLI socket server", () => {
   });
 
   it("caps all foreground provenance work with one wall-clock budget", async () => {
-    // MUTATION: give every RPC its own full deadline -> all three attempts use
-    // the same timeout instead of shrinking to the shared foreground budget.
     await seedDispatchThread("thread_foreground_budget");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2470,8 +2458,6 @@ describe("CLI socket server", () => {
   });
 
   it("returns a visible warning when run-message provenance retries are exhausted", async () => {
-    // MUTATION: swallow the final failure -> the successful CLI result has no
-    // warning and the desktop error channel remains empty.
     await seedDispatchThread("thread_permanent");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2518,9 +2504,6 @@ describe("CLI socket server", () => {
   });
 
   it("gives up on the first permanently refused foreground provenance link", async () => {
-    // MUTATION: treat the terminal refusal as retryable -> three attempts, a
-    // degraded-provenance warning, and a background queue entry for a link the
-    // daemon has already refused for good.
     await seedDispatchThread("thread_terminal_foreground");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2569,9 +2552,6 @@ describe("CLI socket server", () => {
   });
 
   it("settles a background provenance link on the first permanent refusal", async () => {
-    // MUTATION: treat the terminal refusal as retryable -> the recovery queue
-    // burns all twelve attempts and reports the link abandoned instead of
-    // settled.
     await seedDispatchThread("thread_terminal_recovery");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2633,8 +2613,6 @@ describe("CLI socket server", () => {
   });
 
   it("keeps retrying a terminal refusal the link taxonomy does not call permanent", async () => {
-    // MUTATION: classify every terminal refusal as permanent -> a persist
-    // failure the daemon can recover from drops the provenance link forever.
     await seedDispatchThread("thread_terminal_transient");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -2686,10 +2664,6 @@ describe("CLI socket server", () => {
   });
 
   it("reads a permanent code only from a daemon refusal, not any Error", async () => {
-    // MUTATION: widen the guard from DaemonRefusalError to Error -> a plain
-    // Error whose message happens to read "run-not-found" ends the retries.
-    // ChatsLoopbackEngine throws exactly that (chatsLoopbackEngine.ts:2909) and
-    // never wraps it into a wire error, so the narrowing carries real weight.
     await seedDispatchThread("thread_plain_error");
     await dispatchStore.recordTrigger({
       workspaceId: WORKSPACE_ID,
@@ -3131,7 +3105,7 @@ describe("CLI socket server", () => {
 
   // The TypeScript-backend twin of this scenario was removed with the legacy
   // sqlite fallback in queryFtsCandidates. The daemon test below asserts the
-  // same property -- that grep hydrates ONLY the FTS candidate threads
+  // same property -- that grep hydrates only the FTS candidate threads
   // (loadedThreadIds equals the matching thread alone) -- and additionally
   // covers the saturation fallback, so no coverage was lost.
   it("uses daemon candidates for substring grep and falls back when they saturate", async () => {
@@ -3595,7 +3569,6 @@ describe("CLI socket server", () => {
 
 describe("resolveCliWorkspace", () => {
   it("resolves a cwd under a '..'-prefixed directory NAME inside the root", async () => {
-    // MUTATION (..-segment): a bare "..-prefix" isInside refuses this real contained name.
     const scratch = await createTestScratch("dohc-cli-containment-");
     const workspace: CliRegistryWorkspace = {
       workspaceId: "ws-1",

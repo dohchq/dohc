@@ -1575,7 +1575,7 @@ pub(crate) fn run_migrations(
     ctx: &MigrationContext,
     faults: &dyn FaultInjector,
 ) -> Result<MigrationOutcome, StorageError> {
-    // Fail closed on a malformed migration list BEFORE touching the store.
+    // Fail closed on a malformed migration list before touching the store.
     validate_migration_order(migrations)?;
 
     let mut newly_applied = 0u32;
@@ -2104,7 +2104,7 @@ mod tests {
             let mut conn = open_bare(&path);
             let out = run_migrations(&mut conn, &migrations, &ctx, &faults).expect("run");
             assert_eq!(out, MigrationOutcome::Crashed);
-            // Baseline committed; probe migration did NOT run.
+            // Baseline committed; probe migration did not run.
             let probe: Option<i64> = conn
                 .query_row(
                     "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='r04_probe'",
@@ -2148,7 +2148,7 @@ mod tests {
         let ctx = MigrationContext::current(3_000);
 
         // Ordinals [0, 2, 1]: a dev appended out of order. Must fail closed
-        // BEFORE applying anything (no partial out-of-order DDL).
+        // before applying anything (no partial out-of-order DDL).
         let a = Migration {
             ordinal: 1,
             id: "a",

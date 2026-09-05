@@ -5,7 +5,7 @@
 //! stronger type boundary:
 //!
 //! - **Ciphertext-only at rest.** A write encrypts plaintext with
-//!   [`dohc_engine_crypto`] and stores ONLY the IV, tag, and ciphertext (base64
+//!   [`dohc_engine_crypto`] and stores only the IV, tag, and ciphertext (base64
 //!   TEXT) plus the plaintext byte length. No column, journal entry, or blob
 //!   ever holds cleartext — proven by the plaintext-never-leaks scan.
 //! - **One plaintext accessor.** [`SecretFileStore::materialize_secret_file`] is
@@ -15,24 +15,24 @@
 //! - **Fail closed.** A tampered ciphertext/tag, wrong key, or AAD mismatch
 //!   surfaces as `decrypt-failed`, never garbage plaintext.
 //! - **Durable materialization intent.** A write records its R04
-//!   materialization row in the SAME transaction as the secret state, so the
+//!   materialization row in the same transaction as the secret state, so the
 //!   disk intent is crash-safe. [`SecretDiskIntent::Materialize`] enqueues a
-//!   PENDING job (the secret-aware executor writes the plaintext file);
-//!   [`SecretDiskIntent::AlreadyOnDisk`] (capture) records a COMPLETED marker
+//!   pending job (the secret-aware executor writes the plaintext file);
+//!   [`SecretDiskIntent::AlreadyOnDisk`] (capture) records a completed marker
 //!   instead — the plaintext came FROM disk, and the marker lets the
 //!   staleness gate supersede older pending jobs. The row references the
 //!   CIPHERTEXT blob (integrity anchor); plaintext is produced only at
 //!   execution time by `materialize_secret_file` and lives only on disk.
 //!
 //! R07's platform-independent path floor is enforced at every caller-supplied
-//! path entry point. The gate fails closed in BOTH directions: this encrypted
+//! path entry point. The gate fails closed in both directions: this encrypted
 //! store refuses ordinary paths (`not-secret-path`), while the plaintext store
 //! refuses secret-classified paths. Replication/apply callers cannot bypass the
 //! same store-door rule by choosing a different host platform.
 //!
 //! **Delete is a tombstone, not a crypto-shred (documented decision).** Deleting
-//! a secret removes the `secret_files` tip, but the prior WRITE moment in
-//! `secret_moments` RETAINS its `after_ciphertext_base64` + `after_byte_length`.
+//! a secret removes the `secret_files` tip, but the prior write moment in
+//! `secret_moments` Retains its `after_ciphertext_base64` + `after_byte_length`.
 //! So a deleted secret's ciphertext — and its exact plaintext SIZE — persist in
 //! history (never plaintext: ciphertext-only-at-rest still holds). This is the
 //! deliberate, TS-matching behavior: the versioned model preserves history, and
@@ -40,7 +40,7 @@
 //! residual is that existence + size of a deleted secret remain visible to
 //! anyone with DB access — acceptable because they already hold the ciphertext.
 //! A future crypto-shred-on-delete (purge the retained after-state) is a
-//! possible enhancement for the sync/retention shard; see BEHAVIOR_DELTA.md.
+//! possible enhancement.
 
 use crate::error::DomainError;
 use crate::merge::VersionFileChangeStatus;
@@ -89,7 +89,7 @@ impl SecretOp {
 /// `Debug` is HAND-WRITTEN to redact `text` — this is the one secret-bearing
 /// input type, so a stray `tracing::debug!(?input)`, `format!("{write:?}")`,
 /// panic message, or error context must never spill the cleartext (the
-/// plaintext-never-leaks-into-logs invariant). `Clone` is deliberately NOT
+/// plaintext-never-leaks-into-logs invariant). `Clone` is deliberately not
 /// derived: cleartext should live in as few copies as possible, so a caller
 /// must consciously reconstruct the request rather than silently duplicate it.
 pub struct SecretWrite {
@@ -105,15 +105,15 @@ pub struct SecretWrite {
     pub disk_intent: SecretDiskIntent,
 }
 
-/// Whether a secret write's plaintext must REACH disk or is ALREADY there.
+/// Whether a secret write's plaintext must reach disk or is already there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecretDiskIntent {
     /// Enqueue a pending materialization job: the secret-aware executor will
     /// decrypt the tip and write the plaintext to the workspace file.
     Materialize,
     /// Capture: the plaintext came FROM the workspace file, so nothing must
-    /// ever run — but a COMPLETED job marker is recorded so the
-    /// materializer's staleness gate supersedes any OLDER still-pending job
+    /// ever run — but a completed job marker is recorded so the
+    /// materializer's staleness gate supersedes any older still-pending job
     /// for the path instead of letting it regress the captured bytes.
     AlreadyOnDisk,
 }
@@ -134,8 +134,8 @@ pub struct CaptureSecret {
     /// secret writes always carry the per-file label, even in a reconcile).
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
-    /// Whether this write may overwrite a tip written by a DIFFERENT origin
-    /// (API, replication). Capture sets it only when it OBSERVED the disk
+    /// Whether this write may overwrite a tip written by a different origin
+    /// (API, replication). Capture sets it only when it observed the disk
     /// transition; on first sight it must not silently revert another
     /// writer whose plaintext may never have reached disk. Mirrors
     /// [`crate::CaptureIngest::claim_foreign_head`].
@@ -170,11 +170,11 @@ pub struct CaptureSecretRetire {
     /// internally stamped "Deleted <basename>".
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
-    /// Retire ONLY a tip the engine recorded as being on disk. The capture
+    /// Retire only a tip the engine recorded as being on disk. The capture
     /// sink sets it so a disk delete can never destroy a tip whose plaintext
     /// legitimately never reached the workspace file — a replicated secret,
     /// or one written to a non-active version. A tip capture does not own is
-    /// a no-op. Ownership rides the engine-stamped marker, NOT the origin
+    /// a no-op. Ownership rides the engine-stamped marker, not the origin
     /// this call passes.
     pub only_if_own_origin: bool,
 }
@@ -293,7 +293,7 @@ impl<'a> SecretFileStore<'a> {
     /// Encrypt and write `input.text` to a secret path. Content-equality against
     /// the current tip is a no-op (one moment per real change). On a real change:
     /// inserts a moment, upserts the encrypted tip, persists the ciphertext blob,
-    /// enqueues an R04 materialization job, and journals the op — all in ONE
+    /// enqueues an R04 materialization job, and journals the op — all in one
     /// transaction.
     pub fn write_secret_file(
         &mut self,
@@ -435,7 +435,7 @@ impl<'a> SecretFileStore<'a> {
     /// [`SecretDiskIntent::AlreadyOnDisk`] (the plaintext came FROM the
     /// workspace file — a completed marker, never a runnable job), and pins
     /// the reserved secret moment order against the persisted one. A deduped
-    /// (content-equality) capture still marks the CONFIRMED tip's generation
+    /// (content-equality) capture still marks the confirmed tip's generation
     /// as materialized so an older stale pending job cannot regress bytes
     /// capture just verified on disk.
     pub fn capture_secret(
@@ -462,7 +462,7 @@ impl<'a> SecretFileStore<'a> {
         let ws = input.workspace_id.clone();
         // OWNERSHIP: a tip written any other way (API, replication) may
         // legitimately have no plaintext on disk, so capture only claims it
-        // when it OBSERVED the disk transition.
+        // when it observed the disk transition.
         if !input.claim_foreign_head {
             let version = input.version_id.clone();
             let path = path.clone();
@@ -511,7 +511,7 @@ impl<'a> SecretFileStore<'a> {
                 }
             }
             None => {
-                // Deduped: the tip's plaintext is VERIFIED on disk right now,
+                // Deduped: the tip's plaintext is verified on disk right now,
                 // so recording the completed job also stamps disk ownership on
                 // the tip — a later disk delete can retire it. Ownership rides
                 // an engine-stamped column rather than the moment's origin, so
@@ -592,13 +592,13 @@ impl<'a> SecretFileStore<'a> {
 
     // ----------------------------------------------------------- materialize
 
-    /// THE single authorized plaintext accessor. Decrypts the current tip for a
+    /// The single authorized plaintext accessor. Decrypts the current tip for a
     /// secret path, returning a zeroizing [`SecretPlaintext`], or `None` when no
     /// tip exists. Fails closed (`decrypt-failed`) on tamper/wrong-key/AAD. The
     /// secret-aware materialization pipeline calls this to obtain the bytes it
     /// writes to disk.
     /// Materialize with the in-band cap decided IN this read: an over-cap
-    /// tip answers its recorded length WITHOUT decrypting — no window
+    /// tip answers its recorded length without decrypting — no window
     /// where the secret can grow between a size probe and the decrypt,
     /// and over-cap plaintext never exists on the heap.
     pub fn materialize_secret_file_inband(
@@ -617,7 +617,7 @@ impl<'a> SecretFileStore<'a> {
             };
             let byte_length = tip.byte_length() as i64;
             if tip.byte_length() > cap {
-                // AUTHENTICATE even what we withhold: a wrong key,
+                // Authenticate even what we withhold: a wrong key,
                 // tampered ciphertext/tag, or AAD-spliced row must fail
                 // closed, never read as a valid over-cap secret. The
                 // plaintext is decrypted into a zeroizing buffer and
@@ -1726,7 +1726,7 @@ where
     Ok(result)
 }
 
-/// Derive an autonomous secret capture WRITE moment id: length-framed over
+/// Derive an autonomous secret capture write moment id: length-framed over
 /// (workspace, version, path, reserved secret order), same scheme family as
 /// the plaintext capture ids but tagged so the two can never collide.
 pub fn derive_capture_secret_moment_id(
@@ -1748,7 +1748,7 @@ pub fn derive_capture_secret_moment_id(
     )
 }
 
-/// Derive an autonomous secret capture RETIRE moment id (distinct tag from
+/// Derive an autonomous secret capture retire moment id (distinct tag from
 /// the write derivation).
 pub fn derive_capture_secret_retire_moment_id(
     workspace_id: &str,
@@ -1769,8 +1769,8 @@ pub fn derive_capture_secret_retire_moment_id(
     )
 }
 
-/// Whether the workspace holds ANY encrypted secret state (moments or tips).
-/// The capture layer consults this before ever MINTING a key: a missing key
+/// Whether the workspace holds any encrypted secret state (moments or tips).
+/// The capture layer consults this before ever minting a key: a missing key
 /// file over live secret rows (a backup restored without the key, an
 /// accidental deletion) must fail closed, not silently strand the history
 /// under a fresh key.
@@ -1787,7 +1787,7 @@ pub fn has_secret_state(store: &mut EngineStore, workspace_id: &str) -> Result<b
 }
 
 /// The `metadata_origin` of the current secret tip, or `None` when no tip
-/// exists. ONE definition shared by the capture write and retire ownership
+/// exists. One definition shared by the capture write and retire ownership
 /// checks — a schema change to the join must not need two edits.
 /// Whether the tip for `path` is one capture put on disk itself. `None` means
 /// there is no tip. Reads the engine-stamped `capture_owned` column rather
@@ -2085,9 +2085,9 @@ fn map_moment_row(
 }
 /// Keyless tip listing: the metadata never touches the AEAD, so a caller
 /// without the data key (the RPC surface of a workspace that has never
-/// minted one) can still enumerate. ONE query definition — the keyed store
+/// minted one) can still enumerate. One query definition — the keyed store
 /// method delegates here.
-/// One secret tip's RECORDED byte length — keyless, no ciphertext read, no
+/// One secret tip's recorded byte length — keyless, no ciphertext read, no
 /// decrypt. The RPC's in-band cap check runs on this so an over-cap secret
 /// is never decrypted into a heap String just to be discarded.
 pub fn secret_file_len_keyless(

@@ -118,7 +118,7 @@ pub fn commit_relay_cursor(
             } else {
                 crate::enrolment::backfill_enrolment_window_in_tx(tx, workspace_id, now_ms)?
             };
-            // Refusals can also be created OUTSIDE a pull when open/resync/
+            // Refusals can also be created outside a pull when open/resync/
             // close drains an already-ACKed Y.Doc coordinate. Delete only the
             // rows that this exact pull claimed and surfaced. A later drain is
             // unowned (report_id NULL), and a newer pull retags all pending

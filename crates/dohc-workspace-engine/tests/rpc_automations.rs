@@ -92,7 +92,7 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
 }
 
 /// Seed engine.db before the workspace opens: one subscription, two pending
-/// claims from real apply facts, and two stale RUNNING claims for the
+/// claims from real apply facts, and two stale running claims for the
 /// open-time reaper — one with attempts left, one exhausted.
 fn seed_claims(scratch: &ScratchDir) {
     let db = scratch.engine_db_path().expect("engine db path");

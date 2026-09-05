@@ -13,7 +13,7 @@ import {
 import { createTestScratchSync } from "../workspaces/testTemp";
 
 // This module decides whether the daemon-driving suites run at all, so a
-// regression here silently restores the skipped coverage that #390 was about.
+// regression here silently restores the skipped coverage that was about.
 // A test that only checked "it returns a path" would not notice any of that,
 // so each case below pins one decision the resolver makes.
 
@@ -42,7 +42,7 @@ describe("engine binary discovery", () => {
     expect(engineBinaryCandidates()).toEqual([override]);
   });
 
-  it("resolves a RELATIVE override to an absolute path", () => {
+  it("resolves a relative override to an absolute path", () => {
     // EngineDaemonLifecycle sets the child's cwd to dirname(command) and then
     // spawns `command` from there, so a relative override would be resolved a
     // second time against its own directory — artifacts/artifacts/engine — and
@@ -53,7 +53,7 @@ describe("engine binary discovery", () => {
     expect(candidate).toBe(resolve("./artifacts/dohc-workspace-engine"));
   });
 
-  it("tries the workspace-root cargo output BEFORE the staged copy", () => {
+  it("tries the workspace-root cargo output before the staged copy", () => {
     // Root first, because it is the only one a `cargo build` refreshes. The
     // staged copy under apps/desktop exists for Electron, and keeping it in step
     // is the staging hook's job.
@@ -72,7 +72,7 @@ describe("engine binary discovery", () => {
     }
   });
 
-  it("takes the FIRST existing candidate, ignoring mtime", () => {
+  it("takes the first existing candidate, ignoring mtime", () => {
     // Deliberately gives the second candidate the newer mtime. An earlier
     // revision picked by mtime and that heuristic produced four defects in
     // review; order is now the whole rule, so this must not drift back.
@@ -111,7 +111,7 @@ describe("the required-mode gate", () => {
     expect(gate.path).toBeNull();
   });
 
-  it("THROWS when the binary is absent and the flag is set", () => {
+  it("Throws when the binary is absent and the flag is set", () => {
     // The whole point of #390: on a machine that is meant to have a daemon, a
     // silent skip is indistinguishable from a pass.
     vi.stubEnv(ENGINE_BINARY_ENV_VAR, join(tmpdir(), "dohc-absent-engine-xyz"));

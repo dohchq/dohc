@@ -15,7 +15,7 @@ describe("share-view gates", () => {
     for (const raw of [null, 0, "", false, Number.NaN]) {
       expect(
         shareViewIsPresent(raw),
-        `MUTATION: !!shareView lets ${String(raw)} through every main-process gate`,
+        `!!shareView lets ${String(raw)} through every main-process gate`,
       ).toBe(true);
     }
   });

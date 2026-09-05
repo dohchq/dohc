@@ -201,11 +201,9 @@ describe("a request that cannot be framed", () => {
     // A combined conflict resolution is the request that reaches this size in
     // practice. Before this check it died inside `encodeFrame` and surfaced as
     // `transport-error: Failed to send engine request N` — no limit, no size,
-    // and a classification that sends a HEALTHY session into the reconnect
+    // and a classification that sends a healthy session into the reconnect
     // machinery for a failure no reconnect can fix.
     //
-    // MUTATION: classify it `transport-error` again -> `isDaemonReconnectError`
-    // turns true and this fails.
     const peer = new FakePeerConnection();
     const transport = client(peer);
     peer.acknowledge();
@@ -495,8 +493,6 @@ describe("EngineClient", () => {
   });
 
   it("times out only the expired request and ignores its late reply", async () => {
-    // MUTATION: call fail() from the deadline timer -> the unrelated request and
-    // every later request reject because the shared client is closed.
     vi.useFakeTimers();
     try {
       const peer = new FakePeerConnection();
@@ -515,8 +511,8 @@ describe("EngineClient", () => {
       const unrelated = transport.sendRequest(request(56, "unrelated.method"));
       // Its own class, and still `transport-error`: the request left and
       // nothing came back, so every caller that rebinds on a dropped socket
-      // must keep rebinding here. The class is what lets the ONE caller that
-      // set the deadline — `ydoc.open` (#616) — tell its own limit firing apart
+      // must keep rebinding here. The class is what lets the one caller that
+      // set the deadline — `ydoc.open` — tell its own limit firing apart
       // from a socket that died, which a message match cannot do safely.
       const rejection = expect(expired).rejects.toMatchObject({
         name: "EngineRequestDeadlineError",
@@ -753,7 +749,7 @@ describe("EngineClient", () => {
     const pending = transport.sendRequest(request(17, "await.global.chunks"));
     const oneByte = Buffer.from("x");
     // Two streams at exactly the per-stream cap (4096 each) fill the global cap
-    // (8192); a third stream's FIRST chunk then trips the global check while
+    // (8192); a third stream's first chunk then trips the global check while
     // its own per-stream count is zero.
     for (const streamId of [70, 71, 72]) {
       peer.send({
@@ -1629,7 +1625,7 @@ describe("EngineClient", () => {
   });
 
   // AUDIT-KILLREC. A client that died because the daemon crashed and a client
-  // the desktop deliberately closed are NOT the same condition: the first is a
+  // the desktop deliberately closed are not the same condition: the first is a
   // relaunching daemon that callers must retry through (isTransportError gates
   // every rebind path), the second is a shutdown they must not. Reporting a
   // bare "closed" for both made a hard daemon kill abandon a recoverable
@@ -1647,7 +1643,7 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
-  // The supervisor's wedge kill, on the REAL client. A wedged daemon never
+  // The supervisor's wedge kill, on the real client. A wedged daemon never
   // exits on its own, so the supervisor kills it — and once this client is
   // closed, `notifyProcessExit` returns early, so the exit that follows can no
   // longer re-cause these rejections. Whatever is recorded here is final.
@@ -1669,12 +1665,10 @@ describe("EngineClient", () => {
     ).rejects.toMatchObject({ code: "transport-error" });
   });
 
-  // The wedge detector's ONE production input. A daemon draining a large
+  // The wedge detector's one production input. A daemon draining a large
   // backlog answers no probe — the probe cannot overtake its output queue — so
   // this counter is the only thing that tells the supervisor it is alive. If it
   // never advanced, every busy daemon would be killed as wedged.
-  // MUTATION: delete `this.inboundFrames += 1` from receiveFrame and this
-  // fails. Nothing else in the suite notices, which is why it is asserted here.
   it("counts every frame it receives, which is what proves a busy daemon alive", async () => {
     const peer = new FakePeerConnection();
     const transport = client(peer);

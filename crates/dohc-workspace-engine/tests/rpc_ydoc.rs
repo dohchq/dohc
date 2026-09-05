@@ -2212,21 +2212,21 @@ async fn scene_seed_names_the_existing_binary_ceiling_before_commit() {
     assert!(refused.message.contains("5242881 bytes"));
 }
 
-/// Stage the #346 interleaving: a 0-byte artifact on disk that capture has NOT
+/// Stage the interleaving: a 0-byte artifact on disk that capture has not
 /// yet ingested, with a live session opened over it. Returns the path it
 /// staged and the open result.
 ///
-/// The order is VERIFIED, not assumed. Writing the file and opening straight
+/// The order is verified, not assumed. Writing the file and opening straight
 /// after relies on the open beating the watcher's settle window, and this
 /// machine has shown 3.5x slowdowns under suite load — a paused task lets
 /// capture ingest first, `seedContent` comes back "" instead of null, and the
 /// test false-fails without ever staging the race it exists to cover.
 ///
-/// The capture probe cannot enforce it either: its seam holds the driver AFTER
+/// The capture probe cannot enforce it either: its seam holds the driver after
 /// `reconcile_if_dirty` reports Completed, so the head is already minted by the
 /// time it pauses. There is no pre-apply seam, and this is not worth adding new
 /// engine surface for. So an attempt that lost the race is detected and retried
-/// on a path capture has never seen, and exhausting the attempts FAILS rather
+/// on a path capture has never seen, and exhausting the attempts fails rather
 /// than proceeding over an unstaged interleaving.
 async fn stage_headless_session_over_an_empty_artifact(
     transport: &InProcessTransport<EngineService>,
@@ -2254,7 +2254,7 @@ async fn stage_headless_session_over_an_empty_artifact(
             // the proof that no head exists yet.
             assert_eq!(opened["lineage"], json!("absent"));
             // ...and the open reports that absence in its own right, which is
-            // what the desktop's absent-head contract (#534) reads to tell a
+            // what the desktop's absent-head contract reads to tell a
             // creation apart from a path the version does not have.
             assert_eq!(opened["head"], json!("absent"));
             return (path, opened);
@@ -2587,7 +2587,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
     assert_eq!(opened["lineage"], json!("absent"));
-    // A CAPTURED file: no CRDT lineage yet, but the version HAS a snapshot for
+    // A captured file: no CRDT lineage yet, but the version has a snapshot for
     // the path. The open consumer keys its refusal on `head`, not on `lineage`
     // — reading `lineage` here would refuse every ordinary first open.
     assert_eq!(opened["head"], json!("present"));
@@ -2691,7 +2691,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     // Mutation check: disable the SelfWriteSuppression::record call after
     // settlement to restore the bug. Identical-content ingest is a deduped
     // no-op moment-wise, so the count above stays +1 either way — the real
-    // damage is the CLAIMED dedupe transferring ownership: capture's Changed
+    // damage is the claimed dedupe transferring ownership: capture's Changed
     // observation flips the settled head's metadata origin from "ydoc" to the
     // capture origin. This assertion fails under that mutation.
     let head = call(
@@ -2724,8 +2724,8 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "versionId": "main", "path": "notes/live.md" }),
     )
     .await;
-    // The local-only close PRUNED the CRDT cache to the bare marker
-    // (the workspace file is the artifact), so the reopen must NOT claim an existing
+    // The local-only close pruned the CRDT cache to the bare marker
+    // (the workspace file is the artifact), so the reopen must not claim an existing
     // lineage — that would hand the client an empty doc with nothing to seed
     // from, and its next settle would clobber the settled file. Instead the
     // artifact re-seeds the cache: lineage absent + seedContent carrying the
@@ -2827,7 +2827,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
         json!({ "sessionId": rich_session }),
     )
     .await;
-    // The default close SETTLED the richdoc, so the local-only lineage prunes
+    // The default close settled the richdoc, so the local-only lineage prunes
     // exactly like plaintext (the workspace file is the artifact): a reopen must reseed
     // from the settled markdown, not resume a persisted CRDT — a persisted
     // closed CRDT would shadow any external .md edit made while closed.
@@ -2858,7 +2858,7 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     )
     .await;
 
-    // A BARE local marker does not own its content kind: a kindless open
+    // A bare local marker does not own its content kind: a kindless open
     // (plaintext default) whose session settled and pruned leaves only a
     // remembered default behind — the 2026-07 desktop outage minted exactly
     // these for rich .md paths. An explicit richdoc reopen must win and
@@ -3026,7 +3026,7 @@ async fn settle_without_a_seeded_lineage_refuses_and_leaves_the_file_intact() {
 
     // Mutation check: restore `None => Ydoc::wire()` in ydoc_settle_on_store's
     // load_persisted match to bring the bug back — the settle then projects an
-    // EMPTY doc over the existing file and both assertions below fail.
+    // empty doc over the existing file and both assertions below fail.
     let refused = transport
         .call(
             RequestContext::unbounded(),
@@ -3107,7 +3107,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
     // RPC-D's lease rule closed the old rival-claim window: a
     // versionedText.write against a path whose derived object a live
     // session leases now refuses instead of silently changing the owner
-    // under the editor. (Settle-time ownership over a REBOUND head stays
+    // under the editor. (Settle-time ownership over a rebound head stays
     // covered by the runtime rebind test.) Mutation check: drop the lease
     // guard from the versionedText.write arm — this write succeeds and the
     // refusal assertion fails.
@@ -3150,7 +3150,7 @@ async fn a_rival_write_on_a_live_session_path_refuses_session_busy() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content() {
     // AUDIT-SILENTSAVE. Three dogfood journeys watched a doc read "Saved" in
-    // the editor while its .md sat at ZERO BYTES: the settle refused
+    // the editor while its.md sat at zero bytes: the settle refused
     // pre-commit on every debounce because the RESPONSE could not carry the
     // markdown as one wire string. The cap belongs to the wire, not to
     // durability — the daemon materializes from the projection it already
@@ -3176,7 +3176,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
     .await;
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    // Past BOTH the 48 KiB in-band response cap and the desktop capture
+    // Past both the 48 KiB in-band response cap and the desktop capture
     // layer's 128 KiB text cap — the size journey 1 actually pasted into
     // load-test.md was 131,442 bytes, and both limits sit under it.
     let huge = "pasted load-test paragraph.\n".repeat(5_000);
@@ -3206,7 +3206,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
     .await;
 
     // The response omits the body (it cannot cross as one string) but the
-    // settle COMMITTED: a moment id, a sha, and the real bytes on disk.
+    // settle committed: a moment id, a sha, and the real bytes on disk.
     assert_eq!(settled["content"], Value::Null);
     assert!(
         settled["momentId"]
@@ -3219,7 +3219,7 @@ async fn a_settle_past_the_inband_cap_still_lands_on_disk_and_reports_no_content
     assert_eq!(on_disk, huge, "disk must hold every byte the CRDT holds");
 
     // Not a one-shot: a further edit settles and reaches disk too (the bug
-    // refused on EVERY debounced settle, so one green write proves little).
+    // refused on every debounced settle, so one green write proves little).
     call(
         &transport,
         &handle,
@@ -3267,7 +3267,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     //
     // A settled Y.Doc at MAX_CAPTURE_TEXT_BYTES (10 MiB) remains
     // engine-ownable and must not be retired by capture.
-    // Self-write suppression cannot help: it matches a WRITE by sha, and this
+    // Self-write suppression cannot help: it matches a write by sha, and this
     // is a retire taken on a size classification. The next settle — including
     // the one ydoc.close performs by default — then sees a changed target and
     // fails ConflictStaleTarget.
@@ -3320,8 +3320,8 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         "the settle's self-write is suppressed instead of becoming capture work"
     );
 
-    // THE load-bearing assertion: the head survived, still owned by the
-    // Y.Doc. Before the fix this listing came back EMPTY — capture had
+    // The load-bearing assertion: the head survived, still owned by the
+    // Y.Doc. Before the fix this listing came back empty — capture had
     // retired the record for a document the user had just saved.
     let listed = call(
         &transport,
@@ -3429,19 +3429,19 @@ async fn a_zero_byte_precreated_file_settles_the_first_typed_edit_to_disk() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session() {
-    // Issue #346. The desktop's New File writes "" straight to disk with no
+    // The desktop's New File writes "" straight to disk with no
     // engine write, so the artifact exists with NO head. The interleaving that
     // wedges the document — which the file-already-on-disk-at-open test above
     // cannot reach, because nothing ingests the artifact there:
     //
     //   1. workspace.open starts the capture driver and its watcher.
     //   2. createFile writes a 0-byte artifact. The watcher queues the create.
-    //   3. ydoc.open runs BEFORE that batch's debounce elapses: no head yet,
+    //   3. ydoc.open runs before that batch's debounce elapses: no head yet,
     //      so the session's open-time head expectation is None.
     //   4. capture ingests the 0-byte artifact and mints a head at sha("").
     //   5. The user types; settle expects None, probes sha("") — conflict.
     //   6. The failed settle never sets last_settled_sha, so the expectation
-    //      stays None and EVERY later settle conflicts. The document is
+    //      stays None and every later settle conflicts. The document is
     //      wedged for the life of the session.
     //
     // Driven deterministically (sleep past the debounce + capture.flush)
@@ -3530,11 +3530,11 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
     )
     .await;
     let resettled = resettled["content"].as_str().expect("content");
-    // BOTH edits, not just the newest: a second settlement that dropped the
+    // Both edits, not just the newest: a second settlement that dropped the
     // first would otherwise satisfy every assertion here. Order is not
     // asserted — two independent client ids inserting at offset 0 order by
     // client id, which is not fixed across runs — so the disk comparison
-    // below uses what the settle REPORTED rather than a concatenation.
+    // below uses what the settle reported rather than a concatenation.
     assert!(resettled.contains("More typing. "), "{resettled}");
     assert!(resettled.contains(typed), "{resettled}");
     assert_eq!(
@@ -3558,7 +3558,7 @@ async fn capture_ingesting_a_new_files_empty_artifact_must_not_wedge_its_session
 async fn capture_ingesting_content_under_a_headless_session_still_refuses() {
     // The inverse of the test above, and the guard on its fix: the empty
     // artifact is adopted because it IS the session's base. Content is not.
-    // Here something writes REAL bytes to the path after the session opened
+    // Here something writes real bytes to the path after the session opened
     // headless, and capture ingests them. Settling would overwrite bytes the
     // user never saw, so it must still refuse.
     //
@@ -3663,7 +3663,7 @@ async fn creating_a_new_file_through_a_ydoc_session_settles_to_disk() {
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-create", 1).await;
 
-    // notes/created.md exists NOWHERE: not on disk, no head, no lineage. The
+    // notes/created.md exists nowhere: not on disk, no head, no lineage. The
     // seed path pre-creates the file_objects row for the marker FK; the
     // settle's projected write must accept that preallocated object instead
     // of refusing "already bound".
@@ -3740,7 +3740,7 @@ async fn opening_an_absent_path_whose_derived_object_lives_elsewhere_refuses() {
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, "ws-rpc-ydoc-alias", 1).await;
 
-    // Plant notes/old.md's DERIVED object id at a different alias — the state a
+    // Plant notes/old.md's derived object id at a different alias — the state a
     // rename leaves behind: the deterministic id is live at notes/new.md while
     // notes/old.md itself is absent.
     let derived =
@@ -3851,7 +3851,7 @@ async fn settle_recovers_after_a_transient_replace_failure() {
 
     // Hold the target with NO sharing: the settle's atomic replace hits
     // sharing violations until its bounded retry budget exhausts (FileLocked),
-    // AFTER the settle transaction committed the new head.
+    // after the settle transaction committed the new head.
     let lock = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(0)
@@ -3879,12 +3879,12 @@ async fn settle_recovers_after_a_transient_replace_failure() {
         )
         .await
         .expect_err("a locked target must fail the settle");
-    // The wire names the lock and carries the retry contract (#554): the
+    // The wire names the lock and carries the retry contract: the
     // client retries this settle with backoff, so the write lands when the
     // external handle releases instead of on the next unrelated settle.
     assert_eq!(failed.code, ErrorCode::Overloaded);
     assert_eq!(failed.message, "file-locked");
-    // The settle COMMITTED (marker matches the projection) but the job is
+    // The settle committed (marker matches the projection) but the job is
     // still pending and the disk holds the old bytes: a prune-close now
     // would discard the CRDT with the artifact never replaced. Mutation
     // check: drop the pending-job probe from `close_session`'s prune guard
@@ -4014,7 +4014,7 @@ async fn changed_settle_replays_the_pending_job_left_by_a_transient_failure() {
         .expect_err("a locked target must fail the settle");
     drop(lock);
 
-    // The user KEEPS EDITING: the retry settles a CHANGED projection, so it
+    // The user keeps editing: the retry settles a changed projection, so it
     // takes the full write path, whose new job's preimage is the v2 head that
     // never reached disk. Mutation check: re-scope the pending-job replay in
     // ydoc_settle_on_store back to the unchanged-projection branch only —
@@ -4107,7 +4107,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
 
     // Hold the target with NO sharing, exactly like the transient-failure
     // siblings above: the next settle commits its head but its replace
-    // fails, leaving a job PENDING with the v1 bytes as its expected
+    // fails, leaving a job pending with the v1 bytes as its expected
     // preimage.
     let lock = std::fs::OpenOptions::new()
         .read(true)
@@ -4141,7 +4141,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
 
     // The user's desktop, having seen the settle fail, gives up on the
     // session rather than retrying the settle — the daemon-side twin of the
-    // JS "detached debt" issue #739 names — and evicts it (#665's third
+    // JS "detached debt" issue #739 names — and evicts it (the third
     // exit: the lease is dropped, the pending job is untouched) before
     // deleting the path outright.
     let evicted = call(
@@ -4182,7 +4182,7 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
     // the deleted path comes back with "v2 v1" on a path the registry no
     // longer tracks.
     //
-    // GREEN (#739): the delete cancelled the job in the same transaction, so
+    // GREEN: the delete cancelled the job in the same transaction, so
     // replay finds nothing pending for this path and the bytes stay exactly
     // as the delete left them.
     assert_eq!(
@@ -4204,10 +4204,10 @@ async fn a_delete_cancels_the_paths_pending_job_so_replay_cannot_resurrect_it() 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending_job() {
-    // #739 follow-up (codex P1): `cancel_pending_jobs_for_path` is path-keyed
+    // Follow-up: `cancel_pending_jobs_for_path` is path-keyed
     // but materialization jobs carry no version identity — they mirror the
-    // ACTIVE version's working tree only (the same gate `enqueue_binary_delete`
-    // applies to its own job). A delete in a NAMED, inactive version must not
+    // active version's working tree only (the same gate `enqueue_binary_delete`
+    // applies to its own job). A delete in a named, inactive version must not
     // touch `main`'s own pending job for a same-named path.
     use std::os::windows::fs::OpenOptionsExt;
 
@@ -4220,9 +4220,9 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, workspace_id, 1).await;
 
-    // The named version forks main FIRST, before main ever has anything
+    // The named version forks main first, before main ever has anything
     // pending: `versions.createNamed` reconciles its source version's disk
-    // projection as part of the fork, so forking WHILE a job is stuck behind
+    // projection as part of the fork, so forking while a job is stuck behind
     // a lock fails the fork itself rather than leaving the fork clean of it.
     let feature = call(
         &transport,
@@ -4239,7 +4239,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
         .as_str()
         .expect("feature id")
         .to_owned();
-    // Feature gets its OWN, independently-written "notes/shared.md" — not
+    // Feature gets its own, independently-written "notes/shared.md" — not
     // main's, so deleting it can never race main's later lock.
     call(
         &transport,
@@ -4326,7 +4326,7 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
     )
     .await;
 
-    // Deletes feature's OWN "notes/shared.md" — a different object at the
+    // Deletes feature's own "notes/shared.md" — a different object at the
     // same path string in a different, inactive version. This must never
     // reach main's own pending job.
     call(
@@ -4374,13 +4374,13 @@ async fn an_inactive_versions_delete_does_not_cancel_the_active_versions_pending
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_source_delete_run() {
-    // #739 follow-up (codex P1): a binary rename enqueues a PAIRED job pair —
+    // Follow-up: a binary rename enqueues a paired job pair —
     // a write for the new path, a delete for the old one — and startup replay
     // (and the rollback post-commit path) refuses to run the paired delete
-    // until the write proves COMPLETE, so the old path is never removed
+    // until the write proves complete, so the old path is never removed
     // before the new one is proven durable. Cancelling the write (this PR's
     // #739 fix, when the new path is deleted before it ever materializes)
-    // must not read as the SAME "abandon the pair" signal `Conflict` is: the
+    // must not read as the same "abandon the pair" signal `Conflict` is: the
     // delete already resolved the destination, so the paired delete (the old
     // path) must still run — or that path is stranded on disk forever.
     use std::os::windows::fs::OpenOptionsExt;
@@ -4408,7 +4408,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     // An untracked raw file plants a lockable target at the rename's
     // destination — the engine's own occupancy check reads `path_aliases`,
     // not disk, so this does not refuse the rename. Matching bytes keeps its
-    // OWN later cleanup (the fresh delete job `versionedText.delete` below
+    // own later cleanup (the fresh delete job `versionedText.delete` below
     // enqueues) preimage-clean instead of spuriously conflicting.
     std::fs::write(scratch.path().join("new.bin"), bytes).expect("plant destination");
     let lock = std::fs::OpenOptions::new()
@@ -4419,7 +4419,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
 
     // The rename commits (moment + path_aliases move to new.bin), but the
     // destination write's post-commit materialize hits the lock and stays
-    // PENDING — so the paired old.bin delete is never attempted either
+    // pending — so the paired old.bin delete is never attempted either
     // (`write_ready` false).
     let renamed = call(
         &transport,
@@ -4441,7 +4441,7 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     assert!(scratch.path().join("old.bin").exists());
 
     // Delete the renamed destination while its write job is still pending —
-    // the #739 cancellation this PR adds fires here.
+    // the cancellation this PR adds fires here.
     call(
         &transport,
         &handle,
@@ -4464,11 +4464,11 @@ async fn deleting_a_committed_renames_locked_destination_still_lets_its_paired_s
     let restarted_transport = InProcessTransport::new(restarted_service);
     let restarted_handle = open_workspace(&restarted_transport, &scratch, workspace_id, 1).await;
 
-    // RED (bug): the replay's rename-pair check treats the write's CANCELLED
+    // RED (bug): the replay's rename-pair check treats the write's cancelled
     // status like Conflict — it marks the paired old.bin delete conflict too
     // and abandons it, so old.bin survives on disk forever, stranded.
     //
-    // GREEN (fix): CANCELLED lets the paired delete proceed like COMPLETE
+    // GREEN (fix): cancelled lets the paired delete proceed like complete
     // would, so old.bin is removed.
     assert!(
         !scratch.path().join("old.bin").exists(),
@@ -4658,14 +4658,14 @@ async fn a_live_lease_defers_capture_until_the_dirty_session_settles() {
     call(&transport, &handle, 9, "workspace.close", json!({})).await;
 }
 
-/// #665, part B: a session that can neither settle nor prune EVICTS, and the
+/// #665, part B: a session that can neither settle nor prune evicts, and the
 /// reopen resurrects its edits.
 ///
 /// The desktop reaches this on two populations `captureOnePath` never captures
 /// — a policy-excluded path, and a file between the 128 KiB capture limit and
 /// the 2 MiB editor limit. The daemon has no policy notion at `ydoc.open`, so
 /// this stages the state those two share and nothing else: a dirty local-only
-/// lineage whose head does NOT hold its bytes, which no capture will ever fix.
+/// lineage whose head does not hold its bytes, which no capture will ever fix.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
     const PATH: &str = "notes/evict.md";
@@ -4730,8 +4730,6 @@ async fn an_uncoverable_dirty_session_evicts_and_the_reopen_resurrects_it() {
         .expect_err("the refused close holds the lease");
     assert_eq!(busy.message, "ydoc-session-busy");
 
-    // MUTATION: make `ydoc_evict` skip its `sessions.remove` — the open below
-    // answers `ydoc-session-busy` and its `call` panics.
     let evicted = call(
         &transport,
         &handle,
@@ -5278,7 +5276,7 @@ async fn a_declared_seed_only_session_closes_without_writing() {
     call(&transport, &handle, 90, "workspace.close", json!({})).await;
 }
 
-/// #815 pin 2 — THE data-loss direction: one real edit after the seed and the
+/// #815 pin 2 — the data-loss direction: one real edit after the seed and the
 /// close must settle to disk exactly as before the skip existed.
 ///
 /// Mutation kill: make the settle skip unconditional (drop the single-update
@@ -5355,7 +5353,7 @@ async fn a_real_edit_after_the_seed_still_settles_to_disk() {
 }
 
 /// #815 pin 3: a prior session's unsettled real ops (seed + edit surviving an
-/// evict) must still settle with a write when the NEXT session — which itself
+/// evict) must still settle with a write when the next session — which itself
 /// records nothing — closes.
 ///
 /// Mutation kill: drop the exactly-one-update requirement from
@@ -5424,7 +5422,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
         "the evicted lineage must resume"
     );
     let reopened_session = reopened["sessionId"].as_str().expect("reopened session");
-    // This session records NOTHING — and must still settle the prior ops.
+    // This session records nothing — and must still settle the prior ops.
     call(
         &transport,
         &handle,
@@ -5443,7 +5441,7 @@ async fn replayed_prior_session_ops_still_settle_on_close() {
     call(&transport, &handle, 8, "workspace.close", json!({})).await;
 }
 
-/// #815: the seed declaration is only valid for the first update of a
+/// The seed declaration is only valid for the first update of a
 /// lineage-absent session; anything else refuses before touching the store.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_seed_declared_after_the_first_update_refuses() {

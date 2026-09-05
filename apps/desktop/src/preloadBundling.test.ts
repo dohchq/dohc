@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { preloadBundledRuntimeDeps } from "../electron.vite.config";
 
-// #783 — the preload's import graph must be BUNDLED, not required at runtime.
+// The preload's import graph must be bundled, not required at runtime.
 //
 // A sandboxed preload has no module resolver. Anything left external becomes a
 // bare `require(...)` in `dist/preload/preload.cjs`, Electron refuses the whole
@@ -14,7 +14,7 @@ import { preloadBundledRuntimeDeps } from "../electron.vite.config";
 // out waiting for a screen that will never render.
 //
 // That is exactly what happened. `bridgeContract.ts` gained a VALUE import of
-// `@dohc/security-contract/share-selector` (#780) while
+// `@dohc/security-contract/share-selector` while
 // `preloadBundledRuntimeDeps` did not gain the package, and the desktop app
 // stopped booting under the harness — silently, because no gate runs the e2e.
 //
@@ -71,7 +71,7 @@ describe("the sandboxed preload's runtime dependencies", () => {
     }
     expect(
       Object.fromEntries(missing),
-      "MUTATION: a value import the preload does not bundle becomes a bare require(), " +
+      "a value import the preload does not bundle becomes a bare require(), " +
         "Electron refuses the whole preload, and the app boots with no bridge (#783)",
     ).toEqual({});
   });
@@ -84,7 +84,7 @@ describe("the sandboxed preload's runtime dependencies", () => {
     ].map((match) => `${match[1]!.replace(/^\.\//u, "")}.ts`);
     expect(
       [...new Set(localImports)].sort(),
-      "MUTATION: a new local import in preload.ts must join PRELOAD_GRAPH, or its " +
+      "a new local import in preload.ts must join PRELOAD_GRAPH, or its " +
         "packages go unchecked",
     ).toEqual(PRELOAD_GRAPH.filter((module) => module !== "preload.ts").sort());
   });

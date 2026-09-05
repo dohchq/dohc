@@ -1,7 +1,7 @@
 //! Domain records and operation inputs for the versioning slice.
 //!
 //! Identity discipline: a [`VersionRecord`] is a named line of history; a
-//! [`SnapshotView`]/[`TextSnapshot`]/[`MomentRecord`] carries a STABLE
+//! [`SnapshotView`]/[`TextSnapshot`]/[`MomentRecord`] carries a stable
 //! `object_id` that is the
 //! durable identity, and a `path` that is only an alias onto it (plan §Target
 //! architecture). Ids that carry identity (`version_id`, `object_id`,
@@ -123,7 +123,7 @@ pub struct SnapshotMetadata {
     /// Does a `ydoc_docs` marker exist for this object — i.e. is this path
     /// owned by the Y.Doc editor? MARKER-EXISTS, deliberately not
     /// durable-state: a default local close prunes updates and snapshots but
-    /// KEEPS the marker, and such a file is still Y.Doc-owned.
+    /// keeps the marker, and such a file is still Y.Doc-owned.
     ///
     /// Callers use this to avoid mistaking the engine's own artifacts for
     /// content it cannot own. A settled Y.Doc is bounded by nothing, so it
@@ -255,10 +255,10 @@ pub struct MomentRecord {
     pub metadata_correlation_id: Option<String>,
     pub author_json: Option<String>,
     /// A non-NULL marker in the DB → a peer-divergence record, excluded from
-    /// 'latest moment' fork-point selection (`PORTING.md` §1). `false` = a
+    /// 'latest moment' fork-point selection. `false` = a
     /// materialized moment.
     pub sync_record_only: bool,
-    /// HYDRATED payload fields (TS `momentSelectSql` parity): the after/
+    /// Hydrated payload fields (TS `momentSelectSql` parity): the after/
     /// before TEXT bodies (None for binary, absent, or OVER-CAP sides —
     /// bodies above the 48 KiB in-band cap are never loaded out of SQL;
     /// the byte lengths always are) and the COALESCEd text/binary byte
@@ -355,18 +355,18 @@ pub struct CaptureIngest {
     pub author_json: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
-    /// Whether this write may overwrite a head written by a DIFFERENT origin
+    /// Whether this write may overwrite a head written by a different origin
     /// (an RPC write, a replication apply). Capture sets it only when it
-    /// OBSERVED the disk transition (`IngestReason::Changed`) — a genuine
+    /// observed the disk transition (`IngestReason::Changed`) — a genuine
     /// user edit is authoritative for file content. On first sight of a path
     /// (`Added`, e.g. after a fresh/reset manifest) capture cannot tell a
-    /// user edit from stale disk bytes, so it must NOT claim a foreign head
+    /// user edit from stale disk bytes, so it must not claim a foreign head
     /// and silently revert that writer.
     pub claim_foreign_head: bool,
 }
 
 /// Inputs to [`crate::VersionedTextStore::capture_ingest_binary`]: the
-/// autonomous BINARY capture-write primitive. Ids are derived internally via
+/// autonomous binary capture-write primitive. Ids are derived internally via
 /// the same length-framed scheme as text capture; the bytes are persisted as
 /// a BINHEAD binary head with NO materialization job (they came FROM disk).
 #[derive(Debug, Clone)]
@@ -415,19 +415,19 @@ pub struct CaptureRetire {
     pub metadata_correlation_id: Option<String>,
     pub now_ms: i64,
     pub request_id: Option<String>,
-    /// Retire ONLY when the current head is text. The plaintext capture sink
+    /// Retire only when the current head is text. The plaintext capture sink
     /// sets this on its binary-deferral path so it can clear a stale TEXT
     /// head without ever deleting a live binary head it does not own (binary
     /// heads exist via mirrored resolve / the binary capture path). A binary
     /// head under this flag is a no-op, not an error.
     pub only_if_text_head: bool,
-    /// Retire ONLY when the current head was itself written by CAPTURE. The
+    /// Retire only when the current head was itself written by CAPTURE. The
     /// capture sink sets this so a head that arrived by another route (an
     /// RPC versionedText.write, a replication apply) — which may legitimately
     /// have no disk counterpart — can never be deleted by a disk-driven
     /// retire. A foreign-origin head is a no-op, not an error.
     pub only_if_capture_origin: bool,
-    /// May this retire destroy a MATERIALIZED Y.DOC head?
+    /// May this retire destroy a materialized Y.DOC head?
     ///
     /// True for the DELETE reasons: a file removed while the daemon was down
     /// must retire its head rather than leave a stale snapshot readable
@@ -521,7 +521,7 @@ pub struct BinaryWriteResult {
     pub moment: MomentRecord,
     pub deduped: bool,
     /// True when a materialization job was enqueued — only for writes into
-    /// the workspace's ACTIVE version. Disk mirrors the active version; a
+    /// the workspace's active version. Disk mirrors the active version; a
     /// non-active write is DB-only (materializing it would hand the capture
     /// baseline another version's bytes to ingest into the active one).
     pub materialize_enqueued: bool,

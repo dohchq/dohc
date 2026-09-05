@@ -98,7 +98,7 @@ function collectSpans(nodes: HastNode[], offset: number, spans: HighlightSpan[])
   return pos
 }
 
-/** PURE: tokenize `text` as `language` and return highlight spans relative
+/** Pure: tokenize `text` as `language` and return highlight spans relative
  *  to the start of `text`. Returns `[]` for unregistered languages or if
  *  hljs itself throws (malformed input should never crash the editor). */
 export function highlightSpans(language: string, text: string): HighlightSpan[] {
@@ -134,7 +134,7 @@ function normalizeLanguage(value: unknown): string {
 
 type CodeHighlightRange = { from: number; to: number; className: string }
 
-/** PURE: walk the doc, resolve each codeBlock's spans (via `cache` when the
+/** Pure: walk the doc, resolve each codeBlock's spans (via `cache` when the
  *  node object is unchanged — ProseMirror nodes are immutable, so a cache
  *  hit means both identity and content are unchanged) and return absolute
  *  doc-coordinate ranges. */

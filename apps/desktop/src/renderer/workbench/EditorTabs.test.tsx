@@ -139,10 +139,9 @@ describe("EditorTabs strip scrolling", () => {
       />,
     );
 
-    // MUTATION (ignore the label again): the tab falls back to "hello-plugin".
     const tab = screen.getByRole("tab", { name: "Hello Plugin" });
     // The tooltip stays the id: it is what tells a plugin's two tabs apart.
-    expect(tab.title).toBe("Plugin details: hello-plugin");
+    expect(tab.title, "ignore the label again: the tab falls back to 'hello-plugin'.").toBe("Plugin details: hello-plugin");
   });
 
   it("falls back to the plugin id until the shell knows a display name", () => {

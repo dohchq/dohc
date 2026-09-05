@@ -18,10 +18,10 @@ export const MAX_WORKSPACE_SETTINGS_FILE_BYTES = 256 * 1024;
 
 const decodeWorkspaceSettings = Schema.decodeUnknownSync(WorkspaceSettingsContract);
 
-// A settings file that EXISTS but cannot be read may hold the engine opt-out.
+// A settings file that exists but cannot be read may hold the engine opt-out.
 // Reading it as defaults would turn recording back on for a workspace that
 // asked for none, so an unreadable file reads as opted out and carries a
-// warning the workspace shell shows outside Settings. An ABSENT file is the
+// warning the workspace shell shows outside Settings. An absent file is the
 // other case: a new workspace must not be born opted out.
 const UNREADABLE_WORKSPACE_SETTINGS: WorkspaceSettings = {
   ...DEFAULT_WORKSPACE_SETTINGS,
@@ -36,7 +36,7 @@ function unreadableSettings(
     settings: UNREADABLE_WORKSPACE_SETTINGS,
     source: "recovered",
     // Repairing the file is only half the fix, and the second half is a
-    // RESTART, not a reopen: main decides the recorder once per workspace per
+    // restart, not a reopen: main decides the recorder once per workspace per
     // app session (openWorkspaceActivity retains every opened workspace, and
     // workspaceActivity.open no-ops for one it already watches), so leaving
     // the workspace and coming back re-reads nothing.
@@ -86,7 +86,7 @@ export async function readWorkspaceSettingsFile(
   }
 }
 
-// EVERY write for ONE workspace runs on this queue, one at a time. Two
+// Every write for one workspace runs on this queue, one at a time. Two
 // controls changed before the first save settles would otherwise both read the
 // same old file, and the later merge would drop the earlier patch while the
 // dialog reported it saved. Reset joins the same queue for the same reason:
@@ -153,7 +153,7 @@ export function resetWorkspaceSettingsFile(
   });
 }
 
-// THE save path: the changed controls, applied to the file as it is NOW.
+// The save path: the changed controls, applied to the file as it is NOW.
 //
 // Two ways the old whole-object save wrote an opt-out nobody chose. Over a
 // file dohc cannot read, the caller's resolved object carries the fail-closed
@@ -198,7 +198,7 @@ export async function writeWorkspaceSettingsFile(
     // A directory or a link at the settings path reads as unreadable, and
     // Reset is what the refusal tells the user to reach for — but the atomic
     // rename cannot land on either, so the advertised way out would fail.
-    // Move exactly that path into the workspace trash first. NEVER delete it:
+    // Move exactly that path into the workspace trash first. Never delete it:
     // a folder there can hold anything, and a reset the user asked for must
     // not destroy content it never named. The other caller (a patch save) only
     // reaches here after the file read as a regular file, so it never takes

@@ -40,9 +40,9 @@ describe("parseProcessTable", () => {
   });
 
   it("reads a row with no leading padding at all", () => {
-    // Every OTHER fixture line in this file happens to have leading
+    // Every other fixture line in this file happens to have leading
     // whitespace — column alignment ps itself adds for narrower pids, not
-    // something this parser requires — so only a line with NONE can tell
+    // something this parser requires — so only a line with none can tell
     // the leading `\s*` (zero or more) apart from a `\s+` (one or more)
     // that would silently drop a row wide enough to need no padding at
     // all (the shape a captured Windows process-table row happened to
@@ -353,7 +353,7 @@ describe("processDescendants", () => {
   it("still finds a descendant once its own parent has already exited and it was reparented away from root", async () => {
     // The scenario stopChild's capture exists for: root's child already
     // exited and reparented grandchild to pid 1 — a plain root-rooted walk
-    // would miss it, but a PRIOR capture of the grandchild's own pid (as
+    // would miss it, but a prior capture of the grandchild's own pid (as
     // its own root) still finds it, which is why stopChild re-enumerates
     // from each previously captured pid too, not just the original root.
     await expect(

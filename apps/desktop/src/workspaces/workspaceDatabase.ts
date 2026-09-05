@@ -174,9 +174,9 @@ export async function applyDatabaseEdit(
   });
 }
 
-// Atomically writes bytes to a NEW workspace-relative path, enforcing
+// Atomically writes bytes to a new workspace-relative path, enforcing
 // path-safety and real-path containment (no traversal, no symlink escape).
-// Containment is checked against the deepest EXISTING ancestor BEFORE mkdir —
+// Containment is checked against the deepest existing ancestor before mkdir —
 // a workspace-internal symlinked ancestor must not cause directories to be
 // created outside the root (mirrors createFile). Refuses to replace an
 // existing file: the on-disk database is canonical, so materializing over it

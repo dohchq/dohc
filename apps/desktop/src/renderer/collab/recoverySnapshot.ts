@@ -1,8 +1,8 @@
 import * as Y from "yjs";
 
-// Both halves of the recovery snapshot contract (#769): the encoder the
+// Both halves of the recovery snapshot contract: the encoder the
 // deletion/delivery boundaries write, and the decoder every recovery surface
-// reads. The marker is the whole contract, so it lives in ONE module — a
+// reads. The marker is the whole contract, so it lives in one module — a
 // second spelling of it in the surface that copies the text is how the user
 // ends up with an opaque blob on the clipboard.
 
@@ -28,7 +28,7 @@ export function loadProjectionModule(): Promise<ProjectionModule> {
   return projectionModulePromise;
 }
 
-// A deletion's draft text depends on the projection module, but the BYTES
+// A deletion's draft text depends on the projection module, but the bytes
 // that produce it must not: the live doc can be destroyed (unmount) before
 // the module resolves, so the doc is snapshotted synchronously at the event
 // and projected to markdown lazily, off a reconstructed doc.
@@ -40,7 +40,7 @@ export function markdownFromSnapshot(snapshot: Uint8Array): Promise<string> {
   });
 }
 
-// The crude fallback the deletion boundary persists BEFORE the projection
+// The crude fallback the deletion boundary persists before the projection
 // module is even guaranteed to load — pure yjs, no Tiptap, so it never waits
 // on the chunk this whole lazy-load exists to defer. Faithful markdown
 // (frontmatter ordering, table/list formatting, escaping) replaces this the
@@ -142,7 +142,7 @@ function recoverSnapshotDoc(encoded: string): Y.Doc | null {
 // the lossless answer, and the copy after a transient failure retries instead
 // of serving that failure's fallback for as long as the row stays mounted.
 //
-// It REJECTS when the projection fails over intact bytes. Copy then reports
+// It rejects when the projection fails over intact bytes. Copy then reports
 // the failure and the next click retries, because the document is still whole
 // and the user must not be handed the lossy half — and then delete the row
 // believing they have their text.

@@ -232,14 +232,14 @@ describe("secret capture through the desktop pipeline (daemon path)", () => {
   });
 });
 
-describe("#681 round 5: the stand-down marker cleanup must never touch secret paths", () => {
+describe("the stand-down marker cleanup must never touch secret paths", () => {
   it("an engine-owned removal of a secret path does not record a spurious protected delete", async () => {
     // #681 round 5, CodeRabbit Major (real). The round-4 hoist consumed the
-    // expected-delete token for EVERY event, before the secret floor gate —
+    // expected-delete token for every event, before the secret floor gate —
     // stealing it from `captureSecretPath`'s own `consumeExpectedEvent`
     // check (workspaceEngineCapture.ts). An engine-owned removal — a
     // version switch whose target omits the file, a relay fast-forward
-    // delete — registers this SAME token via `registerExpectedEngineEvents`
+    // delete — registers this same token via `registerExpectedEngineEvents`
     // before the disk delete, exactly like `materialize()` does for a
     // text-file delete operation. With the token stolen, the removal read
     // as EXTERNAL and recorded a spurious "Deleted .env" protected moment
@@ -274,7 +274,7 @@ describe("#681 round 5: the stand-down marker cleanup must never touch secret pa
     // reading secret bytes through the reader with no secret-store
     // awareness, and charging a redundant disk read to every secret event.
     // Both readers ultimately call node:fs/promises readFile on the same
-    // absolute path, so a stray plaintext-reader call shows up as a SECOND
+    // absolute path, so a stray plaintext-reader call shows up as a second
     // readFile call for .env — readDiskSecretState's own read, inside
     // captureSecretPath, is the only legitimate one.
     const root = await tempRoot();
@@ -315,7 +315,7 @@ describe("secret version operations through the desktop daemon path", () => {
     engine.captureBatch([{ path: ".env", operation: "update" }]);
     await engine.flush();
 
-    // Merge while Main is ACTIVE so the merged secret must land on disk.
+    // Merge while Main is active so the merged secret must land on disk.
     await engine.switchVersion("main");
     expect(await readText(root, ".env")).toBe(ENV_A);
     const result = await engine.mergeVersionIntoMain(created.activeVersionId);
@@ -489,7 +489,7 @@ describe("listMoments protected pagination", () => {
       "aa-secret",
       "tie",
     );
-    // "aaa-text" is written first, so it holds the LOWER momentOrder even
+    // "aaa-text" is written first, so it holds the lower momentOrder even
     // though its id sorts first.
     const textWrites: ReadonlyArray<[string, number]> = [
       ["older-text", tiedSecret.recordedAtMs - 1],
@@ -528,7 +528,7 @@ describe("listMoments protected pagination", () => {
 
   // The rule has to hold across the whole timeline the user reads, not only
   // inside one page. DesktopWorkspaceShell loads 200 moments at a time and
-  // APPENDS each later page, so a tie group longer than one page would put
+  // appends each later page, so a tie group longer than one page would put
   // the protected moment in front of the tied text moments still to come.
   it("keeps tied text before a protected moment across a page boundary", async () => {
     const root = await tempRoot();

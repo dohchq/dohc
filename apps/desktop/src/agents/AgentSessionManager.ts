@@ -204,7 +204,7 @@ export function createAgentSessionManager(options: AgentSessionManagerOptions) {
   const sessions = new Map<string, ManagedSession>();
   const finalizedRuns = new Set<string>();
   // Per-workspace start mutex. startSession does stop-then-create, so two
-  // CONCURRENT starts for the same workspace would race into duplicate sessions
+  // concurrent starts for the same workspace would race into duplicate sessions
   // (each stopping the other's half-built session). This set marks a workspace
   // whose start is in flight; a second concurrent start is rejected outright.
   const startingWorkspaces = new Set<string>();

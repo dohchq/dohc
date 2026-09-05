@@ -16,22 +16,22 @@ export { ATTACHMENT_FOLDER_NAME_MAX_LENGTH } from "./workspaceSettingsValues";
 
 // The on-disk contract for `<workspace>/.dohc/settings.local.json`.
 //
-// It lives here, not in the desktop app, because TWO processes decide from it:
+// It lives here, not in the desktop app, because two processes decide from it:
 // the desktop resolves the engine capture at workspace open, and the MCP server
 // decides whether a mutating tool may name a recorder. Both ask this one
 // schema, because a hand-copied second schema is how those answers drift apart.
 //
-// The verdict is three-valued: on, off, or UNTRUSTED for a body the schema
+// The verdict is three-valued: on, off, or untrusted for a body the schema
 // rejects. Untrusted is not the opt-out — it may hold one dohc cannot read, and
-// reporting a choice the user never made is its own defect (#641). Both
+// reporting a choice the user never made is its own defect. Both
 // processes fail closed on it, so neither names a recorder, but they report it
 // differently: the desktop recovers to engine-off settings and warns — never to
 // the defaults, which are engine-ON — and MCP answers
 // `historyRecording: "unknown"` with the cause.
 
 // The schema bound on `files.attachmentFolderName`. Exported because the
-// settings UI must enforce the SAME bound on its input: mergeWorkspaceSettings
-// re-parses and THROWS on an over-long value, and it is called straight from a
+// settings UI must enforce the same bound on its input: mergeWorkspaceSettings
+// re-parses and throws on an over-long value, and it is called straight from a
 // React change handler — so an unbounded input would turn a long paste into an
 // unhandled exception instead of a rejected edit.
 const WorkspaceAgentsSettings = Schema.Struct({
@@ -82,7 +82,7 @@ export const WorkspaceSettings = Schema.Struct({
   // parse silently resets the whole file, so settings written before this
   // group existed must keep parsing as-is (see the old-shape regression test).
   //
-  // WS-H1 flag flip: the workspace engine is THE product default. An absent
+  // WS-H1 flag flip: the workspace engine is the product default. An absent
   // experimental group (old settings files, brand-new workspaces) reads as
   // ON; the setting remains as an explicit opt-OUT escape hatch
   // (workspaceEngineAlpha: false). This schema default and

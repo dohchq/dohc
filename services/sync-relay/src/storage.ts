@@ -323,7 +323,7 @@ interface SyncRelayLinkCredentialMint {
   secretHash: string;
 }
 
-// #646 PR3a. A recipient's submitted changes, held at the relay until the
+// A recipient's submitted changes, held at the relay until the
 // granter accepts or declines them. `open` is the only state that can change.
 export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
 
@@ -333,7 +333,7 @@ export interface ShareProposalRow {
   workspaceId: string;
   // SERVER-derived from the authenticated submitter. Never client-supplied.
   proposedByUserId: string;
-  // The ONE version the share exposed when this was submitted.
+  // The one version the share exposed when this was submitted.
   versionId: string;
   state: ShareProposalState;
   createdAtMs: number;
@@ -345,7 +345,7 @@ export interface ShareProposalRow {
 export interface ShareProposalOpRow {
   opIndex: number;
   basedOnPath: string | null;
-  // WHICH file the change is built on, resolved from `basedOnPath` at submit
+  // Which file the change is built on, resolved from `basedOnPath` at submit
   // and followed at accept. null for a file the granter does not have.
   basedOnObjectId: string | null;
   basedOnBlobSha256: string | null;
@@ -443,7 +443,7 @@ export interface SyncRelayStorage {
     createdAtMs: number;
   }): PutBlobResult;
   // Async + chunked so a large sweep never monopolizes the event loop on the
-  // request path. Only reclaims blobs that are BOTH unreferenced AND older than
+  // request path. Only reclaims blobs that are both unreferenced and older than
   // the retention grace window (created_at_ms <= nowMs - grace), which is what
   // keeps a blob uploaded moments before its referencing log op is appended
   // from being deleted between the two phases.
@@ -455,7 +455,7 @@ export interface SyncRelayStorage {
   missingBlobs(workspaceId: string, sha256s: string[]): string[];
   // Create-only on first write (expectedSha256 null), compare-and-swap
   // thereafter: the caller must present the sha256 of the envelope it intends
-  // to replace. Replaced envelopes are RETAINED in an append-only history
+  // to replace. Replaced envelopes are retained in an append-only history
   // table (audit trail + server-side recovery from a bad overwrite).
   putKeyEnvelope(input: {
     workspaceId: string;
@@ -469,7 +469,7 @@ export interface SyncRelayStorage {
     workspaceId: string;
     originId: string;
     ops: SyncRelayLogInput[];
-    // MU-C4 revoke-race gate: runs INSIDE the append's BEGIN IMMEDIATE
+    // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
     // transaction, i.e. under the SQLite write lock that serializes revokes,
     // before anything is inserted. A throwing guard rolls the whole batch
     // back. This is how the member-append route re-verifies the share
@@ -700,7 +700,7 @@ export interface SyncRelayStorage {
     objectId: string;
     versionId: string;
   }): SyncRelayLogRow | null;
-  // MU-C4 shared channels: the channelWireId bound by the EARLIEST
+  // MU-C4 shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
   // exists but carries no shareable channel binding. Earliest-wins mirrors the
@@ -710,14 +710,14 @@ export interface SyncRelayStorage {
     workspaceId: string,
     threadId: string,
   ): string | null | undefined;
-  // The kind claimed by the EARLIEST chat.channel.create op for this wire id.
+  // The kind claimed by the earliest chat.channel.create op for this wire id.
   // undefined means no create exists; null means the earliest exact create is
   // malformed/unshareable. Later duplicate creates never override the first.
   findChannelCreateKind(
     workspaceId: string,
     channelWireId: string,
   ): "channel" | "dm" | "agent" | null | undefined;
-  // #646 PR2: the file a thread is about, as claimed by the EARLIEST
+  // The file a thread is about, as claimed by the earliest
   // chat.thread.create for this threadId. Earliest-wins for the same reason
   // the channel binding uses it: a later forged re-create must not re-bind an
   // existing thread into a share. undefined means no create exists; null means
@@ -726,14 +726,14 @@ export interface SyncRelayStorage {
     workspaceId: string,
     threadId: string,
   ): ThreadFileBinding | null | undefined;
-  // Where this object sits RIGHT NOW. undefined means the relay has never
+  // Where this object sits right NOW. undefined means the relay has never
   // seen the object; null means its latest moment deleted it (or named no
   // readable path). Both deny.
   objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined;
-  // The object at this path RIGHT NOW, or undefined when none is. The reverse
+  // The object at this path right now, or undefined when none is. The reverse
   // of the lookup above; a thread bound by path is re-proved through it.
   objectIdAtPath(workspaceId: string, path: string): string | undefined;
-  // #646 PR3a. WHICH object sits at this path, in the ONE version a share
+  // Which object sits at this path, in the one version a share
   // exposes. `objectIdAtPath` above answers across every version at once, so
   // a path last touched in a side version resolves to an object that share
   // never saw — and every lookup below would then be scoped to a version that
@@ -744,16 +744,16 @@ export interface SyncRelayStorage {
     versionId: string;
     path: string;
   }): string | undefined;
-  // #646 PR3a. The granter's own moment for this object WITHIN one version:
+  // The granter's own moment for this object within one version:
   // the latest one, or the latest that produced `blobSha256` when one is
   // named. The first answers "did this file drift since they sent it?"; the
   // second is the correct three-way base for a change built on that content.
   //
-  // The LATEST match wins, because content can return to an earlier state and
+  // The latest match wins, because content can return to an earlier state and
   // the recipient started from the most recent moment that produced it. null
   // when no moment did, which reads as an unknown base and opens a conflict.
   //
-  // A share exposes exactly ONE version, and the same content can sit under
+  // A share exposes exactly one version, and the same content can sit under
   // the same object id in another one. An unscoped lookup would hand a main
   // share a base from a side version — a moment the granter's main line never
   // held — so the version is a parameter, never a default.
@@ -781,7 +781,7 @@ export interface SyncRelayStorage {
     proposalId: string,
   ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
   listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
-  // The granter's OPEN proposals, as counts rather than op rows. The review
+  // The granter's open proposals, as counts rather than op rows. The review
   // surface polls this on a timer and renders a sender and a count from it, so
   // serving every op of every open proposal would resolve a base per op on
   // every tick to build rows nobody reads. One proposal's ops come from
@@ -797,7 +797,7 @@ export interface SyncRelayStorage {
     to: Exclude<ShareProposalState, "open">,
     settledAtMs: number,
   ): boolean;
-  // The same move, WITHOUT a transaction of its own, for a caller that already
+  // The same move, without a transaction of its own, for a caller that already
   // holds the write lock. Accept uses it inside appendLogBatch's guard so the
   // release and the settle commit together or not at all.
   settleShareProposalInTransaction(
@@ -880,7 +880,7 @@ const LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES =
 const MAX_DISCUSSION_REVISION = Number.MAX_SAFE_INTEGER;
 // Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
 // upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
-// runs between the two must NOT reclaim the blob just because no log row
+// runs between the two must not reclaim the blob just because no log row
 // references it yet. Any blob younger than this window is untouchable. Ten
 // minutes comfortably covers a slow/retried push.
 export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
@@ -1606,7 +1606,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
   }
 }
 
-// Where a `moment.append` payload says its object is AFTER the op: the
+// Where a `moment.append` payload says its object is after the op: the
 // destination path of a write or a rename (a rename carries the destination in
 // both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
 // `rename`), or NULL for a delete.
@@ -1636,7 +1636,7 @@ export function objectPathFromMomentPayload(
   return { objectId, path: null };
 }
 
-// #646 PR3a. What one `moment.append` says about its object, in the shape the
+// What one `moment.append` says about its object, in the shape the
 // base rewrite reads back. The three fields the read filter already trusts —
 // `objectId`, the after path, the after hash — plus the moment's own id, which
 // is what `head_fast_forward` compares against on the granter's engine
@@ -1872,7 +1872,7 @@ function currentFileSelectorClause(selectorPaths: readonly string[]): {
   const params: string[] = [];
   const ranges = selectorPaths.map((root) => {
     const descendantPrefix = `${root}/`;
-    // Normalized roots never end in slash. Under SQLite BINARY collation,
+    // Normalized roots never end in slash. Under SQLite binary collation,
     // replacing the descendant slash (0x2f) with `0` (0x30) is the exact
     // exclusive upper bound, including descendants that start with a
     // supplementary Unicode code point.
@@ -1923,7 +1923,7 @@ export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[])
 // Latest-wins: a rename is a later fact about the same object, and the share
 // must follow the file rather than its history.
 //
-// The relay_seq guard is defence in depth, and today it is UNREACHABLE: both
+// The relay_seq guard is defence in depth, and today it is unreachable: both
 // writers walk the log in relay order (appendLogBatch inserts under the write
 // lock and reads back the row it just took; the seed scans ORDER BY
 // relay_seq), so no upsert here can arrive out of order. Its inverse mutation
@@ -2028,7 +2028,7 @@ export function openSyncRelayStorage(
   const { DatabaseSync } = nodeSqlite();
   const workspaceQuotaBytes =
     options.workspaceQuotaBytes ?? DEFAULT_WORKSPACE_QUOTA_BYTES;
-  // Validate the quota HERE, not just in main.ts: this helper is exported and
+  // Validate the quota here, not just in main.ts: this helper is exported and
   // reused (tests, other services). A NaN/Infinity/negative cap would silently
   // disable the quota check (currentUsage + added > NaN is always false), so
   // reject anything that is not a positive safe integer before constructing
@@ -2536,7 +2536,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // the gap between the two phases. cutoff is the newest created_at_ms still
     // eligible for collection.
     //
-    // #646 PR3a: an OPEN proposal's content is referenced too, and the log
+    // An open proposal's content is referenced too, and the log
     // cannot say so — a proposed change is not in the log, which is the whole
     // point of holding it. Without this second clause a proposal left open
     // past the grace window would lose its content to the sweep and could
@@ -2545,7 +2545,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // one has them in the log, and a declined one never will.
     const cutoff = options.nowMs - this.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
-    // AND aged past the grace window.
+    // and aged past the grace window.
     const candidates = this.db
       .prepare(
         `SELECT b.sha256
@@ -2570,7 +2570,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       )
       .all(workspaceId, cutoff)
       .map((row) => String(row.sha256));
-    // Phase 2: delete in bounded chunks, each in its OWN short transaction, and
+    // Delete in bounded chunks, each in its own short transaction, and
     // yield the event loop between chunks so a large sweep never monopolizes it
     // (CodeRabbit: keep GC off the single-threaded request path). The delete
     // RE-CHECKS unreferenced + aged so a blob newly referenced (or replaced)
@@ -2683,7 +2683,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         return { sha256: nextSha256 };
       }
       // The envelope + its append-only history count toward the workspace
-      // quota (CodeRabbit Stability): each rotation adds roughly the new
+      // quota: each rotation adds roughly the new
       // envelope's size (the prior copy moves into history), so the cap now
       // bounds unbounded rotation growth. workspaceUsageBytes already includes
       // both tables, so the incremental bytes to charge is the new envelope.
@@ -2852,15 +2852,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
       // Data-integrity gate (0P sync-hardening): a log op must never be made
       // durable while it references a blob the relay does not hold. The blob
-      // GC grace window covers the fresh PUT->POST gap, but NOT an old blob
+      // GC grace window covers the fresh PUT->POST gap, but not an old blob
       // that ages past the grace, nor a blob GC'd after a failed /log that a
       // retry then re-references via /blobs/have. Validate every referenced
       // sha IN THIS SAME transaction, before inserting: SQLite serializes
       // writers (BEGIN IMMEDIATE), so a concurrent GC cannot delete a checked
-      // blob between this probe and the insert that pins it. Only NEW ops are
+      // blob between this probe and the insert that pins it. Only new ops are
       // checked -- a skipped idempotent duplicate is already durable and its
       // blobs were validated at first append. Any missing blob rejects the
-      // WHOLE batch atomically (no partial append) with a retryable error the
+      // whole batch atomically (no partial append) with a retryable error the
       // client resolves by re-uploading and re-posting.
       const referencedShas = new Set<string>();
       for (const op of newOps) {
@@ -2900,7 +2900,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           op.recordedAtMs,
         );
         inserted += 1;
-        // #646 PR2: keep "where is this object now?" answerable by primary
+        // Keep "where is this object now?" answerable by primary
         // key. The relay_seq this row just took IS the order the guard in the
         // upsert compares, so a later moment always wins and an out-of-order
         // one never moves a path backwards.
@@ -2914,7 +2914,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               Number(result.lastInsertRowid),
             );
           }
-          // #646 PR3a: the same insert, one question deeper. The row above
+          // The same insert, one question deeper. The row above
           // keeps "where is this object now?" answerable; this one keeps
           // "which moment produced this content?" answerable, which is what a
           // proposal's base resolves to at accept.
@@ -5179,7 +5179,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         )
         .run(Math.trunc(revokedAtMs), shareId);
       if (Number(revoked.changes ?? 0) > 0) {
-        // #646 PR3a: ending a share settles what it was still carrying. An
+        // Ending a share settles what it was still carrying. An
         // open proposal outlives the grant it came through — the recipient
         // can no longer withdraw it, and its content stays pinned out of the
         // blob sweep for as long as it stays open. Declining is the honest
@@ -5344,7 +5344,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       }
       const record = asObject(payload);
       if (!record || record.threadId !== threadId) continue;
-      // The EARLIEST matching op is authoritative, whatever it says: a string
+      // The earliest matching op is authoritative, whatever it says: a string
       // channelWireId with no linked-file owner is the binding; anything else
       // (a file-linked/both-owned thread or a pre-wire-id slug binding) is "no
       // shareable binding" — fail closed.
@@ -5424,7 +5424,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       }
       const record = asObject(payload);
       if (!record || record.threadId !== threadId) continue;
-      // The EARLIEST matching op is authoritative, whatever it says. Exactly
+      // The earliest matching op is authoritative, whatever it says. Exactly
       // one binding shape may be present: an op claiming both is malformed,
       // and reading either half of it would let a crafted create bind a
       // thread twice.
@@ -5468,7 +5468,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     path: string;
   }): string | undefined {
     if (!input.path || !input.versionId) return undefined;
-    // The object whose LATEST moment in this version sits at this path. A
+    // The object whose latest moment in this version sits at this path. A
     // moment that moved the object away leaves a newer row naming another
     // path, so that object no longer answers here — which is what makes this
     // "who is at this path now, in this version" rather than "who was ever".
@@ -5706,7 +5706,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .map(rowToProposalOpRow);
   }
 
-  // The workspace's chat.thread.create rows that MIGHT name this threadId, in
+  // The workspace's chat.thread.create rows that might name this threadId, in
   // relay order. LIKE pre-filter on the exact JSON fragment the canonical
   // (sorted-key, JSON.stringify-escaped) payload stores, wildcards escaped so
   // a hostile threadId cannot widen the match; the caller's JSON.parse
@@ -5909,14 +5909,14 @@ function versionIdFromVersionCreatePayload(payloadJson: string): string | null {
   return record ? readableString(record.versionId) : null;
 }
 
-// Every blob sha an op REQUIRES the relay to already hold before the op may be
-// durably logged. This MUST mirror dohc-engine-sync collect_blob_refs exactly:
+// Every blob sha an op requires the relay to already hold before the op may be
+// durably logged. This must mirror dohc-engine-sync collect_blob_refs exactly:
 // the push client uploads precisely this set (text + binary) before
 // POST /log, so validating the same set neither rejects an honest push nor
 // lets a referencing op slip through unvalidated. Enumerated by op kind:
 //   - moment.append:      payloadBefore/After/before blob shas (both content
 //                         kinds ship as uploaded blobs).
-//   - conflict.open:      base/current/incoming state shas, but ONLY for
+//   - conflict.open: base/current/incoming state shas, but only for
 //                         binary states -- text conflict states carry their
 //                         bytes INLINE in the payload and are never uploaded,
 //                         so requiring them would wrongly reject a valid op.
@@ -6193,7 +6193,7 @@ export class SyncRelayQuotaExceededError extends Error {
 
 // A log append referenced a blob the relay does not hold. 422 (not 409): the
 // push client reserves 409 for same-origin log divergence (rewind/probe
-// recovery), so a blob-missing rejection must use a DISTINCT retryable status
+// recovery), so a blob-missing rejection must use a distinct retryable status
 // the client surfaces as a generic failure and retries -- its next push
 // re-uploads the missing blob (via /blobs/have) before re-posting the batch.
 export class SyncRelayBlobMissingError extends Error {

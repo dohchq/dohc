@@ -120,9 +120,6 @@ fn rollback(version_id: &str, path: &str, moment_id: &str) -> RollbackTextFileMu
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_restore_uses_current_generation_over_newer_completed_lineage() {
-    // MUTATION: pass the rolled-back moment's historical generation to
-    // enqueue_binary_rollback_restore -> the completed other-lineage write
-    // supersedes this active restore and disk remains on UPDATED_BYTES.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -407,8 +404,6 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
-    // MUTATION: derive next_moment_order from moments alone -> deleting the
-    // tip lets this new write fall below the completed restore fence.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -509,8 +504,6 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_binary_delete_rollback_restores_file_bytes() {
-    // MUTATION: remove the binary-delete rollback restore enqueue -> this
-    // leaves deleted.bin absent after the DB head has been restored.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -626,8 +619,6 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
     // The first call commits both jobs but leaves them pending. The SQL update
     // isolates the post-commit race: the write remains retryable while another
     // disk action terminalizes its paired delete before the replay reloads it.
-    // MUTATION: map the paired delete's Cancelled status to Skipped in
-    // `versioned_text_rollback_on_store`; the replay reports Skipped.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -750,8 +741,6 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
-    // MUTATION: omit pending rollback deletes from capture_manifest_seed ->
-    // the baseline reports new-pending.bin as Added and capture can adopt it.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -1370,9 +1359,6 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reopen() {
-    // MUTATION: remove capture_manifest_seed's pending rollback-job exclusion
-    // -> the emulated baseline sees capture.bin missing, retires the restored
-    // capture-origin head, and the final read returns None.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -1475,9 +1461,6 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_delete_rollback_drains_when_version_becomes_active() {
-    // MUTATION: remove the activation-time rollback restore replay -> the
-    // switch projection may put the bytes on disk, but the durable restore
-    // remains pending instead of being consumed by its newly-active version.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -1613,8 +1596,6 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn superseded_inactive_restore_is_drained_after_switch_projection() {
-    // MUTATION: count the selected restore's post-projection Superseded outcome
-    // as failed -> the already-committed switch returns incomplete.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();

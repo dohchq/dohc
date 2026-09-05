@@ -34,8 +34,8 @@ export async function scanWorkspaceFiles(rootDir: string): Promise<ScannedWorksp
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
 
-// Reconciliation-tolerant sibling of scanWorkspaceFiles (WS-H1 gate fix): one
-// unreadable or racy path is collected as a failure and SKIPPED instead of
+// Reconciliation-tolerant sibling of scanWorkspaceFiles: one
+// unreadable or racy path is collected as a failure and skipped instead of
 // aborting the whole recursive scan, so startup reconciliation can still seed
 // every readable file on a cold adoption. Strict callers (sync, diff) keep
 // scanWorkspaceFiles, which still throws on the first error.

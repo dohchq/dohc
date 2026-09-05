@@ -37,13 +37,13 @@ const LOCKED_SETTLE_RETRY_CAP_MS = 10_000;
 const STORE_BUSY_SETTLE_RETRY_CAP_MS = 1_000;
 
 // How far this failure's retry ladder may walk out, or null when retrying
-// cannot help. ONE question decides it — is the condition transient? — and
-// both answers here are yes, for two different busy things (#554, #658).
+// cannot help. One question decides it — is the condition transient? — and
+// both answers here are yes, for two different busy things.
 // Every other settle failure answers no: a preimage that no longer matches, a
 // target turned read-only, an ACL that denies the replace.
 //
 // `isTransientEngineRefusal` owns MEMBERSHIP of the retryable class, in one
-// place at the protocol boundary. This owns only HOW LONG each member may be
+// place at the protocol boundary. This owns only how long each member may be
 // waited on, so a class added there cannot silently acquire a ladder here — it
 // lands on the conservative ceiling instead.
 function settleRetryCapMs(error: unknown): number | null {
@@ -68,7 +68,7 @@ export class YdocReleasedWithSettleFailureError extends Error {
 
 export interface EngineYdocProviderSessionOptions {
   transport: EngineTransport;
-  // Share ONE adapter across every doc on a given transport so request ids stay
+  // Share one adapter across every doc on a given transport so request ids stay
   // unique per session generation (bot #3601684269). When omitted a private
   // adapter is created and disposed with this session; a shared adapter is
   // never disposed here. R13's framed transport should additionally own id
@@ -89,11 +89,11 @@ export interface EngineYdocProviderSessionOptions {
   onLineageReplaced?: (doc: Y.Doc, recoveredPaths: string[]) => void;
   onSessionError?: (error: unknown) => void;
   // A settle is going to the engine now, identified by `token`. Every
-  // outcome below echoes the SAME token, so a caller pairs start to outcome
+  // outcome below echoes the same token, so a caller pairs start to outcome
   // by identity — never by arrival order. Order is not a sound basis here: an
   // aborting settle never reaches settleChain and so completes out of start
   // order, and settleChain is per GENERATION while a caller's bookkeeping is
-  // per session. This is what lets a caller report a HONEST save state.
+  // per session. This is what lets a caller report a honest save state.
   onSettleStart?: (token: number) => void;
   // A settle FAILED. The debounced settle is the only path that writes the
   // user's edits to the file, so a dropped failure here is silent data loss:
@@ -118,13 +118,13 @@ export interface EngineYdocProviderSession {
   readonly path: string;
   // Whether the ENTERED VERSION has a committed snapshot for this path.
   // "absent" plus a lineage that is also absent means the daemon bound an
-  // EMPTY doc over a path the version does not contain: either the caller is
+  // empty doc over a path the version does not contain: either the caller is
   // creating the file (an empty artifact is on disk, not yet captured), or the
   // path is gone and binding a writable editor to it would materialize a
   // phantom file on the first keystroke. The consumer owns that decision; the
   // contract is stated on `WorkspaceEngineCapture.openYDocSession`.
   readonly head: "present" | "absent";
-  // Whether the daemon resumed durable CRDT state for this object. Read WITH
+  // Whether the daemon resumed durable CRDT state for this object. Read with
   // `head`: head-absent plus lineage-existing is a crash-orphaned draft the
   // daemon deliberately resurrects, and its CRDT rows are the only copy of
   // those edits.
@@ -137,8 +137,8 @@ export interface EngineYdocProviderSession {
   applyExternalMarkdownEdit(
     markdown: string,
   ): Promise<YdocApplyExternalMarkdownEditResult>;
-  // `settle: false` alone does NOT promise the file will be left alone: a
-  // release the daemon refuses as unsettled ESCALATES to a settling close, so
+  // `settle: false` alone does not promise the file will be left alone: a
+  // release the daemon refuses as unsettled escalates to a settling close, so
   // pending edits survive a transient failure. A caller that must never
   // materialize this path has to say so with `settleOnRefusal: false`, which
   // turns that escalation off and surfaces the refusal instead.
@@ -147,12 +147,12 @@ export interface EngineYdocProviderSession {
     summary?: string;
     settleOnRefusal?: boolean;
   }): Promise<void>;
-  // End the session while writing NOTHING and discarding NOTHING: the daemon
+  // End the session while writing nothing and discarding nothing: the daemon
   // drops the session and its lease and leaves the durable lineage alone, so
   // the next open resurrects this document's edits. The exit for a session
   // that may not settle (the artifact is not this session's to write) and
   // cannot prune (no artifact holds its CRDT's bytes), which would otherwise
-  // hold its lease until the daemon restarts (#665).
+  // hold its lease until the daemon restarts.
   evict(): Promise<void>;
 }
 
@@ -228,7 +228,7 @@ export async function openEngineYdocProviderSession(
 
   async function runSettle(summary?: string): Promise<YdocSettleResult> {
     // One identity per settle, echoed by whichever outcome this run produces.
-    // Callers pair on it instead of on arrival order, which does NOT hold:
+    // Callers pair on it instead of on arrival order, which does not hold:
     // the two abort paths below throw before reaching settleChain, so an
     // aborting settle completes ahead of settles that queued earlier.
     //
@@ -247,8 +247,8 @@ export async function openEngineYdocProviderSession(
     // forever with nothing logged.
     try {
       await journalChain;
-      // AFTER the chain, so writes already in flight keep their order, and
-      // BEFORE the settle, which must never commit a projection the engine is
+      // After the chain, so writes already in flight keep their order, and
+      // before the settle, which must never commit a projection the engine is
       // still missing text for. A refusal here aborts this settle exactly as a
       // journal failure does, and the ladder tries again.
       await session.resendMissingState();
@@ -285,7 +285,7 @@ export async function openEngineYdocProviderSession(
   }
 
   // A settle refused by a transient condition retries on a doubling delay
-  // until the condition clears (#554, #658). Without this, the work sat
+  // until the condition clears. Without this, the work sat
   // undone until an unrelated future edit triggered another settle, while the
   // document read as saved-or-failed with the on-disk artifact stale. A newer
   // armed settle (an edit during the backoff) owns the timer instead — an
@@ -296,7 +296,7 @@ export async function openEngineYdocProviderSession(
   function scheduleTransientSettleRetry(error: unknown): void {
     const capMs = settleRetryCapMs(error);
     if (closed || cancelSettle !== null || capMs === null) return;
-    // The cap belongs to THIS failure, so a ladder that walked out behind a
+    // The cap belongs to this failure, so a ladder that walked out behind a
     // file lock cannot make the next busy-database wait ten seconds.
     const delay = Math.min(transientRetryMs, capMs);
     transientRetryMs = Math.min(delay * 2, capMs);
@@ -391,11 +391,11 @@ export async function openEngineYdocProviderSession(
         rememberLocalEditError(error);
         throw error;
       }
-      // The caller hears the truth about ITS update; the chain carries the
+      // The caller hears the truth about its update; the chain carries the
       // ordering. They are separate promises because a transient refusal must
       // reject one and not the other: a chain left rejected answers every
       // later settle with the same stale failure, and nothing would ever send
-      // the engine the text it is complaining about (#658).
+      // the engine the text it is complaining about.
       const journaled = journalChain
         .then(() => operation)
         .then(() => undefined);
@@ -436,7 +436,7 @@ export async function openEngineYdocProviderSession(
       //
       // Send it first, exactly as a settle does, and for the same reason: no
       // operation that reads durable state may run while durable state is
-      // known to be behind (#658).
+      // known to be behind.
       await session.resendMissingState();
       return await session.applyExternalMarkdownEdit(markdown);
     },
@@ -466,7 +466,7 @@ export async function openEngineYdocProviderSession(
           preCloseError = error;
         }
       }
-      // Releasing while the engine is STILL behind discards that only copy:
+      // Releasing while the engine is still behind discards that only copy:
       // the doc holding the text goes away with the release, and a caller
       // that saw a clean "released, settle failed" would arm a retry that
       // reopens, settles what the lineage holds, and reports a save of a
@@ -475,7 +475,7 @@ export async function openEngineYdocProviderSession(
       // Only for a TRANSIENT failure, which is the one class the close ladder
       // above retries. A terminal refusal cannot be waited out, so refusing
       // the teardown for one would wedge the entry forever holding a lease
-      // nobody can release — worse than reporting the loss (#658).
+      // nobody can release — worse than reporting the loss.
       if (session.missingLocalState && isTransientEngineRefusal(preCloseError)) {
         throw preCloseError;
       }
@@ -485,8 +485,8 @@ export async function openEngineYdocProviderSession(
         } catch (error) {
           // The escalation preserves pending edits through a transient
           // failure, and it is right for every ordinary teardown. It is
-          // WRONG for a caller releasing a session it is about to declare
-          // absent: the daemon refuses the release precisely BECAUSE the
+          // wrong for a caller releasing a session it is about to declare
+          // absent: the daemon refuses the release precisely because the
           // lineage holds content, and settling it writes the file that
           // caller is about to say does not exist. `settleOnRefusal: false`
           // hands the refusal back instead, and the daemon keeps the session
@@ -522,11 +522,11 @@ export async function openEngineYdocProviderSession(
       } catch (error) {
         resendError = error;
       }
-      // Evicting while the engine is STILL behind discards the only copy: the
+      // Evicting while the engine is still behind discards the only copy: the
       // doc holding the text goes away with the session. Refuse only for a
       // TRANSIENT failure, the one class a retry can clear — a terminal
       // refusal cannot be waited out, and wedging the entry forever holding a
-      // lease nobody can release is worse than reporting the loss (#658).
+      // lease nobody can release is worse than reporting the loss.
       if (session.missingLocalState && isTransientEngineRefusal(resendError)) {
         closeError = resendError;
         throw resendError;

@@ -198,13 +198,13 @@ export interface PluginUninstallPreflightInput {
    * the uninstall warning can name what deleting it destroys. Null when
    * pluginId's own path resolves to data cleanup will never touch: an
    * invalid, never-installed row's own fallback id can coincide with some
-   * OTHER, unrelated, installed plugin's real id, and that path is real
+   * other, unrelated, installed plugin's real id, and that path is real
    * DATA belonging entirely to that other installation — inventorying it
    * here would threaten deleting it when cleanup already excludes it.
    */
   stateRoot: string | null;
   /**
-   * Other durable data directories cleanup will ALSO delete for this same
+   * Other durable data directories cleanup will also delete for this same
    * plugin — a record's state and plugin data can be filed under an id
    * different from the one discovery currently reports once its manifest
    * breaks, and the confirmation this produces has to report that data
@@ -571,7 +571,7 @@ export async function pluginUninstallPreflight(
   const stateRoots = input.stateRoot === null
     ? input.additionalStateRoots
     : [input.stateRoot, ...input.additionalStateRoots];
-  // Two different cleanup identities can resolve to the SAME physical
+  // Two different cleanup identities can resolve to the same physical
   // state directory (pluginStateRoot is deterministic per id, and more
   // than one id can genuinely trace to one directory) — measuring the
   // same path twice would double the file count and byte total the

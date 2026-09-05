@@ -40,7 +40,7 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 }
 
 /// Open a read-only connection that keeps the WAL alive: while it is held, a
-/// writer's close is NOT the last connection, so SQLite does not checkpoint on
+/// writer's close is not the last connection, so SQLite does not checkpoint on
 /// that close. This lets a test read the WAL itself, or prove data is
 /// recoverable *from* it, before a checkpoint folds it into the main file.
 ///
@@ -48,7 +48,7 @@ pub fn write_foreign_unversioned_db(db_path: &Path) -> FixtureResult {
 /// lock, and the close checkpoints anyway. So this also opens a read
 /// transaction and takes a snapshot.
 ///
-/// Call this AFTER the writer has committed: a read-only connection cannot
+/// Call this after the writer has committed: a read-only connection cannot
 /// create the `-shm` file a WAL database needs, so it must find one already
 /// there. Then drop the writer while this is held.
 pub fn open_readonly_keeper(db_path: &Path) -> rusqlite::Result<Connection> {

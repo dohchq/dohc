@@ -26,7 +26,7 @@ export type PMOutlineDocLike = {
   descendants: (cb: (node: PMHeadingNodeLike, pos: number) => boolean | void) => void;
 };
 
-/** PURE: flatten the doc's heading nodes, in document order. Headings with
+/** Pure: flatten the doc's heading nodes, in document order. Headings with
  *  no text (an empty "# " line mid-edit) are skipped — they have nothing to
  *  jump to and would just be noise in the rail/panel. */
 export function extractOutline(doc: PMOutlineDocLike): OutlineHeading[] {
@@ -44,7 +44,7 @@ export function extractOutline(doc: PMOutlineDocLike): OutlineHeading[] {
   return headings;
 }
 
-/** PURE: given the vertical offsets of each heading within the scrollable
+/** Pure: given the vertical offsets of each heading within the scrollable
  *  content (ascending, in document order) and the current scroll position,
  *  return the index of the "active" section — the last heading whose
  *  offset has scrolled past `scrollTop + readingOffset`. `readingOffset`

@@ -421,7 +421,7 @@ describe("notice center", () => {
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyRecordingOff: true,
-        // #483: the cause rides main's open-time read, on the same status
+        // The cause rides main's open-time read, on the same status
         // that decided history is off. One read answers both.
         settingsWarning:
           "Workspace settings could not be read. dohc records no history for this workspace. Fix /ws/.dohc/settings.local.json. Then restart dohc.",
@@ -456,7 +456,7 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
   });
 
-  // #505: the recorder failed to build. Nothing records, exactly as for the
+  // The recorder failed to build. Nothing records, exactly as for the
   // opt-out — so the two states arrive at this surface together and only the
   // cause separates them. The failure must not wear the opt-out's copy.
   it("names the failure when the recorder could not be built", async () => {
@@ -485,7 +485,7 @@ describe("notice center", () => {
     expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
-  // #540: a shared view records no history BY DESIGN — a capability, not an
+  // A shared view records no history BY DESIGN — a capability, not an
   // opt-out and not a failure. Every history-off notice states a cause that
   // is false for a shared view, so the share banner speaks and this surface
   // stays quiet.
@@ -526,7 +526,7 @@ describe("notice center", () => {
     expect(screen.getByTestId("notice-center").textContent).toContain("All clear");
   });
 
-  it("shows the persistent history-capture-failure notice while capture is failing (PR 0M-7)", async () => {
+  it("shows the persistent history-capture-failure notice while capture is failing", async () => {
     const onOpenHistory = vi.fn();
     renderBar({
       syncStatus: {

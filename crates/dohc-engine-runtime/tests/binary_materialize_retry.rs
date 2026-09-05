@@ -33,8 +33,6 @@ fn binary_input(request_id: &str) -> WriteBinary {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_write_retries_its_original_pending_materialization() {
-    // MUTATION: keep the deduped skipped short-circuit -> the retry reports
-    // skipped and asset.bin remains absent.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -86,8 +84,6 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_rollback_retries_its_pending_compensation() {
-    // MUTATION: keep rollback's deduped skipped short-circuit -> asset.bin
-    // survives the retry and the pending compensation never reaches disk.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();
@@ -154,8 +150,6 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen() {
-    // MUTATION: keep original-job cancellation behind the active-version guard
-    // -> reopen replays main's stale bytes into branch's working tree.
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
     let supervisor = WorkspaceSupervisor::new();

@@ -5,10 +5,10 @@
 
 /// Maximum size of one Y.Doc payload — a delta OR a full-state base — accepted
 /// by the durable append, the base claim, and the replication apply, in bytes.
-/// Reject over-cap bytes locally BEFORE the blob put and the journal, so
+/// Reject over-cap bytes locally before the blob put and the journal, so
 /// nothing that can only fail on a peer is ever recorded.
 ///
-/// **MEASURED, not inherited (#549).** The previous value was 5 MiB, copied
+/// **measured, not inherited.** The previous value was 5 MiB, copied
 /// from the deleted TS engine's binary-FILE cap and justified as a bound on one
 /// update. A base is a full state, so the same number bounded whole documents,
 /// and it rejected work the rest of the engine accepts: the store takes a
@@ -40,7 +40,7 @@
 /// compares them; check both when widening either.
 ///
 /// One number covers deltas and bases on purpose. Nothing measures how big a
-/// single EDIT may be; a delta never exceeds the full state it is a slice of;
+/// single edit may be; a delta never exceeds the full state it is a slice of;
 /// and the paths that walk a lineage piece by piece meet snapshots and deltas
 /// mixed together. A second number would be a second thing to keep true.
 pub const MAX_YDOC_UPDATE_BYTES: usize = 20 * 1024 * 1024;
@@ -53,7 +53,7 @@ pub const DEFAULT_COMPACTION_THRESHOLD: u32 = 64;
 
 /// FORWARD CONTRACT (not active protection today). `apply_remote_update` applies
 /// exactly one update per call, so nothing enforces this yet. It is the bound a
-/// future BATCH-apply entrypoint (R11b's replication drain) MUST cap its input
+/// future BATCH-apply entrypoint (R11b's replication drain) must cap its input
 /// at, so a hostile/buggy peer cannot force an unbounded apply loop in one call.
 /// Do not assume it is enforced until a batch entrypoint wires it.
 pub const MAX_REPLICATION_APPLY_BATCH: usize = 4096;

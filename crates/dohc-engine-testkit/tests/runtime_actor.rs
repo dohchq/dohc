@@ -113,7 +113,7 @@ async fn actor_lifecycle_open_ready_closed() {
     assert_eq!(err.code(), "actor-unavailable");
 }
 
-// oracle: two aliased paths converge on ONE actor / ONE writer connection
+// oracle: two aliased paths converge on one actor / one writer connection
 // (canonical-identity keying), proven with a lexical alias that always works.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lexical_aliases_converge_on_one_actor() {
@@ -139,7 +139,7 @@ async fn lexical_aliases_converge_on_one_actor() {
     assert_eq!(read(&b, "shared.md").await.as_deref(), Some("via-a"));
 }
 
-// oracle: a symlink/junction to the same engine dir converges on the SAME
+// oracle: a symlink/junction to the same engine dir converges on the same
 // actor (portability + file-identity). Skips honestly if the platform refuses
 // to create the alias.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -208,8 +208,8 @@ async fn restart_bumps_generation_and_preserves_state() {
 }
 
 // oracle: close deterministically releases the connection. A second open alone
-// does NOT prove release (SQLite permits concurrent connections), so we assert
-// the WAL sidecar was checkpointed away — which only happens when the LAST
+// does not prove release (SQLite permits concurrent connections), so we assert
+// the WAL sidecar was checkpointed away — which only happens when the last
 // connection closes — and, on Windows, that the file is now deletable.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_the_connection() {
@@ -395,7 +395,7 @@ async fn restart_after_panicked_predecessor_continues_generation() {
     assert_eq!(read(&reopened, "d2.md").await.as_deref(), Some("ok"));
 }
 
-// oracle: concurrent opens of the same file converge on ONE actor / ONE writer
+// oracle: concurrent opens of the same file converge on one actor / one writer
 // (the reservation protocol dedups; the lock is not held across the spawn).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_opens_share_one_actor() {

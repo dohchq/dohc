@@ -166,8 +166,6 @@ mod tests {
         let reached = gate.reached.pair_addresses();
         let open = gate.open.pair_addresses();
 
-        // MUTATION: collapse the two conditions back onto one mutex or one
-        // Condvar and the corresponding address assertion fails.
         assert_ne!(reached.0, open.0, "conditions must not share a mutex");
         assert_ne!(reached.1, open.1, "conditions must not share a condvar");
     }

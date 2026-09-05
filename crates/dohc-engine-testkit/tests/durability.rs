@@ -49,7 +49,7 @@ fn moments(store: &EngineStore) -> i64 {
     store.table_row_count("moments").expect("count moments")
 }
 
-/// Assert that opening `db` fails with `expected_code` AND left the file's
+/// Assert that opening `db` fails with `expected_code` And left the file's
 /// bytes and WAL state untouched (the fence must never mutate a rejected store).
 fn assert_rejected_without_mutation(db: &Path, expected_code: &str) {
     let before = std::fs::read(db).expect("read before");
@@ -194,7 +194,7 @@ fn foreign_unversioned_database_is_rejected_without_mutation() {
     assert_rejected_without_mutation(&db, "foreign-database");
 }
 
-// oracle: durability is pinned, not luck — `synchronous` reads back NORMAL, so
+// oracle: durability is pinned, not luck — `synchronous` reads back normal, so
 // a weakened configuration fails this test.
 #[test]
 fn synchronous_is_pinned_to_normal() {
@@ -244,7 +244,7 @@ fn committed_write_replays_from_wal_on_reopen() {
 }
 
 // oracle: idempotency — a same-payload retry replays exactly-once; a key reused
-// with a DIFFERENT payload is rejected, never silently replayed.
+// with a different payload is rejected, never silently replayed.
 #[test]
 fn idempotency_key_reuse_is_guarded() {
     let scratch = ScratchDir::new().expect("scratch dir");
@@ -264,7 +264,7 @@ fn idempotency_key_reuse_is_guarded() {
     assert!(retry.deduped);
     assert_eq!(moments(&store), 1);
 
-    // Same key, DIFFERENT payload → typed mismatch, nothing written.
+    // Same key, different payload → typed mismatch, nothing written.
     let conflicting = write("doc/k.md", "tampered", "m1", Some("req-k"), 2);
     let err = VersionedTextStore::new(&mut store)
         .write_text(&conflicting, &NO_FAULTS)

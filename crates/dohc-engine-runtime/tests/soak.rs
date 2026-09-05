@@ -10,7 +10,7 @@ use dohc_engine_testkit::ScratchDir;
 /// second.
 const SOAK_SMOKE_CYCLES: usize = 50;
 
-/// Repeatedly open and close the SAME workspace identity. Bounded resource
+/// Repeatedly open and close the same workspace identity. Bounded resource
 /// check: `actor_count()` must return to exactly 0 after every close, never
 /// drifting upward across cycles (the "workspace close returns owned
 /// resources to baseline" property, at the session-registry layer).
@@ -41,7 +41,7 @@ fn repeated_open_close_of_one_workspace_returns_to_baseline_every_cycle() {
     }
 }
 
-/// Open many DISTINCT workspace identities, then release them all through
+/// Open many distinct workspace identities, then release them all through
 /// `close_all` -- the primitive the daemon's shutdown drain uses
 /// (`crates/dohc-workspace-engine/src/bin/dohc-workspace-engine.rs`).
 /// Bounded resource check: no leaked actor slot regardless of how many

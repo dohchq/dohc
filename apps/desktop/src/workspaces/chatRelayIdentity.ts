@@ -52,7 +52,7 @@ export function joinedChannelMatchesCredentials(
 }
 
 /**
- * The relay identity a SHARE VIEW writes chat under (#646 PR2).
+ * The relay identity a SHARE VIEW writes chat under.
  *
  * A share view is not an enrolled workspace — it has no `remote`, and no
  * owner id to write as. Its relay identity is the account that holds the
@@ -61,7 +61,7 @@ export function joinedChannelMatchesCredentials(
  *
  * This matters more than it looks. A chat op replicates only when its author
  * carries a user id, so an unresolved identity here does not degrade to a
- * local-only comment — it produces a comment that LOOKS sent and never
+ * local-only comment — it produces a comment that looks sent and never
  * leaves the machine. Callers must refuse the write instead.
  */
 export function resolveShareViewRelayAuthorId(

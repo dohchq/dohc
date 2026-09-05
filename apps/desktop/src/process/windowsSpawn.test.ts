@@ -6,9 +6,9 @@ import { killChildTreeWin32, resolveSpawnCommand } from "./windowsSpawn";
 import { createTestScratch } from "../workspaces/testTemp";
 
 // Teardown retries rmdir against asynchronously-released Windows handles, so the
-// hook needs room for the backoff (#372).
+// hook needs room for the backoff.
 //
-// testTimeout matters too, and hookTimeout alone did NOT cover it: the win32 tests
+// testTimeout matters too, and hookTimeout alone did not cover it: the win32 tests
 // carry their own 10s pid-file deadline and 5s death poll, both sitting inside a 5s
 // test budget — so `expect(grandchildPid).toBeGreaterThan(0)` could never report and
 // you got vitest's generic timeout instead of the real diagnostic. That is exactly
@@ -23,7 +23,7 @@ afterEach(async () => {
   // processes' handles asynchronously — so the rmdir can land while a handle on
   // the temp tree is still open and fail with EBUSY. `force` only swallows
   // ENOENT, not EBUSY, so teardown failed the test even though the kill it was
-  // asserting had worked (#372). maxRetries is fs.rm's own remedy for exactly
+  // asserting had worked. maxRetries is fs.rm's own remedy for exactly
   // this: it retries EBUSY/EPERM/ENOTEMPTY with a linear backoff.
   await Promise.all(
     tempRoots

@@ -13,7 +13,7 @@ import {
 
 // WS-E — CHATS EXPANSION (plan PR 12/13): a flagged workspace gets a Chats
 // view with channels. The default #general channel exists on first use, the
-// composer starts a chat with ONE Enter and no title prompt (untitled chats
+// composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
 // agent messages create unread badges that mark-read clears, and engine
 // search (WS-D) finds channel messages. Unflagged workspaces have no Chats
@@ -84,15 +84,15 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
     await expect(page.getByTestId("chats-view")).toHaveCount(0);
 
     // Relaunch: channel chats are durable engine state. Between sessions an
-    // AGENT starts a second chat through the engine daemon over RPC — the
+    // agent starts a second chat through the engine daemon over RPC — the
     // external write path post-cutover (the retired TS in-process store is
     // refused by daemon-owned workspaces). It must arrive UNREAD.
     //
     // What this pins is durability across a relaunch. The live case — an
-    // external write reaching the RUNNING app — needs the CLI endpoint into
+    // external write reaching the running app — needs the CLI endpoint into
     // the app's own daemon, and is covered by "an agent chat written by the
     // CLI while the app runs arrives unread live" in
-    // workspace-chats-feed.spec.ts (#333).
+    // workspace-chats-feed.spec.ts.
     await desktop.close();
     await seedThroughDaemon(
       { workspaceId, rootPath: temp.rootPath },
@@ -252,7 +252,7 @@ test("flagged: the persistent chats navigator opens conversations in the editor"
 });
 
 // WS-H1 flag flip: chats are engine-backed and the engine is now the
-// default, so only an EXPLICIT opt-out disables the surface.
+// default, so only an explicit opt-out disables the surface.
 test("opted-out workspace: no Chats view, channel handlers reject", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
@@ -270,8 +270,8 @@ test("opted-out workspace: no Chats view, channel handlers reject", async () => 
     await expect(page.getByTestId("titlebar-chats-sidebar")).toHaveCount(0);
 
     // Every channel handler rejects for unflagged workspaces — the read
-    // path, channel creation, thread start, AND read-cursor advancement. A
-    // regression that dropped the enablement guard from any ONE of them
+    // path, channel creation, thread start, and read-cursor advancement. A
+    // regression that dropped the enablement guard from any one of them
     // would fail here by name.
     const rejections = await page.evaluate(async ({ id }) => {
       const api = (window as unknown as {
@@ -369,7 +369,7 @@ test("performance: channel-list first paint and composer send latency", async ()
     await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;
 
-    // Channel-list first paint: click-to-50-painted-rows measured INSIDE the
+    // Channel-list first paint: click-to-50-painted-rows measured inside the
     // page (rAF-polled), so harness polling/CDP overhead does not count
     // against the budget. Includes the lazy view chunk + the IPC round trip.
     const firstPaintMs = await page.evaluate(async () => {

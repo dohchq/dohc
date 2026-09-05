@@ -6,7 +6,7 @@
 //! (`TEST_ORACLE.md` §2, normalizers N2/N4–N8). Ids that carry identity are
 //! caller-supplied in the operation traces, so the capture is fully
 //! deterministic and can be compared to a golden fixture without ID
-//! substitution. A LIVE TS runner would additionally apply N7 structural ID
+//! substitution. A live TS runner would additionally apply N7 structural ID
 //! substitution — noted in the PR as a follow-up.
 
 use crate::error::DomainError;
@@ -26,7 +26,7 @@ pub struct VersionRow {
 
 /// One normalized snapshot row (content by hash — N8). `content_kind` is
 /// carried alongside the digest so a binary head and a text head that happen to
-/// share a digest are NEVER indistinguishable in the differential (a binary
+/// share a digest are never indistinguishable in the differential (a binary
 /// head must never be mis-projected as empty/blank text).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRow {
@@ -56,9 +56,9 @@ pub struct ForkBaseRow {
 /// One normalized moment row (ascending `moment_order`). Carries the full
 /// deterministic-history contract — stable id, object identity, before-linking,
 /// timestamp, and origin — so the differential fails when any of them is wrong,
-/// not only when the after-content diverges. Content kind is preserved for BOTH
+/// not only when the after-content diverges. Content kind is preserved for both
 /// directions (never folded into the text digest) so a text moment and a binary
-/// moment with the same digest produce DIFFERENT canonical output — the exact
+/// moment with the same digest produce different canonical output — the exact
 /// cross-engine divergence the oracle must not mask.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MomentRow {
@@ -110,7 +110,7 @@ pub(crate) fn capture(
 
     let mut snapshots = Vec::new();
     for version in &versions {
-        // Content-aware records (NOT the text-compatibility projection) so a
+        // Content-aware records (not the text-compatibility projection) so a
         // binary head is captured as binary, never as an empty text snapshot.
         for snap in store.list_snapshot_records(workspace_id, &version.version_id)? {
             snapshots.push(SnapshotRow {
@@ -162,7 +162,7 @@ pub(crate) fn capture(
                 path: m.path,
                 recorded_at_ms: m.recorded_at_ms,
                 operation: m.operation.as_str().to_owned(),
-                // PRESERVE content kind + BOTH digests separately. Folding
+                // Preserve content kind + both digests separately. Folding
                 // binary into the text field would make a text moment and a
                 // binary moment with the same digest indistinguishable.
                 after_content_kind: m.after_content_kind,
@@ -209,7 +209,7 @@ impl NormalizedState {
     /// A canonical, line-oriented string form — stable across runs for a given
     /// trace, so a golden-fixture comparison is a plain string equality.
     ///
-    /// FULL sha256 hashes (never truncated) so distinct content can never
+    /// Full sha256 hashes (never truncated) so distinct content can never
     /// compare equal. Field values are emitted via [`field`] which rejects a
     /// value containing a delimiter/newline, so user-controlled names/paths/ids
     /// cannot forge or hide a row.
@@ -293,7 +293,7 @@ impl NormalizedState {
 }
 
 /// A kind-tagged content digest for the canonical form. Emitting the
-/// `content_kind` alongside the digest keeps text and binary at the SAME digest
+/// `content_kind` alongside the digest keeps text and binary at the same digest
 /// distinguishable (`text:<sha>` vs `binary:<sha>`), so the differential never
 /// masks a text-vs-binary divergence. An absent digest for the kind is `-`.
 fn tagged_digest(
@@ -346,8 +346,8 @@ mod tests {
         }
     }
 
-    /// M4 regression: a TEXT moment and a BINARY moment with the SAME digest must
-    /// produce DIFFERENT canonical output — folding the binary digest into the
+    /// M4 regression: a TEXT moment and a binary moment with the same digest must
+    /// produce different canonical output — folding the binary digest into the
     /// text field (the old bug) made a text-vs-binary divergence invisible to the
     /// differential.
     #[test]

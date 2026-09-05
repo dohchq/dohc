@@ -5,7 +5,7 @@
 //! scrypt (N=2^17, r=8, p=1), then AES-256-GCM-encrypted with a random salt and
 //! IV. The envelope is a JSON document carrying the parameters plus the sealed
 //! key; it is what crosses a device-enrollment boundary. Unwrap re-derives the
-//! KEK and opens the envelope; ANY failure collapses to a single
+//! KEK and opens the envelope; any failure collapses to a single
 //! [`CryptoError::EnvelopeUnwrapFailed`] (`unwrap-failed`) so nothing
 //! distinguishable about *why* an unwrap failed can leak.
 
@@ -256,7 +256,7 @@ mod tests {
     }
 
     /// The TS suite flipped a byte in each of `ciphertextBase64`,
-    /// `authTagBase64` and `saltBase64` and required the SAME generic
+    /// `authTagBase64` and `saltBase64` and required the same generic
     /// `unwrap-failed` for all three, so nothing distinguishable about why an
     /// unwrap failed can leak. Rust had wrong-passphrase and wrong-AAD but no
     /// per-field tamper test at all, and this envelope carries a fourth field
@@ -265,9 +265,9 @@ mod tests {
     /// All four tampers keep the field valid base64 of the same length, so they
     /// all land on the AEAD check rather than on a decode or shape guard.
     ///
-    /// Honest about what this adds: it does NOT have a mutation of its own.
+    /// Honest about what this adds: it does not have a mutation of its own.
     /// Giving `decrypt_inout_detached`'s `map_err` a different error kills
-    /// this test AND `wrong_passphrase_fails_closed` AND
+    /// this test and `wrong_passphrase_fails_closed` And
     /// `wrong_workspace_aad_fails_closed`, because all three reach that one
     /// call. What it closes is an INPUT-CLASS gap -- nothing else here feeds
     /// unwrap a corrupted field -- plus the cross-field invariant that all four

@@ -1,12 +1,12 @@
-//! Y.Doc base ORIGINATION (#378).
+//! Y.Doc base ORIGINATION.
 //!
 //! Journaling an outbound `ydoc.update` needs a replicated exact claim, and
-//! before this suite the only thing that established one was the INBOUND apply
+//! before this suite the only thing that established one was the inbound apply
 //! of a peer's `isBaseState: true`
 //! envelope. No production Rust emitted one, so two daemon peers could join a
 //! lineage that already existed and could never start one.
 //!
-//! Every scenario here replays the originated ops into a CLEAN peer — one with
+//! Every scenario here replays the originated ops into a clean peer — one with
 //! no file and no prior CRDT state, reconstructing from the log alone. That is
 //! the only assertion that catches the failure this feature is about: a base
 //! that omits rows the origin already held looks perfect from the origin, which
@@ -98,7 +98,7 @@ fn local_ydoc_ops(db: &Path) -> Vec<LoggedOp> {
         .collect()
 }
 
-/// Base ops across the WHOLE log, local and imported alike. Base-once is a
+/// Base ops across the whole log, local and imported alike. Base-once is a
 /// property of the lineage, not of one machine's outbox.
 fn base_ops_in_log(db: &Path) -> i64 {
     let store = EngineStore::open(db, 9_101).expect("open store");
@@ -254,7 +254,7 @@ fn capture_retire_state(db: &Path, key: &DocKey, path: &str) -> CaptureRetireSta
         .expect("read capture-retire durable state")
 }
 
-/// The workspace has an origin identity. This ALONE is not sync: ordinary
+/// The workspace has an origin identity. This alone is not sync: ordinary
 /// local chat writes mint one (`local_replication_coordinate`), so
 /// [`chat_minted_identity`] is the shape a purely private workspace reaches.
 fn seed_identity(db: &Path, workspace_id: &str) {
@@ -279,7 +279,7 @@ fn chat_minted_identity(db: &Path, workspace_id: &str) {
     seed_identity(db, workspace_id);
 }
 
-/// Sync is genuinely on: the workspace has an identity AND a durable relay
+/// Sync is genuinely on: the workspace has an identity and a durable relay
 /// position, which only a committed pull cursor or a successful push writes.
 /// That pair is what makes a lineage eligible to originate.
 fn enable_sync(db: &Path, workspace_id: &str) {
@@ -357,7 +357,7 @@ fn seed_collection_replica(db: &Path, workspace_id: &str, object_id: &str, path:
         .expect("bind collection record");
 }
 
-/// Replay `ops` into a CLEAN peer and return the text it materialized for
+/// Replay `ops` into a clean peer and return the text it materialized for
 /// `path`. The blobs travel first, exactly as `push_workspace` uploads them
 /// before the log ops that reference them.
 fn replay_into_clean_peer(
@@ -1169,7 +1169,7 @@ async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &s
             )
             .await
             .expect("local-only update");
-        // #632: the benign reasons a lineage does not originate stay silent. A
+        // The benign reasons a lineage does not originate stay silent. A
         // private workspace has no peer to share with — that is not a decline
         // the user has to hear about.
         assert_eq!(append.sharing_declined, None);
@@ -1199,7 +1199,7 @@ async fn an_unsynced_workspace_never_originates() {
     two_edits_originate_nothing("ws-originate-private", "notes/private.md", |_, _| {}).await;
 }
 
-/// A chat-minted `sync_identity` is NOT sync. `local_replication_coordinate`
+/// A chat-minted `sync_identity` is not sync. `local_replication_coordinate`
 /// creates that row on every ordinary local chat write — creating a channel is
 /// enough — so identity-row existence would promote the private documents of a
 /// user who has only ever chatted locally. Promotion is not reversible: the
@@ -1220,7 +1220,7 @@ async fn a_chat_minted_identity_is_not_sync_and_never_originates() {
 
 /// PROMOTION. A local-only lineage that already holds durable update rows — the
 /// state a crash before settle/close leaves — must publish those rows when it
-/// originates. The base encodes the PERSISTED Y.Doc, never a fresh markdown
+/// originates. The base encodes the persisted Y.Doc, never a fresh markdown
 /// seed, so the clean peer sees the pre-promotion content too.
 ///
 /// Mutation check: encode a fresh seed instead of the persisted lineage (or
@@ -1233,7 +1233,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
     let scratch = ScratchDir::new().expect("scratch");
     let db = scratch.engine_db_path().expect("db");
 
-    // Phase 1: private workspace, one durable edit, no close.
+    // Private workspace, one durable edit, no close.
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
@@ -1265,7 +1265,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
     // this scenario exists to test.
     supervisor.close(&db).expect("close actor");
 
-    // Phase 2: the user turns sync on, reopens, and edits again.
+    // The user turns sync on, reopens, and edits again.
     enable_sync(&db, WS);
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 2).expect("reopen actor").actor;
@@ -1310,12 +1310,13 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
         )
         .await
         .expect("promoting edit");
-    // #632, the other half: a lineage that DOES originate reports no decline.
-    // MUTATION: report the decline unconditionally, or tighten
-    // `MAX_YDOC_UPDATE_BYTES` under a healthy document, and this fails.
-    assert_eq!(promoted.sharing_declined, None);
+    // #632, the other half: a lineage that does originate reports no decline.
+    assert_eq!(
+        promoted.sharing_declined, None,
+        "report the decline unconditionally, or tighten `MAX_YDOC_UPDATE_BYTES` under a healthy document, and this fails."
+    );
 
-    // A later edit, journaled as a delta against the SAME lineage. Without it
+    // A later edit, journaled as a delta against the same lineage. Without it
     // a re-seeded base is undetectable: a fresh seed of the current text still
     // reads correctly on its own, and only a delta that references the
     // original Yjs item ids exposes that the base minted new ones.
@@ -1941,7 +1942,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
     );
 }
 
-/// REDELIVERY (idempotence). A base whose acknowledgement was lost comes back
+/// Redelivery (idempotence). A base whose acknowledgement was lost comes back
 /// on the same coordinate. The divergence check must not turn that valid retry
 /// into an error, and it must not mint a second base.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -2530,7 +2531,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
         .expect("the promoting edit is accepted, not rolled back");
     supervisor.close(&db).expect("close actor");
 
-    // #632: the decline says WHY. It used to be `Ok(None)` — the same answer
+    // The decline says WHY. It used to be `Ok(None)` — the same answer
     // origination gives for "already claimed", "this workspace does not
     // replicate", and "a dependency is unresolved" — so a document that had
     // quietly stopped being shareable was indistinguishable from one that had
@@ -2575,7 +2576,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
 }
 
 /// The defect #549 names, from the other side: a document whose Y.Doc state is
-/// larger than the OLD inherited cap must originate now.
+/// larger than the old inherited cap must originate now.
 ///
 /// 5 MiB of full state is reached by a rich document holding roughly 3.5 MiB of
 /// markdown — a third of what the store accepts as a body. Under the old cap

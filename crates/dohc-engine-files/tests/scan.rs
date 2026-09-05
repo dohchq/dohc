@@ -189,7 +189,7 @@ fn scanner_reuses_one_pool_across_scans_within_cap() {
         let listing = scan(&scanner, ws.path());
         assert_eq!(listing.files.len(), 10);
     }
-    // Concurrency stayed capped across all three scans on the SAME pool.
+    // Concurrency stayed capped across all three scans on the same pool.
     assert!(scanner.pool().gauge().max_concurrent() <= workers);
     assert_eq!(scanner.pool().gauge().hashed(), 30);
 }
@@ -264,7 +264,7 @@ fn symlink_directory_cycle_terminates_and_tracks_nothing_under_loop() {
 }
 
 /// The amended-N8 short-circuit, pinned at the scanner seam: a matching
-/// (size, mtime) pairing returns the manifest's RECORDED hash — provably
+/// (size, mtime) pairing returns the manifest's recorded hash — provably
 /// without reading the file, because the recorded hash here is a deliberate
 /// lie that a re-hash could never produce — while a zero-mtime entry and a
 /// mismatched size each force the real hash.
@@ -482,7 +482,7 @@ impl ScanIoFaultInjector for MutateOnHashProbe {
 
 /// The recorded (mtime, hash) pairing takes its mtime from the enumerate-time
 /// stat and its hash from a later read. A same-size write between the two
-/// would pair the STALE mtime with the other bytes' hash — and an
+/// would pair the stale mtime with the other bytes' hash — and an
 /// mtime-preserving restore of the original bytes would then reuse the wrong
 /// hash forever. Pinned: any (size, mtime) drift between the enumerate stat
 /// and the post-hash re-stat voids the pairing (the entry records mtime 0),

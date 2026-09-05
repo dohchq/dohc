@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { launchMarks, logLaunchMarksOnce } from "./launchMarks";
 
 describe("launch marks log", () => {
-  // The daemon handshake and the renderer's first paint race, and BOTH
+  // The daemon handshake and the renderer's first paint race, and both
   // callers log after marking — the line must still print exactly once, and
   // only once every mark has landed.
   it("logs the snapshot exactly once even when the triggering events double-fire", () => {

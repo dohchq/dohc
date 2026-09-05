@@ -25,7 +25,7 @@ import {
 let projectionLoads = 0;
 let projectionShouldFail = false;
 // A held gate: while armed, the mocked import does not resolve until the
-// test releases it — the only way to prove what is durable BEFORE the
+// test releases it — the only way to prove what is durable before the
 // projection module answers, not just eventually.
 let projectionGate: { promise: Promise<void>; release: () => void } | null =
   null;
@@ -187,12 +187,8 @@ afterEach(async () => {
 });
 
 it("does not load the Tiptap projection module merely by importing useEngineDoc", () => {
-  // No render, no bind, nothing — this checks the STATIC import chain only.
-  // MUTATION: reintroduce `import { yDocToMarkdown } from "@dohc/ydoc-projection"`
-  // at the top of useEngineDoc.ts -> this reads 1 instead of 0, because the
-  // test file's own top-level `import { useEngineDoc } from "./useEngineDoc"`
-  // already evaluated that chain before this test body ran.
-  expect(projectionLoads).toBe(0);
+  // No render, no bind, nothing — this checks the static import chain only.
+  expect(projectionLoads, "reintroduce `import { yDocToMarkdown } from '@dohc/ydoc-projection'` at the top of useEngineDoc.ts -> this reads 1 instead of 0, because the test file's own top-level `import { useEngineDoc } from './useEngineDoc'` already evaluated that chain before this test body ran.").toBe(0);
 });
 
 // A rich-text doc, so the crude walk (raw text, no markdown syntax) and the
@@ -262,7 +258,7 @@ it("persists a lossless rich snapshot when delivery and projection fail", async 
 
 it("persists a lossless rich snapshot when a deletion's projection fails", async () => {
   // The deletion boundary is the sibling of the delivery boundary above, and
-  // it loses the same way: the synchronous write is the ONLY copy when the
+  // it loses the same way: the synchronous write is the only copy when the
   // projection never answers, so it has to carry the document structure, not
   // the crude walk's flattened text.
   projectionShouldFail = true;
@@ -315,13 +311,13 @@ it("persists a lossless rich snapshot when a deletion's projection fails", async
   consoleError.mockRestore();
 });
 
-// MUST run before any test that lets a real projection load complete:
+// Must run before any test that lets a real projection load complete:
 // `recoverySnapshot.ts`'s `loadProjectionModule` caches the promise at
 // module scope, for the lifetime of this whole test FILE — once resolved by
 // an earlier test, a later "held" gate has nothing left to hold.
 it("persists a crude-text draft synchronously, before the held projection import resolves", async () => {
-  // #697 Codex P1: while the projection chunk is loading, the deletion
-  // snapshot must not exist ONLY in the queue's promise closure — a
+  // While the projection chunk is loading, the deletion
+  // snapshot must not exist only in the queue's promise closure — a
   // renderer close/reload/crash in that window would lose the text, with
   // the file already deleted and no draft for the recovery close guard to
   // find. Hold the import so the faithful path can never complete inside
@@ -338,11 +334,8 @@ it("persists a crude-text draft synchronously, before the held projection import
   });
   harness.emitNow("deleted", 0);
 
-  // MUTATION: skip the synchronous captureOrphanedDraft call in
-  // captureDeletion -> this reads "none" because nothing is durable yet;
-  // the only route to a draft would be the still-held projection import.
   await waitFor(() =>
-    expect(screen.getByTestId("draft-count").textContent).toBe("1"),
+    expect(screen.getByTestId("draft-count").textContent, "skip the synchronous captureOrphanedDraft call in captureDeletion -> this reads 'none' because nothing is durable yet; the only route to a draft would be the still-held projection import.").toBe("1"),
   );
   expect(screen.getByTestId("draft").textContent).toContain("My Heading");
 

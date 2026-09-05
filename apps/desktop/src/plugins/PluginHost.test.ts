@@ -714,7 +714,7 @@ describe("PluginHost", () => {
     );
   });
 
-  it("answers a request only after activationOf settles, on a real spawn (#798)", async () => {
+  it("answers a request only after activationOf settles, on a real spawn", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "slow-hello" },
@@ -748,7 +748,7 @@ describe("PluginHost", () => {
     ).rejects.toThrow('Command "does-not-exist" is not registered.');
   });
 
-  it("rejects activationOf with the activation error a real spawn failed on (#798)", async () => {
+  it("rejects activationOf with the activation error a real spawn failed on", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "throws" },
@@ -767,7 +767,7 @@ describe("PluginHost", () => {
     );
   });
 
-  it("reports no activation for a plugin that has no spawn (#798)", async () => {
+  it("reports no activation for a plugin that has no spawn", async () => {
     const root = await workspaceRoot();
     const host = trackHost({
       stateDir: await stateDir(),
@@ -779,7 +779,7 @@ describe("PluginHost", () => {
     expect(host.activationOf("hello-plugin")).toBeUndefined();
   });
 
-  it("releases activationOf when the spawn stops before it activated (#798)", async () => {
+  it("releases activationOf when the spawn stops before it activated", async () => {
     const root = await workspaceRoot();
     const harness = createProcessHarness({
       modes: { "hello-plugin": "never-resolves" },
@@ -2164,7 +2164,7 @@ describe("PluginHost", () => {
     // onStatusChange is always deferred (queueMicrotask), so a listener can
     // no longer preempt the crash-loop's own immediate-respawn decision —
     // that decision finishes synchronously before any listener even learns
-    // the plugin crashed. What a listener CAN still do is call stop()
+    // the plugin crashed. What a listener can still do is call stop()
     // afterward, and that must land cleanly on whatever is current then
     // (the respawned instance), not on stale state and not orphan anything.
     const root = await workspaceRoot();
@@ -2252,7 +2252,7 @@ describe("PluginHost", () => {
     const startedAt = Date.now();
 
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-    // disposedPluginIds only proves shutdown() STARTED disposing — the real
+    // disposedPluginIds only proves shutdown() started disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
     // actually be gone, which only happens once shutdown() fully completes.
     await waitFor(
@@ -2590,7 +2590,7 @@ describe("PluginHost", () => {
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
 
-  it("logs, instead of leaving unhandled, a spawn teardown rejection (CodeRabbit #779 R13)", async () => {
+  it("logs, instead of leaving unhandled, a spawn teardown rejection", async () => {
     // Calling bumpGeneration() immediately, ahead of the harness's own
     // async activation callback, exercises both of R13's discarded-promise
     // call sites in one pass: bumpGeneration's own endSpawn call, and
@@ -2728,10 +2728,6 @@ describe("PluginHost web apps", () => {
 
     await host.stopWebApp("hello-plugin", "main-app", null);
 
-    // MUTATION (drop the protocol stop dispatch, or the host method): the
-    // plugin never learns the guest is gone, so this start returns the paired
-    // URL into a guest with no session — the workspace-started host's whole
-    // failure mode.
     await expect(host.startWebApp("hello-plugin", "main-app", null)).resolves.toEqual({
       url: "http://127.0.0.1:43210/pair#token=fixture-2",
     });
@@ -2801,8 +2797,8 @@ describe("PluginHost web apps", () => {
   });
 
   // Round 19 finding 1: readPluginSettings used to be handed the manifest's
-  // OWN declared id — but settings are stored and looked up per directory
-  // (round 18 finding 4), and a manifest's declared name can differ from
+  // own declared id — but settings are stored and looked up per directory,
+  // and a manifest's declared name can differ from
   // the folder it was actually found in. Handing it the id there threw
   // "Unknown plugin directory" for every such plugin, refusing it its own
   // settings at every activation.
@@ -2930,7 +2926,7 @@ describe("PluginHost web apps", () => {
   // Round 19 finding 2: settings are saved per directory (round 18 finding
   // 4), but pluginHost only ever runs one process under a given id at a
   // time — the id-share's own directory, not the one a save was actually
-  // for. Telling that running process about a save meant for a DIFFERENT
+  // for. Telling that running process about a save meant for a different
   // directory would hand it values it never asked for.
   it("does not push a settings change meant for a different directory than the one running", async () => {
     const root = await workspaceRoot();
@@ -2955,7 +2951,7 @@ describe("PluginHost web apps", () => {
       "Plugin did not become ready.",
     );
 
-    // Same id, but a save that was actually for some OTHER, unrelated
+    // Same id, but a save that was actually for some other, unrelated
     // directory this id happens to collide with.
     await host.notifySettingsChanged("hello-plugin", "unrelated-directory", {
       greeting: "Hello",
@@ -3010,8 +3006,6 @@ describe("PluginHost instanced web apps", () => {
     return host;
   }
 
-  // MUTATION (drop instanceKey from the start params): both instances would
-  // come back on one origin, and the two tabs would show the same app.
   it("serves a different origin for each instance of one web app", async () => {
     const host = await startInstancedHost();
     const first = await host.startWebApp("hello-plugin", "preview", "sites/a");
@@ -3035,8 +3029,6 @@ describe("PluginHost instanced web apps", () => {
     expect(started.title).toBe("Preview sites/a");
   });
 
-  // MUTATION (stop every instance, or ignore instanceKey in stopWebApp): one
-  // closed preview tab would take the plugin's other previews down with it.
   it("stops one instance and leaves the others running", async () => {
     const host = await startInstancedHost();
     await host.startWebApp("hello-plugin", "preview", "sites/a");

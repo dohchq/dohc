@@ -137,7 +137,7 @@ test("an agent's file-written collection opens live and answers its MCP queries"
       timeout: 30_000,
     });
 
-    // --- A second record written WHILE the board is open appears live: no
+    // --- A second record written while the board is open appears live: no
     // refresh, no UI action.
     await writeFile(
       join(temp.rootPath, "tasks", "zephyr.md"),
@@ -232,7 +232,7 @@ test("an agent's MCP field set and record create land live with agent attributio
     await waitForCliEndpoint(temp.homeDir);
 
     // --- The agent sets a field through its MCP write tool: the card moves
-    // columns on the OPEN board with no refresh, and the write settles into
+    // columns on the open board with no refresh, and the write settles into
     // the record's file.
     const set = await agentCli(temp, "collectionSetFields", {
       recordPath: "tasks/apollo.md",

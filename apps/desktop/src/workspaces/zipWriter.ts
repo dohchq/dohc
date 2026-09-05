@@ -1,4 +1,4 @@
-// Store-only ZIP writer (PKWARE APPNOTE container format, method 0 — no
+// Store-only zip writer (PKWARE APPNOTE container format, method 0 — no
 // compression). Pure and dependency-free on purpose: workspace exports are
 // local folders where deflate buys little, no zip dependency exists anywhere
 // in the lockfile, and ~120 auditable lines beat a third-party archiver on a
@@ -49,9 +49,9 @@ function dosDateTime(date: Date): { time: number; date: number } {
   };
 }
 
-// Entry names MUST be relative POSIX paths. Many extractors honor an absolute
+// Entry names must be relative POSIX paths. Many extractors honor an absolute
 // path, a drive letter, backslashes (Windows separators), or a ".." segment to
-// write OUTSIDE the extraction directory (zip-slip). This is the container
+// write outside the extraction directory (zip-slip). This is the container
 // boundary, so refuse them here — no buildStoreZip caller can emit a slip name
 // even if its own name construction is ever wrong.
 function assertSafeEntryName(name: string): void {

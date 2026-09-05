@@ -7,7 +7,7 @@ import {
   useEngineDoc,
 } from "./useEngineDoc";
 
-// #533. `available: false` used to mean two different things — "this document
+// `available: false` used to mean two different things — "this document
 // is not engine-backed" and "dohc has not found out yet" — and the editor
 // surface could only see the first. While the engine open waits behind the
 // capture chain (startup reconciliation of a 1,000-file workspace holds it for
@@ -15,7 +15,7 @@ import {
 // autosave writes straight to disk. The about-to-bind session seeds from the
 // engine head, so those keystrokes went somewhere it never looks.
 //
-// These tests own the distinguishing state: `opening` is true from the FIRST
+// These tests own the distinguishing state: `opening` is true from the first
 // render until the open resolves, whichever way it resolves.
 
 // What every render pass reported, in order. The effect that issues an open
@@ -110,7 +110,7 @@ it("reports opening on the first render, before the open is even issued", () => 
 
   render(<Harness path="notes/a.md" />);
 
-  // The FIRST render pass, not merely the settled DOM: the effect that issues
+  // The first render pass, not merely the settled DOM: the effect that issues
   // the open runs after that pass, so a state that only turns true there paints
   // one frame in which the caller believes this document is not engine-backed
   // and mounts its writable editor. `render` flushes effects, so the DOM alone
@@ -203,7 +203,7 @@ it("never opens for a document the caller has gated off", () => {
   expect(bridge.api.openEngineYDocSession).not.toHaveBeenCalled();
 });
 
-it("re-enters opening on the FIRST render of a version switch, not one frame later", async () => {
+it("re-enters opening on the first render of a version switch, not one frame later", async () => {
   const bridge = deferredBridge();
   vi.stubGlobal("dohcDesktop", bridge.api);
 
@@ -213,7 +213,7 @@ it("re-enters opening on the FIRST render of a version switch, not one frame lat
     expect(screen.getByTestId("available").textContent).toBe("true"),
   );
 
-  // The shell switches the active version under an OPEN document. It keys the
+  // The shell switches the active version under an open document. It keys the
   // inspector by tab (`DesktopWorkspaceShell.tsx`), so this is a prop change,
   // not a remount, and the session for the previous version is already closed.
   rendered = [];
@@ -226,7 +226,7 @@ it("re-enters opening on the FIRST render of a version switch, not one frame lat
   expect(rendered[0]).toEqual({ opening: true, available: false, hasDoc: false });
   expect(rendered.every((pass) => !pass.available)).toBe(true);
 
-  // And it stays that way until the NEW open answers.
+  // And it stays that way until the new open answers.
   expect(screen.getByTestId("opening").textContent).toBe("true");
   await waitFor(() =>
     expect(bridge.api.openEngineYDocSession).toHaveBeenCalledTimes(2),
@@ -237,7 +237,7 @@ it("re-enters opening on the FIRST render of a version switch, not one frame lat
   );
 });
 
-it("re-enters opening on the FIRST render after the gate reopens", async () => {
+it("re-enters opening on the first render after the gate reopens", async () => {
   const bridge = deferredBridge();
   vi.stubGlobal("dohcDesktop", bridge.api);
 
@@ -247,14 +247,14 @@ it("re-enters opening on the FIRST render after the gate reopens", async () => {
     expect(screen.getByTestId("available").textContent).toBe("true"),
   );
 
-  // The caller closes the gate and opens it again on the SAME document — a
+  // The caller closes the gate and opens it again on the same document — a
   // truncated read that reloads whole flips `enabled` this way. The request
   // returns to a key it held before, and the session bound above is destroyed.
   view.rerender(<Harness path="notes/a.md" enabled={false} />);
   rendered = [];
   view.rerender(<Harness path="notes/a.md" />);
 
-  // Matching an OLD result would hand the caller a destroyed doc to edit.
+  // Matching an old result would hand the caller a destroyed doc to edit.
   expect(rendered[0]).toEqual({ opening: true, available: false, hasDoc: false });
   expect(rendered.every((pass) => !pass.hasDoc)).toBe(true);
 });

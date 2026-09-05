@@ -1,5 +1,5 @@
 //! Crash-injection traces at the version-create and restore transaction
-//! boundaries (CAL-2). Durability is proven by REOPENING, never by trusting an
+//! boundaries (CAL-2). Durability is proven by reopening, never by trusting an
 //! in-process flag (`TEST_ORACLE.md` §3). The named storage fault points
 //! (`storage.before-persist`, `storage.after-commit-before-ack`) are the same
 //! seam the storage crate pins; the versioning compound commits ride it via
@@ -119,7 +119,7 @@ fn rename_input() -> RenameTextFile {
     }
 }
 
-// oracle: crash BEFORE persist during create-named-version → atomic rollback.
+// oracle: crash before persist during create-named-version → atomic rollback.
 // Restart shows NO new version; a retry then applies cleanly.
 #[test]
 fn version_create_crash_before_persist_rolls_back() {
@@ -161,7 +161,7 @@ fn version_create_crash_before_persist_rolls_back() {
     );
 }
 
-// oracle: crash AFTER commit before ack during create-named-version → the fork
+// oracle: crash after commit before ack during create-named-version → the fork
 // is durable; an exactly-once retry (same request id) replays to the recorded
 // result without minting a second version.
 #[test]
@@ -178,7 +178,7 @@ fn version_create_crash_after_commit_is_exactly_once() {
             .create_named_version(&fork_input(Some("req-fork")), faults.as_ref())
             .expect_err("crash after commit");
         assert_eq!(err.code(), "persist-failed");
-        // store dropped → simulated crash AFTER the durable commit
+        // store dropped → simulated crash after the durable commit
     }
 
     // Restart: the fork committed durably.
@@ -203,7 +203,7 @@ fn version_create_crash_after_commit_is_exactly_once() {
     );
 }
 
-// oracle: crash BEFORE persist during restore (set-active-version) → the active
+// oracle: crash before persist during restore (set-active-version) → the active
 // pointer is unchanged on restart.
 #[test]
 fn restore_crash_before_persist_leaves_active_unchanged() {

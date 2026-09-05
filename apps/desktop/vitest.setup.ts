@@ -1,12 +1,12 @@
 // jsdom implements no hit testing: document.elementFromPoint does not exist.
 //
 // ProseMirror calls it on every pointer press (posAtCoords, reached from its
-// mousedown handler) and does NOT feature-guard it, so every renderer test
+// mousedown handler) and does not feature-guard it, so every renderer test
 // that clicks or types into the WYSIWYG editor threw an uncaught TypeError
 // inside the listener. The assertions still passed -- the throw happens in the
 // event handler, not in the test -- but vitest fails a run that produced
 // unhandled errors. That is why the FileInspector suite went red on a busy box
-// and green in isolation, naming a different test each time (#590).
+// and green in isolation, naming a different test each time.
 //
 // Only elementFromPoint. ProseMirror feature-guards the two caret-from-point
 // APIs (`if (doc.caretPositionFromPoint)`, `if (doc.caretRangeFromPoint)`) and

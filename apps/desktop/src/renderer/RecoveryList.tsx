@@ -5,7 +5,7 @@ import {
   type OrphanedDraftRow,
 } from "./orphanedDrafts";
 
-// The path-independent recovery surface (#579 review, r5). The in-document
+// The path-independent recovery surface. The in-document
 // notice needs a mounted inspector, and three states have none: a path whose
 // read fails, a deleted file whose tab closed, and the crash screen. This
 // list renders unresolved set-aside drafts with the same Copy/Dismiss the
@@ -14,13 +14,13 @@ import {
 //
 // The caller supplies the rows, because each one already has them: the notice
 // center holds its workspace's drafts (another workspace's paths must not leak
-// across a switch, #579 review r6) and the close guard holds the at-risk ones
+// across a switch) and the close guard holds the at-risk ones
 // (a persisted draft comes back on the next launch, so listing it under "these
-// are lost" would be false, #600). `showWorkspace` goes with the guard's
+// are lost" would be false). `showWorkspace` goes with the guard's
 // cross-workspace list.
 //
 // The copy button repeats the quiet swap-and-restore rhythm of
-// FileInspector's CopySourceButton on purpose, WITHOUT importing it: this
+// FileInspector's CopySourceButton on purpose, without importing it: this
 // component mounts above the error boundary (the close guard), and pulling
 // the whole document-view module into that chunk for one button is the
 // wrong trade. `recoverySnapshot` is the exception it makes room for: it
@@ -45,7 +45,7 @@ function CopyDraftButton(props: { text: string }) {
         const clipboard = navigator.clipboard;
         if (!clipboard) return;
         // A draft the projection never refined carries the document inside an
-        // encoded comment, and the decode happens HERE: the copy waits for the
+        // encoded comment, and the decode happens here: the copy waits for the
         // lossless text instead of taking whatever was ready to render.
         void restoreRecoveryDraftText(props.text)
           .then((restored) => clipboard.writeText(restored))
@@ -63,9 +63,9 @@ function CopyDraftButton(props: { text: string }) {
   );
 }
 
-// Dismissing deletes the ONLY copy of the text — the store is the last place
-// it exists — so the destructive step requires an explicit confirmation
-// (#579 review, r6). Shared by this list and the in-document notice: one
+// Dismissing deletes the only copy of the text — the store is the last place
+// it exists — so the destructive step requires an explicit confirmation.
+// Shared by this list and the in-document notice: one
 // contract for one destructive action.
 export function DismissDraftControls(props: { onDismiss: () => void }) {
   const [confirming, setConfirming] = useState(false);
@@ -121,7 +121,7 @@ export function RecoveryList(props: {
             <span className="font-mono text-muted">{row.path}</span>
             {/* The GLOBAL list (the close dialog) can hold two workspaces'
                 identical paths — name the workspace or the rows are
-                indistinguishable (#579 review, r7). The label is the name
+                indistinguishable. The label is the name
                 the UI shows elsewhere (the shell registers it); scoped lists
                 need none. */}
             {props.showWorkspace === true ? (
@@ -132,8 +132,8 @@ export function RecoveryList(props: {
                 {row.workspaceLabel}
               </span>
             ) : null}
-            {/* Most rows survive a quit (#600), and one kind does not: a
-                secret-classified path never enters plaintext storage (#446),
+            {/* Most rows survive a quit, and one kind does not: a
+                secret-classified path never enters plaintext storage,
                 and a refused write leaves the text in memory. The lifetime
                 belongs to the ROW, so the row carries it — a list that mixes
                 the two (the notice center) would otherwise show a lost edit

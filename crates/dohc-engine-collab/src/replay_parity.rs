@@ -5,8 +5,8 @@
 //! scalar's UTF-8 boundary; Yjs instead exposes the two surrogate units. A
 //! candidate whose insertion/deletion boundary names that interior clock can
 //! therefore replay to different content despite being a valid update. Beyond
-//! that boundary class, a HOSTILE peer can re-encode a `(client, clock)` pair
-//! the base (or a still-parked update) already owns with DIFFERENT content:
+//! that boundary class, a hostile peer can re-encode a `(client, clock)` pair
+//! the base (or a still-parked update) already owns with different content:
 //! yrs keeps its own first-seen item for that id and silently ignores the
 //! redefinition, while a from-scratch Yjs peer integrating the same lineage
 //! can resolve the conflicting redefinition differently — a divergence with
@@ -18,14 +18,14 @@
 //!    honest edit ever encodes one, and it is the wire-visible precondition of
 //!    at least one internal yrs unwind this gate must never trigger);
 //!  - compares the candidate's string content against whatever the base (or a
-//!    still-parked update) already claims at the SAME clocks — a content-parity
-//!    check that catches a hostile re-encode BEFORE any doc is touched;
-//!  - checks candidate delete endpoints, AND any still-parked delete endpoints
-//!    (whose target scalar may only just now be forming from THIS candidate's
+//!    still-parked update) already claims at the same clocks — a content-parity
+//!    check that catches a hostile re-encode before any doc is touched;
+//!  - checks candidate delete endpoints, and any still-parked delete endpoints
+//!    (whose target scalar may only just now be forming from this candidate's
 //!    content), against the base ∪ candidate ∪ pending scalar structure —
-//!    computed BEFORE any delete removes it, since a post-delete scan no
+//!    computed before any delete removes it, since a post-delete scan no
 //!    longer contains the scalar;
-//!  - checks every candidate insertion boundary, AND any still-parked
+//!  - checks every candidate insertion boundary, and any still-parked
 //!    insertion boundary, against that same pre-delete scalar structure — so a
 //!    parked insert is caught at the moment its dependency integrates;
 //!  - requires dependency-complete replay to either integrate or park every
@@ -33,7 +33,7 @@
 //!    silently discarded).
 //!
 //! All of the above is computed by scanning the base/candidate/pending WIRE
-//! BYTES directly — never by asking yrs to diff a state vector captured on one
+//! bytes directly — never by asking yrs to diff a state vector captured on one
 //! `Doc` against a different `Doc` instance, which is what `store.rs`'s
 //! `write_blocks_from` can panic on (a state-vector clock that does not align
 //! with the diffed doc's own block layout). The gate still applies
@@ -57,9 +57,9 @@
 //! boundary can contain. [`scan_v1`] — the wire walk this module already
 //! performs for replay parity — doubles as the pre-validator that closes this:
 //! it never calls `decode_v1` and never uses yrs' own unsafe string decode, so
-//! it can safely reject a malformed/adversarial update BEFORE any decode that
+//! it can safely reject a malformed/adversarial update before any decode that
 //! could abort ever sees the bytes. [`prevalidate_update_bytes`] is the public
-//! entry point [`crate::durable::validate_update_bytes`] calls FIRST — the
+//! entry point [`crate::durable::validate_update_bytes`] calls first — the
 //! shared choke point for both the local edit path and the remote replication
 //! path (`crates/dohc-engine-collab/src/durable.rs`,
 //! `crates/dohc-engine-collab/src/replication.rs`) — and this module's own
@@ -477,12 +477,12 @@ struct WireStructure {
     insertion_boundaries: Vec<ID>,
     deletion_boundaries: Vec<ID>,
     claimed_clocks: BTreeMap<ClientID, u32>,
-    /// The structural identity every LIVE content block in this wire claims, by
+    /// The structural identity every live content block in this wire claims, by
     /// `(client, clock)`. Covers all live content kinds (string, JSON, binary,
     /// embed, format, type, doc, any) — the content-parity check compares these
     /// across wires at overlapping clocks so a candidate cannot redefine an
     /// already-known clock's kind or payload. `ContentDeleted` tombstones are
-    /// NOT stored here: a single `ContentDeleted` item can span up to `u32::MAX`
+    /// not stored here: a single `ContentDeleted` item can span up to `u32::MAX`
     /// clocks in a few wire bytes, so materializing one identity per clock is an
     /// unbounded, attacker-controlled allocation on the untrusted decode path.
     /// They are tracked as O(1) ranges in [`WireStructure::tombstone_ranges`].
@@ -490,7 +490,7 @@ struct WireStructure {
     /// Half-open `[start, end)` clock ranges this wire tombstones via a
     /// `ContentDeleted` item, recorded as O(1) ranges (never one entry per
     /// clock). The content-parity check queries membership here — only for the
-    /// bounded set of clocks the ESTABLISHED side already holds as live — rather
+    /// bounded set of clocks the established side already holds as live — rather
     /// than materializing every tombstoned clock, which a hostile peer could
     /// drive to `u32::MAX` in a handful of wire bytes. [`scan_v1`] normalizes
     /// each vector once ([`normalize_ranges`]: sorted, coalesced,
@@ -500,10 +500,10 @@ struct WireStructure {
     /// The wire's own delete-set as `(client, [start, end))` half-open clock
     /// ranges. A `ContentDeleted` item whose clock IS in this set is a
     /// legitimate delete/GC (the deletion the peer performed); a bare
-    /// `ContentDeleted` NOT covered here is a hostile redefinition. Normalized
+    /// `ContentDeleted` Not covered here is a hostile redefinition. Normalized
     /// by [`scan_v1`] like [`WireStructure::tombstone_ranges`] so membership is
     /// a binary search. Only the covers-queries read these vectors; the
-    /// delete-set BOUNDARY endpoints consumed elsewhere are recorded separately
+    /// delete-set boundary endpoints consumed elsewhere are recorded separately
     /// (and unnormalized) in `deletion_boundaries`.
     deleted_ranges: BTreeMap<ClientID, Vec<(u32, u32)>>,
     /// The v2 differential oracle's complete client-local block topology. The
@@ -934,7 +934,7 @@ fn canonical_deletion_boundaries(coverage: &IdSet) -> Vec<ID> {
 
 /// Sort and coalesce half-open `[start, end)` ranges in place: drop empty
 /// ranges (they cover nothing), sort by start, and merge overlapping or
-/// adjacent ranges. Membership ("does any range cover this clock") is EXACTLY
+/// adjacent ranges. Membership ("does any range cover this clock") is exactly
 /// preserved; only the representation changes. Both range counts are
 /// attacker-controlled (one wire varint plus a few bytes per range), and the
 /// content-parity check queries membership once per established live clock —
@@ -977,10 +977,10 @@ thread_local! {
     static SCRATCH_APPLY_ERROR_INJECT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// Run `f` with the replay gate armed: while armed, ANY gate invocation fails
+/// Run `f` with the replay gate armed: while armed, any gate invocation fails
 /// closed, so an outcome other than that failure proves the path never reached
 /// the gate (the dedupe-hoist tests in [`crate::replication`] rely on this).
-/// Disarms on return AND on unwind, so a panicking closure cannot leave the
+/// Disarms on return and on unwind, so a panicking closure cannot leave the
 /// seam armed for later tests on the same thread.
 #[cfg(test)]
 pub(crate) fn with_armed_gate<T>(f: impl FnOnce() -> T) -> T {
@@ -1138,7 +1138,7 @@ fn validate_replay_parity_inner(
     if PANIC_INJECT.with(std::cell::Cell::get) {
         panic!("injected replay-gate unwind for fail-closed test");
     }
-    // `scan_v1` MUST run before anything that can reach yrs' own uncatchable
+    // `scan_v1` Must run before anything that can reach yrs' own uncatchable
     // `Update::decode_v1` hard-abort (the scratch-doc `apply`s further down) —
     // it never calls `decode_v1` and never uses yrs' unsafe string decode (see
     // `safe_read_string`'s doc comment), so malformed/adversarial `candidate`
@@ -1167,20 +1167,20 @@ fn validate_replay_parity_inner(
         None => WireStructure::default(),
     };
 
-    // (1) Content parity (ALL content kinds, not just strings): a candidate
+    // (1) Content parity (all content kinds, not just strings): a candidate
     // that re-encodes a clock the base or a still-parked update already holds
-    // as LIVE content MUST present the identical structural identity — same
-    // KIND and same canonical PAYLOAD — UNLESS it is genuinely deleting that
+    // as live content must present the identical structural identity — same
+    // KIND and same canonical PAYLOAD — unless it is genuinely deleting that
     // clock. yrs dedups a re-encoded id by silently keeping its first-seen
     // item; a from-scratch Yjs peer replaying the same lineage can resolve a
-    // conflicting LIVE redefinition differently, whether it changes a string's
+    // conflicting live redefinition differently, whether it changes a string's
     // units OR swaps the content kind entirely (string -> JSON / binary /
     // embed / format / type). A candidate that instead tombstones a base-live
     // clock (`ContentDeleted`) is a legitimate delete/GC when it carries that
-    // clock in its OWN delete-set — the normal reconnect/resync full-state
-    // resend does exactly this — and only a BARE `ContentDeleted` (not in the
+    // clock in its own delete-set — the normal reconnect/resync full-state
+    // resend does exactly this — and only a bare `ContentDeleted` (not in the
     // candidate's delete-set) is a hostile redefinition. No honest peer ever
-    // redefines a `(client, clock)` it has already used as LIVE content, so
+    // redefines a `(client, clock)` it has already used as live content, so
     // this can only reject a hostile/corrupt input.
     let base_content_conflict = match frontier {
         Some(frontier) => frontier.content_parity_conflict(&candidate_structure),
@@ -1202,7 +1202,7 @@ fn validate_replay_parity_inner(
     }
 
     // Every scalar interior clock any of the three wires (base, candidate,
-    // pending) currently claims, computed BEFORE any delete removes it —
+    // pending) currently claims, computed before any delete removes it —
     // deleting a unit drops the whole scalar from a post-delete scan, so this
     // union must be taken from each wire's own isolated content, not from the
     // integrated (and possibly already-deleted) result.
@@ -1215,15 +1215,15 @@ fn validate_replay_parity_inner(
             || pending_structure.unsafe_boundaries.contains(boundary)
     };
 
-    // (2) DELETE boundaries: the candidate's own claims, base's FULL current
+    // (2) DELETE boundaries: the candidate's own claims, base's full current
     // delete-set (Yjs/yrs always (re-)encode the whole delete-set on a
     // full-state/diff write, including a "dangling" entry whose target item
-    // is not yet known — yrs tracks that as a pending delete set, NOT as a
+    // is not yet known — yrs tracks that as a pending delete set, not as a
     // pending update, so it is invisible to `pending_update_v1()`; it only
-    // surfaces by re-scanning `base`'s own current delete-set), AND any
+    // surfaces by re-scanning `base`'s own current delete-set), and any
     // still-parked delete claims bundled with a not-yet-integrated insert. A
     // dangling delete's target may only now be forming a multi-unit scalar
-    // because THIS candidate delivers the dependency that completes it,
+    // because this candidate delivers the dependency that completes it,
     // which was invisible when the delete was first accepted in isolation.
     let delete_boundary_conflict = match frontier {
         Some(frontier) => {
@@ -1255,8 +1255,8 @@ fn validate_replay_parity_inner(
     }
 
     // (3) INSERT boundaries: symmetric to (2) — the candidate's own claims,
-    // AND any still-parked insertion claims, against the same pre-delete
-    // union. Catches an immediately-integrated insert AND a previously-parked
+    // and any still-parked insertion claims, against the same pre-delete
+    // union. Catches an immediately-integrated insert and a previously-parked
     // insert at the moment its dependency integrates.
     if candidate_structure
         .insertion_boundaries
@@ -1273,7 +1273,7 @@ fn validate_replay_parity_inner(
     // whether a claimed clock was silently discarded (e.g. an overlap-slice).
     // A cached append hit applies the candidate to the tuple-keyed persistent
     // scratch. All cold callers replay base + pending + candidate as before.
-    // The verdict reads ONLY merge-insensitive state-vector and pending-maxima
+    // The verdict reads only merge-insensitive state-vector and pending-maxima
     // facts. It never reads content or structural boundaries from the scratch.
     let mut rebuilt_scratch = None;
     let scratch = match persistent_scratch {
@@ -1417,33 +1417,33 @@ pub(crate) fn persistent_gate_scratch_matches_base(
     Ok(gate_scratch_facts(scratch)? == gate_scratch_facts(&fresh)?)
 }
 
-/// True when `candidate` redefines a clock the ESTABLISHED side (`base` or a
-/// still-parked update) already holds as LIVE content, in a way that would
-/// diverge yjs<->yrs. Asymmetric on purpose: only a clock that is LIVE on the
+/// True when `candidate` redefines a clock the established side (`base` or a
+/// still-parked update) already holds as live content, in a way that would
+/// diverge yjs<->yrs. Asymmetric on purpose: only a clock that is live on the
 /// established side is compared. A clock the established side holds as a
 /// tombstone (`ContentDeleted`) "renders neither way," so a resend that
 /// references or re-encodes it is never false-rejected; a clock the established
 /// side never claims is new and untouched here.
 ///
 /// At a base-live clock the candidate also claims, three cases:
-///   - the candidate presents the IDENTICAL identity — a clean resend, fine;
-///   - the candidate tombstones the clock (`ContentDeleted`) AND covers it in
-///     its OWN delete-set — a legitimate delete/GC (the normal reconnect
+///   - the candidate presents the identical identity — a clean resend, fine;
+///   - the candidate tombstones the clock (`ContentDeleted`) and covers it in
+///     its own delete-set — a legitimate delete/GC (the normal reconnect
 ///     full-state resend carries a deleted clock this way), fine;
-///   - otherwise the candidate presents a DIFFERENT LIVE identity (string
-///     units or a different kind/payload) OR a BARE `ContentDeleted` not in
+///   - otherwise the candidate presents a different live identity (string
+///     units or a different kind/payload) OR a bare `ContentDeleted` not in
 ///     its delete-set — a hostile redefinition, rejected. No honest peer ever
 ///     redefines an already-used clock's live content without deleting it.
 fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentityIndex) -> bool {
     established.any_identity(|client, clock, established_identity| {
-        // Every identity the established side stores is LIVE content
+        // Every identity the established side stores is live content
         // (tombstones live in `tombstone_ranges`, not here), so each entry is a
         // clock a conflicting candidate could diverge.
         if let Some(candidate_identity) = candidate.identities.identity_at(client, clock) {
-            // A candidate LIVE identity at the same clock must match exactly.
+            // A candidate live identity at the same clock must match exactly.
             return candidate_identity != established_identity;
         }
-        // No candidate LIVE identity here. If the candidate instead
+        // No candidate live identity here. If the candidate instead
         // TOMBSTONES this clock, that is a legitimate delete/GC only when its
         // own delete-set also covers it; a bare tombstone is hostile.
         if candidate.tombstone_covers(client, clock) {
@@ -1460,7 +1460,7 @@ fn content_parity_conflict(candidate: &WireStructure, established: &ClockIdentit
 /// identically even if yrs re-encoded a map's keys in a different order — a
 /// legitimate full-state resend is never false-flagged.
 ///
-/// NOT `any_to_json`: that projection is LOSSY for the content-parity check —
+/// Not `any_to_json`: that projection is lossy for the content-parity check —
 /// it collapses `Any::BigInt(1)`/`Any::Number(1.0)`, `Any::Null`/`Any::Undefined`,
 /// and `Any::Buffer(b)`/`Any::Map({"__bytes__": b})` to the same JSON, so a
 /// hostile re-encode swapping one of those variants at an already-known clock
@@ -1537,9 +1537,9 @@ fn record_identity(
 }
 
 /// The pre-validator [`crate::durable::validate_update_bytes`] (the shared
-/// choke point for BOTH the local edit path — `record_local_update` /
+/// choke point for both the local edit path — `record_local_update` /
 /// `record_local_update_creating_marker` — and the remote replication path —
-/// `apply_remote_update` / `apply_remote_update_in_transaction`) runs BEFORE
+/// `apply_remote_update` / `apply_remote_update_in_transaction`) runs before
 /// any call that can reach yrs 0.27.3's uncatchable `Update::decode_v1`
 /// hard-abort. See [`safe_read_string`]'s doc comment for the root cause and
 /// why `scan_v1`'s manual wire walk is safe to run on fully untrusted bytes.
@@ -1581,7 +1581,7 @@ pub(crate) fn prevalidate_state_vector_bytes(bytes: &[u8]) -> Result<(), CollabE
 /// therefore every string-bearing v1 decode — `Any::decode`'s String/Map-key
 /// cases, `Decoder::read_key`, `Decoder::read_json`, `TypeRef::decode`'s XML
 /// element tag, `Options::decode`'s guid) casts the raw length-prefixed bytes
-/// straight to `&str` via `std::str::from_utf8_unchecked`, WITHOUT checking
+/// straight to `&str` via `std::str::from_utf8_unchecked`, without checking
 /// they are valid UTF-8:
 ///
 /// ```ignore
@@ -1597,7 +1597,7 @@ pub(crate) fn prevalidate_state_vector_bytes(bytes: &[u8]) -> Result<(), CollabE
 /// own structural walk if it naively reused yrs's decode helpers), the char
 /// decoder can synthesize an out-of-range/surrogate `u32` and hand it to an
 /// unchecked `char` construction — a debug-mode precondition check catches it
-/// as an UNCATCHABLE process abort (`std::panic::catch_unwind` cannot
+/// as an uncatchable process abort (`std::panic::catch_unwind` cannot
 /// intercept it); in a release build the check compiles out and the same
 /// input is silent undefined behavior instead. This is the root cause of the
 /// `known_crash_witness_yrs_char_decode_ub` hard-abort.
@@ -1607,9 +1607,9 @@ pub(crate) fn prevalidate_state_vector_bytes(bytes: &[u8]) -> Result<(), CollabE
 /// `read_any`/`TypeRef::decode`/`Options::decode`. It reads the raw bytes
 /// with the ordinary bounds-checked `read_buf` (safe: yrs' `Read` trait only
 /// makes the STRING CAST unsafe, not the length-prefixed byte read) and
-/// validates them with the CHECKED `std::str::from_utf8`, rejecting anything
+/// validates them with the checked `std::str::from_utf8`, rejecting anything
 /// that is not well-formed UTF-8 — which by construction can never encode a
-/// surrogate (0xD800..=0xDFFF) or an out-of-range scalar (> 0x10FFFF) — BEFORE
+/// surrogate (0xD800..=0xDFFF) or an out-of-range scalar (> 0x10FFFF) — before
 /// it is ever treated as a `str`. Once bytes have passed through here, no
 /// later `.chars()` iteration over them (by this module, or by yrs's own real
 /// `Update::decode_v1` once the pre-validator has accepted the update) can
@@ -1637,12 +1637,12 @@ fn safe_read_json(decoder: &mut DecoderV1<'_>) -> Result<Any, CollabError> {
 /// (`safe_read_json` → `Any::from_json`) and this manual path reject at the
 /// same depth. An `Any::Array`/`Any::Map` chain is 2 bytes per level on the
 /// wire (`[tag, len]`), so without this bound a hostile ~20 KB update nests
-/// ~10k deep and OVERFLOWS THE STACK — an uncatchable process abort, the same
+/// ~10k deep and overflows the stack — an uncatchable process abort, the same
 /// severity class this shard exists to close. No honest document nests remotely
 /// this deep.
 const MAX_ANY_DEPTH: usize = 128;
 
-/// A from-scratch, SAFE reimplementation of yrs' `Any::decode` for
+/// A from-scratch, safe reimplementation of yrs' `Any::decode` for
 /// `DecoderV1`. Cannot reuse `decoder.read_any()` / `Any::decode` directly:
 /// both bottom out in yrs' unsafe `Read::read_string` for the String and
 /// Map-key cases (see [`safe_read_string`]). Every primitive used here
@@ -1658,7 +1658,7 @@ const MAX_ANY_DEPTH: usize = 128;
 /// adversarial update overflows the stack (an uncatchable abort — a stack
 /// overflow is not a Rust panic, so neither `catch_unwind` nor this module's
 /// gate wrapper contains it). yrs' own `Any::decode` recurses unbounded too,
-/// so bounding HERE — before the pre-validator accepts the update — is what
+/// so bounding here — before the pre-validator accepts the update — is what
 /// protects the downstream `decode_v1` as well.
 fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, CollabError> {
     if depth >= MAX_ANY_DEPTH {
@@ -1704,7 +1704,7 @@ fn safe_read_any(decoder: &mut DecoderV1<'_>, depth: usize) -> Result<Any, Colla
     })
 }
 
-/// A SAFE reimplementation of `TypeRef::decode`'s wire shape, sufficient for a
+/// A safe reimplementation of `TypeRef::decode`'s wire shape, sufficient for a
 /// content-identity fingerprint (this module only ever needs KIND identity
 /// for the content-parity check, never the constructed `TypeRef` value
 /// itself). Reimplemented rather than calling `TypeRef::decode` because its
@@ -1734,7 +1734,7 @@ fn safe_read_type_ref_fingerprint(decoder: &mut DecoderV1<'_>) -> Result<Vec<u8>
     Ok(canonical)
 }
 
-/// A SAFE reimplementation of `Options::decode`'s wire shape (a guid string
+/// A safe reimplementation of `Options::decode`'s wire shape (a guid string
 /// plus an `Any` map of sub-document options). The gate's v1 content identity
 /// remains GUID-only. The v2 cache oracle also appends the canonical, tagged
 /// options payload, whose map keys are sorted by [`append_canonical_any`].
@@ -1903,9 +1903,9 @@ fn scan(bytes: &[u8], version: ScanVersion) -> Result<WireStructure, CollabError
     }
     // The delete-set. Replaces `IdSet::decode`, which constructs `ClientID`
     // from the raw wire value with no range check (see [`safe_read_client`])
-    // and computes each range's `clock + len` UNCHECKED (an overflow panic in
+    // and computes each range's `clock + len` Unchecked (an overflow panic in
     // debug builds, a silent wrap in release). yrs' decode also silently keeps
-    // only the LAST section when a client appears twice — a duplicate section
+    // only the last section when a client appears twice — a duplicate section
     // is a wire claim no honest encoder produces, and mirroring that discard
     // here would let a hostile update smuggle delete claims this scan sees but
     // yrs drops (or vice versa), so it is rejected outright instead.
@@ -2563,7 +2563,7 @@ mod tests {
     }
 
     /// Content-parity: a candidate that re-encodes an id the base already
-    /// owns with DIFFERENT text content must be rejected even though the
+    /// owns with different text content must be rejected even though the
     /// clock is fully covered (no shortfall) and the redefinition itself is
     /// not a multi-unit-scalar interior split.
     #[test]
@@ -2571,7 +2571,7 @@ mod tests {
         let base = Ydoc::wire();
         let base_update = base.plaintext_insert(0, "a");
 
-        // A hostile candidate claims the SAME (client, clock) as `base_update`
+        // A hostile candidate claims the same (client, clock) as `base_update`
         // but with different content ("b" instead of "a"). Built by corrupting
         // the original bytes' single-byte string payload directly (locating it
         // by the fixed `plainText` root-name marker, since the preceding
@@ -2683,11 +2683,11 @@ mod tests {
         }
     }
 
-    /// varint encoding of `2^53` — the smallest client identifier OUTSIDE the
+    /// varint encoding of `2^53` — the smallest client identifier outside the
     /// 53-bit yjs range (yrs `ClientID::new` debug-asserts on it; in release
     /// it would silently alias client `0`).
     const CLIENT_2_POW_53: [u8; 8] = [0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x10];
-    /// varint encoding of `2^53 - 1` — the LARGEST honest client identifier.
+    /// varint encoding of `2^53 - 1` — the largest honest client identifier.
     const CLIENT_MAX_HONEST: [u8; 8] = [0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x0f];
 
     #[test]
@@ -2880,7 +2880,7 @@ mod tests {
             0x09, // client
             0x01, // ranges_len
             0xff, 0xff, 0xff, 0xff, 0x0f, // start = u32::MAX
-            0x01, // len = 1 -> end overflows u32 (yrs computes this UNCHECKED)
+            0x01, // len = 1 -> end overflows u32 (yrs computes this unchecked)
         ];
         let error = scan_err(&bytes);
         assert!(matches!(error, CollabError::ReplayParityViolation { .. }));
@@ -2895,7 +2895,7 @@ mod tests {
             0x01, // ranges_len
             0x00, // start
             0x01, // len
-            0x09, // the SAME client again (yrs would silently drop the first)
+            0x09, // the same client again (yrs would silently drop the first)
             0x01, // ranges_len
             0x05, // start
             0x01, // len
@@ -2905,7 +2905,7 @@ mod tests {
     }
 
     /// [`normalize_ranges`] + [`normalized_ranges_cover`] must answer
-    /// membership EXACTLY like a linear scan over the raw, un-normalized
+    /// membership exactly like a linear scan over the raw, un-normalized
     /// ranges — including unsorted, overlapping, adjacent, duplicate, and
     /// empty ranges (all of which a hostile wire can encode).
     #[test]
@@ -2962,13 +2962,13 @@ mod tests {
         }
     }
 
-    /// Anti-quadratic regression: `content_parity_conflict` with MANY
-    /// established live clocks against MANY fragmented candidate tombstone and
+    /// Anti-quadratic regression: `content_parity_conflict` with many
+    /// established live clocks against many fragmented candidate tombstone and
     /// delete-set ranges must run in O(clocks x log ranges), not
     /// O(clocks x ranges). 100k x 100k linear range scans (~1e10 comparisons)
     /// would take minutes in a debug build; the binary-search version completes
-    /// in milliseconds. Every established clock is tombstoned AND delete-set
-    /// covered by the candidate, so the scan exercises BOTH covers-queries for
+    /// in milliseconds. Every established clock is tombstoned and delete-set
+    /// covered by the candidate, so the scan exercises both covers-queries for
     /// every clock and legitimately accepts (returns false) at the end.
     #[test]
     fn fragmented_range_membership_scans_are_not_quadratic() {
@@ -3006,7 +3006,7 @@ mod tests {
 
     /// A `ContentDeleted` block legitimately spans up to `u32::MAX` tombstone
     /// clocks in a handful of wire bytes (yrs stores the whole item as a single
-    /// count, O(1)). The pre-validator MUST record it as one range, NOT one
+    /// count, O(1)). The pre-validator must record it as one range, not one
     /// identity per clock: a hostile peer could otherwise set the length to
     /// `u32::MAX` in ~10 bytes and drive `scan_v1` into ~4.29 billion `BTreeMap`
     /// inserts — a multi-gigabyte out-of-memory blow-up on the untrusted decode
@@ -3035,7 +3035,7 @@ mod tests {
     }
 
     /// A `ContentAny` block (content-ref 8) whose `Any` payload is a chain of
-    /// `MAX_ANY_DEPTH`+ length-1 arrays must be rejected — NOT drive
+    /// `MAX_ANY_DEPTH`+ length-1 arrays must be rejected — not drive
     /// `safe_read_any` into a stack overflow (an uncatchable abort). Each level
     /// is the 2 bytes `[117, 0x01]`, so this is the cheap, attacker-controlled
     /// nesting a hostile ~20 KB update would carry. This scan must complete and
@@ -3091,7 +3091,7 @@ mod tests {
     /// that `any_to_json` collapses — otherwise a hostile re-encode swapping,
     /// e.g., `BigInt(1)` for `Number(1.0)` at an already-known clock would hash
     /// identically and slip past the content-parity check. Each pair below is
-    /// two DISTINCT wire values that `any_to_json` maps to the same JSON.
+    /// two distinct wire values that `any_to_json` maps to the same JSON.
     #[test]
     fn canonical_any_distinguishes_variants_json_collapses() {
         use std::sync::Arc;
@@ -3117,7 +3117,7 @@ mod tests {
                 "distinct Any wire values must not share a fingerprint"
             );
         }
-        // And the SAME value fingerprints stably (map key order independent).
+        // And the same value fingerprints stably (map key order independent).
         let m1 = Any::Map(Arc::new(HashMap::from([
             ("a".to_owned(), Any::BigInt(1)),
             ("b".to_owned(), Any::Bool(true)),
@@ -3129,7 +3129,7 @@ mod tests {
         assert_eq!(any_payload(&m1), any_payload(&m2));
     }
 
-    /// The 53-bit bound is exact: the LARGEST honest client identifier
+    /// The 53-bit bound is exact: the largest honest client identifier
     /// (`2^53 - 1`, producible by real yjs) must still be accepted end-to-end.
     #[test]
     fn accepts_max_honest_53_bit_client() {

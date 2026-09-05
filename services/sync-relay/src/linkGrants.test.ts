@@ -640,7 +640,7 @@ describe("atomic View and Comment link mint", () => {
   });
 });
 
-describe("Phase 3 owner link contract", () => {
+describe("owner link contract", () => {
   it.each([
     ["missing access", {}],
     ["Edit access", { access: "edit" }],

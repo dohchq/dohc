@@ -163,7 +163,7 @@ describe("plugin uninstall preflight", () => {
 
   // A null stateRoot means the caller has already determined pluginId's own
   // state path belongs to an unrelated installation (an id collision
-  // between a discovered row's fallback id and some OTHER, unrelated,
+  // between a discovered row's fallback id and some other, unrelated,
   // installed plugin's real id) and must not be inventoried here — only
   // additionalStateRoots, resolved separately by directory, may still
   // apply.
@@ -196,7 +196,7 @@ describe("plugin uninstall preflight", () => {
     expect(result.stateData).toMatchObject({ path: otherStateRoot, fileCount: 1 });
   });
 
-  // Two different cleanup identities can trace to the SAME physical state
+  // Two different cleanup identities can trace to the same physical state
   // directory — pluginStateRoot is deterministic per id, and PluginPipeline
   // callers can legitimately pass the same resolved root as both stateRoot
   // and (via additionalCleanupIds) an entry in additionalStateRoots.
@@ -226,14 +226,8 @@ describe("plugin uninstall preflight", () => {
       engineCaptureAvailable: true,
     });
 
-    // MUTATION (measure every listed root, including duplicates): fileCount
-    // would read 3 (session.json counted twice, cache.json once) instead of
-    // the real, deduplicated total of 2.
-    expect(result.stateData).toMatchObject({ fileCount: 2 });
-    // MUTATION (join every combined directory's path with ", "): path
-    // would read "<sharedStateRoot>, <distinctStateRoot>" instead of one
-    // real, single directory with the second one only counted.
-    expect(result.stateData?.path === sharedStateRoot || result.stateData?.path === distinctStateRoot)
+    expect(result.stateData, "measure every listed root, including duplicates: fileCount would read 3 (session.json counted twice, cache.json once) instead of the real, deduplicated total of 2.").toMatchObject({ fileCount: 2 });
+    expect(result.stateData?.path === sharedStateRoot || result.stateData?.path === distinctStateRoot, "join every combined directory's path with ', ': path would read '<sharedStateRoot>, <distinctStateRoot>' instead of one real, single directory with the second one only counted.")
       .toBe(true);
     expect(result.stateData?.additionalLocations).toBe(1);
   });
@@ -290,7 +284,7 @@ describe("plugin uninstall preflight", () => {
     ).toMatchObject({ sourceHash: installedBaselineHash });
   });
 
-  it("never promises recovery it cannot verify, even with capture running (#779 round 7 B2)", async () => {
+  it("never promises recovery it cannot verify, even with capture running", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.txt", "baseline text\n");
     const installedBaselineHash = await saveBaseline(fixture);
@@ -437,7 +431,7 @@ describe("plugin uninstall preflight", () => {
     expect(Object.keys(summary)).not.toContain("files");
   });
 
-  it("reports an already-deleted source folder as nothing left to warn about (#779 round 12 A2)", async () => {
+  it("reports an already-deleted source folder as nothing left to warn about", async () => {
     const fixture = await createFixture();
     await writeSourceFile(fixture, "index.ts", "export const value = 1;\n");
     const installedBaselineHash = await saveBaseline(fixture);

@@ -81,7 +81,7 @@ import {
 // The collaboration hands back a transport PER SCOPE rather than a single baked
 // one: a participant viewing a channel shared TO them must publish into a SHARE
 // scope (which the relay maps to the granter's workspace) so they land in the
-// SAME relay presence scope as the owner (who publishes into their WORKSPACE
+// same relay presence scope as the owner (who publishes into their WORKSPACE
 // scope). See the scope/topic derivation in ChatsView below. Still null when
 // solo/offline — the transport factory is simply never called.
 export interface ChatPresenceCollaboration {
@@ -100,7 +100,7 @@ export interface AgentSetupSummary {
 // The Chats view (PR 13, WS-E): workspace Chats organized in channels, plus
 // a read-only "Files" grouping that cross-links to the per-file rail. Built
 // to feel like chat, not a forum: the channel composer sends on Enter and a
-// new thread NEVER asks for a title — it displays its first-message snippet.
+// new thread never asks for a title — it displays its first-message snippet.
 //
 // Every async response is gated by a liveness token before it touches state
 // (workspace switches and rapid navigation must never repaint stale data).
@@ -131,16 +131,16 @@ type OverviewState =
 // carries its own commit watermark (see commitTicket).
 type CommitLane = "overview" | "joinedShares" | "relayShares" | "relayReach";
 
-// What the view keeps: the flat merged share listing. This is NOT the contract
+// What the view keeps: the flat merged share listing. This is not the contract
 // result — that one may answer "the relay was unreachable", which is not
 // storable as rows. commitShareListing translates, lane by lane. The relay
 // rows carry the session they were read under, because they are
-// account-scoped: preservation through an outage may only ever keep the SAME
+// account-scoped: preservation through an outage may only ever keep the same
 // session's rows.
 interface ShareListing {
   granted: ChatChannelShareGrantRow[];
   received: ChatChannelShareReceivedRow[];
-  // One answer per channel the read covered. A channel the read did NOT cover
+  // One answer per channel the read covered. A channel the read did not cover
   // is absent, which is unknown, and unknown locks it — see channelIsLocked.
   joined: JoinedChannelAnswer[];
   sessionKey: string | null;
@@ -150,7 +150,7 @@ interface ShareListing {
 // the joined lane about: the channels in the list, plus the invitations under
 // "Shared with you" (each one needs to know whether this workspace already
 // joined that channel). The response is one answer per name, so it is bounded
-// by the view and not by how many channels the account has ever joined (#640).
+// by the view and not by how many channels the account has ever joined.
 function shownChannelWireIds(
   channels: readonly ChatChannelRecord[],
   received: readonly ChatChannelShareReceivedRow[],
@@ -166,7 +166,7 @@ function shownChannelWireIds(
 // Why a committed share read carried no rows. "unreachable" covers both a
 // relay that did not answer and a listing the IPC rejected outright: dohc
 // could not read it, and a retry is the honest next step. "over-limit" is the
-// answer that DID arrive and that dohc cannot list — retrying repeats it
+// answer that did arrive and that dohc cannot list — retrying repeats it
 // exactly, so the surface owes the count and the limit instead of a button.
 type ShareReadFailure =
   | { kind: "unreachable" }
@@ -176,7 +176,7 @@ type ShareReadFailure =
       limit: number;
     };
 
-// A share listing answers two independent questions. The JOINED rows come from
+// A share listing answers two independent questions. The joined rows come from
 // the local registry, so any reader that got a listing at all has the true
 // answer. The granted/received rows come from the relay — a reader that is not
 // authoritative for them must leave them exactly as they were.
@@ -190,9 +190,9 @@ type ShareReadFailure =
 // claim now writes only what it answered.
 // Two different questions, and they must not be confused:
 //
-//  - MERGING is answer-driven. A read writes the channels it answered and
+//  - Merging is answer-driven. A read writes the channels it answered and
 //    leaves the rest, so a read that never named a channel cannot drop it.
-//  - EVICTION is view-driven. The newest read also discards answers for
+//  - Eviction is view-driven. The newest read also discards answers for
 //    channels the view no longer shows — an invitation that was revoked or
 //    claimed by another workspace would otherwise sit in the map forever, and
 //    a cache that grows with history is the growth this whole change removes.
@@ -217,7 +217,7 @@ type JoinedCommit = {
   // answers because only the updater knows them.
   write: (current: readonly JoinedChannelAnswer[]) => JoinedChannelAnswer[];
   // This response is the newest for the lane. Only it may evict, and only it
-  // may ESTABLISH a lane that does not exist yet: seeding is a whole-lane act,
+  // may establish a lane that does not exist yet: seeding is a whole-lane act,
   // and a response that owns a few wires must not put itself — and its own
   // relay rows — over an unknown a newer read established on purpose.
   ownsLane: boolean;
@@ -231,7 +231,7 @@ type JoinedLaneOrder = {
   // read in another workspace ever will, so a channel created and abandoned
   // in one workspace would sit in every later workspace's `keep` forever.
   workspaceId: string | null;
-  // The highest ticket that has ANSWERED each wire id. The lane orders per
+  // The highest ticket that has answered each wire id. The lane orders per
   // WIRE, not per lane: one watermark for the whole lane let a newer read
   // outrank an older one for channels the newer read never mentioned. A
   // refreshShares issuing from a stale overview took the watermark, and the
@@ -240,7 +240,7 @@ type JoinedLaneOrder = {
   // locked, until some later refresh. A newer claim outranks only what it
   // answered.
   answeredAt: Map<string, number>;
-  // Wire ids this surface answered ITSELF — see answerLocally.
+  // Wire ids this surface answered itself — see answerLocally.
   local: Set<string>;
 };
 
@@ -255,7 +255,7 @@ function adoptWorkspace(order: JoinedLaneOrder, workspaceId: string): void {
   order.local.clear();
 }
 
-// A channel this surface answered ITSELF, with no read behind it. It survives
+// A channel this surface answered itself, with no read behind it. It survives
 // eviction until a read names it, because every read now in flight was issued
 // before the channel existed.
 export function answerLocally(
@@ -282,7 +282,7 @@ export function planJoinedCommit(
     answers: readonly JoinedChannelAnswer[];
     // The lane claim. Only the newest response may evict.
     newestForLane: boolean;
-    // What the surface shows NOW, or null while it cannot say. A response's
+    // What the surface shows now, or null while it cannot say. A response's
     // own scope is not the view: a read issued from an older render answers
     // less than the surface has since put on screen, so evicting to its scope
     // would drop the answer for a channel the user is looking at — and an
@@ -346,7 +346,7 @@ function mergeShareLanes(
 // Without this the new channel is unanswered, and unanswered locks: the user
 // creates a channel and lands in it with no composer.
 //
-// It writes ONE key, and applyJoinedAnswers is what keeps it: a read issued
+// It writes one key, and applyJoinedAnswers is what keeps it: a read issued
 // before the create never named this channel, so when it lands it replaces the
 // channels it did name and leaves this entry alone. refreshShares is
 // deliberately not liveToken-guarded, so a token bump would not have been
@@ -994,7 +994,7 @@ function UnreadPill(props: { count: number; testId: string }) {
 //
 // The joined lane counts the other unit — mergeJoinedChannel matches on
 // channelWireId as well as shareId, so those rows really are one per channel —
-// and it has no limit to report at all now that it is read per channel (#640).
+// and it has no limit to report at all now that it is read per channel.
 function overLimitSentences(failure: {
   lanes: ReadonlyArray<{ lane: "granted" | "received"; rows: number }>;
   limit: number;
@@ -1006,9 +1006,9 @@ function overLimitSentences(failure: {
   );
 }
 
-// Whether a NEW outgoing grant would deepen the over-limit state. Only the
-// GRANTED lane can: an outgoing share adds a row there and nowhere else. A
-// full RECEIVED lane is an inbound backlog the user did not create and cannot
+// Whether a new outgoing grant would deepen the over-limit state. Only the
+// granted lane can: an outgoing share adds a row there and nowhere else. A
+// full received lane is an inbound backlog the user did not create and cannot
 // clear from here, and rejecting their outgoing work over it turns one
 // account-wide problem into a second one.
 function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
@@ -1020,7 +1020,7 @@ function grantedLaneIsOverLimit(failure: ShareReadFailure | null): boolean {
 
 // What the sharing surface says when a committed share read carried no rows.
 // Without it the surface renders an empty list, which reads as "you have no
-// shares" (#618).
+// shares".
 //
 // The two reasons owe different things. An outage owes a retry, because the
 // next request can answer. A listing over dohc's own cap owes the count and
@@ -1269,14 +1269,14 @@ function AcceptDmDialog(props: {
   );
 }
 
-// The DM placement reverse path's confirmation (#742): reversible but
+// The DM placement reverse path's confirmation: reversible but
 // disruptive, so it states what happens before it runs (product invariant).
 function LeaveDmDialog(props: {
   dm: DmRecord;
   workspaceLabel: string;
-  // #742 P2 (round 6): a send composed for THIS conversation, still in
+  // A send composed for this conversation, still in
   // flight when Leave ends the row, would have its own revalidation reject
-  // AFTER the row is gone — and goBack's context change (#742 P1-B) then
+  // after the row is gone — and goBack's context change then
   // suppresses that rejection, so the message vanishes with no warning.
   // Disabling confirm until the send settles means the user always sees
   // either the message land or the existing "Could not send" error, never
@@ -1311,7 +1311,7 @@ function LeaveDmDialog(props: {
         aria-modal="true"
         aria-labelledby="chats-leave-dm-title"
         data-testid="chats-leave-dm-dialog"
-        // #742 P2-D: this dialog owns Escape. Without the marker, the Chats
+        // This dialog owns Escape. Without the marker, the Chats
         // root's own Escape handler (onKeyDownCapture, capture phase — it
         // runs before this) walks the DM view back before this dialog ever
         // sees the key, leaving it open over whatever conversation goBack
@@ -1843,7 +1843,7 @@ export function ChatsView(props: {
   // Chats never configures executables or grants capabilities itself.
   agentSetup?: AgentSetupSummary | null;
   onSetupAgent?: () => void;
-  // Ephemeral presence/typing transport, present ONLY under collaboration.
+  // Ephemeral presence/typing transport, present only under collaboration.
   collaboration?: ChatPresenceCollaboration | null;
   // Where this view lives: the side panel (default) or a full editor tab.
   // The page variant centers the narrow surfaces in a reading column — the
@@ -1851,7 +1851,7 @@ export function ChatsView(props: {
   variant?: "panel" | "page";
   // Expand-to-tab: the conversation to open once the overview is ready —
   // the shell hands the live surface's position to whichever instance mounts
-  // next, so panel and tab feel like ONE chats surface. Applied once per
+  // next, so panel and tab feel like one chats surface. Applied once per
   // mount; workspace switches and later navigation behave exactly as before.
   initialNav?: ChatsNav;
   // Unsent drafts to restore alongside initialNav (same handoff, same
@@ -1861,7 +1861,7 @@ export function ChatsView(props: {
   // expanded tab) with this instance's current conversation.
   onNavChange?: (nav: ChatsNav) => void;
   // The page variant's counterpart of the panel's onOpenInTab: an explicit
-  // conversation click, reported BEFORE the view navigates in place. It is a
+  // conversation click, reported before the view navigates in place. It is a
   // user command, so the shell cancels a pending cross-surface navigation
   // (the DM lookup) unconditionally — even when the click repeats the current
   // destination, which still re-loads and re-scrolls. The passive onNavChange
@@ -1983,11 +1983,11 @@ export function ChatsView(props: {
   // out / listing failed) and every sharing affordance stays hidden — the
   // solo view is unchanged.
   const [channelShares, setChannelShares] = useState<ShareListing | null>(null);
-  // WHY the last committed share read did not produce rows, or null when it
+  // Why the last committed share read did not produce rows, or null when it
   // did. The rows above are what dohc knows; this is what stopped it knowing.
-  // Separate facts: a relay that did not answer commits no rows AND keeps the
+  // Separate facts: a relay that did not answer commits no rows and keeps the
   // cached ones, so without this the surface renders an empty list that reads
-  // as "no shares" (#618). Its own commit lane, because it answers its own
+  // as "no shares". Its own commit lane, because it answers its own
   // question and an older response must not overwrite a newer one.
   //
   // The two reasons owe the user different things. An outage owes a retry.
@@ -2011,7 +2011,7 @@ export function ChatsView(props: {
   // SYNCHRONOUS in-flight guards. `sending` / `startingThread` are React state
   // and stay false until the next render, so a double-send (two Enters in one
   // tick) can fire TWO IPC sends — and two agent invocations — before the state
-  // flips. These refs flip synchronously BEFORE the first await, so the second
+  // flips. These refs flip synchronously before the first await, so the second
   // call is ignored immediately.
   const sendingRef = useRef(false);
   // Sends are owned per workspace conversation. This lets another conversation
@@ -2085,20 +2085,20 @@ export function ChatsView(props: {
   //    made a badge refresh landing mid-mutation throw away the mutation's
   //    successful result, leaving the create form or the old invite on screen.
   //    Latest-wins among overview refreshes uses its own sequence instead; the
-  //    captured token is still CHECKED, so a workspace switch or a user
+  //    captured token is still checked, so a workspace switch or a user
   //    navigation still discards this response.
   //  - A transient failure must not replace a working navigator with an error
   //    card (there is nothing to report to a user who asked for nothing).
   //
-  // ONE issue order over every commit into these surfaces, with a watermark
-  // per lane. A reader takes a ticket when it ISSUES its request and commits a
+  // One issue order over every commit into these surfaces, with a watermark
+  // per lane. A reader takes a ticket when it issues its request and commits a
   // lane only if no newer ticket landed there first. Same commit-time
   // watermark as the workspace file listing: an id is taken at issue, and a
   // response commits only if it is newer than what is already displayed.
   //
   // Lanes exist because these readers answer different questions.
   // refreshOverview answers all three. refreshShares answers both share lanes.
-  // refreshChannelBadges answers the channel listing and the JOINED grants its
+  // refreshChannelBadges answers the channel listing and the joined grants its
   // listing just synced, and nothing about the relay-backed rows. One sequence
   // over all of them would let a joined-only correction discard a full share
   // read still in flight; one sequence per reader would let two readers undo
@@ -2134,9 +2134,9 @@ export function ChatsView(props: {
   // The one place a full share listing lands, whichever reader produced it.
   // Success commits per lane: each takes the newest answer it has.
   //
-  // A FAILED lookup says nothing about either lane, and "unknown" is a state
+  // A failed lookup says nothing about either lane, and "unknown" is a state
   // of the whole listing — there is no way to store it for one lane alone. So
-  // it may commit only when it owns BOTH lanes. Otherwise a response that
+  // it may commit only when it owns both lanes. Otherwise a response that
   // learned nothing would discard a newer joined-grant answer and lock every
   // channel through channelIsLocked until some later refresh succeeded.
   // Read the committed listing from an async callback (see latestComposerState).
@@ -2155,7 +2155,7 @@ export function ChatsView(props: {
     overview.status === "ready"
       ? shownChannelWireIds(overview.channels, channelShares?.received ?? [])
       : null;
-  // The ONE path that writes joined answers: the lane claim decides who may
+  // The one path that writes joined answers: the lane claim decides who may
   // evict, the declaration above decides what survives, and planJoinedCommit
   // decides everything else.
   const planJoinedWrite = useCallback(
@@ -2179,11 +2179,11 @@ export function ChatsView(props: {
       // A response issued under an older cloud session commits nothing: its
       // rows belong to an account the user has left.
       if (session !== sessionGeneration.current) return;
-      // A failed lookup for a refresh NOBODY ASKED FOR is not an answer. It
+      // A failed lookup for a refresh nobody asked for is not an answer. It
       // fills in only where nothing has answered yet — so the surface resolves
       // instead of waiting on a request that may never return — and it takes
       // no lane, so a real answer still in flight replaces it even though it
-      // was issued earlier. Where something HAS answered, it says nothing at
+      // was issued earlier. Where something has answered, it says nothing at
       // all and the cached rows stand.
       if (value === null && options?.background) {
         const answered =
@@ -2193,7 +2193,7 @@ export function ChatsView(props: {
         setChannelShares(null);
         // Claims NO lane, reachability included. This refresh learned nothing
         // and only fills in where nothing has answered yet — so a real answer
-        // still in flight, issued EARLIER and therefore holding an older
+        // still in flight, issued earlier and therefore holding an older
         // ticket, must still be able to correct it. Taking the lane here left
         // "dohc could not read your shares" standing over a listing that then
         // arrived and worked.
@@ -2202,7 +2202,7 @@ export function ChatsView(props: {
         return;
       }
       // A failure the user asked for answers "unknown", which is the whole
-      // listing. It commits only while it owns BOTH lanes — claiming one and
+      // listing. It commits only while it owns both lanes — claiming one and
       // leaving it unwritten would starve the reader that can answer it.
       if (value === null) {
         if (!claimLanes(["joinedShares", "relayShares"], ticket)) return;
@@ -2216,7 +2216,7 @@ export function ChatsView(props: {
         setSharesWorkspaceId(workspaceId);
         return;
       }
-      // Whether dohc could READ the relay is its own answer, and every
+      // Whether dohc could read the relay is its own answer, and every
       // resolved listing carries it — including the unreachable one, which
       // claims no row lane at all.
       const nextFailure: ShareReadFailure | null =
@@ -2229,8 +2229,8 @@ export function ChatsView(props: {
                 limit: value.relay.limit,
               }
             : null;
-      // A refresh NOBODY ASKED FOR may take the reachability lane only when it
-      // ESTABLISHED an account-scoped answer. The test is what the read
+      // A refresh nobody asked for may take the reachability lane only when it
+      // established an account-scoped answer. The test is what the read
       // learned, not which sentinel it returned: a background read that
       // resolved "unreachable" or "over-limit" established no listing, exactly
       // like one that rejected, and taking the lane over either would let it
@@ -2238,25 +2238,25 @@ export function ChatsView(props: {
       // standing over a listing that then arrived and worked. Keying this on
       // `value === null` covered one of the three shapes.
       //
-      // It may still SAY so where nothing has answered yet, so the surface
+      // It may still say so where nothing has answered yet, so the surface
       // resolves instead of waiting on a request that may never return.
       const establishedRelayFact =
         value.relay.state === "answered" || value.relay.state === "signed-out";
       if (!options?.background || establishedRelayFact) {
         if (claimLanes(["relayReach"], ticket)) setShareReadFailure(nextFailure);
       } else if (ticket > committedLane.current.relayReach) {
-        // It may still SAY so — an outage the user should see is a real fact,
+        // It may still say so — an outage the user should see is a real fact,
         // and refusing to show it would trade one silence for another. It
-        // READS the watermark without taking it: newer than what is displayed,
+        // reads the watermark without taking it: newer than what is displayed,
         // so a late-arriving older outage cannot repaint over a fresher
         // answer; unclaimed, so an authoritative answer still in flight on an
-        // OLDER ticket can still land and clear it.
+        // older ticket can still land and clear it.
         setShareReadFailure(nextFailure);
       }
       // The relay lanes are only this answer's to write when it learned an
       // account-scoped fact: the relay's rows, or that no session exists
       // (signed out — cached rows must clear; another account's invitations
-      // and recipient emails must not survive a logout). "Unreachable" is NOT
+      // and recipient emails must not survive a logout). "Unreachable" is not
       // an empty listing: the cached rows stand, and the unclaimed lane lets
       // a real relay answer land its rows.
       // Over-limit is non-authoritative for the same reason unreachable is:
@@ -2293,13 +2293,13 @@ export function ChatsView(props: {
           // Nothing to merge into. Only an answer that vouches for the joined
           // rows may seed the listing — they decide channelIsLocked, and a
           // relay-only claim seeding stale joined rows would unlock what
-          // nothing has vouched for. It must own the whole LANE, not a few
+          // nothing has vouched for. It must own the whole lane, not a few
           // wires of it: a newer read that could not answer sets this null on
           // purpose, and re-seeding would put these relay rows back over it.
           return joined?.ownsLane ? { ...listing, joined: joined.write([]) } : current;
         }
         // The cached relay rows are account-scoped: they are preservable
-        // only for the SAME session. Under any other session — a login, a
+        // only for the same session. Under any other session — a login, a
         // switch — they are never candidates, whatever the relay lane
         // claims, so an unreachable relay on the new account cannot show
         // the previous account's invitations and emails.
@@ -2333,7 +2333,7 @@ export function ChatsView(props: {
         );
       }
       try {
-        // The channel listing FIRST, and not beside the share read: the share
+        // The channel listing first, and not beside the share read: the share
         // read now has to be told which channels this surface is showing, and
         // that is what the listing answers. The listing also syncs joined
         // shared channels before it reads, so a channel a sync just pulled is
@@ -2341,7 +2341,7 @@ export function ChatsView(props: {
         const result = await bridge().listChatChannels({ workspaceId });
         if (token !== liveToken.current) return;
         // Sharing is OPTIONAL: solo / signed-out workspaces simply render
-        // without the sharing affordances. Whether the lookup FAILED is kept
+        // without the sharing affordances. Whether the lookup failed is kept
         // separate from what it returned — null is not an answer, it is the
         // absence of one, and it fails closed in channelIsLocked.
         const shares = await bridge()
@@ -2360,7 +2360,7 @@ export function ChatsView(props: {
         commitShareListing(ticket, session, shares.value, {
           background: options?.background === true,
         });
-        // The channel list settles WITH its share answer, not before it: a
+        // The channel list settles with its share answer, not before it: a
         // list rendered while the joined lane is still unknown is a list of
         // locked channels, and the flash back to writable is worse than
         // holding the load a moment longer.
@@ -2390,29 +2390,12 @@ export function ChatsView(props: {
     [claimLanes, commitShareListing, takeCommitTicket, workspaceId],
   );
 
-  // Badge-only refresh, for the invalidation nobody asked for. It differs from
-  // refreshOverview in three ways, and each one is a thing this refresh has no
-  // authority to do:
-  //
-  //  - It reads the channel listing, and the JOINED grants that listing's sync
-  //    may have just changed. Both are local questions: the joined rows come
-  //    from the registry, which is why they have a read of their own. The
-  //    relay-backed granted/received rows are nobody's business here.
-  //  - It takes its tickets like every other reader, so it cannot discard the
-  //    response of a refresh the user DID ask for (a join, a leave, a retry),
-  //    and a newer commit cannot be undone by its own late answer. It captures
-  //    liveToken, so a workspace switch, a navigation, or a mutation wins.
-  //  - It keeps ONE listing in flight. The activity signal fires for every
-  //    settled file batch and run update, the listing syncs shared channels
-  //    over the relay before it reads, and a persistent navigator plus an
-  //    expanded page mount two of these surfaces. Activity arriving mid-read
-  //    is not dropped: it runs exactly one more pass when the read settles.
-  //
-  // liveToken decides what a drain may do, exactly as it does for every other
-  // reader: a workspace switch, a navigation, and a mutation all move it, and
-  // a pass that captured an older value can neither commit nor run again. The
-  // record itself only says who holds the slot, which is what keeps ONE
-  // listing in flight.
+  // Badge-only refresh for activity nobody asked for. It reads only the
+  // channel listing and the joined grants (local questions), takes commit
+  // tickets like every other reader so it cannot discard a refresh the user
+  // asked for, and keeps one listing in flight: activity arriving mid-read
+  // runs exactly one more pass when the read settles. liveToken decides what
+  // a drain may do; the record only says who holds the slot.
   const badgeRead = useRef<{ token: number; pending: boolean } | null>(null);
   const refreshChannelBadges = useCallback(async (): Promise<void> => {
     const active = badgeRead.current;
@@ -2465,7 +2448,7 @@ export function ChatsView(props: {
           const cachedShares = latestChannelShares.current;
           if (cachedShares === null) {
             // Nothing has answered the share lanes yet, and this pass has just
-            // put a NEWER channel list on screen than the lookup that will
+            // put a newer channel list on screen than the lookup that will
             // seed them was scoped to. A channel this pass added would get no
             // answer from that lookup at all, and unanswered locks it — so the
             // pass that shows the list asks about the list, relay rows and
@@ -2497,7 +2480,7 @@ export function ChatsView(props: {
                 cachedShares.received,
               ),
             });
-            // ONLY the joined lane, which is all this read answers. Leaving the
+            // Only the joined lane, which is all this read answers. Leaving the
             // relay-backed lane alone also lets a full share read still in
             // flight land its own rows.
             // Planning advances the lane's ordering, so it must not run for a
@@ -2516,7 +2499,7 @@ export function ChatsView(props: {
                   ? current
                   : mergeShareLanes(
                       current,
-                      // The unclaimed relay lane keeps the current rows AND
+                      // The unclaimed relay lane keeps the current rows and
                       // their session key; this local read speaks for neither.
                       {
                         granted: [],
@@ -2591,7 +2574,7 @@ export function ChatsView(props: {
   // offline keeps the current list and the next pass retries. A late response
   // for a stale workspace/nav is dropped by the token guard.
   //
-  // ONE sync in flight (#545, badgeRead precedent). The activity signal below
+  // One sync in flight (#545, badgeRead precedent). The activity signal below
   // fires for every settled file batch and run update, and this is a relay
   // sync, not a local read — a burst must not fan out into a sync per event.
   // A call landing mid-sync is not dropped: it runs exactly one more pass when
@@ -2673,7 +2656,7 @@ export function ChatsView(props: {
     setShareReadFailure(null);
     setSharesWorkspaceId(null);
     // Nothing is committed for the new workspace yet. Tickets stay monotonic:
-    // an in-flight response from the old workspace holds an older ticket AND
+    // an in-flight response from the old workspace holds an older ticket and
     // fails the token check. The session generation moves too, because
     // refreshShares commits under IT rather than the nav token — an old
     // workspace's share listing must be refused at the commit point.
@@ -2798,7 +2781,7 @@ export function ChatsView(props: {
 
   // Gentle DM poll while the view is open: the other side's messages arrive
   // by relay pull, and the sync is cursor-based (no changes = no work). While a
-  // DM conversation is OPEN the inner 4s poll already runs a full syncDms pass,
+  // DM conversation is open the inner 4s poll already runs a full syncDms pass,
   // so pause this outer poll then — otherwise viewing a DM doubles the
   // relay/sync cadence for no benefit.
   useEffect(() => {
@@ -2990,7 +2973,7 @@ export function ChatsView(props: {
             upToSequence: result.messages.length,
           })
           .then(
-            // Only once the cursor write LANDED (the thread-view precedent),
+            // Only once the cursor write landed (the thread-view precedent),
             // and only when this load actually cleared something: the open-DM
             // poll re-marks on every pass, and reporting those would make the
             // shell's DM revision re-poll the suspended navigator at the
@@ -3074,7 +3057,7 @@ export function ChatsView(props: {
   );
 
   // MU-C4 derived lookups: a channel matches a grant by its WIRE id. A key
-  // that is PRESENT with a null value means "asked, and this workspace holds
+  // that is present with a null value means "asked, and this workspace holds
   // no grant" — an absent key means nobody asked, which is unknown.
   const joinedByWire = useMemo(() => {
     const map = new Map<string, JoinedSharedChannelRow | null>();
@@ -3126,7 +3109,7 @@ export function ChatsView(props: {
         void bridge()
           .markChatThreadRead({ workspaceId, threadId, upToSequence })
           .then(
-            // Only once the cursor write LANDED: a panel refetch before that
+            // Only once the cursor write landed: a panel refetch before that
             // would read the same count back and look like nothing happened.
             () => onThreadRead?.(),
             () => {
@@ -3239,7 +3222,7 @@ export function ChatsView(props: {
         // the user does not have open is only visible here.
         void refreshChannelBadges();
         // The DM roll-up lives on the same list and used to wait for the 5s
-        // poll beside a live channel badge (#545). Same signal, same moment —
+        // poll beside a live channel badge. Same signal, same moment —
         // refreshDms coalesces the burst itself.
         void refreshDms();
         return;
@@ -3359,7 +3342,7 @@ export function ChatsView(props: {
     return unsubscribe;
   }, [props.suspendPolling, refreshForActivity]);
 
-  // The anti-forum move: typing in the channel composer STARTS the chat.
+  // The anti-forum move: typing in the channel composer starts the chat.
   // One Enter = thread + first message; no title prompt exists on this path.
   const startThread = useCallback(async () => {
     if (nav.level !== "channel") return;
@@ -3796,7 +3779,7 @@ export function ChatsView(props: {
 
   // Expand-to-tab seam, outbound: report where this view is (and what's
   // typed) so the shell can seed the next mount with this instance's current
-  // conversation and unsent drafts. While a seed is still PENDING the
+  // conversation and unsent drafts. While a seed is still pending the
   // reports are suppressed — nav/drafts start as mount defaults, and
   // reporting those would overwrite the very state the seed is about to
   // restore (closing the tab while the overview is still loading would then
@@ -3854,7 +3837,7 @@ export function ChatsView(props: {
       setNewThreadBody(drafts.newThreadBody);
       setDmRecipients(drafts.dmRecipients);
       setDmDraft(drafts.dmDraft);
-      // AFTER the open* call above: navigation resets these, and restoring
+      // After the open* call above: navigation resets these, and restoring
       // the composer text without its mode would post a drafted reply (or
       // decision resolution) as a plain top-level comment.
       setReplyTarget(drafts.replyTarget);
@@ -3891,8 +3874,8 @@ export function ChatsView(props: {
   // leavingDm on any navigation away from the DM it was opened for — leaving
   // this DM, opening a different one, or leaving Chats entirely — so a stale
   // confirmation can never reappear over a conversation it wasn't opened for.
-  // Also clears it the moment a field-level refresh of the SAME open DM
-  // (refreshOpenDm) reports connected:false (round 5): an owner revocation
+  // Also clears it the moment a field-level refresh of the same open DM
+  // (refreshOpenDm) reports connected:false: an owner revocation
   // mid-dialog leaves the channelId unchanged, so the nav-change check alone
   // would leave the dialog open — confirming would re-end an already-ended
   // tombstone and promise a request that, for an owner-revoked grant, can
@@ -4113,10 +4096,10 @@ export function ChatsView(props: {
   //    channel shared TO them must publish into a SHARE scope keyed by their
   //    grant's shareId: the relay maps a {kind:"share"} request to the GRANTER's
   //    workspace, so the owner (workspace scope) and every participant (share
-  //    scope) fan into ONE relay scope and see each other. An owner of a shared
+  //    scope) fan into one relay scope and see each other. An owner of a shared
   //    channel — and any plain local channel — uses the plain workspace scope.
   //
-  //  • TOPIC — the per-conversation key BOTH sides must agree on. A channel's
+  //  • TOPIC — the per-conversation key both sides must agree on. A channel's
   //    LOCAL id differs across machines (a replicated channel gets a fresh local
   //    id), so channel presence keys on the cross-machine wireId instead — that
   //    unification is what lets owner + participant meet. The relay's share gate
@@ -4127,7 +4110,7 @@ export function ChatsView(props: {
   //    so typing in one thread never bleeds into a sibling thread.
   //
   // A DIRECT MESSAGE is a kind:"dm" chat channel backed by a chat-channel
-  // grant, so it folds into the SAME derivation: its TOPIC is the DM channel's
+  // grant, so it folds into the same derivation: its TOPIC is the DM channel's
   // cross-machine wireId (channel-level co-presence — a DM has one running
   // thread, so this is the natural "who's here", and both participants agree on
   // the wireId), and its SCOPE is the grant's share scope for the PARTICIPANT
@@ -4149,8 +4132,8 @@ export function ChatsView(props: {
   // The scope's stable identity for memoization: a joined channel pins to its
   // grant's shareId, a DM the viewer PARTICIPATES in pins to that DM grant's
   // shareId (both fan into the granter's workspace scope so both sides meet),
-  // and everything the viewer OWNS — plain channels and owned DMs — pins to the
-  // workspace. The transport is rebuilt ONLY when this changes, so usePresence
+  // and everything the viewer owns — plain channels and owned DMs — pins to the
+  // workspace. The transport is rebuilt only when this changes, so usePresence
   // re-creates its channel on a real scope switch (aborting the old poll — the
   // no-repaint invariant) and never churns on an unrelated re-render.
   const scopeShareId =
@@ -4171,11 +4154,11 @@ export function ChatsView(props: {
     return collaboration.transportForScope(scope);
   }, [collaboration, scopeShareId, workspacePresenceTransport]);
   // Presence stays dormant until the scope is DEFINITIVELY resolved for the
-  // active conversation in the CURRENT workspace: a joined channel's scope is
+  // active conversation in the current workspace: a joined channel's scope is
   // derived from channelShares, so publishing before that share state loads
-  // would land a participant in their OWN workspace scope (convergence lost)
+  // would land a participant in their own workspace scope (convergence lost)
   // and a workspace switch could briefly publish under the previous workspace's
-  // scope. Gating on (channelShares loaded for THIS workspaceId) closes both.
+  // scope. Gating on (channelShares loaded for this workspaceId) closes both.
   const scopeResolved = sharesWorkspaceId === workspaceId;
   const presence = usePresence({
     enabled: collaboration !== null && presenceTopic !== "" && scopeResolved,
@@ -4232,7 +4215,7 @@ export function ChatsView(props: {
     const shares = await bridge()
       .listChatChannelShares({ workspaceId, channelWireIds: shown })
       .catch(() => null);
-    // Deliberately NOT liveToken-guarded: the share listing is
+    // Deliberately not liveToken-guarded: the share listing is
     // workspace-scoped, not conversation-scoped, so navigating into a
     // channel must not discard a session refresh's answer. A workspace
     // switch bumps sessionGeneration, and the commit point refuses the
@@ -4247,7 +4230,7 @@ export function ChatsView(props: {
   // answer clears the previous account's rows without any manual refresh.
   useEffect(() => {
     return bridge().onCloudSessionChanged(({ sessionKey, phase }) => {
-      // A rotation within the SAME session — same server, relay, and user;
+      // A rotation within the same session — same server, relay, and user;
       // the key deliberately excludes the token — invalidates nothing: the
       // rows stay (an outage during rotation must not hide them), in-flight
       // reads stay valid, and the refresh below simply reloads.
@@ -4258,7 +4241,7 @@ export function ChatsView(props: {
         // still in flight must not land the old account's rows after the
         // clear below.
         sessionGeneration.current += 1;
-        // And the previous session's rows leave the SCREEN now, not when
+        // And the previous session's rows leave the screen now, not when
         // the next listing resolves — a stalled relay would otherwise keep
         // showing another account's invitations and emails indefinitely.
         // The joined rows stay: they are local, and channelIsLocked depends
@@ -4293,10 +4276,10 @@ export function ChatsView(props: {
         void refreshShares();
         return;
       }
-      // Same key, two moments. The CHANGING phase refreshes nothing:
+      // Same key, two moments. The changing phase refreshes nothing:
       // mid-transition the credential cache is deliberately empty, and a
       // listing issued now answers an authoritative signed-out that would
-      // clear the very rows the same-key rule preserved. The READY phase is
+      // clear the very rows the same-key rule preserved. The ready phase is
       // adoption end — the one revalidation, now against the settled
       // session, so invitations and revocations from during the reauth
       // land.
@@ -4307,7 +4290,7 @@ export function ChatsView(props: {
   const submitShare = useCallback(async () => {
     // The disabled control is honesty; this is the gate. A submit that slips
     // past it (a stale enter key, a re-render race) would still grow the lane
-    // dohc already cannot list. Only the GRANTED lane, though — an outgoing
+    // dohc already cannot list. Only the granted lane, though — an outgoing
     // share never touches the received one.
     if (grantedLaneIsOverLimit(shareReadFailure)) return;
     if (nav.level !== "channel" || shareBusy) return;
@@ -4350,7 +4333,7 @@ export function ChatsView(props: {
       try {
         await bridge().revokeRelayShare({ shareId });
         if (token !== liveToken.current) return;
-        // The revocation LANDED, so apply it to the cached relay lane before
+        // The revocation landed, so apply it to the cached relay lane before
         // asking the relay to confirm it. The follow-up listing can resolve
         // unreachable, and the keep-cached rule would otherwise keep showing
         // the removed person with a live Remove button. A local action takes
@@ -4358,7 +4341,7 @@ export function ChatsView(props: {
         // the row back; the refresh below is newer still and lands normally.
         //
         // Only under the session it started in: a revoke finishing after a
-        // switch would otherwise claim a NEW ticket in the new session's
+        // switch would otherwise claim a new ticket in the new session's
         // commit order and reject that session's own in-flight answer.
         if (
           session === sessionGeneration.current &&
@@ -4401,7 +4384,7 @@ export function ChatsView(props: {
         props.onError(ipcErrorMessage(error, "Could not join that channel."));
       } finally {
         // Unconditional reset (the sendingRef/startingThreadRef precedent):
-        // refreshOverview bumps liveToken ITSELF, so a token-equality check
+        // refreshOverview bumps liveToken itself, so a token-equality check
         // here can never pass after a successful join and would leave every
         // other Join button dead for the session. A workspace switch already
         // clears joiningShareId in its own effect, so resetting late is
@@ -4449,7 +4432,7 @@ export function ChatsView(props: {
         );
         // In the same update that shows the channel: a channel on screen with
         // no answer in the lane is a locked channel. Registered as answered
-        // LOCALLY, so the read already in flight — issued before this channel
+        // locally, so the read already in flight — issued before this channel
         // existed, and therefore evicting to a view without it — keeps it.
         if (result.channel.wireId) {
           answerLocally(joinedOrder.current, workspaceId, result.channel.wireId);
@@ -4500,27 +4483,27 @@ export function ChatsView(props: {
     }
   }, [nav, openChannel, props.onNavCommand, refreshDms, refreshOverview]);
 
-  // Ends the DM's registry row through the exact leaveSharedChannel mechanism
-  // (#742). The conversation drops out of `dms` immediately; the next
+  // Ends the DM's registry row through the exact leaveSharedChannel mechanism.
+  // The conversation drops out of `dms` immediately; the next
   // syncDms poll's classifyDmRequests puts it back in the request lane
   // because no workspace holds a live row for its shareId anymore. Routes
-  // through goBack for its nav + composer-draft cleanup (#742 P1-B): without
+  // through goBack for its nav + composer-draft cleanup: without
   // it, the next DM opened after leaving could show this one's unsent draft,
   // and Send could reach the wrong person.
   const leaveDmConversation = useCallback(
     async (dm: DmRecord) => {
       const shareId = dm.shareId;
       // The belt effect above already closes the dialog the moment the
-      // record it was opened for loses connected (#742 P2-D, round 5); this
+      // record it was opened for loses connected; this
       // is the same guard at the one call site that can reach here, closing
       // the last sliver of a click/effect race. sendingRef mirrors this
       // DM's own send state the same way the confirm button's disabled prop
-      // does (#742 P2, round 6) — the dialog only ever opens for the
+      // does — the dialog only ever opens for the
       // currently-viewed DM, so it IS this DM's in-flight state.
       if (!shareId || !dm.connected || sendingRef.current) return;
       const token = liveToken.current;
       try {
-        // Presence leave BEFORE the row ends (#742 P2-E): once leaveDm ends
+        // Presence leave before the row ends: once leaveDm ends
         // the share, this DM's presence scope rejects further publish/leave
         // calls (the same ended-grant gate messages use), so the effect
         // cleanup's later best-effort leave would be rejected and peers would
@@ -4535,7 +4518,7 @@ export function ChatsView(props: {
         goBack();
       } catch (error) {
         if (token !== liveToken.current) return;
-        // Re-arm presence (#742 P2, round 3): if leaveDm rejected, the row
+        // Re-arm presence: if leaveDm rejected, the row
         // never ended and this conversation stays open, but presence.leave()
         // already stopped the channel — without this the client goes
         // invisible to peers until it navigates away and back.
@@ -5039,8 +5022,8 @@ export function ChatsView(props: {
           testId="chats-dm"
           onBack={goBack}
           icon={<AtSign size={12} aria-hidden className="shrink-0 text-subtle" />}
-          // A CONNECTED participant (shareId set, not already ended) has a
-          // live placement to reverse (#742); the owner side (shareId null)
+          // A connected participant (shareId set, not already ended) has a
+          // live placement to reverse; the owner side (shareId null)
           // never accepted a grant here, and an already-ended row (owner
           // revoked, or already left) has nothing live to end — confirming
           // would re-end a tombstone and promise a request that, for an
@@ -5061,7 +5044,7 @@ export function ChatsView(props: {
           trailing={<PresenceFaces others={presence.others} />}
         />
         {/* Presence (MU-C1): "viewing" faces + "typing…" for this DM, keyed by
-            its channelWireId and fanned out through the SAME shareForRecipient
+            its channelWireId and fanned out through the same shareForRecipient
             grant gate. Dormant (calm header, no fake liveness) when solo. */}
         <div className={`flex min-h-0 flex-1 flex-col ${pageColumn}`}>
           {dm.threadId ? (
@@ -5365,9 +5348,9 @@ export function ChatsView(props: {
     const channelGrants = nav.channel.wireId
       ? grantedByWire.get(nav.channel.wireId) ?? []
       : [];
-    // Sharing an OWNED channel needs the sharing surface up; a joined channel
+    // Sharing an owned channel needs the sharing surface up; a joined channel
     // is never re-shareable from here (only its owner manages members).
-    // Over the cap, a NEW grant only deepens the state: the relay's create
+    // Over the cap, a new grant only deepens the state: the relay's create
     // path has no matching cap, so each one grows the lane dohc already
     // cannot list, and the granted rows are empty on an over-limit read so
     // the user cannot remove any to make room. A refusal has to leave a way

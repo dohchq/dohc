@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES } from "../src/ipc/channels.ts";
 
 // Static packaging gate: asserts the built tree and electron-builder config
-// are release-ready WITHOUT running electron-builder (no network, no heavy
+// are release-ready without running electron-builder (no network, no heavy
 // packaging). Run after `electron-vite build`.
 
 const desktopDir = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -187,7 +187,7 @@ if (config) {
 
 // --- signing labeling ------------------------------------------------------
 // A production-signed release is never implied: without CSC credentials the
-// build is loudly unsigned, and a release that REQUIRES signing fails here.
+// build is loudly unsigned, and a release that requires signing fails here.
 const hasSigningCredentials = Boolean(process.env.CSC_LINK || process.env.WIN_CSC_LINK);
 if (process.env.DOHC_REQUIRE_SIGNING === "1") {
   check(hasSigningCredentials, "DOHC_REQUIRE_SIGNING=1 demands CSC_LINK/WIN_CSC_LINK in the env");

@@ -79,8 +79,8 @@ async function createLifecycleFixture(options: {
       scripts: options.rootScripts,
     }, null, 2)}\n`,
   );
-  // This is the shape emitted by the fresh pnpm@11.20.0 isolated install:
-  // .modules.yaml names an absolute virtualStoreDir, and physical packages
+  // This is the shape emitted by the fresh pnpm@11.20.0 isolated install:.
+  // Modules.yaml names an absolute virtualStoreDir, and physical packages
   // live under <entry>/node_modules/<name>/package.json.
   await writeFile(
     join(nodeModulesRoot, ".modules.yaml"),
@@ -163,7 +163,7 @@ describe("scanPluginLifecycleScripts", () => {
     // Measured directly against this machine's pinned pnpm@11.20.0: a real
     // frozen install with zero dependencies creates no node_modules
     // directory whatsoever, not merely an empty one (that's the distinct
-    // case the .modules.yaml-less fixture above covers). #777's e2e caught
+    // case the.modules.yaml-less fixture above covers). the e2e caught
     // this — a real hello-plugin install failed closed here with an
     // installation-integrity error before this fix.
     const root = await mkdtemp(join(tmpdir(), "dohc-plugin-lifecycle-"));
@@ -185,7 +185,7 @@ describe("scanPluginLifecycleScripts", () => {
     expect(result).toMatchObject({ ok: true, warnings: [], warningLines: [] });
   });
 
-  it("fails closed on a real permission error whose message happens to mention ENOENT (CodeRabbit #779 R22)", async () => {
+  it("fails closed on a real permission error whose message happens to mention ENOENT", async () => {
     const root = await mkdtemp(join(tmpdir(), "dohc-plugin-lifecycle-"));
     roots.push(root);
     const snapshotRoot = join(root, "snapshot");
@@ -242,7 +242,7 @@ describe("scanPluginLifecycleScripts", () => {
     expect(error.userFacingLines[0]).not.toContain("build-native");
   });
 
-  it("reports a dependency preprepare hook (CERT779 PoC: dependency hooks matched the root set, not a hand-picked subset)", async () => {
+  it("reports a dependency preprepare hook: dependency hooks match the root set, not a hand-picked subset", async () => {
     // Reproduces cert779-report.md finding 2 exactly: a dependency
     // declaring only preprepare (no prepare) previously scanned clean
     // (ok: true, zero warnings) because DEPENDENCY_HOOKS omitted

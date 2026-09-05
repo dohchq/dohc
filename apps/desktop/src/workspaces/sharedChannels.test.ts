@@ -81,7 +81,7 @@ function joined(overrides: Partial<JoinedSharedChannel> = {}): JoinedSharedChann
 }
 
 // The desktop hands the pass two views of the registry, and every test uses the
-// same split: the FULL ordered rows fix the rotation's positions, and the work
+// same split: the full ordered rows fix the rotation's positions, and the work
 // set is what is left after ended rows drop out (main.ts:runSharedChannelSyncPass).
 // Passing one array for both is what let a cursor pin certify inputs production
 // never sends.
@@ -194,8 +194,8 @@ describe("syncJoinedSharedChannels", () => {
     expect(second.uncovered).toBe(15);
   });
 
-  // Worse than a plain revoke: the channel is revoked AND re-granted before the
-  // next pass, so mergeJoinedChannel replaces its row and the OLD share id is
+  // Worse than a plain revoke: the channel is revoked and re-granted before the
+  // next pass, so mergeJoinedChannel replaces its row and the old share id is
   // gone from the registry entirely. The rotation survives it because its cursor
   // names the CHANNEL, and the merge keeps that channel in its place.
   it("steps past a cursor channel revoked and re-granted between passes", async () => {
@@ -267,7 +267,7 @@ describe("syncJoinedSharedChannels", () => {
       pull,
       push,
     });
-    // The written share pushes in THIS pass, first, and it does NOT eat a
+    // The written share pushes in this pass, first, and it does not eat a
     // rotation slot: the rotation still gets its full 16 rows.
     expect(calls.slice(0, 2)).toEqual(["push:share-1", "pull:share-1"]);
     expect(calls).toHaveLength(34);
@@ -323,7 +323,7 @@ describe("syncJoinedSharedChannels", () => {
       ...passOver(channels),
       passRows: 3,
       // The cursor wraps the rotation to share-1, so its range (share-1 ..
-      // share-3) CONTAINS the priority row — the case where a naive fill would
+      // share-3) contains the priority row — the case where a naive fill would
       // spend two of the three slots on share-2.
       resumeAfterChannelWireId: "wire-5",
       priorityChannelWireId: "wire-2",
@@ -662,7 +662,7 @@ describe("createPassCoverageReporter", () => {
 });
 
 describe("createKeyedSerializer", () => {
-  it("serializes runs for the SAME key (a second call waits for the first) and keeps keys independent", async () => {
+  it("serializes runs for the same key (a second call waits for the first) and keeps keys independent", async () => {
     const serialize = createKeyedSerializer();
     const events: string[] = [];
     let releaseFirst!: () => void;
@@ -684,14 +684,14 @@ describe("createKeyedSerializer", () => {
       events.push("b1:end");
     });
 
-    // A DIFFERENT key is not blocked by ws-a's in-flight pass.
+    // A different key is not blocked by ws-a's in-flight pass.
     await other;
     expect(events).toEqual(["a1:start", "b1:start", "b1:end"]);
 
     releaseFirst();
     await first;
     await second;
-    // The second ws-a pass ran ONLY after the first finished — it queued (so
+    // The second ws-a pass ran only after the first finished — it queued (so
     // ops journaled after the first pass started still get their own pass),
     // never overlapped.
     expect(events).toEqual(["a1:start", "b1:start", "b1:end", "a1:end", "a2:start", "a2:end"]);
@@ -734,11 +734,11 @@ describe("mergeJoinedChannel", () => {
       joined({ shareId: "share-old", channelWireId: "wire-1" }),
       joined({ shareId: "share-other", channelWireId: "wire-other" }),
     ];
-    // Same channel, NEW share id (revoked + re-granted): the stale row for
+    // Same channel, new share id (revoked + re-granted): the stale row for
     // the wire id is replaced, not duplicated — and IN PLACE. The sync rotation
     // reads its positions from this array, so appending the re-granted row
     // would move the channel to the end and strand every row the rotation had
-    // not reached yet (#718).
+    // not reached yet.
     const rejoined = mergeJoinedChannel(
       existing,
       joined({ shareId: "share-new", channelWireId: "wire-1" }),
@@ -754,7 +754,7 @@ describe("mergeJoinedChannel", () => {
     expect(rejoinedSameShare[0]!.access).toBe("read-only");
   });
 
-  // The join gate is gone (#640). It existed to bound the joined-lane
+  // The join gate is gone. It existed to bound the joined-lane
   // response, the scoped read bounds that now, and refusing a join could only
   // ever make the user's own channel unreachable — the shape that produced
   // three permanent-refusal defects in one review cycle.
@@ -772,7 +772,7 @@ describe("mergeJoinedChannel", () => {
 
 });
 
-// #640: the joined lane is answered for the channels a caller is SHOWING.
+// The joined lane is answered for the channels a caller is SHOWING.
 // This is what replaced the join gate — the response no longer carries the
 // registry's history, so nothing about the read needs a join to be refused,
 // and tombstones can stay for as long as the write gate needs them.
@@ -789,7 +789,7 @@ describe("scopeJoinedChannels", () => {
     );
   }
 
-  // THE MUTATION TEST for the scoping. Take the scope out of
+  // The mutation test for the scoping. Take the scope out of
   // scopeJoinedChannels — answer the whole array — and this fails on the
   // response size, at every history size below.
   it("answers one row per channel the caller names, however many the account has ever joined", () => {
@@ -887,7 +887,7 @@ describe("scopeJoinedChannels", () => {
   });
 });
 
-// #640 acceptance: tombstones are kept for as long as the write gate needs
+// Acceptance: tombstones are kept for as long as the write gate needs
 // them. Nothing reaps them and nothing compacts them, because nothing depends
 // on their number any more.
 describe("tombstones outlive every revoke-and-grant cycle", () => {
@@ -899,7 +899,7 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
   it("keeps one tombstone per channel through any number of cycles, and still refuses writes", async () => {
     let rows: JoinedSharedChannel[] = [];
     // One channel, revoked and re-granted a thousand times. A re-grant
-    // REPLACES the row for that wire, so it leaves ONE tombstone.
+    // replaces the row for that wire, so it leaves one tombstone.
     for (let cycle = 0; cycle < 1_000; cycle += 1) {
       rows = mergeJoinedChannel(
         rows,
@@ -919,7 +919,7 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
       }),
     ).rejects.toBeInstanceOf(SharedChannelReadOnlyError);
 
-    // DISTINCT channels each keep their own tombstone; nothing reaps them.
+    // Distinct channels each keep their own tombstone; nothing reaps them.
     for (let index = 0; index < 500; index += 1) {
       rows = mergeJoinedChannel(
         rows,
@@ -934,7 +934,7 @@ describe("tombstones outlive every revoke-and-grant cycle", () => {
   });
 });
 
-// #617 codex round 3: there is deliberately NO release helper. A pull is
+// There is deliberately NO release helper. A pull is
 // multi-page and durable, so a failure proves nothing about what landed, and a
 // row removed under landed data is a channel that reads as locally owned. The
 // reservation stays; syncJoinedSharedChannels finishes it or ends it.
@@ -968,7 +968,7 @@ describe("a failed join keeps its reservation", () => {
       joined({ shareId: "share-regranted", channelWireId: "wire-1" }),
     );
     expect(rejoined).toHaveLength(1);
-    // Whatever happens to the pull, SOME row still answers for wire-1.
+    // Whatever happens to the pull, some row still answers for wire-1.
     expect(rejoined.filter((entry) => entry.channelWireId === "wire-1")).toHaveLength(1);
   });
 });
@@ -1031,7 +1031,7 @@ describe("assertSharedChannelWritable", () => {
       });
 
       const readOnlyRows = [joined({ channelWireId: teamWire!, access: "read-only" })];
-      // All three write shapes gate: send/reaction target a THREAD, the
+      // All three write shapes gate: send/reaction target a thread, the
       // composer targets a CHANNEL.
       await expect(
         assertSharedChannelWritable({
@@ -1053,7 +1053,7 @@ describe("assertSharedChannelWritable", () => {
       const messages = await chats.listMessages({ workspaceId: "ws-1", threadId: "team-thread" });
       expect(messages).toHaveLength(1);
 
-      // The SAME channel under a read-write grant stays writable…
+      // The same channel under a read-write grant stays writable…
       await expect(
         assertSharedChannelWritable({
           workspaceId: "ws-1",
@@ -1111,7 +1111,7 @@ describe("assertSharedChannelWritable", () => {
         }),
       ).resolves.toBeUndefined();
 
-      // An ENDED grant rejects writes even when its recorded access is
+      // An ended grant rejects writes even when its recorded access is
       // read-write (revocation → "ended means read-only local copy"): the
       // renderer skipping ended composers is honesty, not authorization.
       const endedRows = [joined({ channelWireId: teamWire!, access: "read-write", ended: true })];

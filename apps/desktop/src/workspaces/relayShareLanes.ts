@@ -2,18 +2,18 @@
 //
 // Two managers split the relay's listing: chat-channel grants belong to the
 // Chats surface (`listChatChannelShares`), path and version shares belong to
-// Settings → Cloud. The split has to be exhaustive for GRANTED rows, because
+// Settings → Cloud. The split has to be exhaustive for granted rows, because
 // ending a share is only possible from the manager that lists it.
 //
-// That is what makes a DAMAGED row awkward. The chat manager scopes by
+// That is what makes a damaged row awkward. The chat manager scopes by
 // `selector.kind` and `channelWireId`, and a damaged row has no selector at
 // all — so a damaged row claiming to be a chat-channel grant can never appear
 // there. Excluding it here too would strand it in neither manager, with no
 // way left to end it.
 //
-// So: a READABLE chat-channel selector is the other manager's, and leaves
-// both lanes. A damaged row stays in GRANTED whatever kind it claims, and is
-// dropped from RECEIVED, where an invitation whose grant cannot be read
+// So: a readable chat-channel selector is the other manager's, and leaves
+// both lanes. A damaged row stays in granted whatever kind it claims, and is
+// dropped from received, where an invitation whose grant cannot be read
 // offers the recipient nothing to accept.
 
 type ShareRow = Record<string, unknown>;

@@ -13,7 +13,7 @@
 //! [`dohc_engine_files::policy::normalized_path_is_secret`], so this module
 //! calls it. A restated copy of the rules would agree with the floor only by
 //! coincidence, and a class added to the floor alone would leave relayed
-//! deletes of it replayable (#484).
+//! deletes of it replayable.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathClass {

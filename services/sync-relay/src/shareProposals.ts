@@ -1,6 +1,6 @@
 import type { ObjectMomentRow, ShareProposalOpRow } from "./storage";
 
-// #646 PR3a — the accept door.
+// The accept door.
 //
 // A recipient proposes a NET CHANGE, never a moment: the served moment drops
 // `momentId`, `objectId` and every `before*` field (`shareFilter.ts`), so a
@@ -19,17 +19,17 @@ import type { ObjectMomentRow, ShareProposalOpRow } from "./storage";
 //   - the recipient was current -> the base IS the object's head -> clean
 //     apply, no conflict;
 //   - the file drifted -> the base is a real, older granter moment -> one
-//     conflict with a CORRECT three-way base, resolved in the conflict UI that
+//     conflict with a correct three-way base, resolved in the conflict UI that
 //     already exists;
 //   - the base resolves to no moment -> the payload states `beforePresent:
-//     "null"`, which fast-forwards ONLY onto an object the granter does not
+//     "null"`, which fast-forwards only onto an object the granter does not
 //     have. A file the granter does have therefore opens a conflict instead of
 //     being silently overwritten by a change with no stated base.
 //
 // No new merge code, no new arbitration.
 
 export interface ProposalMomentContext {
-  // The ONE version the share exposes, from the selector.
+  // The one version the share exposes, from the selector.
   versionId: string;
   // The GRANTER's object id, or a freshly minted one for a file the recipient
   // created. Never the recipient's: its object ids name nothing here.
@@ -38,7 +38,7 @@ export interface ProposalMomentContext {
   // The granter's own moment that produced the content the recipient started
   // from, or null when the base cannot be resolved.
   base: ObjectMomentRow | null;
-  // Where the granter has this object RIGHT NOW, or null when it has it
+  // Where the granter has this object right now, or null when it has it
   // nowhere. Decides `rename` against `write`.
   currentPath: string | null;
   // Minted by the relay. A recipient-supplied id could name a moment the
@@ -54,7 +54,7 @@ export type ProposalMomentResult =
   | { ok: true; payload: Record<string, unknown>; blobSha256: string }
   | { ok: false; reason: string };
 
-// Whether the recipient MOVED the file, as opposed to editing it where it
+// Whether the recipient moved the file, as opposed to editing it where it
 // found it. Stating the same path on both sides is stating no opinion about
 // where the file lives.
 function recipientMoved(op: ShareProposalOpRow): boolean {
@@ -65,10 +65,10 @@ function recipientMoved(op: ShareProposalOpRow): boolean {
 
 // WHERE the change lands.
 //
-// Decided by what the recipient EXPRESSED, never by the path it happened to
+// Decided by what the recipient expressed, never by the path it happened to
 // read. A recipient that edited a file in place said nothing about its
 // location, so if the granter moved the file since, the content belongs at
-// the granter's CURRENT path: a deliberate rename must survive an accepted
+// the granter's current path: a deliberate rename must survive an accepted
 // content edit, and naming the recipient's stale path would silently undo it.
 //
 // A recipient that moved the file said exactly that, and it applies. If the
@@ -104,7 +104,7 @@ export function proposalMomentPayload(
   context: ProposalMomentContext,
 ): ProposalMomentResult {
   // A delete removes content the granter holds, and the moment it writes
-  // carries that content on BOTH sides — the same shape the domain's own
+  // carries that content on both sides — the same shape the domain's own
   // delete emits. Without a resolvable base there is no content to name, so
   // the change cannot be expressed and the accept refuses rather than
   // inventing one.
@@ -165,7 +165,7 @@ export function proposalMomentPayload(
     payload.beforeContentKind = base!.contentKind ?? "text";
     if (base!.byteLength !== null) payload.beforeByteLength = base!.byteLength;
     payload.beforeUpdatedAtMs = base!.recordedAtMs;
-    // THE base. Equal to the granter's head when the recipient was current,
+    // The base. Equal to the granter's head when the recipient was current,
     // an older real moment when the file drifted.
     payload.beforeLatestMomentId = base!.momentId;
   }

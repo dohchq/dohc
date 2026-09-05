@@ -54,7 +54,7 @@ describe("share mounts real daemon", () => {
               baseUrl: "http://unused.invalid",
               token: "unused",
             },
-            // A REAL pinned selector: no paths and no version selects
+            // A real pinned selector: no paths and no version selects
             // nothing at all, which the engine refuses.
             pinnedSelector: { paths: ["docs"], versionId: null, access: "view" },
             recordRefusals: async () => undefined,

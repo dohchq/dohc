@@ -2,7 +2,7 @@
 //! which to retire), and own the watcher **dirty-generation** state machine.
 //!
 //! The plan is the CAL-3 deliverable; actual materialization/capture into the
-//! domain is a thin downstream call (a later shard). Two invariants live here:
+//! domain is a thin downstream call. Two invariants live here:
 //!
 //! - **Prepare, apply, then acknowledge.** A reconcile only prepares a bounded
 //!   plan. [`crate::capture`] applies its operations one at a time, then calls
@@ -12,7 +12,7 @@
 //!   produces no plan, so generation, manifest, and dirty remain untouched.
 //! - **Dirty coalesces but never drops a change.** A watcher overflow (or any
 //!   uncertainty) sets the single dirty flag; many events coalesce to one
-//!   pending rescan, but the flag is cleared ONLY by a completed apply/ack, so
+//!   pending rescan, but the flag is cleared only by a completed apply/ack, so
 //!   evidence of a change is never lost (`plan §Workspace actor model`).
 
 use crate::diff::{ManifestEntry, ScanDiff, ScanManifest, diff_scans};
@@ -85,10 +85,10 @@ pub struct ReconcilePlan {
     pub from_generation: ScanGeneration,
     pub to_generation: ScanGeneration,
     pub ops: Vec<CaptureOp>,
-    /// Previously-tracked paths that are STILL on disk but now exceed the size
-    /// cap. A distinct, no-op disposition: NOT an `Ingest` (can't re-hash),
-    /// NEVER a `Retire` (the file exists). The engine keeps them tracked at
-    /// their last-known-good content (`BEHAVIOR_DELTA.md` CAL-3). Surfaced for
+    /// Previously-tracked paths that are still on disk but now exceed the size
+    /// cap. A distinct, no-op disposition: not an `Ingest` (can't re-hash),
+    /// never a `Retire` (the file exists). The engine keeps them tracked at
+    /// their last-known-good content. Surfaced for
     /// R07 materialization so it can leave these files untouched.
     pub retained_over_cap: Vec<String>,
     /// Missing paths retained because a scan failure or final lstat result did
@@ -177,7 +177,7 @@ pub enum ReconcileRun {
     /// The scan completed and produced a prepared plan. No generation or
     /// manifest state advances until capture applies and acknowledges it.
     Completed(ReconcilePlan),
-    /// The scan was cancelled mid-way. NOTHING was committed: the generation
+    /// The scan was cancelled mid-way. Nothing was committed: the generation
     /// and manifest are unchanged and the dirty flag is preserved, so the next
     /// reconcile completes the work. No partial capture.
     Cancelled,
@@ -353,7 +353,7 @@ impl ReconcileController {
             ScanOutcome::Completed(listing) => listing,
         };
 
-        // Clamp every observed mtime to what the manifest may PAIR with this
+        // Clamp every observed mtime to what the manifest may pair with this
         // scan's hashes ([`recordable_mtime_ms`], the racy-write fence).
         // Everything downstream — the refresh pass and the plan's ops — carries
         // the clamped value, never the raw observation.
@@ -362,7 +362,7 @@ impl ReconcileController {
         }
 
         // Refresh the mtime pairing of every hash-verified unchanged file so
-        // the NEXT scan can reuse its hash (a rehydrated seed carries no
+        // the next scan can reuse its hash (a rehydrated seed carries no
         // mtimes; a touch-without-change moves the mtime while the hash stays
         // put). Content identity (size + hash) is never touched. Changed/added
         // files get their pairing at acknowledgement instead — recording it
@@ -444,7 +444,7 @@ impl ReconcileController {
     /// module after the sink phase; stale receipts fail closed. Applied ingests
     /// record the plan's hash, applied retires remove the path, and
     /// [`IngestOutcome::NotOwned`](crate::capture::IngestOutcome) dispositions
-    /// FORGET the path — a not-owned path must never read as already-captured,
+    /// forget the path — a not-owned path must never read as already-captured,
     /// or a later ownership change (policy widened, content became ownable
     /// again) would silently skip its re-ingest.
     pub(crate) fn acknowledge_capture(
@@ -483,16 +483,16 @@ impl ReconcileController {
                     ..
                 } => {
                     // A re-reading sink can persist newer bytes than the scan
-                    // hashed; record what was ACTUALLY captured so a later
+                    // hashed; record what was actually captured so a later
                     // revert to the scan-time bytes still diffs as a change.
-                    // A receipt claiming an applied ingest WITHOUT its captured
+                    // A receipt claiming an applied ingest without its captured
                     // identity is malformed — falling back to the scan hash
                     // would recreate the exact lost-capture bug this exists to
                     // prevent, so it fails closed before any state advances.
                     let Some((size, sha)) = captured.get(path.as_str()) else {
                         return Err(FilesError::InvalidCaptureReceipt { path: path.clone() });
                     };
-                    // The scan-time mtime pairs ONLY with the scan-time hash: a
+                    // The scan-time mtime pairs only with the scan-time hash: a
                     // sink that persisted different bytes than the scan hashed
                     // leaves no mtime observation for what it captured, so
                     // that entry records 0 and the next scan re-hashes it once
@@ -577,7 +577,7 @@ impl ReconcileController {
 
 /// Worst-case filesystem mtime granularity: exFAT/FAT truncate mtimes to 2s
 /// (ext3, HFS+, and SMB servers to 1s), so a stat can report an mtime up to a
-/// full granule OLDER than the write that produced it.
+/// full granule older than the write that produced it.
 const MTIME_GRANULARITY_MARGIN_MS: i64 = 2000;
 
 /// The mtime a manifest entry may pair with a hash computed by a scan that
@@ -693,7 +693,7 @@ mod ack_receipt_tests {
     }
 
     /// A side-effect retire (the driver's over-cap policy-exclusion path)
-    /// reports a path that never appeared in `plan.ops`. The manifest MUST
+    /// reports a path that never appeared in `plan.ops`. The manifest must
     /// drop it: leaving the entry would claim the path is still tracked at
     /// content whose head was just deleted, so a later policy widen would
     /// diff clean and never re-ingest it.

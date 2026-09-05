@@ -167,7 +167,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             refused,
             dohc_engine_runtime::YdocSettleOutcome::RemoteUpdatesPending { .. }
         ),
-        "MUTATION: excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
+        "excluding identity-refused applied rows from drained lets settle succeed: {refused:?}"
     );
     supervisor.close(&db).expect("close actor");
 
@@ -262,9 +262,9 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     supervisor.close(&db).expect("close actor");
 
     // Rebind: rename the settled file away, then capture identical bytes at
-    // the old path — capture's locked resolution mints a DISAMBIGUATED object
+    // the old path — capture's locked resolution mints a disambiguated object
     // (the derived id is live at the new alias), so PATH's head is now
-    // another object with the SAME blob sha.
+    // another object with the same blob sha.
     {
         let mut store = EngineStore::open(&db, 100).expect("open store");
         VersionedTextStore::new(&mut store)
@@ -418,7 +418,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         .await
         .expect("prune close");
 
-    // The head advances WITHOUT a session: an external disk edit ingested by
+    // The head advances without a session: an external disk edit ingested by
     // capture (disk + DB stay consistent).
     std::fs::write(scratch.path().join(PATH), "external edit").expect("disk edit");
     handle
@@ -443,7 +443,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
         .await
         .expect("external capture");
 
-    // Reopen: the pruned lineage reseeds from the NEW head, and its first
+    // Reopen: the pruned lineage reseeds from the new head, and its first
     // settle must succeed. Mutation check: drop `last_settled_sha = NULL`
     // from the prune UPDATE in `close_session` — the settle expectation then
     // trails at the v1 sha and this settle refuses ConflictStaleTarget.
@@ -566,7 +566,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
         )
         .await
         .expect("settle");
-    // Workspace teardown WITHOUT ydoc.close: the lineage (rows +
+    // Workspace teardown without ydoc.close: the lineage (rows +
     // last_settled_sha) survives. The user then deletes the file and the
     // disk-driven retire destroys the head.
     std::fs::remove_file(scratch.path().join(PATH)).expect("delete artifact");
@@ -591,10 +591,10 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
         .await
         .expect("retire");
 
-    // Reopen: the deleted document must NOT resurrect, and the fresh
+    // Reopen: the deleted document must not resurrect, and the fresh
     // create-flow must settle cleanly. Mutation check: drop the
     // retired-lineage clearing in ydoc_open_state_on_store — the open
-    // reports lineage EXISTING and the settle below wedges
+    // reports lineage existing and the settle below wedges
     // ConflictStaleTarget on the retained last_settled_sha.
     let reopened = handle
         .ydoc_open_state(
@@ -658,7 +658,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     // Portable twin of the windows-only exclusive-lock tests: the crash
-    // fault at materialize.after-job-commit leaves the SAME durable state a
+    // fault at materialize.after-job-commit leaves the same durable state a
     // transient replace failure does (committed marker + pending ydoc-mat_
     // job + stale disk), so the replay path gets non-Windows coverage.
     // Mutation check: drop the pending-job probe from `close_session`'s

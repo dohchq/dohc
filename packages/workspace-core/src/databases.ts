@@ -142,7 +142,7 @@ export function serializeDatabaseOperation(op: DatabaseOperation): string {
 // 32-bit FNV-1a over the exact path (pure JS — workspace-core must stay
 // renderer-safe, so no node:crypto). The readable slug alone is ambiguous
 // ("a/b.sqlite" and "a_b.sqlite" both slug to "a_b.sqlite"); the tag makes two
-// databases' logs collide only if BOTH slug and hash collide.
+// databases' logs collide only if both slug and hash collide.
 function pathTag(path: string): string {
   let hash = 0x811c9dc5;
   for (const char of path) {

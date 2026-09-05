@@ -4,11 +4,11 @@
 //! *restore test* proves the copy is openable and consistent. This module:
 //!
 //! 1. **Preflights free space** through the [`FreeSpaceProbe`] seam and refuses
-//!    on disk-full BEFORE touching anything — it never deletes the only valid
+//!    on disk-full before touching anything — it never deletes the only valid
 //!    source to make room.
 //! 2. **Copies** the live database with `VACUUM INTO` (a clean, WAL-free single-
 //!    file snapshot) into a private recovery directory the caller places
-//!    OUTSIDE the workspace root (owner-only where supported; the caller keeps
+//!    outside the workspace root (owner-only where supported; the caller keeps
 //!    it excluded from watch/search/sync).
 //! 3. **Restore-tests**: opens the copy read-only, runs `integrity_check`, and
 //!    compares row counts of the durable tables against the source. Only then
@@ -16,7 +16,7 @@
 //! 4. **Writes a redaction-safe manifest** (opaque engine id, build, schema
 //!    fingerprint, checksum, size, retention) — never document content. A
 //!    backup with no manifest is invalid-by-absence and never counted.
-//! 5. **Reads back through [`load_valid_backup`]**, which ENFORCES those
+//! 5. **Reads back through [`load_valid_backup`]**, which enforces those
 //!    invariants: it returns `None` for a missing manifest (invalid-by-absence)
 //!    or a checksum that no longer matches the db bytes (tamper / partial
 //!    write). A backup is only trusted through this validated read path.
@@ -131,7 +131,7 @@ impl FreeSpaceProbe for RealFreeSpace {
 /// file paths — only opaque identity and integrity metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupManifest {
-    /// Opaque engine identity (the `engine_ownership.engine_uuid`), NOT a path.
+    /// Opaque engine identity (the `engine_ownership.engine_uuid`), not a path.
     pub engine_uuid: String,
     pub engine_build: String,
     pub schema_fingerprint: i64,
@@ -185,7 +185,7 @@ impl BackupManifest {
     }
 }
 
-/// Load and VALIDATE a backup pair `(<stem>.db, <stem>.manifest.json)` from
+/// Load and validate a backup pair `(<stem>.db, <stem>.manifest.json)` from
 /// `recovery_dir`. Returns `Some(record)` only when the manifest is present,
 /// well-formed, marked `verified`, and its recorded checksum matches the current
 /// db bytes. Returns `None` for:
@@ -195,7 +195,7 @@ impl BackupManifest {
 /// - an unverified manifest,
 /// - a checksum mismatch (tampered or partially-written bytes).
 ///
-/// This is the ONLY sanctioned way to trust a backup; the documented invariants
+/// This is the only sanctioned way to trust a backup; the documented invariants
 /// are enforced here rather than assumed by a reader.
 pub fn load_valid_backup(
     recovery_dir: &Path,
@@ -280,7 +280,7 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
 }
 
 /// Create a verified backup of `store` into `recovery_dir` (which the caller
-/// keeps OUTSIDE the workspace root). `backup_stem` names the pair
+/// keeps outside the workspace root). `backup_stem` names the pair
 /// (`<stem>.db` + `<stem>.manifest.json`).
 pub fn create_verified_backup(
     store: &EngineStore,
@@ -294,7 +294,7 @@ pub fn create_verified_backup(
     let source_size = store.database_size_bytes()?;
     let needed = source_size.saturating_add(BACKUP_HEADROOM_BYTES);
 
-    // 1. Preflight free space BEFORE touching disk. Fail closed on disk-full;
+    // 1. Preflight free space before touching disk. Fail closed on disk-full;
     //    never delete the only valid source to make room.
     let available = probe.available_bytes(recovery_dir)?;
     if available < needed {
@@ -307,7 +307,7 @@ pub fn create_verified_backup(
     let backup_path = recovery_dir.join(format!("{backup_stem}.db"));
     let manifest_path = recovery_dir.join(format!("{backup_stem}.manifest.json"));
     // Copy into a disposable STAGING path first, so any existing verified backup
-    // with this stem is only replaced AFTER the new copy is restore-tested — a
+    // with this stem is only replaced after the new copy is restore-tested — a
     // crash never destroys the last valid restore point to make room for an
     // unverified one. VACUUM INTO also refuses a pre-existing target, so a stale
     // staging file is cleared (staging is scratch, safe to delete).
@@ -346,7 +346,7 @@ pub fn create_verified_backup(
     };
 
     // 5. Publish: the verified staging copy is atomically renamed into place
-    //    FIRST (a prior backup's bytes are replaced only by verified bytes),
+    //    first (a prior backup's bytes are replaced only by verified bytes),
     //    then the manifest is written LAST. The manifest is the validity marker,
     //    so a crash after the db-rename but before the manifest leaves the new
     //    verified db invalid-by-absence-of-manifest; a retry re-manifests and no

@@ -1,4 +1,4 @@
-// Where a path REALLY lands inside a workspace root, and which reservation
+// Where a path really lands inside a workspace root, and which reservation
 // refuses that location. Both answers come from here and nowhere else: every
 // surface that decides authority from a path (MCP tools, the desktop main
 // process) asks the same two questions of the same code, so no surface can
@@ -19,17 +19,17 @@ export type PathAccess = "read" | "write" | "entry";
 // WHERE does `absolute` really land inside `root`, after symlinks? Lexical
 // containment (the path validators) stops ../ and friends, but a symlink that
 // already exists inside the workspace can point anywhere; every later fs call
-// would follow it. We realpath the deepest EXISTING ancestor (the file itself
+// would follow it. We realpath the deepest existing ancestor (the file itself
 // for reads, its parent chain for not-yet-created targets) and require it to
 // stay under the canonical root. The root itself may legitimately be a symlink,
 // so we compare against realpath(root).
 //
-// Returns the real path RELATIVE to the canonical root, with the still-absent
+// Returns the real path relative to the canonical root, with the still-absent
 // tail appended — the answer callers need to judge where the operation lands,
 // not just whether it is inside. Every failure refuses.
 //
 // `resolvedAbsolute` is that same answer as an absolute path: the resolution
-// this walk performed, offered so a caller acts on the path it JUDGED instead
+// this walk performed, offered so a caller acts on the path it judged instead
 // of resolving a second time and hoping the two agree. In `noFollow` mode it
 // is the resolved PARENT plus the held-back name, which is the entry the
 // caller renames — not wherever that entry points.
@@ -41,7 +41,7 @@ export type RealTarget =
   | { ok: false; reason: "unresolvable-symlink"; code: string }
   | { ok: false; reason: "unreadable-path"; code: string };
 
-// The only two errnos that mean NOTHING is at a path. Every other one leaves
+// The only two errnos that mean nothing is at a path. Every other one leaves
 // the question unanswered, and an unanswered question is not a "no".
 const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
 const UNNAMED_ERROR = "unknown error";
@@ -54,11 +54,11 @@ function errnoCode(error: unknown): string | null {
 // `noFollow` says the caller mutates the ENTRY at `absolute` rather than
 // reading or writing through it -- delete and a move's source, both of which
 // rename the entry itself. Its final name is then held back and only the
-// PARENT chain is resolved, because where that entry POINTS is not the
+// PARENT chain is resolved, because where that entry points is not the
 // question: a link there is the thing being removed, whether it is live,
 // broken, or looping. The parent must still resolve inside the root, and the
 // caller still decides the reserved rule on the parent's real path plus this
-// name, so an alias INSIDE a reserved area still refuses.
+// name, so an alias inside a reserved area still refuses.
 export async function realRelativeInRoot(
   root: string,
   absolute: string,
@@ -70,7 +70,7 @@ export async function realRelativeInRoot(
   } catch (error) {
     return { ok: false, reason: "unreadable-root", code: errnoCode(error) ?? UNNAMED_ERROR };
   }
-  // A filesystem root realpaths WITH its separator (`C:\`, `/`); nothing else
+  // A filesystem root realpaths with its separator (`C:\`, `/`); nothing else
   // does. Drop it so one prefix test and one slice serve both.
   if (realRoot.endsWith(sep)) realRoot = realRoot.slice(0, -1);
   const absentTail: string[] = [];
@@ -87,13 +87,13 @@ export async function realRelativeInRoot(
       real = await realpath(probe);
     } catch (error) {
       // A component realpath cannot resolve is only safe to call "not there
-      // yet" when NOTHING is there. A dangling symlink is present, and
+      // yet" when nothing is there. A dangling symlink is present, and
       // whatever creates its target later decides where this path lands.
       // lstat separates absent from present; realpath cannot.
       //
       // A permission or I/O error answers neither question. Climbing past it
       // would append the component as spelling, and spelling is exactly what
-      // the reserved rule must not decide on (#638) — so it refuses instead.
+      // the reserved rule must not decide on — so it refuses instead.
       const realpathCode = errnoCode(error) ?? UNNAMED_ERROR;
       const climbable = ABSENT_CODES.has(realpathCode) || realpathCode === "ELOOP";
       if (!climbable) return { ok: false, reason: "unreadable-path", code: realpathCode };
@@ -131,7 +131,7 @@ export async function realRelativeInRoot(
   }
 }
 
-// WHICH rule refuses this resolved path, or null when none does. It names the
+// Which rule refuses this resolved path, or null when none does. It names the
 // matched rule rather than answering yes/no, because a refusal has to state the
 // constraint it actually hit: an alias landing in `.git` is not refused by the
 // `.dohc` reservation, and saying so would send a reader to the wrong rule.

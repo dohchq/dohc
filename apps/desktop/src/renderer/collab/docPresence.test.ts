@@ -121,14 +121,14 @@ describe("bindDocPresence", () => {
     // y-protocols applies whatever clientIDs an update embeds — it never
     // validates ownership. These are the client-side guards: (1) a yc slot is
     // bound to the first server-authenticated presence entry that claimed it,
-    // (2) no remote peer may claim OUR clientID, (3) an update embedding any
+    // (2) no remote peer may claim our clientID, (3) an update embedding any
     // id other than the claimed yc is rejected wholesale.
     const forgedUpdate = (targetYc: number, name: string): string => {
       const doc = new Y.Doc();
       doc.clientID = targetYc;
       const aw = new Awareness(doc);
       // Bump the clock well past the honest peer's so, unguarded, this forgery
-      // WOULD win the awareness merge.
+      // would win the awareness merge.
       for (let i = 0; i < 5; i += 1) aw.setLocalState({ user: { name, color: "#000" } });
       const update = Buffer.from(encodeAwarenessUpdate(aw, [targetYc])).toString("base64");
       aw.destroy();
@@ -151,7 +151,7 @@ describe("bindDocPresence", () => {
       updatedAtMs: 0,
     };
 
-    // A controllable transport so each snapshot arrives AFTER we know yc ids.
+    // A controllable transport so each snapshot arrives after we know yc ids.
     let notify: ((s: PresenceSnapshot) => void) | null = null;
     let version = 0;
     const push = async (peers: PresencePeer[]): Promise<void> => {
@@ -207,7 +207,7 @@ describe("bindDocPresence", () => {
     expect(aliceState?.user?.name).toBe("Alice");
     expect(onPeers.mock.calls.at(-1)?.[0]).not.toContain("Impostor");
 
-    // (2) Mallory claims OUR clientID: dropped, local state untouched.
+    // (2) Mallory claims our clientID: dropped, local state untouched.
     await push([
       alicePeer,
       {
@@ -221,7 +221,7 @@ describe("bindDocPresence", () => {
     expect(localState?.user?.name).toBe("Me");
 
     // (3) Mallory claims her own (unowned) yc but smuggles Alice's id into the
-    // update: rejected wholesale — Alice intact AND Mallory never applied.
+    // update: rejected wholesale — Alice intact and Mallory never applied.
     const smuggleDoc = new Y.Doc();
     smuggleDoc.clientID = 424242;
     const smuggleAw = new Awareness(smuggleDoc);
@@ -259,7 +259,7 @@ describe("bindDocPresence", () => {
   });
 
   it("tolerates malformed peer state: bad yc/update are skipped, non-string names never reach onPeers", async () => {
-    // A rogue peer publishes a REAL Yjs awareness update whose user.name is an
+    // A rogue peer publishes a real Yjs awareness update whose user.name is an
     // object — applyAwarenessUpdate accepts it, so the name filter is the only
     // thing keeping the `string[]` contract of onPeers.
     const rogueDoc = new Y.Doc();

@@ -188,7 +188,7 @@ export type PluginPipelineStatusEvent =
   // one honest fact available: discovery itself changed, not which
   // plugin.
   | { kind: "discovery-changed" }
-  // Emitted only where the pipeline itself has PROVEN a rename — the same
+  // Emitted only where the pipeline itself has proven a rename — the same
   // id reappearing at a new directory within one watcher batch
   // (processWatcherBatch's own renamedDirectory), or an offline rename
   // startup resolves by matching content hash. Consumers that would
@@ -664,10 +664,10 @@ function candidateKey(candidate: InstalledPluginRecord): string {
 // Two rows can share an id (a broken manifest's directory-derived fallback
 // colliding with some other, unrelated plugin's real id), each with its
 // own open uninstall confirmation dialog. Keying uninstallConfirmations by
-// pluginId alone let a SECOND row's preflight silently overwrite the
-// FIRST's still-open confirmation — confirming the first dialog would
+// pluginId alone let a second row's preflight silently overwrite the
+// first's still-open confirmation — confirming the first dialog would
 // either fail on a token that no longer matches, or worse, go on to
-// resolve and delete whatever row the SECOND preflight actually named.
+// resolve and delete whatever row the second preflight actually named.
 function uninstallConfirmationKey(pluginId: string, directoryName: string): string {
   return `${pluginId}\0${directoryName}`;
 }
@@ -749,7 +749,7 @@ export class PluginPipeline {
    * write landing in that window leaves the recorded approval describing a
    * tree that is already gone. The queued refresh then holds for approval,
    * which is right — nothing may auto-approve a hash nobody approved — but
-   * the user edited nothing, so the hold has to name what moved (#803).
+   * the user edited nothing, so the hold has to name what moved.
    */
   private readonly freshInstallsInFlight = new Set<string>();
   private readonly sourceChangedDuringInstall = new Set<string>();
@@ -770,7 +770,7 @@ export class PluginPipeline {
   }
 
   /**
-   * The single PluginHost this pipeline owns for its workspace. #777's panel
+   * The single PluginHost this pipeline owns for its workspace. the panel
    * surface shares this instance (rather than creating its own host) so a
    * panel and the install/build pipeline can never race two independent
    * hosts over the same plugin id.
@@ -789,7 +789,7 @@ export class PluginPipeline {
    * every settings call names a directory, and only one this workspace
    * discovered has declarations to answer with. Resolved by directoryName,
    * never id — an id is only ever a broken manifest's directory-derived
-   * fallback, which can coincide with some OTHER, unrelated plugin's real
+   * fallback, which can coincide with some other, unrelated plugin's real
    * id, and one directory is always exactly one discovery entry.
    *
    * The running build's own status, not the freshest on-disk manifest, is
@@ -801,7 +801,7 @@ export class PluginPipeline {
    * to trace to this directory yet (never installed) does the fresh
    * manifest answer instead — status.directoryName, not merely a status
    * keyed under this candidate's id, guards against a stale or colliding
-   * status entry a shared id can still hold under a DIFFERENT directory.
+   * status entry a shared id can still hold under a different directory.
    */
   private declaredSettings(directoryName: string): PluginSettingDeclaration[] {
     const candidate = this.discovery.find(
@@ -833,8 +833,8 @@ export class PluginPipeline {
     // manifest's directory-derived fallback colliding with some other,
     // unrelated plugin's real id), and pluginId's own persisted record is
     // what proves which directory it actually belongs to. A record that
-    // positively names a DIFFERENT directory means this id's real bytes are
-    // the OTHER row's, not this one's, to report.
+    // positively names a different directory means this id's real bytes are
+    // the other row's, not this one's, to report.
     const state = await this.localState();
     const record = state.plugins[pluginId];
     if (record?.directoryName !== undefined && record.directoryName !== directoryName) {
@@ -868,7 +868,7 @@ export class PluginPipeline {
    * always read and written under directoryName. directoryName also gates
    * the notification itself: two directories can share an id, and
    * pluginHost only ever runs one of them under it at a time — telling it
-   * about a save meant for the OTHER one would hand a running process
+   * about a save meant for the other one would hand a running process
    * values it never asked for. */
   async setPluginSettings(
     directoryName: string,
@@ -967,7 +967,7 @@ export class PluginPipeline {
    * for an internal-only field) and never by scanning diagnostic text
    * (bounded and re-worded for display, not a stable machine-checked
    * signal). addOfferedPlugin's own handler uses this to detect its copy
-   * having WON a collision another directory already held the id under.
+   * having won a collision another directory already held the id under.
    */
   findDirectorySupersededBy(pluginId: string): string | null {
     return this.discovery.find(
@@ -1024,7 +1024,7 @@ export class PluginPipeline {
    * null registration back needs this distinction: falling back to its own
    * last-known-good record is right for "unknown," but reading the failed
    * candidate's own raw manifest straight off disk instead is exactly what
-   * pluginRegistration()'s own refusal was for (#779 round 23 finding 1).
+   * pluginRegistration()'s own refusal was for.
    */
   hasUnrecoverableFailedReplacement(pluginId: string): boolean {
     return this.recoveryState.get(pluginId) === null;
@@ -1194,7 +1194,7 @@ export class PluginPipeline {
 
   /**
    * Starts an already-approved, hash-verified plugin if it isn't already
-   * running, refusing otherwise. This is the gate #777's panel surface calls
+   * running, refusing otherwise. This is the gate the panel surface calls
    * before it can execute a plugin's process: opening a panel must never run
    * code this pipeline hasn't verified and built. Unlike `enable()`, this
    * never clears a `disabled` flag — a user's explicit disable must not be
@@ -1622,7 +1622,7 @@ export class PluginPipeline {
           hooks,
         );
       }
-      // Resolved from what THIS confirmation's own preflight named, never
+      // Resolved from what this confirmation's own preflight named, never
       // a fresh lookup a caller could otherwise steer — the row an
       // uninstall deletes can never drift from the one its own preflight
       // reported on.
@@ -1632,7 +1632,7 @@ export class PluginPipeline {
         record,
       );
       // State/artifacts might be filed under the id the record was
-      // ORIGINALLY installed under, not pluginId: a broken manifest gives
+      // originally installed under, not pluginId: a broken manifest gives
       // discovery a directory-derived fallback id,
       // and installedRecord's own directoryName join is what already finds
       // the persisted record across that mismatch. Deleting only under
@@ -1640,11 +1640,11 @@ export class PluginPipeline {
       // nothing else ever visits it again once the discovery entry for
       // this directory is gone.
       //
-      // pluginId itself only joins cleanup when nothing PROVES it belongs
+      // pluginId itself only joins cleanup when nothing proves it belongs
       // to a different directory — a persisted record's own directoryName
       // is that proof, for every piece of cleanup here, not only which
       // directory's SOURCE gets deleted: an invalid row's own fallback id can
-      // coincide with some OTHER, unrelated, installed plugin's real id,
+      // coincide with some other, unrelated, installed plugin's real id,
       // and that installation's record genuinely lives under this exact
       // key — disabling it, stopping its running process, and deleting its
       // build and state right along with the invalid row's source.
@@ -1656,7 +1656,7 @@ export class PluginPipeline {
 
       // Guarded: candidate.id can collide with an unrelated, installed
       // plugin's real id, and this.statuses is keyed by that id alone — an
-      // unguarded write here would show THAT plugin as uninstalling and
+      // unguarded write here would show that plugin as uninstalling and
       // then, on this action's own status transitions below, keep
       // overwriting an entry that was never this row's to begin with.
       // Skipping the write costs the invalid row nothing visible: list()
@@ -1904,7 +1904,7 @@ export class PluginPipeline {
           // recoverable/cleanup path already handles that; this candidate
           // — a fresh, unrelated one from the record's point of view —
           // still gets the reconciliation below, which verifies its own
-          // hash against this SAME approvedHash and correctly holds for
+          // hash against this same approvedHash and correctly holds for
           // approval on the mismatch rather than auto-trusting it.
         }
         this.enqueueSourceRefresh(candidate.id, (change) =>
@@ -1947,19 +1947,19 @@ export class PluginPipeline {
   }
 
   /**
-   * Every id whose OWN persisted record traces to this candidate's
+   * Every id whose own persisted record traces to this candidate's
    * directory — including candidate.id itself, when a record happens to be
    * filed under exactly that key. Deliberately its own scan, not
-   * installedRecord's: installedRecord returns the FIRST match by
+   * installedRecord's: installedRecord returns the first match by
    * id-then-directory, correct for seeding one status from one
    * installation, but uninstall()'s own "mark disabled before delete" step
    * (a crash-safety marker, run at the very start of every attempt) writes
-   * a bare record under the candidate's OWN id with no directoryName at
-   * all — installedRecord's byId branch would match that marker on a RETRY
+   * a bare record under the candidate's own id with no directoryName at
+   * all — installedRecord's byId branch would match that marker on a retry
    * and stop there, never reaching the real record a partially-failed
-   * first attempt left behind under the ORIGINAL id.
+   * first attempt left behind under the original id.
    *
-   * candidate.id is deliberately NOT excluded here: a broken manifest's
+   * candidate.id is deliberately not excluded here: a broken manifest's
    * discovery id (candidate.id) and the caller's pluginId can differ (a
    * row installed under one id, later discovered by its directory-derived
    * fallback), and a genuine record filed under candidate.id's own key —
@@ -1982,11 +1982,11 @@ export class PluginPipeline {
 
   /**
    * Whether pluginId's own persisted record — if any — genuinely belongs
-   * to candidate's directory, rather than to some OTHER, unrelated
+   * to candidate's directory, rather than to some other, unrelated
    * installation whose real id happens to collide with candidate's own
    * fallback id. Nothing recorded there yet is not evidence of a
    * collision, so this reads true by default; only a record that
-   * positively names a DIFFERENT directory excludes pluginId. Shared by
+   * positively names a different directory excludes pluginId. Shared by
    * uninstallPreflight (what the confirmation warns about and compares
    * against) and uninstall (what cleanup actually touches), so both agree.
    */
@@ -2000,14 +2000,14 @@ export class PluginPipeline {
 
   /**
    * Whether a caller-supplied (pluginId, directoryName) pair names a
-   * genuine relationship, checked BEFORE any side effect runs — stricter
+   * genuine relationship, checked before any side effect runs — stricter
    * than pluginIdTracesDirectory, which defaults to true on no evidence
    * (right for deciding whether an ALREADY-accepted pluginId also gets
    * touched by cleanup, wrong for deciding whether to accept the pair at
    * all). A pair is valid when pluginId is exactly the row's own current
    * id (candidate.id, resolved by directory — the ordinary case), or
    * pluginId's own persisted record positively names this exact directory
-   * (a broken manifest's ORIGINAL id — still valid even though it differs
+   * (a broken manifest's original id — still valid even though it differs
    * from candidate.id). Anything else — an arbitrary or
    * stale combination naming two unrelated rows — is rejected outright,
    * before uninstallRootPath or any cleanup identity is resolved from it.
@@ -2022,9 +2022,9 @@ export class PluginPipeline {
 
   /**
    * Whether this.statuses' entry at candidate.id — if any — genuinely
-   * belongs to candidate's own directory, rather than to some OTHER,
+   * belongs to candidate's own directory, rather than to some other,
    * unrelated installation whose real id happens to collide with this
-   * candidate's own fallback id. setStatus(candidate, ...) writes THAT
+   * candidate's own fallback id. setStatus(candidate,...) writes that
    * key; calling it when this is false would overwrite an entry that
    * belongs entirely to someone else's plugin — exactly the harm
    * cleanupIds's own pluginIdTracesHere guard closes for disk state, kept
@@ -2123,7 +2123,7 @@ export class PluginPipeline {
     const replaced = new Set<string>();
     const departing: InstalledPluginRecord[] = [];
     const replacements: InstalledPluginRecord[] = [];
-    // The new directoryName a departing id's OWN settings entry should
+    // The new directoryName a departing id's own settings entry should
     // move to — set only when this exact id reappears, within this same
     // batch, under a different directory: the one case the pipeline can
     // prove is a rename rather than an unrelated departure and a
@@ -2154,7 +2154,7 @@ export class PluginPipeline {
       }
 
       departing.push(oldCandidate);
-      // Not a rename when sameId's directory already existed as SOME
+      // Not a rename when sameId's directory already existed as some
       // candidate before this batch (valid or not) — that is a duplicate
       // this id was already sharing, now promoted into the vacancy
       // oldCandidate's own departure just opened, never oldCandidate's own
@@ -2229,7 +2229,7 @@ export class PluginPipeline {
     // never installed gets no status entry and so no "changed"/"removed"
     // event of its own above — the only signal left honest enough to name
     // is that discovery's invalid set itself moved. Fingerprinted by
-    // directoryName AND its diagnostics, not directoryName alone: one
+    // directoryName and its diagnostics, not directoryName alone: one
     // malformed manifest replaced by another, differently malformed one
     // leaves the directory NAME set unchanged while the row's own
     // diagnostics — what the Plugins view actually shows for it — did
@@ -2286,7 +2286,7 @@ export class PluginPipeline {
   ): Promise<PluginHostStartResult<void>> {
     // Consumed first, before any early return: this is the refresh the racing
     // write queued, and a mark left behind by an install that never recorded
-    // an approval would explain a later, unrelated hold (#803).
+    // an approval would explain a later, unrelated hold.
     const racedInstall = this.sourceChangedDuringInstall.delete(pluginId);
     const candidate = this.validCandidate(pluginId);
     if (!candidate) return existingHostResult(undefined);
@@ -2305,7 +2305,7 @@ export class PluginPipeline {
       : undefined;
     // Captured before verifyApprovedSource's own snapshotOrThrow clears it
     // to a busy "snapshotting" status — restored below if this reconcile
-    // turns out to be a no-op (#779 round 20 finding 3).
+    // turns out to be a no-op.
     const priorStatus = this.statuses.get(pluginId);
     const verified = await this.verifyApprovedSource(candidate, record.approvedHash);
     if (verified.kind === "failed") return existingHostResult(undefined);
@@ -2315,8 +2315,7 @@ export class PluginPipeline {
       // exact hash too (alsoAcceptHash), one shared rule. Gated on
       // hasRecoverableFailure, the same fact Retry itself requires: once a
       // later hold genuinely ends this recovery, a stale attempt hash must
-      // not resurrect it for content that only happens to match again
-      // (#779 round 21 finding 3).
+      // not resurrect it for content that only happens to match again.
       if (
         priorStatus &&
         this.hasRecoverableFailure(pluginId) &&
@@ -2497,7 +2496,7 @@ export class PluginPipeline {
     // The old runtime a recovery would have preserved is genuinely gone
     // now, whatever reason stopped it — the recovery this key stood for
     // ends here too, or a stale attempt hash could resurrect it later for
-    // content that only happens to match again (#779 round 21 finding 3).
+    // content that only happens to match again.
     this.recoveryState.delete(pluginId);
     this.lastApprovedAttemptHash.delete(pluginId);
     // The stop already happened — mark it before running its consequences,
@@ -2672,7 +2671,7 @@ export class PluginPipeline {
     // since recoveryState has no key for it yet. If the attempt then fails
     // with nothing recoverable from the live root, the catch below needs
     // what those fields held before this attempt touched them, not
-    // whatever they drifted to along the way (#779 round 22 finding 5).
+    // whatever they drifted to along the way.
     const priorStatus = this.statuses.get(candidate.id) ?? null;
     let oldRuntimeStopped = false;
     let startEvidence: PluginHostStartEvidence | null = null;
@@ -2904,8 +2903,8 @@ export class PluginPipeline {
       // just not in that cache. Refreshed here so pluginRegistration()
       // (and anything else that reads this.discovery) is accurate right
       // away instead of only after the next watcher rescan happens to run.
-      // A later rescan still wins normally, the same as any other edit
-      // (#779 round 23 finding 5). iconPath is manifest-derived the same
+      // A later rescan still wins normally, the same as any other edit.
+      // IconPath is manifest-derived the same
       // way discovery's own scan computes it — left at its stale value, a
       // build that added, removed or changed a plugin's icon would keep
       // showing whatever discovery's last scan found instead (#779 round
@@ -2941,7 +2940,7 @@ export class PluginPipeline {
       // before publish or start then failed — oldRuntime's own pre-build
       // status would otherwise claim a runtime that is now gone. Reading
       // the host directly reports what is actually running at the moment
-      // of failure instead (#779 round 24 finding 2).
+      // of failure instead.
       const currentRuntimeStatus =
         this.host.getStatus(candidate.id) ?? null;
       if (input.freshInstall && oldRuntime === null) {
@@ -2963,7 +2962,7 @@ export class PluginPipeline {
         // a stopped plugin's own failed approve needs the same durable
         // fact a running one does, or a later watcher-triggered reseed can
         // still wipe status "failed" out from under it with nothing left
-        // to prove Retry is still owed (#779 round 22 finding 4).
+        // to prove Retry is still owed.
         let recovered = false;
         if (!oldRuntimeStopped) {
           await this.captureRecoveredManifest(candidate.id);
@@ -3002,7 +3001,7 @@ export class PluginPipeline {
    * that raced the install itself. Both hold — the approval gate never bends
    * — but only one of them is something the user did, so a hold with no
    * message left a plugin that switched itself off seconds after Install
-   * with nothing on screen to explain it (#803).
+   * with nothing on screen to explain it.
    */
   private async holdForApproval(
     candidate: InstalledPluginRecord & { manifest: DohcPluginManifest },
@@ -3135,8 +3134,7 @@ export class PluginPipeline {
    *
    * Marks recoveryState's own key (has(), value null) before attempting
    * the read: an unreadable or missing generated manifest must not cost
-   * Retry its own availability, only the palette's manifest to show
-   * (#779 round 21 finding 5).
+   * Retry its own availability, only the palette's manifest to show.
    */
   private async captureRecoveredManifest(pluginId: string): Promise<void> {
     if (!this.recoveryState.has(pluginId)) this.recoveryState.set(pluginId, null);
@@ -3275,13 +3273,13 @@ export class PluginPipeline {
    * root, the live root and plugin data keyed by plugin id, and the state
    * record — so a broken manifest must not remove the way back.
    *
-   * Directory is checked FIRST, against every discovered candidate —
+   * Directory is checked first, against every discovered candidate —
    * valid or not. pluginId alone is not a safe key to search discovery by:
    * a discovered (never-installed) row's own id is only ever a broken
    * manifest's directory-derived fallback, a plain string that can coincide
-   * with some OTHER, unrelated plugin's real, valid manifest id. Matching
+   * with some other, unrelated plugin's real, valid manifest id. Matching
    * that id first — the id-then-fallback shape this method used to check
-   * first — would then resolve the WRONG plugin whenever the two collide,
+   * first — would then resolve the wrong plugin whenever the two collide,
    * naming one row while deleting another.
    * Every discovered entry carries exactly one physical directory, so a
    * directory match can never be ambiguous the way an id match can.
@@ -3526,7 +3524,7 @@ export class PluginPipeline {
    * Cleanup still has to resolve every identity the record carried, the
    * same as uninstall()'s normal path: the earlier attempt could have
    * deleted the source and the record under pluginId while leaving state
-   * and plugin data behind under the id the plugin was ORIGINALLY installed
+   * and plugin data behind under the id the plugin was originally installed
    * under, if that differs — the synthetic candidate's directoryName is the
    * one identity survivable across that partial failure, since a record by
    * directory outlives the source delete that stranded it.
@@ -3808,7 +3806,7 @@ export class PluginPipeline {
   }
 
   /**
-   * A live bundle is trusted to start only when it is present AND its
+   * A live bundle is trusted to start only when it is present and its
    * content still hashes to what this pipeline itself built and recorded as
    * approvedBundleHash — a bundle tampered after the build, with its
    * source tree untouched, must never start because only file presence
@@ -4030,7 +4028,7 @@ export class PluginPipeline {
     const current = this.statuses.get(candidate.id) ?? this.baseStatus(candidate);
     // null (a failed replacement, nothing recovered) falls every
     // derivation below back to current's own contributions instead of
-    // this candidate's own untrusted manifest (#779 round 22 finding 5).
+    // this candidate's own untrusted manifest.
     const authoritativeManifest = this.recoveryState.has(candidate.id)
       ? (this.recoveryState.get(candidate.id) ?? null)
       : (built?.manifest ?? candidate.manifest);

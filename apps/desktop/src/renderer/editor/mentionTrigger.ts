@@ -1,6 +1,6 @@
 // Notion-style `@`-mention trigger for page wikilinks.
 //
-// A SECOND trigger surface over the SAME wikilink node used by the
+// A second trigger surface over the same wikilink node used by the
 // `[[` autocomplete (see wikilinkPlugin.ts) — no new schema, no new
 // node type. Typing `@query` at a word boundary opens the shared
 // `WikilinkPicker`; picking a file inserts a real `wikilink` atom
@@ -36,7 +36,7 @@ export const mentionPluginKey = new PluginKey('dohc-mention')
 // instead of being swallowed as mention text).
 const MENTION_RE = /(?<=^|\s)@([^\s@[]*)$/
 
-/** PURE: detect an incomplete `@mention` at the cursor. Same shape
+/** Pure: detect an incomplete `@mention` at the cursor. Same shape
  *  and strategy as wikilinkPlugin's `detectAutocomplete` — reused
  *  here so the picker component doesn't need to know which trigger
  *  fired it. */

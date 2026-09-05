@@ -1,10 +1,10 @@
 //! The durable materialization-**job** ledger (`plan §Filesystem/database crash
 //! boundary`, step 1 & 5). SQLite and the filesystem cannot share one
-//! transaction, so the intent to write a file is made durable FIRST: a job row
-//! is committed in the SAME transaction as the canonical state it materializes.
+//! transaction, so the intent to write a file is made durable first: a job row
+//! is committed in the same transaction as the canonical state it materializes.
 //! A separate filesystem pipeline (`dohc-engine-files::materialize`) then
-//! executes PENDING jobs — temp-write, flush, atomic replace — and marks them
-//! COMPLETE, replaying idempotently at startup after any crash.
+//! executes pending jobs — temp-write, flush, atomic replace — and marks them
+//! complete, replaying idempotently at startup after any crash.
 //!
 //! This module owns the DB side of that contract: the job row shape, the
 //! phase-1 enqueue (composed into a caller's transaction), and the phase-2
@@ -62,7 +62,7 @@ pub enum JobStatus {
     /// preserved both and did not overwrite. Terminal until a human/agent
     /// resolves it (never silently replayed).
     Conflict,
-    /// Its target path was deleted before the job ever reached disk (#739).
+    /// Its target path was deleted before the job ever reached disk.
     /// Terminal, and distinct from `Conflict`: nothing needs a human's
     /// resolution here — the delete is the resolution. Never replayed.
     Cancelled,
@@ -138,8 +138,8 @@ pub fn enqueue_delete_job(
     enqueue_operation(tx, spec, MaterializationOperation::Delete)
 }
 
-/// Cancel pending WRITE jobs targeting `path` in the same transaction as the
-/// delete that removes the path from `path_aliases` (#739). Preserve a prior
+/// Cancel pending write jobs targeting `path` in the same transaction as the
+/// delete that removes the path from `path_aliases`. Preserve a prior
 /// pending DELETE for the same path. After the prior delete clears the target,
 /// the replay ladder's "target already absent" short-circuit makes a later
 /// delete idempotent even if its preimage is stale. An empty `workspace_id` is
@@ -203,20 +203,20 @@ pub fn upsert_projection_job(
     Ok(())
 }
 
-/// Record a write job that is ALREADY satisfied on disk, as `'complete'`.
+/// Record a write job that is already satisfied on disk, as `'complete'`.
 /// Capture uses this: its bytes came FROM the file, so nothing must ever run —
 /// but the completed-generation marker is what lets the materializer's
-/// staleness gate supersede an OLDER still-pending job for the same path.
+/// staleness gate supersede an older still-pending job for the same path.
 /// Without it, a stale pending job whose preimage matches the just-captured
 /// disk bytes could later run and regress disk behind the captured head.
 ///
-/// UPSERT, deliberately, for the two legitimate same-id cases:
+/// Upsert, deliberately, for the two legitimate same-id cases:
 /// - A rolled-back capture leaves its completed marker behind while the
-///   moment's deletion frees its order; the NEXT capture of the path derives
+///   moment's deletion frees its order; the next capture of the path derives
 ///   the same moment/job id and must reclaim the row (the fresh moment insert
 ///   succeeding proves the id was free in `moments`, so a surviving job row
 ///   is a dead remnant, never a live unrelated job).
-/// - A deduped capture confirms a head whose creating write's OWN job may
+/// - A deduped capture confirms a head whose creating write's own job may
 ///   still be pending (its content is by construction the head's sha — the
 ///   very bytes just verified on disk); flipping it complete records reality
 ///   and immunizes the path against older stale pending jobs.
@@ -269,7 +269,7 @@ pub fn record_completed_job(
 /// Scoped by workspace because `secret_moments` is keyed by
 /// `(workspace_id, moment_id)` and RPC callers choose their own moment ids, so
 /// a bare id can name a different workspace's moment. `after_present = 1`
-/// selects write moments: a delete means the plaintext is GONE, which grants
+/// selects write moments: a delete means the plaintext is gone, which grants
 /// no ownership.
 pub fn stamp_secret_capture_owned(
     tx: &Transaction<'_>,
@@ -400,7 +400,7 @@ fn set_status(
 
 /// Mark a job complete (its content is durably on disk).
 ///
-/// Deliberately does NOT stamp secret capture ownership. The materializer
+/// Deliberately does not stamp secret capture ownership. The materializer
 /// writing a secret's plaintext to disk is the engine projecting API state
 /// outward, not capture observing the user's file; treating it as ownership
 /// would let a disk delete retire an API-written secret. Ownership is stamped
@@ -438,7 +438,7 @@ pub fn pending_job_count(conn: &Connection) -> Result<i64, StorageError> {
     .map_err(StorageError::corrupt)
 }
 
-/// The highest ordinary moment-order `target_generation` among COMPLETE jobs
+/// The highest ordinary moment-order `target_generation` among complete jobs
 /// for `path` in `workspace_id`, including legacy rows whose workspace
 /// coordinate predates the column, or `None` if nothing has been materialized
 /// there yet. An empty caller coordinate is itself a legacy global job, so its

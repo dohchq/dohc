@@ -87,8 +87,8 @@ export function settledSnapshotForWire(snapshot: JsonObject): JsonObject {
  * instead of refusing the page. A row under the cap carries its bodies in
  * band, exactly as served.
  *
- * EVERY body goes, not only the ones over the in-band cap: a row crosses on
- * the SUM of its parts, so the daemon withholds them all
+ * Every body goes, not only the ones over the in-band cap: a row crosses on
+ * the sum of its parts, so the daemon withholds them all
  * (`withhold_all_conflict_side_texts`). Withholding only the individually
  * over-cap ones here would leave this fixture serving in-band bodies where the
  * daemon serves digests, and every desktop test reading them would certify a
@@ -114,7 +114,7 @@ function withheldConflictForWire(conflict: JsonObject): JsonObject {
 }
 
 /**
- * The daemon's `settled_conflict_json` (lib.rs): the SAME withholding rule
+ * The daemon's `settled_conflict_json` (lib.rs): the same withholding rule
  * over every side of the conflict a resolution closed, so no part of that
  * answer grows with a body.
  */
@@ -826,20 +826,20 @@ function utf8Length(value: string): number {
 }
 
 // One reading of a metadata field, matching the daemon on all three points:
-// JSON `null` is ABSENT (these deserialize as `Option<String>`), a non-string is
+// JSON `null` is absent (these deserialize as `Option<String>`), a non-string is
 // a refusal, and either field over MAX_METADATA_FIELD_BYTES is
 // `invalid-metadata`.
 //
 // THE ORDERING INVARIANT, stated once for every caller. `validate_metadata_fields`
-// runs on EVERY write handler, immediately after the content checks and the
-// origin, and BEFORE the handler reads any state. So a request that is wrong in
+// runs on every write handler, immediately after the content checks and the
+// origin, and before the handler reads any state. So a request that is wrong in
 // two ways must fail on whichever the daemon reaches first, and the call sites
 // below keep that order rather than restating why.
 //
 // Two ordering details must stay explicit at the call sites:
 // `versionedBinary.writeBlob` validates before decoding while
 // `versionedBinary.write` decodes first, and handlers must validate before they
-// call `mutationVersion` because it can create `main` (#439).
+// call `mutationVersion` because it can create `main`.
 function metadataField(params: JsonObject, key: string): string | undefined {
   const raw = params[key];
   if (raw === undefined || raw === null) return undefined;
@@ -1170,7 +1170,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
 
   /**
    * The text write a conflict resolution settles, shaped as a
-   * `versionedText.write` request but WITHOUT that method's in-band request
+   * `versionedText.write` request but without that method's in-band request
    * cap. The daemon settles a resolution inside the store
    * (`resolve_text_conflict`), so only the store's own text cap bounds the
    * body — a fixture that routed a resolution through the capped method would
@@ -1403,7 +1403,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     );
     if (momentId === undefined) this.assertFreshMoment(state, resolvedMomentId);
     const before = version.files.get(path);
-    // The daemon binds the input object id to NEW paths only — an existing
+    // The daemon binds the input object id to new paths only — an existing
     // head keeps its identity (store.rs existing_object.unwrap_or).
     const effectiveObjectId = before?.objectId ?? objectId;
     const now = parsed.nowMs ?? this.clock++;
@@ -1584,7 +1584,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     }
     const before = version.files.get(path);
     const binarySha = sha256(bytes);
-    // Daemon parity: writing the SAME bytes over an equal binary head is a
+    // Daemon parity: writing the same bytes over an equal binary head is a
     // content-equality dedup — no new moment, no materialization work.
     if (before?.contentKind === "binary" && before.binarySha === binarySha) {
       const headMoment = state.moments.get(before.latestMomentId);
@@ -1675,9 +1675,9 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const expectedSha = parsed.sha256.toLowerCase();
     const encoded = parsed.bytesBase64;
     if (!/^[0-9a-f]{64}$/.test(expectedSha)) throw new Error("invalid-input");
-    // The blob handler validates origin, metadata AND author before it decodes
+    // The blob handler validates origin, metadata and author before it decodes
     // or looks up the bytes (lib.rs versionedBinary.writeBlob: origin, metadata,
-    // validated_author, then the decode), the OPPOSITE order from
+    // validated_author, then the decode), the opposite order from
     // versionedBinary.write, which decodes first. So a request wrong in both ways
     // answers for the metadata or author here and for the bytes there.
     //
@@ -2178,7 +2178,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const current = target.files.get(path);
     const base = source.textForkBase.get(path);
     const comparison = this.comparisonRecord(workspace, path, target, source);
-    // WS-G1: the fast-forward writes a side through the TEXT seam, so both LIVE
+    // WS-G1: the fast-forward writes a side through the TEXT seam, so both live
     // sides must be text. The base does not gate it — a binary base can never
     // compare equal to a text current. The line merge below reads all three, and
     // its own kind check keeps a binary ancestor out.
@@ -2211,7 +2211,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       return result;
     }
     let textToWrite = incoming?.text;
-    // A source-only BINARY change fast-forwards through the binary seam:
+    // A source-only binary change fast-forwards through the binary seam:
     // current equals base by content ADDRESS (a binary side never compares
     // equal to a text one), so only the source moved. A removal keeps its
     // conflict — that seam is the text delete.
@@ -2286,7 +2286,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...copyFile(incoming),
       text: textToWrite,
       // Daemon parity: a path that already exists in the target keeps its
-      // object identity; the source id binds only NEW target paths.
+      // object identity; the source id binds only new target paths.
       objectId: before?.objectId ?? objectId,
       updatedAtMs: now,
       latestMomentId: momentId,
@@ -2345,7 +2345,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     });
     let included = changes.length;
     const budget = Math.max(1, optionalNumber(params, "byteBudget") ?? Number.MAX_SAFE_INTEGER);
-    // Daemon parity: the byte-budget cut has a PROGRESS GUARANTEE — the first
+    // Daemon parity: the byte-budget cut has a progress guarantee — the first
     // row always ships under a tiny budget (only the hard frame cap refuses).
     while (included > 1 && Buffer.byteLength(JSON.stringify(changes.slice(0, included))) > budget) included -= 1;
     const entries = changes.slice(0, included);
@@ -2357,7 +2357,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return { entries, nextCursor };
   }
 
-  // Parsed BEFORE any no-op check or mutation. `optionalString` throws on a
+  // Parsed before any no-op check or mutation. `optionalString` throws on a
   // non-string, and evaluating it inside the makeSecretMoment call meant the
   // secret had already changed while the caller got a refusal and no moment —
   // the daemon refuses a malformed request atomically, before touching state.
@@ -2509,7 +2509,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const momentId = requiredString(params, "momentId", "secret apply");
     const origin = requiredOrigin(params);
     // Above both version lookups, which is safe here because `state.versions.get`
-    // only reads — the #439 handlers use `mutationVersion`, which creates.
+    // only reads — the handlers use `mutationVersion`, which creates.
     const { summary, correlationId } = this.secretMomentMetadata(params);
     const source = state.versions.get(requiredString(params, "sourceVersionId", "secret apply"));
     const target = state.versions.get(requiredString(params, "targetVersionId", "secret apply"));
@@ -2546,12 +2546,12 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const momentId = requiredString(params, "momentId", "secret restore");
     // Origin then metadata, both before any state is read — the daemon's order
     // (secrets_restore: validated_origin, validate_metadata_fields, then the
-    // source-moment lookup). Origin is REQUIRED on this request: the daemon takes
+    // source-moment lookup). Origin is required on this request: the daemon takes
     // it as a non-Option field, so a restore without one is refused. The fake used
     // to ignore params.origin entirely and hardcode "restore" below, which made it
     // accept requests production rejects while a comment here claimed the ordering
     // was matched.
-    // `origin` strictly, NOT via requiredOrigin: that helper falls back to the
+    // `origin` strictly, not via requiredOrigin: that helper falls back to the
     // legacy `metadataOrigin`, while SecretsRestoreParams requires `origin` and
     // denies unknown fields, so the fallback accepts a request the daemon rejects
     // at deserialization.
@@ -2594,7 +2594,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const rawPath = optionalString(params, "path");
     const path = rawPath === undefined ? undefined : normalizedSecretPath(rawPath);
     const versionId = optionalString(params, "versionId");
-    // Daemon parity: a PRESENT but unknown versionId refuses invalid-version
+    // Daemon parity: a present but unknown versionId refuses invalid-version
     // (require_version inside the keyless domain query) instead of answering
     // an empty page.
     if (versionId !== undefined && !state.versions.has(versionId)) {
@@ -3043,10 +3043,10 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
-  // Mirrors the daemon's `validated_author` (lib.rs), which is the WRITE path:
-  // a malformed author is REFUSED with `invalid-metadata` before any mutation.
+  // Mirrors the daemon's `validated_author` (lib.rs), which is the write path:
+  // a malformed author is refused with `invalid-metadata` before any mutation.
   // An earlier draft mirrored `parsed_moment_author` instead and recorded
-  // `{ corrupt: true }` — but that marker exists for READING malformed
+  // `{ corrupt: true }` — but that marker exists for reading malformed
   // historical rows, so recording it here let the fake accept writes production
   // refuses. Same class as copying the author raw: permissive where the daemon
   // is strict.
@@ -3098,7 +3098,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...(correlationId !== undefined
         ? { metadataCorrelationId: correlationId }
         : {}),
-      // The daemon stamps the write's AUTHOR on the moment it records and
+      // The daemon stamps the write's author on the moment it records and
       // returns it from moments.list/get (store.rs `author_json`); a write
       // without one gets null. Dropping it here made every moment look
       // actor-neutral, so a caller could not tell agent-authored history from
@@ -3107,7 +3107,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       // NORMALIZED, not copied. AgentAuthor is `JsonObject & {...}`, so a
       // caller may pass extension fields; the daemon accepts them and
       // `parsed_moment_author` returns only the recognized ones. Copying raw
-      // made the loopback STRICTER than the daemon — the response failed the
+      // made the loopback stricter than the daemon — the response failed the
       // client's own `strictObjectValue` on the extra key, so a write that
       // works against the engine broke against the fake.
       ...(() => {
@@ -3143,7 +3143,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
       recordedAtMs,
       operation,
       afterContentKind: after.contentKind,
-      // A delete and a rename record ONE digest on BOTH sides: `delete_text_in_tx`
+      // A delete and a rename record one digest on both sides: `delete_text_in_tx`
       // and the rename insert (store.rs) bind `before.blob_sha256` to
       // `after_blob_sha256` and `before_blob_sha256` alike, so their callers pass
       // an `after` that repeats the removed content.

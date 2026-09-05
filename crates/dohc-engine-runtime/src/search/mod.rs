@@ -1,8 +1,8 @@
-//! Workspace search (R12): an FTS index over file text and chat messages, with
+//! Workspace search: an FTS index over file text and chat messages, with
 //! policy-filtered visibility, a fail-closed FILE policy, and read-your-writes
 //! semantics on the single writer.
 //!
-//! This ports the TS `searchIndex.ts` (FTS maintenance + policy-filtered query)
+//! This ports the TS search index (FTS maintenance + policy-filtered query)
 //! and the pure preview slice of `workspaceSearch.ts`. The FTS tables are
 //! created by the storage baseline migration; this module
 //! is the logic that fills and reads them, composed through the storage seams
@@ -17,12 +17,11 @@
 //!
 //! ## Fail-closed, scoped to files
 //!
-//! A `.dohc/files.toml` / `.dohc/visibility.toml` that EXISTS but cannot be read
+//! A `.dohc/files.toml` / `.dohc/visibility.toml` that exists but cannot be read
 //! or parsed never widens search: FILE results go empty (a hidden/secret/`.dohc`
 //! path can never appear), while CHAT search — which the FILE policy does not
-//! govern — stays fully available. An ABSENT policy file is defaults. This is
-//! the hotfix posture (`searchIndex.ts` after the fail-open→fail-closed fix),
-//! preserved here verbatim.
+//! govern — stays fully available. An absent policy file is defaults. This is
+//! the TS posture after its fail-open→fail-closed fix, preserved here verbatim.
 
 pub mod index;
 pub mod policy;
@@ -89,7 +88,7 @@ pub const CHAT_SEARCH_RESULT_SOURCE_BYTE_BUDGET: usize = MAX_MESSAGE_BODY_BYTES 
 pub const CHAT_SEARCH_PAGE_SOURCE_BYTE_BUDGET: usize = 256 * 1024;
 const UNPAGED_SEARCH_PAGE_CEILING: usize = MAX_RESULT_LIMIT + 1;
 
-/// Errors from the search index/query surface. Policy read failures are NOT
+/// Errors from the search index/query surface. Policy read failures are not
 /// errors — they fail closed and surface as diagnostics; only storage faults and
 /// fail-closed corruption are errors here.
 #[derive(Debug, thiserror::Error)]
@@ -939,8 +938,6 @@ mod tests {
 
     #[test]
     fn preview_is_bounded_in_utf16_units_on_astral_text() {
-        // MUTATION: window by Rust scalar count and this becomes 360 UTF-16
-        // units, exceeding the renderer's 250-unit IPC contract.
         let line = format!(
             "{}needle{}",
             "\u{1f600}".repeat(120),
@@ -948,7 +945,10 @@ mod tests {
         );
         let hits = preview_line_matches(&line, "needle", 1);
         let hit = hits.first().expect("astral hit");
-        assert!(hit.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS);
+        assert!(
+            hit.preview.encode_utf16().count() <= WORKSPACE_ENGINE_SEARCH_MAX_PREVIEW_CHARS,
+            "window by Rust scalar count and this becomes 360 UTF-16 units, exceeding the renderer's 250-unit IPC contract."
+        );
         let start_utf16 = hit.preview[..hit.match_start].encode_utf16().count();
         let end_utf16 = hit.preview[..hit.match_end].encode_utf16().count();
         assert_eq!(
@@ -963,8 +963,6 @@ mod tests {
 
     #[test]
     fn unpaged_search_rejects_runaway_alternating_continuations() {
-        // MUTATION: remove the iteration ceiling and this finite pathological
-        // pager eventually returns success after alternating beyond the bound.
         let mut calls = 0usize;
         let error = collect_search_pages(1, |_remaining, _generation, _after| {
             calls = calls.saturating_add(1);

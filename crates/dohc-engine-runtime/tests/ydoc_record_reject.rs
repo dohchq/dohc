@@ -1,6 +1,6 @@
-//! The local append path validates update bytes ONCE, in the durable layer's
+//! The local append path validates update bytes once, in the durable layer's
 //! `validate_update_bytes`, inside the append transaction. A malformed first
-//! seed must still be rejected end-to-end through the actor AND must not
+//! seed must still be rejected end-to-end through the actor and must not
 //! strand a bare `file_objects` row for the deterministic object id (which
 //! regular writes then treat as already existing). Mutation check: move
 //! `validate_update_bytes` after the transaction's parent-row insert commits,
@@ -75,7 +75,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     );
     supervisor.close(&db).expect("close actor");
 
-    // The rejection rolled the WHOLE transaction back: no parent row, no
+    // The rejection rolled the whole transaction back: no parent row, no
     // marker, no journaled update.
     let object_id = open.key.object_id.clone();
     {

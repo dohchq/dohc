@@ -3,7 +3,7 @@ import { createRequire } from "node:module";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// WS-G2-C-2 — the ONE source of truth for the e2e SQLite helpers that read the
+// WS-G2-C-2 — the one source of truth for the e2e SQLite helpers that read the
 // workspace engine.db. These are load-bearing for the "no double-journal"
 // invariant (workspace-engine-editor.spec) and the decoupling proof
 // (workspace-collab-decoupling.spec); keeping a single copy stops the two specs
@@ -33,13 +33,13 @@ export interface EngineMoment {
   text: string;
 }
 
-// Only a database that cannot be OPENED reads as "not ready, poll again", and
-// only by error CODE — never by matching message text, which is the rule the
+// Only a database that cannot be opened reads as "not ready, poll again", and
+// only by error code — never by matching message text, which is the rule the
 // relay helper already follows.
 //
-// `node:sqlite` reports EVERY sqlite failure as `code: "ERR_SQLITE_ERROR"` and
+// `node:sqlite` reports every sqlite failure as `code: "ERR_SQLITE_ERROR"` and
 // carries the real result code in `errcode`, so an absent engine.db arrives as
-// SQLITE_CANTOPEN (14), NOT as ENOENT. ENOENT stays for a filesystem-level
+// SQLITE_CANTOPEN (14), not as ENOENT. ENOENT stays for a filesystem-level
 // failure raised before sqlite sees the path.
 const SQLITE_CANTOPEN = 14;
 
@@ -74,13 +74,13 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
 // every read below is valid, whatever ordinal the store has reached.
 //
 // The two sides come from different places: the ledger belongs to the DAEMON
-// BINARY, the migration list to the SOURCE TREE. This repo's e2e workflow
+// binary, the migration list to the SOURCE TREE. This repo's e2e workflow
 // stages a prebuilt `dohc-workspace-engine.exe`, so a store settled at an
-// EARLIER ordinal than the source is a normal state — and gating reads on the
+// earlier ordinal than the source is a normal state — and gating reads on the
 // source terminal left every helper here answering 0/[]/false in it, silently
 // and forever.
 //
-// The ledger therefore only classifies an ABSENT name: settled at the source
+// The ledger therefore only classifies an absent name: settled at the source
 // terminal is a defect and throws, short of it may still be migrating and
 // polls. Ordinals apply in strictly increasing order
 // (`validate_migration_order`), so a complete terminal row means every earlier
@@ -165,7 +165,7 @@ export function withEngineDb<T>(rootPath: string, fn: (db: EngineDb) => T): T | 
     // Every read above is its own snapshot, so the daemon can commit the rest
     // of the chain between them and leave "name absent" and "ledger finished"
     // describing two different instants. Settling is final, so re-reading the
-    // names AFTER the ledger is the whole guard: still absent now means never.
+    // names after the ledger is the whole guard: still absent now means never.
     const missing = missingSchemaNames(db);
     if (missing.length === 0) return fn(db);
     // Absent after settling is a defect, and it says which name and where the
@@ -235,7 +235,7 @@ export function engineMomentsOrEmpty(rootPath: string): EngineMoment[] {
   return withEngineDb(rootPath, (db) => readMoments(db)) ?? [];
 }
 
-// The projected settle-moment texts for one path (settle points ARE engine
+// The projected settle-moment texts for one path (settle points are engine
 // history) — moment payloads reference text by blob sha, so the moment→blob
 // join is how the content is read.
 export function momentTextsForPath(rootPath: string, path: string): string[] {
@@ -263,7 +263,7 @@ export function textFileTrackedByEngine(rootPath: string, path: string): boolean
 
 // Replication ops whose payload carries the given plaintext needle, grouped by
 // op_kind. A ydoc.update payload is opaque Yjs binary (plaintext is not
-// searchable), so the ONLY way typed plaintext lands in a replication op is a
+// searchable), so the only way typed plaintext lands in a replication op is a
 // moment.append — this list therefore proves whether a double-journal happened.
 export function replicationOpKindsMentioning(rootPath: string, needle: string): string[] {
   return (

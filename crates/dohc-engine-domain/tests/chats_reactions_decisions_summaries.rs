@@ -171,8 +171,10 @@ fn resolve(
 fn reaction_id_is_deterministic_across_peers() {
     let first = reaction_id_for("m1", "👍", "alice");
     let second = reaction_id_for("m1", "👍", "alice");
-    // MUTATION: deriving ids from local randomness or the mutation timestamp -> peers address different cells.
-    assert_eq!(first, "reaction_nxgdfvb2hr4vetwrk357dtmpb4");
+    assert_eq!(
+        first, "reaction_nxgdfvb2hr4vetwrk357dtmpb4",
+        "deriving ids from local randomness or the mutation timestamp -> peers address different cells."
+    );
     assert_eq!(first, second);
 }
 
@@ -203,8 +205,10 @@ fn reaction_local_toggle_bumps_past_prior_cell() {
         100,
     )
     .expect("add");
-    // MUTATION: using wall time without the per-cell +1 bump -> equal-time remove wins over the later re-add.
-    assert_eq!(removed.at_ms, 100);
+    assert_eq!(
+        removed.at_ms, 100,
+        "using wall time without the per-cell +1 bump -> equal-time remove wins over the later re-add."
+    );
     assert_eq!(added.at_ms, 101);
     assert_eq!(added.state, ChatReactionState::Added);
 }
@@ -224,14 +228,16 @@ fn reaction_set_requires_message_in_thread_and_workspace() {
         ChatReactionState::Added,
         30,
     );
-    // MUTATION: checking only a message id or skipping the visibility head check -> an absent target receives a reaction.
-    assert!(matches!(
-        missing,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "message-not-found",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            missing,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "message-not-found",
+                ..
+            })
+        ),
+        "checking only a message id or skipping the visibility head check -> an absent target receives a reaction."
+    );
 }
 
 #[test]
@@ -249,14 +255,16 @@ fn reaction_set_rejects_non_emoji_graphemes() {
         ChatReactionState::Added,
         30,
     );
-    // MUTATION: accepting arbitrary short strings as reaction keys -> hostile text renders as a reaction pill.
-    assert!(matches!(
-        invalid,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-message-body",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            invalid,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-message-body",
+                ..
+            })
+        ),
+        "accepting arbitrary short strings as reaction keys -> hostile text renders as a reaction pill."
+    );
 }
 
 #[test]
@@ -295,8 +303,10 @@ fn reaction_row_and_journal_share_origin_coordinate() {
             Ok::<_, StorageError>((row, op))
         })
         .expect("coordinates");
-    // MUTATION: allocating a second journal sequence after the row upsert -> the replicated tie-break differs from the stored cell.
-    assert_eq!(coordinates.0, coordinates.1);
+    assert_eq!(
+        coordinates.0, coordinates.1,
+        "allocating a second journal sequence after the row upsert -> the replicated tie-break differs from the stored cell."
+    );
 }
 
 #[test]
@@ -435,8 +445,10 @@ fn reaction_read_hides_tombstones_and_orphans() {
                 .map_err(StorageError::corrupt_public)
         })
         .expect("durable count");
-    // MUTATION: omitting the state filter or message inner join -> tombstones/orphans leak to readers.
-    assert!(visible.is_empty());
+    assert!(
+        visible.is_empty(),
+        "omitting the state filter or message inner join -> tombstones/orphans leak to readers."
+    );
     assert_eq!(durable, 2);
 }
 
@@ -484,14 +496,14 @@ fn personal_feed_hydrates_active_reactions_per_item_in_stable_order() {
     let page = LinkedChatStore::new(&mut store)
         .list_personal_feed(WS, "viewer", Some(10), None)
         .expect("feed");
-    // MUTATION: retaining the parked empty field or failing to sort per candidate -> feed reaction pills disappear or reorder.
     assert_eq!(
         page.items[0]
             .reactions
             .iter()
             .map(|reaction| reaction.emoji.as_str())
             .collect::<Vec<_>>(),
-        vec!["👍", "🎉"]
+        vec!["👍", "🎉"],
+        "retaining the parked empty field or failing to sort per candidate -> feed reaction pills disappear or reorder.",
     );
 }
 
@@ -532,8 +544,10 @@ fn reaction_request_replay_does_not_mint_a_later_cell() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("ops");
-    // MUTATION: fingerprinting nowMs or skipping the request ledger -> retry mints a later cell and second op.
-    assert_eq!(replay.at_ms, first.at_ms);
+    assert_eq!(
+        replay.at_ms, first.at_ms,
+        "fingerprinting nowMs or skipping the request ledger -> retry mints a later cell and second op."
+    );
     assert_eq!(ops, 1);
 }
 
@@ -557,8 +571,11 @@ fn decision_open_is_atomic_with_start_and_send() {
             ))
         })
         .expect("counts");
-    // MUTATION: omitting either in-transaction decision write -> a sent decision prompt has no matching cell/op.
-    assert_eq!((cells, ops), (2, 2));
+    assert_eq!(
+        (cells, ops),
+        (2, 2),
+        "omitting either in-transaction decision write -> a sent decision prompt has no matching cell/op."
+    );
 
     let failed = LinkedChatStore::new(&mut store).send_message(
         &SendMessage {
@@ -589,8 +606,10 @@ fn decision_open_is_atomic_with_start_and_send() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("leak count");
-    // MUTATION: committing the decision outside the message transaction -> a failed send leaks an orphan open decision.
-    assert_eq!(leaked, 0);
+    assert_eq!(
+        leaked, 0,
+        "committing the decision outside the message transaction -> a failed send leaks an orphan open decision."
+    );
 }
 
 #[test]
@@ -599,14 +618,16 @@ fn decision_resolve_malformed_resolver_is_invalid_message_body() {
     seed_channel(&mut store);
     start(&mut store, "thread", "decision", 20, true);
     let malformed = resolve(&mut store, "malformed", "thread", "decision", "", 30);
-    // MUTATION: classifying malformed wire input as store corruption -> caller mistakes surface as INTERNAL.
-    assert!(matches!(
-        malformed,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-message-body",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            malformed,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-message-body",
+                ..
+            })
+        ),
+        "classifying malformed wire input as store corruption -> caller mistakes surface as INTERNAL."
+    );
 }
 
 #[test]
@@ -643,8 +664,10 @@ fn decision_resolve_uses_monotonic_time_and_exact_journal_coordinate() {
             Ok::<_, StorageError>((row, op))
         })
         .expect("coordinates");
-    // MUTATION: using the stale wall clock or a second sequence allocation -> resolve loses monotonicity or diverges on peers.
-    assert_eq!(decision.at_ms, 31);
+    assert_eq!(
+        decision.at_ms, 31,
+        "using the stale wall clock or a second sequence allocation -> resolve loses monotonicity or diverges on peers."
+    );
     assert_eq!(coordinates.0, coordinates.1);
 }
 
@@ -728,8 +751,10 @@ fn decision_resolve_returns_existing_winner_idempotently() {
         999,
     )
     .expect("second");
-    // MUTATION: writing another resolved cell for an already-resolved decision -> a later retry changes the winning resolver.
-    assert_eq!(second, first);
+    assert_eq!(
+        second, first,
+        "writing another resolved cell for an already-resolved decision -> a later retry changes the winning resolver."
+    );
     assert_eq!(
         second.resolved_by_message_id.as_deref(),
         Some("resolver-one")
@@ -762,8 +787,10 @@ fn decision_read_hides_orphan_cells() {
                 .map_err(StorageError::corrupt_public)
         })
         .expect("durable");
-    // MUTATION: removing the message inner join -> head-check-free imported decisions leak before their target arrives.
-    assert!(visible.is_empty());
+    assert!(
+        visible.is_empty(),
+        "removing the message inner join -> head-check-free imported decisions leak before their target arrives."
+    );
     assert_eq!(durable, 1);
 }
 
@@ -785,8 +812,10 @@ fn decision_request_replay_does_not_append_a_second_op() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("ops");
-    // MUTATION: failing to replay through the request ledger -> retry appends a second resolve op.
-    assert_eq!(replay, first);
+    assert_eq!(
+        replay, first,
+        "failing to replay through the request ledger -> retry appends a second resolve op."
+    );
     assert_eq!(ops, 2, "one open op plus one resolve op");
 }
 
@@ -800,13 +829,13 @@ fn channel_threads_order_by_newest_activity() {
     let summaries = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "channel", None, 10)
         .expect("summaries");
-    // MUTATION: ordering by creation/opening message instead of thread activity -> the recently updated thread stays below beta.
     assert_eq!(
         summaries
             .iter()
             .map(|summary| summary.thread.thread_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["alpha", "beta"]
+        vec!["alpha", "beta"],
+        "ordering by creation/opening message instead of thread activity -> the recently updated thread stays below beta.",
     );
 }
 
@@ -829,8 +858,10 @@ fn channel_summary_clamps_corrupt_overcount_cursor_and_rejects_negative_cursor()
     let summaries = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "channel", None, 10)
         .expect("clamped");
-    // MUTATION: trusting a persisted over-count cursor -> summary reports more reads than messages or a negative unread count.
-    assert_eq!(summaries[0].last_read_sequence, 1);
+    assert_eq!(
+        summaries[0].last_read_sequence, 1,
+        "trusting a persisted over-count cursor -> summary reports more reads than messages or a negative unread count."
+    );
     assert_eq!(summaries[0].unread_count, 0);
 
     store
@@ -845,11 +876,13 @@ fn channel_summary_clamps_corrupt_overcount_cursor_and_rejects_negative_cursor()
         })
         .expect("negative");
     let corrupt = LinkedChatStore::new(&mut store).list_channel_threads(WS, "channel", None, 10);
-    // MUTATION: clamping negative corruption to zero -> tampered state silently becomes a plausible unread summary.
-    assert!(matches!(
-        corrupt,
-        Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
-    ));
+    assert!(
+        matches!(
+            corrupt,
+            Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
+        ),
+        "clamping negative corruption to zero -> tampered state silently becomes a plausible unread summary."
+    );
 }
 
 #[test]
@@ -872,8 +905,10 @@ fn channel_summary_counts_only_visible_open_decisions() {
     let summaries = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "channel", None, 10)
         .expect("summaries");
-    // MUTATION: counting decision rows without joining present targets -> the orphan inflates openDecisionCount.
-    assert_eq!(summaries[0].open_decision_count, 1);
+    assert_eq!(
+        summaries[0].open_decision_count, 1,
+        "counting decision rows without joining present targets -> the orphan inflates openDecisionCount."
+    );
 }
 
 #[test]
@@ -900,8 +935,10 @@ fn channel_summary_uses_earliest_message_and_500_char_snippet() {
         .opening_message
         .as_ref()
         .expect("opening message");
-    // MUTATION: selecting message_order or truncating 500 units without trim-before-ellipsis -> wrong opening id/snippet bytes.
-    assert_eq!(opening.message_id, "earlier");
+    assert_eq!(
+        opening.message_id, "earlier",
+        "selecting message_order or truncating 500 units without trim-before-ellipsis -> wrong opening id/snippet bytes."
+    );
     assert_eq!(opening.body_snippet, format!("{}…", "x".repeat(498)));
 }
 
@@ -962,14 +999,14 @@ fn channel_summary_returns_only_active_opening_reactions_in_stable_order() {
         .opening_message
         .as_ref()
         .expect("opening message");
-    // MUTATION: hydrating all thread reactions or tombstones without `(atMs,reactionId)` order -> reply/removed pills leak or reorder.
     assert_eq!(
         opening
             .reactions
             .iter()
             .map(|reaction| reaction.emoji.as_str())
             .collect::<Vec<_>>(),
-        vec!["👍", "🎉"]
+        vec!["👍", "🎉"],
+        "hydrating all thread reactions or tombstones without `(atMs,reactionId)` order -> reply/removed pills leak or reorder.",
     );
 }
 
@@ -1013,15 +1050,13 @@ fn channel_summary_batch_keeps_per_thread_aggregates_apart() {
     let summaries = LinkedChatStore::new(&mut store)
         .list_channel_threads(WS, "channel", None, 10)
         .expect("summaries");
-    // MUTATION: batching the per-thread aggregates without distributing by thread
-    // -> counts, read cursors, opening messages, or reactions leak across the
-    // page's threads, or a deleted/absent row breaks its neighbors.
     assert_eq!(
         summaries
             .iter()
             .map(|summary| summary.thread.thread_id.as_str())
             .collect::<Vec<_>>(),
-        vec!["empty", "pruned", "full"]
+        vec!["empty", "pruned", "full"],
+        "batching the per-thread aggregates without distributing by thread -> counts, read cursors, opening messages, or reactions leak across the page's threads, or a deleted/absent row breaks its neighbors.",
     );
     let empty = &summaries[0];
     assert_eq!(empty.message_count, 0);
@@ -1080,10 +1115,6 @@ fn message_page_batch_keeps_attachments_with_their_own_messages() {
     let page = LinkedChatStore::new(&mut store)
         .list_messages(WS, "thread", 10, None)
         .expect("page");
-    // MUTATION: hydrating the page's attachments in one query without
-    // distributing by message -> one message collects its neighbors'
-    // attachments, an attachment-free message stops being empty, or the
-    // per-message (created_at_ms, attachment_id) order breaks.
     let mut pair_objects = vec!["alpha", "beta"];
     pair_objects.sort_by_key(|object| attachment_id_for("pair", object, None, None));
     let by_message: Vec<(&str, Vec<&str>)> = page
@@ -1159,8 +1190,11 @@ fn js_trimmed_author_user_id_matches_person_follow() {
     let feed = LinkedChatStore::new(&mut store)
         .list_personal_feed(WS, "viewer", Some(10), None)
         .expect("feed");
-    // MUTATION: use Rust trim instead of JS trim -> the stored U+FEFF-edged id misses this follow.
-    assert_eq!(feed.items.len(), 1);
+    assert_eq!(
+        feed.items.len(),
+        1,
+        "use Rust trim instead of JS trim -> the stored U+FEFF-edged id misses this follow."
+    );
     assert_eq!(feed.items[0].message.author_user_id.as_deref(), Some("ada"));
     assert_eq!(feed.items[0].matched_by, vec![FollowTargetKind::Person]);
 }
@@ -1188,14 +1222,16 @@ fn lone_bom_display_name_is_invalid_sender() {
         },
         &NO_FAULTS,
     );
-    // MUTATION: use Rust trim -> U+FEFF survives as a non-empty display name.
-    assert!(matches!(
-        result,
-        Err(dohc_engine_domain::DomainError::Chat {
-            code: "invalid-sender",
-            ..
-        })
-    ));
+    assert!(
+        matches!(
+            result,
+            Err(dohc_engine_domain::DomainError::Chat {
+                code: "invalid-sender",
+                ..
+            })
+        ),
+        "use Rust trim -> U+FEFF survives as a non-empty display name."
+    );
 }
 
 #[test]
@@ -1242,8 +1278,10 @@ fn channel_name_and_optional_thread_title_use_js_trim() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("stored title");
-    // MUTATION: use Rust trim for either sibling -> BOMs remain in the name/title.
-    assert_eq!(channel.name, "General");
+    assert_eq!(
+        channel.name, "General",
+        "use Rust trim for either sibling -> BOMs remain in the name/title."
+    );
     assert_eq!(stored_title, "");
 }
 
@@ -1300,9 +1338,10 @@ fn optional_thread_title_caps_utf16_units_before_journaling() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("poisoned op count");
-    // MUTATION: count Unicode scalar values instead of UTF-16 units -> the
-    // 101-astral title journals a thread.create every TypeScript peer refuses.
-    assert!(accepted.is_ok());
+    assert!(
+        accepted.is_ok(),
+        "count Unicode scalar values instead of UTF-16 units -> the 101-astral title journals a thread.create every TypeScript peer refuses."
+    );
     assert!(rejected.is_err());
     assert_eq!(poisoned_ops, 0);
 }
@@ -1383,9 +1422,10 @@ fn channel_sender_and_author_caps_use_utf16_units() {
         },
         &NO_FAULTS,
     );
-    // MUTATION: count Rust chars in any sibling normalizer -> its over-cap
-    // astral input is accepted even though JavaScript length exceeds the cap.
-    assert!(accepted_channel.is_ok());
+    assert!(
+        accepted_channel.is_ok(),
+        "count Rust chars in any sibling normalizer -> its over-cap astral input is accepted even though JavaScript length exceeds the cap."
+    );
     assert!(rejected_channel.is_err());
     assert!(accepted_sender.is_ok());
     assert!(rejected_display.is_err());
@@ -1437,8 +1477,10 @@ fn thread_mutations_reject_negative_timestamps_before_journaling() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("journal count");
-    // MUTATION: allow either negative local timestamp -> Rust mints a thread op JS peers refuse.
-    assert!(start_result.is_err());
+    assert!(
+        start_result.is_err(),
+        "allow either negative local timestamp -> Rust mints a thread op JS peers refuse."
+    );
     assert!(create_result.is_err());
     assert_eq!(journaled, 0);
 }
@@ -1490,9 +1532,10 @@ fn thread_mutations_reject_timestamps_above_the_wire_integer_max() {
             .map_err(StorageError::corrupt_public)
         })
         .expect("journal count");
-    // MUTATION: check only the lower timestamp bound -> an unsafe integer is
-    // journaled even though both strict receivers refuse it.
-    assert!(start_result.is_err());
+    assert!(
+        start_result.is_err(),
+        "check only the lower timestamp bound -> an unsafe integer is journaled even though both strict receivers refuse it."
+    );
     assert!(create_result.is_err());
     assert_eq!(journaled, 0);
 }
@@ -1552,12 +1595,13 @@ fn channel_thread_start_refuses_unreplicable_stored_channel_identity() {
                 .map_err(StorageError::corrupt_public)
             })
             .expect("journal count");
-        // MUTATION: trusting imported channel metadata lets a local start mint
-        // a channelSlug/channelWireId that apply_thread rejects.
-        assert!(matches!(
-            result,
-            Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
-        ));
+        assert!(
+            matches!(
+                result,
+                Err(dohc_engine_domain::DomainError::StateCorrupt { .. })
+            ),
+            "trusting imported channel metadata lets a local start mint a channelSlug/channelWireId that apply_thread rejects."
+        );
         assert_eq!(journaled, 0);
     }
 }
@@ -1570,8 +1614,10 @@ fn agent_read_negative_coordinate_noops_without_revision() {
     let state = LinkedChatStore::new(&mut store)
         .mark_thread_read_by_agent(WS, "thread", -1, "before", None, 30, &NO_FAULTS)
         .expect("negative coordinate");
-    // MUTATION: retain the nonnegative cursor gate -> this oracle-valid clamp no-op errors.
-    assert_eq!(state.last_read_created_at_ms, 0);
+    assert_eq!(
+        state.last_read_created_at_ms, 0,
+        "retain the nonnegative cursor gate -> this oracle-valid clamp no-op errors."
+    );
     assert_eq!(state.last_read_message_id, "");
     assert_eq!(state.revision, 0);
 }

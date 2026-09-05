@@ -14,11 +14,11 @@
 // ## Which floor inputs this fixture may use
 //
 // `resolveEffectivePolicy` starts from the path floor, and `search_policy.rs`
-// carries TWO deliberate, documented deltas from the TypeScript floor:
+// carries two deliberate, documented deltas from the TypeScript floor:
 //   - the Windows host-unsafe write admission checks (ADS colon, device
 //     basenames, 8.3 aliases) are not re-litigated there, and
-//   - reserved/secret segment comparison is per-platform (`BEHAVIOR_DELTA.md`
-//     CAL-3), so a trailing-dot/space or case-variant alias such as
+//   - reserved/secret segment comparison is per-platform, so a
+//     trailing-dot/space or case-variant alias such as
 //     `config/secret.env. ` classifies differently on Windows and POSIX.
 // Resolution vectors therefore stay inside the platform-independent shared
 // subset. The floor's own cross-platform parity is asserted by the
@@ -200,11 +200,11 @@ const filesPolicyCases = [
   ["unknown-rule-keys-integer-like", '[[rule]]\npath = "x.md"\nzeta = 1\n2 = 2\n1 = 3\n'],
   ["unknown-rule-keys-non-canonical-integers", '[[rule]]\npath = "x.md"\n"01" = 1\n"+1" = 2\n1 = 3\n'],
   ["unknown-rule-keys-array-index-boundary", '[[rule]]\npath = "x.md"\n4294967295 = 1\n4294967294 = 2\n0 = 3\n'],
-  // The boundary case above cannot SEE the `4294967295` exclusion: `path` is
+  // The boundary case above cannot see the `4294967295` exclusion: `path` is
   // the only non-index key there, and it reports no error, so moving
   // `4294967295` between the index half and the named half leaves the reported
-  // error order unchanged. An unknown NAMED key ahead of the boundary key is
-  // what makes the two halves distinguishable: `zeta` is reported BEFORE
+  // error order unchanged. An unknown named key ahead of the boundary key is
+  // what makes the two halves distinguishable: `zeta` is reported before
   // `4294967295` only while `4294967295` is an ordinary string key.
   ["unknown-rule-keys-named-before-array-index-boundary", '[[rule]]\npath = "x.md"\nzeta = 1\n4294967295 = 2\n0 = 3\n'],
   ["tracked-not-boolean", '[[rule]]\npath = "x.md"\ntracked = "false"\n'],

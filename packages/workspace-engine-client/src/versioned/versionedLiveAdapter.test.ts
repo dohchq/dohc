@@ -450,8 +450,8 @@ describe("VersionedLiveAdapter", () => {
     });
   });
 
-  it("passes ONE conflicts.list page through with the daemon's continuation", async () => {
-    // #562: the drain that undid the daemon's paging lived here. One call is
+  it("passes one conflicts.list page through with the daemon's continuation", async () => {
+    // The drain that undid the daemon's paging lived here. One call is
     // one page — a second request from a single call is the drain coming back.
     const requests: Request[] = [];
     const second = { ...conflict, id: "conflict-2", createdAtMs: 2 };
@@ -557,8 +557,6 @@ describe("VersionedLiveAdapter", () => {
   it("hydrates a withheld conflict side through the text blob route", async () => {
     // The daemon degrades a conflicts.list row past its frame cap: the side
     // body arrives as `text: null` beside `inbandLimitBytes` and `blobSha256`.
-    // MUTATION: drop the hydration branch in `listTextConflicts` and this
-    // side reaches the caller with no body at all.
     const body = "an over-cap side body";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const withheld: ConflictRecord = {
@@ -618,8 +616,6 @@ describe("VersionedLiveAdapter", () => {
 
   it("reads no bodies for a metadata-only conflict listing", async () => {
     // A metadata-only conflict listing must not fetch bodies it will not use.
-    // MUTATION: drop the `bodies: "withheld"` early return and this listing
-    // issues a blob read.
     const withheld: ConflictRecord = {
       ...conflict,
       current: {
@@ -664,8 +660,6 @@ describe("VersionedLiveAdapter", () => {
     // rebuilt. The page is cut by the `byteLength` each withheld side already
     // carries, so the bodies past the budget are never transferred.
     //
-    // MUTATION: drop the budget cut in `listTextConflicts` and both conflicts
-    // hydrate, issuing a second blob read.
     const body = "rebuilt";
     const bodySha = createHash("sha256").update(body, "utf8").digest("hex");
     const huge = (id: string): ConflictRecord => ({
@@ -1691,7 +1685,7 @@ describe("VersionedLiveAdapter", () => {
   it("decodes a withheld conflict body from either surface as a hydration hint", () => {
     // `conflicts.resolve` withholds over-cap sides to keep its answer inside
     // one control frame (`settled_conflict_json`, lib.rs), and `conflicts.list`
-    // withholds the sides of a row past the conflict row frame cap (#537).
+    // withholds the sides of a row past the conflict row frame cap.
     // The null is a hint, not content: `blobSha256` names the body, and
     // `listTextConflicts` hydrates it — or throws — before any reader sees
     // the record.

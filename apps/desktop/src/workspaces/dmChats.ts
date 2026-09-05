@@ -9,19 +9,19 @@ import type { JoinedSharedChannel } from "./registryStore";
 //     their ops ride the normal workspace push, and members' ops arrive in
 //     their bucket through the relay's member-append route.
 //   - a PARTICIPANT discovered the channel through a received grant and joined
-//     it; the join replayed the share's filtered log, minting a FRESH local
+//     it; the join replayed the share's filtered log, minting a fresh local
 //     channel id whose wire id is the OWNER's channel id — so a replayed
 //     channel's wire id never equals its local id.
 // The role rule is deterministic and durable: a locally-created channel's wire
 // id equals its channel id; a replayed channel mints a fresh local id.
-// Authorization NEVER derives from any of this local state — the relay
+// Authorization never derives from any of this local state — the relay
 // re-derives membership from the grant row on every request.
 
 export interface DmRecordInfo {
   channelId: string;
   channelWireId: string;
   name: string;
-  // What the DM is CALLED for this viewer: the owner sees the recipients they
+  // What the DM is called for this viewer: the owner sees the recipients they
   // addressed (the channel name); a participant sees the granter's email —
   // the replicated channel name is the owner's recipient list, which would
   // read as the participant's own address.
@@ -65,10 +65,10 @@ export async function requireShareableChatChannel(input: {
   }
 }
 
-// The single running conversation (the anti-forum rule): the OLDEST thread in
+// The single running conversation (the anti-forum rule): the oldest thread in
 // the DM channel, deterministically (createdAtMs, then thread id) — every
 // participant picks the same one even if a race ever minted a duplicate.
-// Exported so startDm reuses the SAME canonical-thread rule as listDmRecords
+// Exported so startDm reuses the same canonical-thread rule as listDmRecords
 // (the two must never drift).
 export function runningThread<
   T extends { thread: { id: string; createdAtMs: number } },
@@ -120,7 +120,7 @@ export async function listDmRecords(input: {
     // and startDm revokes this call's grants on a partial grant failure, so the
     // orphan is left with zero live recipients. Hide it — a failed startDm must
     // never linger as a broken empty conversation, and a retry mints a fresh
-    // complete DM. A PARTICIPANT with no thread yet is a REAL pending DM (the
+    // complete DM. A PARTICIPANT with no thread yet is a real pending DM (the
     // owner may grant before sending the first message), so it stays visible.
     if (role === "owner" && running === undefined) continue;
     dms.push({
@@ -143,7 +143,7 @@ export async function listDmRecords(input: {
 }
 
 // One page of a relay share-log GET (`/sync/shares/:id/log`): the relay
-// paginates RAW log rows and applies the share filter AFTER, so `ops` can be
+// paginates raw log rows and applies the share filter after, so `ops` can be
 // empty while `hasMore` is true and the cursor still advances over the dropped
 // (filtered-out) rows.
 export interface ShareLogPage {
@@ -158,7 +158,7 @@ export interface ShareLogPage {
 //               channel.create was observed with kind "channel". Safe to
 //               CACHE because a grant's channel kind is immutable.
 //   "unknown" — no authoritative create is visible yet, or a page could not
-//               be fetched. Do NOT cache; retry on the next pass. A grant can
+//               be fetched. Do not cache; retry on the next pass. A grant can
 //               become visible before the owner's bootstrap ops reach relay.
 export type DmPeekResult = "dm" | "not-dm" | "unknown";
 
@@ -202,10 +202,10 @@ export function shareIdsToWithholdFromOrdinaryInvites(input: {
 // Peek a received chat-channel grant's KIND without mutating the local store
 // to classify it as a pending DM request or an ordinary shared-channel invite.
 // The share filter serves the
-// channel.create as the join bootstrap, so the EARLIEST SERVED op carries the
+// channel.create as the join bootstrap, so the earliest served op carries the
 // channel kind. But the log GET paginates raw rows before filtering — a normal
 // owner log has `workspace.init` before `chat.channel.create`, so the first
-// page is served EMPTY (ops:[], hasMore:true). Naively reading only page one
+// page is served empty (ops:[], hasMore:true). Naively reading only page one
 // is a permanent false negative. Page through `nextCursor` until the first
 // served op appears (inspect its kind) or the log is exhausted. Bounded to
 // `maxPages` so a hostile/huge filtered prefix can't loop forever on since=0;
@@ -238,11 +238,11 @@ export async function peekReceivedGrantKind(input: {
 }
 
 // Grant every not-yet-covered recipient of a DM ATOMICALLY. Create all missing
-// grants first, tracking the ones created in THIS call; if ANY create fails,
-// best-effort REVOKE the just-created grants before rethrowing — so a partial
-// failure never leaves the channel with an INCOMPLETE live-grant set.
-// matchDmChannelByRecipients requires an EXACT recipient-set match, so a
-// half-granted channel would be missed on the retry and a DUPLICATE DM minted
+// grants first, tracking the ones created in this call; if any create fails,
+// best-effort revoke the just-created grants before rethrowing — so a partial
+// failure never leaves the channel with an incomplete live-grant set.
+// matchDmChannelByRecipients requires an exact recipient-set match, so a
+// half-granted channel would be missed on the retry and a duplicate DM minted
 // (with a split conversation). Rolling back to zero grants keeps the retry
 // clean. The commit callback writes the first message inside the same rollback
 // scope, so a thrown rollback means nothing was said yet. A revoke failure
@@ -315,18 +315,18 @@ export function parseDmRecipients(raw: string): string[] {
 }
 
 // The DM channel's display name for its OWNER: the recipient set, bounded to
-// the channel-name cap. COSMETIC ONLY — it truncates and can collide across
-// distinct recipient sets, so it must NEVER be a DM's dedup identity (see
+// the channel-name cap. Cosmetic only — it truncates and can collide across
+// distinct recipient sets, so it must never be a DM's dedup identity (see
 // matchDmChannelByRecipients).
 export function dmChannelNameFor(recipients: string[]): string {
   const name = recipients.join(", ");
   return name.length <= 80 ? name : `${name.slice(0, 77)}...`;
 }
 
-// A DM's true identity is its LIVE grant recipient set — the set of live
-// chat-channel grant recipients on the channel's wire — NOT its (truncatable,
-// collidable) display name. Reuse an existing DM channel ONLY when its live
-// grant recipients EXACTLY equal the requested normalized recipient set;
+// A DM's true identity is its live grant recipient set — the set of live
+// chat-channel grant recipients on the channel's wire — not its (truncatable,
+// collidable) display name. Reuse an existing DM channel only when its live
+// grant recipients exactly equal the requested normalized recipient set;
 // otherwise the caller must create a fresh channel, even if the derived name
 // collides. Matching by name instead would grant a new recipient someone
 // else's existing conversation log when two recipient sets collide at the cap.

@@ -42,7 +42,7 @@ function LayoutToggle(props: {
 }
 
 // Custom titlebar: a drag strip under the hidden OS titlebar, sized by the
-// SAME constant the titleBarOverlay uses so they can never disagree. Every
+// same constant the titleBarOverlay uses so they can never disagree. Every
 // interactive child opts out of dragging (titlebar-no-drag). The right spacer
 // reserves room for the OS window-control overlay via env(titlebar-area-*)
 // where the platform provides it, falling back to 140px (three controls).
@@ -57,7 +57,7 @@ export function Titlebar(props: {
   chatsSidebar?: TitlebarPanelToggle;
 }) {
   const [switcherOpen, setSwitcherOpen] = useState(false);
-  // macOS draws traffic lights on the LEFT and never populates the
+  // macOS draws traffic lights on the left and never populates the
   // titlebar-area-* env vars (WCO is only enabled on the non-darwin branch of
   // createMainWindow) — lay out around them with fixed insets there, and
   // around the OS window-controls overlay via env() everywhere else.

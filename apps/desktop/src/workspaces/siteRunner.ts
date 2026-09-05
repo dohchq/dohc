@@ -67,7 +67,7 @@ const DESCENDANT_CAPTURE_INTERVAL_MS = 5000;
 // The will-quit teardown's own budget must cover this site-preview stop
 // path's worst case (SIGTERM, then this grace, then the SIGKILL
 // round-trip) or an unref'd preview process can survive with no kill
-// signal ever sent. Computed HERE, not duplicated as an independent
+// signal ever sent. Computed here, not duplicated as an independent
 // literal in main.ts — a hard-coded, independently-drifting duplicate is
 // exactly how the two fell out of sync before.
 export const WILL_QUIT_BUDGET_MS = BUILD_HARD_KILL_GRACE_MS + 1000;
@@ -81,12 +81,12 @@ const DEV_URL_TRAILING_PUNCTUATION_RE = /[.,)"'`,\]>]+$/;
 // SGR sequences before matching.
 // eslint-disable-next-line no-control-regex
 const ANSI_SGR_RE = /\u001B\[[0-9;]*m/g;
-// Case-insensitive for BOTH the inline (--host=X) and separate-token
+// Case-insensitive for both the inline (--host=X) and separate-token
 // (--host X) forms — a CLI flag parser is typically case-sensitive itself,
 // so "--HOST" likely does nothing to a real tool, but that's exactly why
 // treating it as a possible host bind is the safe direction: refusing a
 // flag spelling that turns out to be inert costs nothing, while trusting
-// it silently (on the chance some tool DOES accept it) would not.
+// it silently (on the chance some tool does accept it) would not.
 const HOST_BIND_FLAG_PATTERN = /^(?:--host|--hostname|-H)(?:=(.*))?$/i;
 const MAX_SHELL_NESTING_DEPTH = 3;
 const DEV_URL_CARRY_CHARS = 2 * 1024;
@@ -155,11 +155,11 @@ interface DescendantCapture {
   /** Takes one snapshot right now, in addition to the periodic poll. */
   captureNow(): Promise<void>;
   /**
-   * Every capture CURRENTLY in flight, so a caller that needs the FRESHEST
+   * Every capture currently in flight, so a caller that needs the freshest
    * possible snapshot (stopChild, once the wrapper has already exited) can
-   * await ALL of them instead of racing its own async ps read. A single
-   * "latest" promise isn't enough: an interval tick that started SLOW and
-   * one that started later but finishes FAST would otherwise have the fast
+   * await all of them instead of racing its own async ps read. A single
+   * "latest" promise isn't enough: an interval tick that started slow and
+   * one that started later but finishes fast would otherwise have the fast
    * one overwrite it, so a caller awaiting only the fast one would decide
    * the set is empty and return before the slow one's own descendant lands.
    */
@@ -179,7 +179,7 @@ interface DescendantCapture {
 // that hadn't forked yet on an earlier tick) must not drop a pid an earlier
 // poll already found — union every poll's result instead of replacing it. A
 // session left open for a long time would otherwise retain every helper's
-// pid forever, and POSIX/Windows pids get REUSED once a process fully
+// pid forever, and POSIX/Windows pids get reused once a process fully
 // exits — pruning a pid the instant it's confirmed dead (isPidAlive) keeps
 // the set to only pids still worth being able to reach.
 function createDescendantCapture(
@@ -329,12 +329,12 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
     }
     // Subshell grouping (`(HOST=0.0.0.0 vite)`), brace grouping
     // (`{ HOST=0.0.0.0 vite; }`), and command substitution (`$(...)`/
-    // `` `...` ``) are shell CONSTRUCTS this tokenizer has no way to
+    // `` `...` ``) are shell constructs this tokenizer has no way to
     // decompose — `(` glues onto whatever token follows it, so
     // "(HOST=0.0.0.0" never matches the leading-assignment scan's
     // identifier-starting pattern, and the real command hidden inside
     // never gets validated at all. splitShellStatements only recognizes
-    // statement SEPARATORS, not constructs that wrap a whole statement —
+    // statement separators, not constructs that wrap a whole statement —
     // there is no separator here for it to split on. Refuse outright, the
     // same stance this file already takes on a shape it cannot safely
     // parse (ENV_OPTIONS_UNVERIFIABLE, MAX_SHELL_NESTING_DEPTH).
@@ -363,7 +363,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
 }
 
 // splitCommandLine's contract is "the ONE command the real shell will run"
-// — it has no concept of a shell's own STATEMENT separators, so a raw body
+// — it has no concept of a shell's own statement separators, so a raw body
 // with an unquoted `;`, `&&`, `||`, `&`, `|`, or newline tokenizes as if the
 // whole thing were a single command. `export HOST=0.0.0.0; vite` would
 // glue "HOST=0.0.0.0;" onto the args of a command named "export" — the
@@ -374,7 +374,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
 // chaining with `;` — dohc's own test fixtures do exactly this to prove
 // descendant teardown) must keep working, so refusing every compound body
 // outright is too coarse; splitting it into the statements a real shell
-// would run and validating each ONE independently checks exactly what
+// would run and validating each one independently checks exactly what
 // actually executes, without reimplementing full shell grammar (quoting
 // and escaping still use splitCommandLine's own rules, applied per split
 // segment) or over-refusing ordinary usage.
@@ -425,7 +425,7 @@ export function splitShellStatements(commandLine: string): string[] {
 
 interface HostBindCandidate {
   value: string;
-  // Set to the flag token ONLY when this candidate's value could not be
+  // Set to the flag token only when this candidate's value could not be
   // determined at all — the flag was the command's last token, or
   // immediately followed by what looks like another flag rather than a
   // value. Distinct from a genuinely empty INLINE value ("--host="), which
@@ -458,27 +458,27 @@ function explicitHostBinds(args: string[]): HostBindCandidate[] {
 // `splitCommandLine` has no concept of shell env-var assignments — a
 // leading `HOST=0.0.0.0 vite` tokenizes as command "HOST=0.0.0.0" with
 // args ["vite"], which the flag-based check above never sees. npm's own
-// script shell DOES honor a leading assignment, and a server that reads
+// script shell does honor a leading assignment, and a server that reads
 // process.env.HOST/HOSTNAME (the conventional names many frameworks and
 // custom servers use) binds every interface while still printing a
-// loopback URL that satisfies startup detection. A shell allows SEVERAL
+// loopback URL that satisfies startup detection. A shell allows several
 // leading assignments before the real command (`NODE_ENV=production
 // HOST=0.0.0.0 vite`) — HOST/HOSTNAME need not be first among them — so
-// this walks the whole leading run of ANY `VAR=value` token, collecting
+// this walks the whole leading run of any `VAR=value` token, collecting
 // only the host-named ones, and stops at the first token that isn't an
 // assignment at all (the real command).
 const ENV_ASSIGNMENT_PATTERN = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/;
 
 // GNU env's documented form is `env [OPTION]... [NAME=VALUE]... [COMMAND
-// [ARG]...]` — its OPTIONs can precede the assignments this scanner is
+// [arg]...]` — its OPTIONs can precede the assignments this scanner is
 // looking for (`env -i HOST=0.0.0.0 vite`, `env -u FOO HOST=0.0.0.0 vite`).
 // Each recognized option is skipped, along with the value token it takes,
 // so the scan can still reach a HOST/HOSTNAME assignment that follows it.
 const ENV_OPTIONS_WITHOUT_VALUE = new Set(["-i", "--ignore-environment", "-0", "--null", "-v", "--debug"]);
 const ENV_OPTIONS_WITH_VALUE = new Set(["-u", "--unset", "-C", "--chdir"]);
-// -S/--split-string re-parses its OWN payload into further OPTIONs,
+// -S/--split-string re-parses its own payload into further OPTIONs,
 // NAME=VALUE assignments, and the command — using env(1)'s own splitting
-// rules, which are NOT the same as shell quoting (its backslash escapes and
+// rules, which are not the same as shell quoting (its backslash escapes and
 // quote handling differ). Treating it as an opaque value-carrying option
 // (the way -u/-C are) would skip a HOST assignment hidden inside it
 // entirely; reimplementing env's exact splitting risks a parity mismatch
@@ -490,7 +490,7 @@ const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 // There is no allowlist anywhere in this validator — every command not
 // refused here still has its own args scanned by assertDirectHostBinds and,
 // if it nests a shell or an env-style wrapper, recursed into below. This is
-// the REFUSE set: commands that run an ARBITRARY wrapped command (the same
+// the refuse set: commands that run an arbitrary wrapped command (the same
 // "smuggle a shell past validation" risk env(1) had before its own fix) but
 // that this file cannot soundly verify, for one of two reasons:
 //
@@ -504,7 +504,7 @@ const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 //   options of their own, but are grouped here rather than singled out:
 //   nothing about "this wrapper happens to have a small grammar" changes
 //   the risk it exists to smuggle a shell past validation.
-// - `cross-env-shell` joins its own remaining args back into ONE shell
+// - `cross-env-shell` joins its own remaining args back into one shell
 //   command string with a plain space join before handing it to a shell —
 //   unlike env's `sh -c "already one token"`, where the author quoted the
 //   whole body as a single argument this file's own tokenizer received
@@ -514,7 +514,7 @@ const ENV_OPTIONS_UNVERIFIABLE = new Set(["-S", "--split-string"]);
 //   arg that itself contained a space arrives here as one token; rejoining
 //   loses the boundary that made it one arg instead of two). Recursing into
 //   it as a shell body the way env-wrapped shells are below would be
-//   verifying a DIFFERENT string than what cross-env-shell will actually
+//   verifying a different string than what cross-env-shell will actually
 //   run — refused instead.
 // - `env-cmd`, `dotenv` both load their environment assignments from a
 //   CONFIG FILE (an .env file, an env-cmd config) this validator never
@@ -543,7 +543,7 @@ const PASSTHROUGH_WRAPPER_COMMAND_NAMES = new Set([
 // that's the index of the wrapped command itself (or tokens.length if the
 // whole array was assignments/options with nothing left, or the scan
 // stopped on export/declare/typeset/local, which never leave a wrapped
-// command behind at all). Callers that need to know WHAT comes after env's
+// command behind at all). Callers that need to know what comes after env's
 // own options and assignments (see assertLoopbackOnlyDevServerCommandAtDepth's
 // env-wrapped-shell recursion) read consumedThrough; callers that only need
 // the collected hosts (assertDirectHostBinds) read .hosts.
@@ -568,19 +568,19 @@ function explicitHostEnvironmentAssignments(
       continue;
     }
     // "export HOST=0.0.0.0" (its own split shell statement — see
-    // splitShellStatements) persists an assignment into the CURRENT
+    // splitShellStatements) persists an assignment into the current
     // shell's environment, the same way a bare prefix assignment sets one
-    // for the NEXT command — either way, a HOST/HOSTNAME value it sets
+    // for the next command — either way, a HOST/HOSTNAME value it sets
     // reaches this statement's own dev server command. export's own
     // grammar (`export [-fn] [name[=value] ...]`, per bash's own `help
     // export`) takes an ARBITRARY NUMBER of operands — it never runs a
-    // following command at all, so EVERY remaining token in this
+    // following command at all, so every remaining token in this
     // statement belongs to it. `export KEEP HOST=0.0.0.0` validly
     // exports both — stopping at the first bare name ("KEEP") and
-    // treating the REST as a separate command would miss HOST entirely.
+    // treating the rest as a separate command would miss HOST entirely.
     // A bare operand (no "=") just exports an already-set variable —
     // nothing new to check — but the scan must keep going past it to
-    // reach a LATER operand's own assignment.
+    // reach a later operand's own assignment.
     if (!isEnvWrapper && token === "export") {
       index += 1;
       while (index < tokens.length) {
@@ -595,14 +595,14 @@ function explicitHostEnvironmentAssignments(
     }
     // "declare -x HOST=0.0.0.0"/"typeset -x ..."/"local -x ..." export
     // the assignment to child processes exactly the same as a bare
-    // "export" does — but PLAIN declare/typeset/local (no -x) creates a
+    // "export" does — but plain declare/typeset/local (no -x) creates a
     // shell-local variable a child process never sees, so treating it as
     // exported would refuse a script that never actually rebinds
-    // anything. These builtins take only SHORT options (no long forms),
+    // anything. These builtins take only short options (no long forms),
     // combinable in one token ("-rx") or given separately ("-r -x") —
     // scan every "-"-prefixed option token immediately after the keyword
     // for an "x" before deciding. Like export, they never run a
-    // following command either — declare/typeset/local ALSO take an
+    // following command either — declare/typeset/local also take an
     // arbitrary number of name[=value] operands, so every remaining
     // token belongs to them too.
     if (!isEnvWrapper && (token === "declare" || token === "typeset" || token === "local")) {
@@ -671,7 +671,7 @@ function explicitHostEnvironmentAssignments(
 }
 
 // cross-env's documented form is `cross-env [NAME=VALUE]... COMMAND
-// [ARG]...` — no OPTIONs of its own, just the same leading-assignments-then-
+// [arg]...` — no OPTIONs of its own, just the same leading-assignments-then-
 // command shape env(1) has. explicitHostEnvironmentAssignments's env-wrapper
 // scan already treats an unrecognized "-"-prefixed token as an unverifiable
 // option and refuses rather than skip it (see ENV_OPTIONS_UNVERIFIABLE and
@@ -692,7 +692,7 @@ function assertDirectHostBinds(command: string, args: string[]): void {
     ...explicitHostBinds(args),
     ...explicitHostEnvironmentAssignments([command, ...args], false).hosts.map((value) => ({ value })),
     // env/cross-env each set every leading assignment before running the
-    // wrapped command, so the SAME assignments matter here too, just one
+    // wrapped command, so the same assignments matter here too, just one
     // token later since the wrapper's own name isn't one — and env's own
     // OPTIONs (cross-env has none) may precede them.
     ...(isEnvStyleWrapper(commandName)
@@ -741,7 +741,7 @@ function nestedShellCommand(command: string, args: string[]): string | null {
 // What env(1) (or cross-env, same shape) actually runs, once its own
 // OPTIONs and NAME=VALUE assignments are consumed — `env sh -c 'HOST=0.0.0.0
 // vite'` looks like a completely unrecognized command to nestedShellCommand,
-// which only ever switches on the command it's GIVEN ("env" here), never on
+// which only ever switches on the command it's given ("env" here), never on
 // what that command goes on to run. Without this, a shell (or any further
 // wrapper) env/cross-env wraps is never validated at all: assertDirectHostBinds
 // only checks the wrapper's OWN leading assignments, and nestedShellCommand's
@@ -786,7 +786,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
     );
   }
   if (wrappedByEnv) {
-    // Recurse through the WHOLE validator (not just a raw string re-split
+    // Recurse through the whole validator (not just a raw string re-split
     // the way the nested-shell-statement case below needs) — an env-
     // wrapped shell (env sh -c "...", env -i bash -c "...", a nested `env
     // env ...`, ...) gets exactly the treatment a bare invocation of that
@@ -836,7 +836,7 @@ export function packageManagerValidatedScriptCommand(
   // version, so validating Yarn hooks keeps Classic sites safe.
   for (const body of [scriptBody, lifecycle.pre, lifecycle.post]) {
     if (!body) continue;
-    // npm/pnpm/Yarn/Bun run this body through a REAL shell — a compound
+    // npm/pnpm/Yarn/Bun run this body through a real shell — a compound
     // one (`export HOST=0.0.0.0; vite`, `true && HOST=0.0.0.0 vite`)
     // genuinely executes as several statements, so each gets validated on
     // its own instead of only the first.
@@ -854,7 +854,7 @@ export function detectDevUrl(text: string): string | null {
   const plain = text.replace(ANSI_SGR_RE, "");
   const matched = DEV_URL_RE.exec(plain)?.[1];
   // A server that reports "[::1]" listens on the IPv6 loopback specifically
-  // — rewriting it to "127.0.0.1" pointed the preview at a DIFFERENT
+  // — rewriting it to "127.0.0.1" pointed the preview at a different
   // address nothing was necessarily listening on. isLoopbackHostname (and
   // the LoopbackPreviewUrl IPC schema built on it) already accept the
   // bracketed IPv6 form as-is, so there is nothing left to rewrite for.
@@ -932,11 +932,11 @@ export async function startSiteDevServer(input: {
     const failTimer = setTimeout(() => {
       if (resolved) return;
       stopped = true;
-      // Bring the child fully DOWN before rejecting. stopChild awaits before it
+      // Bring the child fully down before rejecting. stopChild awaits before it
       // delivers SIGTERM (non-win32) / completes the tree kill (win32), so
       // rejecting first would let a caller observe the failure and delete or
       // switch the workspace while the dev server is still alive, holding the
-      // site dir. stopChild also sequences the Windows tree kill BEFORE the
+      // site dir. stopChild also sequences the Windows tree kill before the
       // wrapper signal; signalling first would let the taskkill race a dead
       // wrapper pid and orphan the real dev server.
       void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
@@ -964,7 +964,7 @@ export async function startSiteDevServer(input: {
       // The immediate post-spawn snapshot (above) can race a wrapper that
       // hasn't finished forking its background server yet — spawn()
       // returning is not proof the shell has executed anything. By the
-      // time its "ready" line is OUT, everything the script did BEFORE
+      // time its "ready" line is out, everything the script did before
       // printing that line (backgrounding included) has already run, so
       // this is a far more reliable synchronization point for a second
       // snapshot than an arbitrary short delay would be.
@@ -1030,14 +1030,14 @@ async function stopChild(
   // server still running as an orphan. taskkill /PID <wrapper> /T (and its
   // POSIX process-group equivalent) needs the wrapper's pid to still be a
   // live process to walk its tree from — a dead pid gives it nothing to
-  // reach either way, on EITHER platform. capturedDescendants (see
+  // reach either way, on either platform. capturedDescendants (see
   // createDescendantCapture, shared by startSiteDevServer's/buildSite's
-  // periodic poll) carries pids enumerated WHILE the wrapper was still
+  // periodic poll) carries pids enumerated while the wrapper was still
   // alive, so they stay reachable directly by pid even after the wrapper's
   // own exit reparents them away from its pid in the process table —
   // proceed using those even though the wrapper itself is already gone.
   //
-  // Each capture is itself fire-and-forget from its OWN caller (an async
+  // Each capture is itself fire-and-forget from its own caller (an async
   // `ps`/PowerShell read a caller doesn't block startup or readiness on) —
   // a capture triggered right before the wrapper exits can still be
   // IN FLIGHT the instant stop() runs. Give it a chance to land before
@@ -1128,7 +1128,7 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
     if (!isInside(realSiteRoot, realOutput)) return null;
     const info = await stat(absolute);
     if (!info.isDirectory()) continue;
-    // A build command that exits 0 having created only an EMPTY output
+    // A build command that exits 0 having created only an empty output
     // directory hasn't actually produced a servable site — the preview
     // path serves <output>/index.html next and fails after buildSite
     // already reported ok: true. Requiring a real, readable index.html
@@ -1139,11 +1139,11 @@ export async function detectBuildOutput(siteRoot: string, configured?: string): 
     const indexInfo = await stat(indexPath).catch(() => null);
     if (!indexInfo?.isFile() || !(await pathExists(indexPath))) continue;
     // stat() follows symlinks — a readable index.html that's actually a
-    // symlink to a file OUTSIDE the output directory (still inside the
+    // symlink to a file outside the output directory (still inside the
     // site, just not inside `dist`) passes every check above, but the
     // static preview server's own per-request containment check
     // (staticDirectoryPreview.ts, isInside(root, realTarget)) resolves
-    // the SAME entry's real path and rejects it for escaping the served
+    // the same entry's real path and rejects it for escaping the served
     // root — buildSite would report ok: true for an artifact the preview
     // then serves as a 403/blank page. Require the entry's own real path
     // to stay inside the output directory's real path too.
@@ -1211,7 +1211,7 @@ export async function buildSite(input: {
     timer = setTimeout(() => {
       timedOut = true;
       pushLog(logs, "system", `Build timed out after ${timeoutMs}ms.`);
-      // stopChild sequences the Windows tree kill BEFORE the wrapper signal
+      // stopChild sequences the Windows tree kill before the wrapper signal
       // and resolves once the child exits (or the kill grace lapses).
       void stopChild(child, descendants.captured, undefined, descendants.awaitAll).then(() => finish(null));
     }, timeoutMs);

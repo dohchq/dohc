@@ -15,11 +15,11 @@ export default defineConfig({
     // document.elementFromPoint failed whole runs rather than single tests.
     // `testSetup.ts` registers the scratch-directory cleanup every suite needs.
     // Dropping `./vitest.setup.ts` fails `src/vitestSetup.test.ts` by name,
-    // so the suite can no longer go red without naming a test (#635).
+    // so the suite can no longer go red without naming a test.
     setupFiles: ["./vitest.setup.ts", "./src/testSetup.ts"],
     maxWorkers: WORKER_CAP,
     // node >= 25 ships a default-on WebStorage whose localStorage global is
-    // created WITHOUT a backing file in the workers ("--localstorage-file was
+    // created without a backing file in the workers ("--localstorage-file was
     // provided without a valid path") and shadows jsdom's real Storage, so
     // renderer tests using localStorage (theme.test.ts) fail. Disable node's
     // copy in the test workers; jsdom's localStorage takes over.

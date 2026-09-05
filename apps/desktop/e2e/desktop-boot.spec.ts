@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 import { launchDesktopApp } from "./helpers/desktopApp";
 import { cleanupDesktopWorkspace, createTempWorkspace } from "./helpers/workspace";
 
-// #783 — the app boots, and the bridge is there.
+// The app boots, and the bridge is there.
 //
 // Every other spec in this directory opens with a click on a screen that only
 // renders once `window.dohcDesktop` exists. When the preload fails to load,

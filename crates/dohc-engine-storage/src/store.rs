@@ -19,8 +19,7 @@ fn is_safe_identifier(name: &str) -> bool {
 
 /// A single owned writable connection. Not `Sync`, not cloneable: the workspace
 /// actor owns exactly one and never lets it cross threads
-/// (`STATE_OWNERSHIP.tsv` row `sqlite-conn-versioned-text` → Rust: one writer
-/// per actor). Dropping it closes the connection deterministically.
+/// (one writer per actor). Dropping it closes the connection deterministically.
 #[derive(Debug)]
 pub struct EngineStore {
     conn: Connection,
@@ -142,7 +141,7 @@ impl EngineStore {
         f(&self.conn)
     }
 
-    /// Run a compound domain mutation inside exactly ONE `BEGIN IMMEDIATE`
+    /// Run a compound domain mutation inside exactly one `BEGIN IMMEDIATE`
     /// transaction, consulting the two named storage fault points around the
     /// commit boundary. The closure issues every mutation — the domain write
     /// and any idempotency-ledger row — against the same `&Transaction`, so
@@ -177,9 +176,8 @@ impl EngineStore {
             }
         };
 
-        // Cancel/crash point is BETWEEN durable steps, never mid-commit
-        // (PORTING.md §12): the closure has issued all SQL but nothing is
-        // durable yet.
+        // Cancel/crash point is between durable steps, never mid-commit: the
+        // closure has issued all SQL but nothing is durable yet.
         if should_crash(faults, FaultPoint::StorageBeforePersist) {
             drop(tx); // explicit rollback
             return Ok(TxnOutcome::Crashed { committed: false });
@@ -194,7 +192,7 @@ impl EngineStore {
         Ok(TxnOutcome::Committed(value))
     }
 
-    /// The database's `PRAGMA synchronous` setting (`1` = NORMAL). Exposed so a
+    /// The database's `PRAGMA synchronous` setting (`1` = normal). Exposed so a
     /// weakened-durability configuration is directly assertable.
     pub fn synchronous_setting(&self) -> Result<i64, StorageError> {
         self.conn
@@ -287,7 +285,7 @@ impl EngineStore {
         materialize::pending_job_count(&self.conn)
     }
 
-    /// The highest COMPLETE `target_generation` for `path` in `workspace_id`
+    /// The highest complete `target_generation` for `path` in `workspace_id`
     /// (staleness gate for the materialization pipeline), or `None` if nothing
     /// is materialized there.
     pub fn max_completed_generation_for_path(

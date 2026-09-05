@@ -32,7 +32,7 @@ pub enum CorruptionKind {
     /// Out of disk space. Recovery: free space; the source was never destroyed.
     DiskFull,
     /// A transient lock (Windows AV/indexer, busy SQLite handle). Recovery:
-    /// retry; NOT corruption.
+    /// retry; not corruption.
     TransientLock,
 }
 
@@ -52,8 +52,7 @@ impl CorruptionKind {
 
 /// Classify a storage failure into a recovery kind. The mapping is total and
 /// deliberately distinct per kind so a caller never misclassifies (e.g. a
-/// transient AV lock must not read as corruption — `LANGUAGE_SEMANTICS_MATRIX`
-/// 7.8).
+/// transient AV lock must not read as corruption).
 pub fn classify(err: &StorageError) -> CorruptionKind {
     match err {
         StorageError::UnsupportedFingerprint { .. } => CorruptionKind::UnsupportedFingerprint,
@@ -68,7 +67,7 @@ pub fn classify(err: &StorageError) -> CorruptionKind {
     }
 }
 
-/// A redacted, machine-readable diagnostic bundle. Contains ONLY integrity and
+/// A redacted, machine-readable diagnostic bundle. Contains only integrity and
 /// classification metadata and evidence file *basenames* — never absolute
 /// paths (which can embed a username), document bodies, secrets, or keys.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -27,7 +27,7 @@ import {
   WINDOWS_RENAME_RETRY_DELAYS_MS,
 } from "./pluginShared";
 
-// CodeRabbit #779 R25: a byte bound before JSON.parse/js-yaml load, so an
+// A byte bound before JSON.parse/js-yaml load, so an
 // oversized plugin-authored package.json/pnpm-lock.yaml fails with a named
 // limit instead of forcing a full parse of arbitrary-size, attacker-
 // controlled text. Measured 2026-08-13 (see
@@ -167,7 +167,7 @@ export interface PluginPnpmPaths {
   storeDir: string;
   cacheDir: string;
   stateDir: string;
-  /** HOME/USERPROFILE for the install child process (CodeRabbit #779 R18) —
+  /** HOME/USERPROFILE for the install child process —
    * plugin-scoped and empty, so pnpm never reads this machine's real
    * ~/.npmrc (which can hold registry auth tokens) for a plugin-authored
    * install. */
@@ -214,7 +214,7 @@ export type PluginSourceSnapshotResult =
      * beside the live root until `publish()`, or the live snapshot itself
      * when an already-matching one was preserved. Install, scan, and build
      * all read from here, so a tree held for approval is never the tree a
-     * panel or a brokered child can reach (#779 round 9 B1).
+     * panel or a brokered child can reach.
      */
     snapshotRoot: string;
     sourceHash: string;
@@ -349,9 +349,9 @@ function findLocalDependencySpec(
   // (never cleared, unlike stack) so a node already found to have no match
   // is never re-walked. YAML's &anchor/*alias syntax — legitimate and
   // common in pnpm lockfiles for shared dependency specs — parses repeated
-  // aliases to the SAME object reference, so without this a diamond-shaped
+  // aliases to the same object reference, so without this a diamond-shaped
   // alias structure can revisit one shared subtree once per path reaching
-  // it, compounding multiplicatively across levels (CodeRabbit #779 R25).
+  // it, compounding multiplicatively across levels.
   // stack alone only catches true cycles (a node its own ancestor), not
   // this DAG re-visitation.
   visited: WeakSet<object>,
@@ -467,8 +467,7 @@ function validatePackageJson(packagePath: string, value: unknown): void {
   // downloads whatever it names, so the pin above is only a pin while this
   // field is absent. Measured against the staged pnpm@11.20.0: a package.json
   // declaring the pinned value alongside devEngines pnpm 10.15.0 ran 10.15.0,
-  // a release that still honors path settings from a plugin-authored .npmrc
-  // (#779 round 8 D1).
+  // a release that still honors path settings from a plugin-authored .npmrc.
   const devEngines = value.devEngines;
   if (isRecord(devEngines) && devEngines.packageManager !== undefined) {
     throw new SnapshotError(
@@ -1045,7 +1044,7 @@ function resultError(error: unknown): PluginSourceSnapshotError {
  * published snapshot inside its live root, and a staged snapshot beside that
  * root which no approval has published yet. The build reads from whichever
  * one the pipeline handed it, so it checks membership of this family rather
- * than a single fixed path (#779 round 9 B1).
+ * than a single fixed path.
  */
 export function isPluginSourceRoot(liveRoot: string, sourceRoot: string): boolean {
   const resolvedLiveRoot = resolve(liveRoot);
@@ -1068,7 +1067,7 @@ export function isPluginSourceRoot(liveRoot: string, sourceRoot: string): boolea
  * the live root named `liveRootName`. The uuid is part of the match: plugin
  * ids may contain "." and "-", so a bare prefix test also accepts another
  * plugin's live root — `example.snap-staging-1` for `example`, or `foo.bar`
- * for `foo` (#779 round 10 A1/B1).
+ * for `foo`.
  */
 export function isPluginRootArtifact(
   liveRootName: string,
@@ -1229,7 +1228,7 @@ export async function snapshotPluginSource(
       },
       // Claimed only once the tree is actually gone. A removal that failed
       // left it exactly where it was, so it is still this snapshot's and the
-      // caller's retry has to reach it (#779 round 10 A5).
+      // caller's retry has to reach it.
       discard: async () => {
         settle.assertOpen();
         await removeStaging(stagedRoot);

@@ -81,7 +81,7 @@ const LOOPBACK_RELAY_HOSTNAMES = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * Single owner of the e2e escape hatch for the daemon's HTTPS-only relay
- * transport: true only when the explicit test env flag is "1" AND the relay
+ * transport: true only when the explicit test env flag is "1" And the relay
  * URL is plain http to a loopback host. Everything else (flag unset, https,
  * non-loopback host, unparseable URL) keeps the secure default.
  */
@@ -221,7 +221,7 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
   readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
-  // These two are forwarded for completeness, NOT because anything reaches
+  // These two are forwarded for completeness, not because anything reaches
   // them through this wrapper today: the supervisor probes and kills the
   // client it launched itself, never this one. Deleting them would break
   // nothing now, which is exactly why the reason has to be written down —
@@ -557,8 +557,8 @@ function translateRelayError(method: string, error: unknown): never {
   ) {
     throw new SharedChannelReadOnlyError();
   }
-  // #646: the same relay refusal, one noun over. The relay answers ONE code
-  // for both — that is the anti-fingerprinting property — so the METHOD, not
+  // The same relay refusal, one noun over. The relay answers one code
+  // for both — that is the anti-fingerprinting property — so the method, not
   // the code, decides which noun the reader sees. Proposal submission is a
   // file-share operation, so this reads as the file.
   if (
@@ -646,7 +646,7 @@ export interface EngineRelayWorkspaceClient {
     };
   }): Promise<RecordShareViewIdentityResult>;
 
-  // #646 PR3: this replica's own EDITS of the shared files, offered to the
+  // This replica's own edits of the shared files, offered to the
   // granter to accept or decline. Takes the same pinned selector, for the
   // same reason, and the engine offers nothing below `edit`.
   submitShareProposal(input: {
@@ -656,7 +656,7 @@ export interface EngineRelayWorkspaceClient {
       versionId: string | null;
       access: ShareAccess;
     };
-    // The idempotency key for ONE submit. The caller owns it so a retry of
+    // The idempotency key for one submit. The caller owns it so a retry of
     // the same intent answers with the proposal the relay already holds
     // instead of opening a second one.
     submitId: string;
@@ -1094,7 +1094,7 @@ export class EngineRelayClient {
           "proposalId",
           "share.proposal.submit",
         );
-        // The two fields state ONE fact between them: a proposal exists, and
+        // The two fields state one fact between them: a proposal exists, and
         // it holds these changes. Either half alone is a result no caller can
         // act on — an id with nothing in it, or changes with nothing to show
         // the sender or to withdraw.
@@ -1201,7 +1201,7 @@ export class EngineRelayClient {
             if (refusals.length >= MAX_REPORTED_REFUSALS) break;
             refusals.push(refusal);
           }
-          // Record BEFORE the commit below. Once that cursor is committed the
+          // Record before the commit below. Once that cursor is committed the
           // pull never offers these ops again, so a throw on a later page must
           // not be able to take the reason with it.
           if (pageRefusals.length > 0) await recordRefusals?.(pageRefusals);

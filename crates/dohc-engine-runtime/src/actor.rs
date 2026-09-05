@@ -2,15 +2,13 @@
 //! writer connection, driven by a **tokio** command loop.
 //!
 //! This is the Rust replacement for the TS engine's process-global write chain
-//! and `workspaceActivity` map (`STATE_OWNERSHIP.tsv` rows `chain-store-writes`,
-//! `registry-workspace-activity`, `actor-registry`). State ownership is
-//! unambiguous: the connection lives on the worker thread and never crosses it;
-//! callers hold clonable [`ActorHandle`]s that only send messages
-//! (`PORTING.md` §5, §14).
+//! and `workspaceActivity` map. State ownership is unambiguous: the
+//! connection lives on the worker thread and never crosses it; callers hold
+//! clonable [`ActorHandle`]s that only send messages.
 //!
 //! ## The blocking writer under an async loop (CAL-2)
 //!
-//! The writer connection is synchronous, blocking rusqlite. It stays on ONE
+//! The writer connection is synchronous, blocking rusqlite. It stays on one
 //! dedicated OS thread (`std::thread`) — **never** on the async runtime (plan
 //! §Workspace actor model: "one writable `rusqlite` connection on a dedicated
 //! thread (never blocking the async runtime)"). Commands flow over a bounded
@@ -24,7 +22,7 @@
 //! Lifecycle is explicit — `open → ready → draining → closed` — and `Drop`
 //! releases the connection deterministically by joining the worker (no detached
 //! task outlives the actor). Cancellation ([`CancellationToken`]) is checked
-//! BETWEEN bounded units, never inside a transaction (`PORTING.md` §12).
+//! between bounded units, never inside a transaction.
 
 use crate::error::RuntimeError;
 use crate::identity::EngineDbIdentity;
@@ -187,7 +185,7 @@ pub struct ActiveVersionSwitch {
     pub now_ms: i64,
 }
 
-/// Physical channel capacity: the data bound plus ONE slot reserved at spawn
+/// Physical channel capacity: the data bound plus one slot reserved at spawn
 /// for the `Close` command (see [`WorkspaceActor::close`]). Reserving keeps the
 /// usable data capacity at exactly [`COMMAND_QUEUE_CAPACITY`] while guaranteeing
 /// `Close` always has a home, so shutdown never spins or starves.
@@ -245,7 +243,7 @@ pub struct YdocOpenState {
     pub artifact_assets: Vec<ArtifactAssetDescriptor>,
     pub seed_materialization_jobs: Vec<String>,
     /// Record facts the open's deferred drain committed, in drain order. The
-    /// service emits them post-commit (#1002); they never claim automation
+    /// service emits them post-commit; they never claim automation
     /// triggers — drained updates are synced, and ADR 0008 gives the claim to
     /// the origin device alone.
     pub record_facts: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
@@ -281,7 +279,7 @@ pub struct YdocSettlement {
     pub sha256: String,
     /// Whether the file on disk actually received these bytes. `false` means
     /// the settle committed durably (marker, moment, snapshot) but
-    /// materialization was BLOCKED by containment, so the write is pending a
+    /// materialization was blocked by containment, so the write is pending a
     /// retry and the artifact on disk is still the old one. Callers must not
     /// report the document as saved on a `false`.
     pub materialized: bool,
@@ -295,7 +293,7 @@ pub struct YdocSettlement {
 /// deferred drain lands remote content cannot settle — the client's doc is
 /// behind — but the drained updates' record facts are already committed and
 /// their queue rows consumed, so they must cross the mailbox with the
-/// refusal or no path ever emits them (#1002).
+/// refusal or no path ever emits them.
 #[derive(Debug)]
 pub enum YdocSettleOutcome {
     Settled(Box<YdocSettlement>),
@@ -319,7 +317,7 @@ impl YdocSettleOutcome {
     /// adoption, relation cleanup). Those callers settle with
     /// `drain_deferred = false` — they have no event route for drained
     /// record facts — so the remote-updates-pending arm is defensive: it
-    /// restores the refusal rather than silently dropping facts (#1008).
+    /// restores the refusal rather than silently dropping facts.
     fn into_settlement_for_internal_caller(self) -> Result<YdocSettlement, RuntimeError> {
         match self {
             Self::Settled(settlement) => Ok(*settlement),
@@ -335,7 +333,7 @@ impl YdocSettleOutcome {
 
 /// A close's actor-side result: the collab close outcome (`None` when no
 /// lineage existed) plus the record facts the close's deferred drain
-/// committed, which the service emits post-commit (#1002).
+/// committed, which the service emits post-commit.
 #[derive(Debug)]
 pub struct YdocCloseSessionOutcome {
     pub outcome: Option<CloseOutcome>,
@@ -442,15 +440,15 @@ pub enum RelayOperation {
         stream_identity: String,
         created_at_ms: i64,
     },
-    /// Offer this replica's own edits of a RECEIVED file share back to the
-    /// granter, for the granter to accept or decline (#646 PR3). The grant
+    /// Offer this replica's own edits of a received file share back to the
+    /// granter, for the granter to accept or decline. The grant
     /// scopes the files and carries the level the client refuses below `edit`
     /// on.
     SubmitShareProposal {
         workspace_id: String,
         share_id: String,
         granted: dohc_engine_sync::ShareGrant,
-        /// The idempotency key for ONE submit. A repeat with the same id
+        /// The idempotency key for one submit. A repeat with the same id
         /// answers with the proposal the relay already holds and never opens a
         /// second one.
         submit_id: String,
@@ -780,7 +778,7 @@ mod deferred_relay_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .completed
                 .is_empty(),
-            "MUTATION: omitting Push from the release set retains every consumed batch"
+            "omitting Push from the release set retains every consumed batch"
         );
     }
 
@@ -917,7 +915,7 @@ mod deferred_relay_tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .completed
                 .is_empty(),
-            "MUTATION: retaining a successful all-present inventory holds its request vector"
+            "retaining a successful all-present inventory holds its request vector"
         );
     }
 
@@ -942,7 +940,7 @@ mod deferred_relay_tests {
         );
         assert!(
             transport.take_pending().is_none(),
-            "MUTATION: rebasing the CAS conflict schedules a GET and re-enters cached I/O"
+            "rebasing the CAS conflict schedules a GET and re-enters cached I/O"
         );
     }
 
@@ -1232,7 +1230,7 @@ pub enum RelayOperationOutcome {
 /// What a share view's identity call settled on, including the answer the
 /// journal layer cannot give.
 ///
-/// `NotRequired` lives HERE rather than in `dohc-engine-sync` because it is
+/// `NotRequired` lives here rather than in `dohc-engine-sync` because it is
 /// the LEVEL's answer, and the level is read here: View and Comment never
 /// reach the store at all. Keeping it out of the journal layer means that
 /// function has no variant it can never return.
@@ -2536,7 +2534,7 @@ impl ActorHandle {
         LifecycleState::from_u8(self.state.load(Ordering::Acquire))
     }
 
-    // --- Synchronous API (must be used OUTSIDE a runtime) ---
+    // --- Synchronous API (must be used outside a runtime) ---
 
     /// Capture a text file on the actor's writer, blocking the calling thread.
     pub fn capture_ingest_blocking(
@@ -2813,7 +2811,7 @@ impl ActorHandle {
             .map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// Whether the workspace holds ANY encrypted secret state — the async
+    /// Whether the workspace holds any encrypted secret state — the async
     /// variant for RPC handlers (a missing key file over live secret rows
     /// must fail closed, never read as "no secrets").
     pub async fn secret_state_exists(&self, workspace_id: String) -> Result<bool, RuntimeError> {
@@ -2828,8 +2826,8 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// Whether the workspace holds ANY encrypted secret state. The capture
-    /// layer consults this before ever MINTING a data key: a missing key file
+    /// Whether the workspace holds any encrypted secret state. The capture
+    /// layer consults this before ever minting a data key: a missing key file
     /// over live secret rows must fail closed, never silently strand the
     /// history under a fresh key.
     pub fn secret_state_exists_blocking(&self, workspace_id: String) -> Result<bool, RuntimeError> {
@@ -3606,7 +3604,7 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// Secret materialize with the cap decided in the SAME turn — an
+    /// Secret materialize with the cap decided in the same turn — an
     /// over-cap tip is never decrypted.
     pub async fn materialize_secret_inband(
         &self,
@@ -3916,7 +3914,7 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
-    /// The workspace's ACTIVE version id (falling back to main), read on the
+    /// The workspace's active version id (falling back to main), read on the
     /// actor thread. The capture driver targets this so captures land in the
     /// version the user is actually on (TS oracle parity).
     pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
@@ -6246,7 +6244,7 @@ impl ActorHandle {
 }
 
 /// Debug-only guard: the synchronous `*_blocking` API uses
-/// `blocking_send`/`blocking_recv`, which PANIC inside a tokio runtime (the
+/// `blocking_send`/`blocking_recv`, which panic inside a tokio runtime (the
 /// product runs on tokio). Catch the misuse cheaply in debug builds with a
 /// clear message instead of an opaque tokio panic in production; use the async
 /// API from within a runtime.
@@ -7120,10 +7118,10 @@ fn replay_pending_materializations(
                 .load_materialization_job(&write_job_id)?
                 .map(|write_job| write_job.status)
             {
-                // #739 follow-up: CANCELLED means the destination path was
+                // Follow-up: cancelled means the destination path was
                 // explicitly deleted after the rename committed — that
-                // delete already resolved the destination, so THIS paired
-                // delete (removing the rename's OLD path) must still run.
+                // delete already resolved the destination, so this paired
+                // delete (removing the rename's old path) must still run.
                 // Treating it like Conflict would strand the old path on
                 // disk forever, under a job nothing ever revisits.
                 Some(JobStatus::Complete) | Some(JobStatus::Cancelled) => {}
@@ -7774,7 +7772,7 @@ fn execute_relay_operation(
             stream_identity,
             created_at_ms,
         } => {
-            // THE level gate, and the only place it is read. Only Edit sends
+            // The level gate, and the only place it is read. Only Edit sends
             // workspace replication ops, so View and Comment need no
             // identity and the store is not touched at all.
             if access != dohc_engine_sync::ShareAccess::Edit {
@@ -7842,7 +7840,7 @@ fn worker_main(
     state: Arc<AtomicU8>,
     startup_tx: std::sync::mpsc::SyncSender<Result<bool, StorageError>>,
 ) {
-    // Publish Closed on ANY exit — normal return OR a panic unwind (e.g. a
+    // Publish Closed on any exit — normal return OR a panic unwind (e.g. a
     // panicking fault injector). Declared before `store` so `store` (and its
     // connection) drops first, then this guard publishes Closed: a reader that
     // observes Closed is guaranteed the writer handle is already gone.
@@ -7884,7 +7882,7 @@ fn worker_main(
     // validity proof (`doc_cache.rs`, CACHE-VALID) assumes.
     let mut doc_cache = WriterDocCache::new();
 
-    // Blocking recv on the tokio channel keeps the SQLite work on THIS
+    // Blocking recv on the tokio channel keeps the SQLite work on this
     // dedicated thread, off the async runtime. `blocking_recv` returns `None`
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
@@ -10550,7 +10548,7 @@ fn reconcile_scene_asset_materialization_conflicts(
 /// the artifact).
 fn ydoc_marker_has_durable_state(marker: &dohc_engine_collab::Marker) -> bool {
     // The claim status covers the replicated base-only lineage: claim_base inserts
-    // the base snapshot at up_to_seq 0 WITHOUT advancing head_snapshot_seq, so
+    // the base snapshot at up_to_seq 0 without advancing head_snapshot_seq, so
     // the seq pair alone would misread a claimed base as absent (double-seed +
     // NoMarker settle refusals on a valid lineage).
     marker.head_update_seq > 0
@@ -10640,7 +10638,7 @@ fn ydoc_version_unsettled_content_kind_on_store(
                 "SELECT blob_sha256 FROM snapshots \
                  WHERE workspace_id = ?1 AND version_id = ?2 AND object_id = ?3",
                 params![workspace_id, version_id, key.object_id],
-                // NULL for a BINARY head (schema v10). It matches no text
+                // NULL for a binary head (schema v10). It matches no text
                 // projection, and reading it as a plain String would raise
                 // InvalidColumnType instead — `.optional()` absorbs only
                 // QueryReturnedNoRows.
@@ -11023,7 +11021,7 @@ fn ydoc_open_state_on_store(
         return Err(RuntimeError::Cancelled);
     }
     let canonical_path = validate_addressable_plaintext_path(path)?;
-    // Bootstrap: the first live doc in an EMPTY workspace must be creatable —
+    // Bootstrap: the first live doc in an empty workspace must be creatable —
     // without this, read_text errors VersionNotFound before the absent-path
     // flow can run (capture normally creates main, but nothing has captured).
     ensure_mutation_version_on_store(store, workspace_id, version_id, now_ms, &NoFaults)?;
@@ -11036,13 +11034,13 @@ fn ydoc_open_state_on_store(
             // NO HEAD: the entered version does not contain this path. The
             // daemon still binds an empty doc, because that is how a file the
             // user just created (written to disk, not yet captured) becomes
-            // editable. The open reports `head: "absent"` and the CONSUMER
+            // editable. The open reports `head: "absent"` and the consumer
             // decides whether that is a creation or a path the version does
             // not have — the contract it applies is stated on
             // `WorkspaceEngineCapture.openYDocSession`
             // (apps/desktop/src/workspaces/workspaceEngineCapture.ts).
             let derived = derive_capture_object_id(workspace_id, version_id, &canonical_path);
-            // A derived id still LIVE at another alias means this path's
+            // A derived id still live at another alias means this path's
             // former file was renamed away: capture's locked resolution mints
             // an order-disambiguated id for that case, which open-time cannot
             // reserve pre-commit. Reusing the derived id would graft the new
@@ -11061,16 +11059,16 @@ fn ydoc_open_state_on_store(
     };
     let key = DocKey::new(workspace_id, version_id, object_id)?;
     let expected_key_matches = expected_key.is_none_or(|expected| *expected == key);
-    // An open sync conflict on this object freezes the OPEN as well as the
+    // An open sync conflict on this object freezes the open as well as the
     // settle: the claimed lineage may be a peer's unreviewed base, and
     // serving it would put the editor on the very side the conflict
     // preserves the head against — the user types into unreviewed content
     // and resolution rewrites the lineage under the live client. Refuse
     // with the same reason the settle freeze uses; resolution lifts both.
-    // The check runs BEFORE the lineage clear and the deferred drain below:
+    // The check runs before the lineage clear and the deferred drain below:
     // both mutate durable state, and a drain whose open then refuses would
     // consume the parked rows — and the record facts persisted on them —
-    // with no caller left to emit their events (#1009).
+    // with no caller left to emit their events.
     if expected_key_matches
         && store
             .read_with(|conn| {
@@ -11088,7 +11086,7 @@ fn ydoc_open_state_on_store(
         }
         .into());
     }
-    // RETIRED artifact: the path has NO head (deleted on disk, capture
+    // Retired artifact: the path has NO head (deleted on disk, capture
     // retired the snapshot/alias) but a LOCAL-ONLY lineage that claims a
     // settled artifact survived (workspace teardown skips the prune).
     // Markdown-is-the-artifact: the user deleted the document, so reopening
@@ -11134,7 +11132,7 @@ fn ydoc_open_state_on_store(
             return Err(RuntimeError::OperationCrashed);
         }
     }
-    // Re-converge BEFORE loading state: an envelope acked-but-deferred while
+    // Re-converge before loading state: an envelope acked-but-deferred while
     // a previous session held the lease is only guaranteed to drain on that
     // session's ydoc.close — workspace.close, stale-handle eviction, and a
     // crash all skip it. The imported replication log is the durable pending
@@ -11170,14 +11168,14 @@ fn ydoc_open_state_on_store(
     // "Existing" means durable DOC STATE, not a bare marker: a local-only
     // close prunes every CRDT row and leaves head_update_seq == 0
     // (the workspace file is the artifact). Reporting it as existing would
-    // hand the client an EMPTY doc with no seedContent — its next settle
+    // hand the client an empty doc with no seedContent — its next settle
     // would clobber the settled file. A pruned marker is seed-eligible
     // (the recordUpdate guard checks head_update_seq > 0), so the artifact
     // re-seeds the cache exactly like a first open. "Durable doc state"
     // means updates OR snapshots: a replicated lineage holding only its
     // base snapshot (head_update_seq == 0, head_snapshot_seq > 0) is
-    // EXISTING — reporting it absent would hand the client the base state
-    // AND a content seed, duplicating the artifact on the first seed apply.
+    // existing — reporting it absent would hand the client the base state
+    // and a content seed, duplicating the artifact on the first seed apply.
     let mut lineage_existing = persisted
         .as_ref()
         .is_some_and(|persisted| ydoc_marker_has_durable_state(&persisted.marker));
@@ -11221,7 +11219,7 @@ fn ydoc_open_state_on_store(
         Some(persisted) => {
             let marker = &persisted.marker;
             let mut kind = marker.content_kind;
-            // A BARE local marker is a remembered default, not a lineage:
+            // A bare local marker is a remembered default, not a lineage:
             // honor an explicit caller kind and rewrite the row (re-proved
             // bare inside the write transaction). Without this, a stale
             // default — e.g. the plaintext markers the dead editor path
@@ -11346,7 +11344,7 @@ fn ydoc_record_update_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Validation happens ONCE, in the durable layer's `validate_update_bytes`,
+    // Validation happens once, in the durable layer's `validate_update_bytes`,
     // inside the append transaction. The rows the transaction writes before it
     // (the path stamp, the ensured file_objects parent) roll back with the
     // rejection, so a malformed first seed cannot strand a bare file_objects
@@ -11377,8 +11375,8 @@ fn ydoc_record_update_on_store(
         attribution.as_ref(),
         expected_lineage_claim_id.as_deref(),
         // Parent row, seed guard, marker, append, and outbound journal all
-        // commit in ONE transaction — no bare-parent crash window, and a
-        // timed-out-commit seed retry DEDUPES inside the guard instead of
+        // commit in one transaction — no bare-parent crash window, and a
+        // timed-out-commit seed retry dedupes inside the guard instead of
         // refusing seed-onto-existing-lineage.
         true,
         require_empty_lineage,
@@ -11387,7 +11385,7 @@ fn ydoc_record_update_on_store(
         faults,
         now_ms,
         |tx, outcome, update_sha| {
-            // Origination is asked FIRST and owns the base-once decision: it
+            // Origination is asked first and owns the base-once decision: it
             // originates only a lineage that has no base yet. The base is a
             // full state, so it already carries this append and every row the
             // lineage held before it — a delta beside it would be redundant.
@@ -11502,7 +11500,7 @@ fn ydoc_record_update_on_store(
 /// One recorded Y.Doc append, and what its origination attempt decided.
 ///
 /// The append itself is [`AppendOutcome`]. `sharing_declined` is `Some` only
-/// when this edit COULD have originated the lineage and did not — the edit
+/// when this edit could have originated the lineage and did not — the edit
 /// committed either way. The four ordinary reasons a lineage does not
 /// originate stay silent.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -11599,8 +11597,8 @@ fn ydoc_settle_on_store(
     // Refuse to settle a lineage that has no durable state: projecting a
     // fresh doc would be the empty string, and the projected write below
     // would clobber the existing file with it. Mirrors collab settle()'s
-    // NoMarker refusal — and a PRUNED bare marker (local-only close) is the
-    // same hazard: load_persisted returns Some with an EMPTY doc, so the
+    // NoMarker refusal — and a pruned bare marker (local-only close) is the
+    // same hazard: load_persisted returns Some with an empty doc, so the
     // durable-state predicate (updates OR snapshots) gates it, matching
     // ydoc.open's lineage-absent treatment.
     match dohc_engine_collab::read_marker(store, key)? {
@@ -11616,7 +11614,7 @@ fn ydoc_settle_on_store(
                 }
                 .into());
             }
-            // An open sync conflict on this object FREEZES the settle: the
+            // An open sync conflict on this object freezes the settle: the
             // lineage may hold a peer's base the user has not reviewed, and
             // settling would materialize it over the preserved head — the
             // clobbering settle #338 refuses. Resolution folds the choice
@@ -11638,7 +11636,7 @@ fn ydoc_settle_on_store(
                 }
                 .into());
             }
-            // Acked-but-deferred remote envelopes must land BEFORE the
+            // Acked-but-deferred remote envelopes must land before the
             // projection — but if any actually apply, the CLIENT's doc has
             // not seen them: settling would materialize content the user
             // never saw while they keep editing stale state. Refuse; the
@@ -11649,7 +11647,7 @@ fn ydoc_settle_on_store(
             // parked update they drained would fire no record events. The
             // rows stay queued for the next pull, open, settle, or close,
             // which all emit; the later drain applies and projects the
-            // remote content over whatever the pass settled (#1008).
+            // remote content over whatever the pass settled.
             if drain_deferred && marker.regime == Regime::Replicated {
                 let drained = drain_deferred_ydoc_for_live_session_rpc(
                     store,
@@ -11661,7 +11659,7 @@ fn ydoc_settle_on_store(
                 if drained.drained > 0 {
                     // The drained facts ride the refusal: the drain committed
                     // them and consumed their queue rows, so this is their
-                    // only crossing (#1002).
+                    // only crossing.
                     return Ok(YdocSettleOutcome::RemoteUpdatesPending {
                         record_facts: drained.record_facts,
                     });
@@ -11695,13 +11693,13 @@ fn ydoc_settle_on_store(
     // `content: None` and the caller reads the file. (Refusing here instead
     // left the user's content in the CRDT and the workspace file at zero bytes.)
     //
-    // The stale-head guard runs BEFORE the idempotent no-op: an external
+    // The stale-head guard runs before the idempotent no-op: an external
     // capture ingest (or any same-object writer) must surface as
     // ConflictStaleTarget even when the projection itself is unchanged —
     // otherwise settle reports success and a close can prune without the
     // client ever resyncing over the divergence.
     //
-    // The expectation derives from DURABLE state (the lineage's last settle
+    // The expectation derives from durable state (the lineage's last settle
     // sha) falling back to the caller-supplied OPEN-TIME head sha — never
     // from RPC-side session fields mutated after awaits, which a dropped
     // future (deadline firing after the actor committed a settle) leaves
@@ -11713,13 +11711,13 @@ fn ydoc_settle_on_store(
     let probe_sha = head_probe
         .as_ref()
         .map(|snapshot| snapshot.blob_sha256.clone());
-    // Adopt an EMPTY head when this lineage has no durable settle and the
+    // Adopt an empty head when this lineage has no durable settle and the
     // session saw no head at open. What the types cannot show: an empty
     // artifact holds no bytes, so adopting one can destroy nothing, while
     // refusing it wedges the session — a refused settle records no
     // expectation, so every later settle refuses the same way. Capture mints
     // such a head from the 0-byte artifact the desktop's New File leaves on
-    // disk. A head with CONTENT still refuses (#346).
+    // disk. A head with content still refuses.
     let expected_head_sha = match head_probe.as_ref() {
         Some(snapshot)
             if expected_head_sha.is_none()
@@ -11733,7 +11731,7 @@ fn ydoc_settle_on_store(
         return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
     }
     if let Some(current) = head_probe.as_ref() {
-        // Ownership must hold even when the CONTENT matches the expectation:
+        // Ownership must hold even when the content matches the expectation:
         // a path rebound to another object whose blob happens to equal this
         // session's expected sha would otherwise pass the stale guard and be
         // answered (or replayed) as if this session still owned it — and a
@@ -11742,15 +11740,15 @@ fn ydoc_settle_on_store(
         if current.object_id != key.object_id {
             return Err(dohc_engine_domain::DomainError::ConflictStaleTarget.into());
         }
-        // The marker may have committed while the PRIOR settle's
+        // The marker may have committed while the prior settle's
         // materialization failed transiently before the file replace: the
         // head and last_settled_sha are advanced, the job is still pending,
-        // and the DISK holds the old preimage. That job must replay BEFORE
+        // and the disk holds the old preimage. That job must replay before
         // any settle answer — the idempotent no-op (or close could prune
-        // over stale disk bytes) AND a changed-projection settle (whose new
+        // over stale disk bytes) and a changed-projection settle (whose new
         // job's preimage is the unmaterialized head; skipping the replay
         // would strand it in a permanent materialization conflict).
-        // The head's pending job can be a SETTLE job or a conflict-RESOLUTION
+        // The head's pending job can be a settle job or a conflict-RESOLUTION
         // job: a resolution write on this object enqueues `resolve-mat_<id>`
         // and the fold advances last_settled_sha in the same transaction, so
         // skipping it here would leave the disk pre-resolution while every
@@ -11766,13 +11764,13 @@ fn ydoc_settle_on_store(
                 break;
             }
         }
-        // PENDING only: a completed/conflicted job must not replay here — a
+        // Pending only: a completed/conflicted job must not replay here — a
         // completed one would re-read the target on every settle (and fail
         // the whole settle pre-commit on a transient read error), and a
         // conflicted one already ran its compensation.
         if let Some(job) = pending_job {
             validate_workspace_root(root_dir, root_guard)?;
-            // Suppression BEFORE the replace, exactly like the fresh path —
+            // Suppression before the replace, exactly like the fresh path —
             // the watcher can observe the replayed bytes the instant they
             // land; retract on a conflicted job.
             self_writes.record(&key.workspace_id, &current.path, &current.blob_sha256);
@@ -11865,7 +11863,7 @@ fn ydoc_settle_on_store(
             projection,
         })));
     }
-    // A session with no edits settles WITHOUT writing (#815). The lineage's
+    // A session with no edits settles without writing. The lineage's
     // durable history is exactly one client-declared seed importing the
     // captured head — and the head guard above proved the store still holds
     // that head, while the disk probe proved the file still holds its bytes.
@@ -11908,7 +11906,7 @@ fn ydoc_settle_on_store(
         }
         // The path may have changed owners since ydoc.open (another write
         // claimed it with a different object). Settling anyway would overwrite
-        // the OTHER object's head with this session's stale projection while
+        // the other object's head with this session's stale projection while
         // marking this lineage settled — refuse as a stale target instead.
         if let Some(snapshot) = current.snapshot.as_ref()
             && snapshot.object_id != key.object_id
@@ -11979,10 +11977,10 @@ fn ydoc_settle_on_store(
             .map_err(search_domain)?;
         }
         enqueue_write(tx, &result, preimage, "ydoc")?;
-        // The settle marker commits ATOMICALLY with the moment: a crash can
+        // The settle marker commits atomically with the moment: a crash can
         // never leave a minted settlement moment whose lineage still reads
         // as unsettled (which would force a non-idempotent re-settle — the
-        // moment fingerprint includes the per-open session_id). The PRIOR
+        // moment fingerprint includes the per-open session_id). The prior
         // marker values ride along so a materialization conflict below can
         // compensate — an errored settle must not leave a marker that lets
         // close(settle:false) prune the CRDT with no artifact on disk.
@@ -12035,7 +12033,7 @@ fn ydoc_settle_on_store(
         })
     })?;
     validate_workspace_root(root_dir, root_guard)?;
-    // The suppression identity registers BEFORE the file replace: the watcher
+    // The suppression identity registers before the file replace: the watcher
     // can observe the materialized bytes the instant they land, and a
     // record-after-replace left a window where capture queued an ingest that
     // would claim the settle as an external edit. Root validation comes first
@@ -12064,7 +12062,7 @@ fn ydoc_settle_on_store(
             // committed durably (marker, moment, snapshot) and the job stays
             // pending for startup replay, exactly as if the process had died
             // between the commit and the replace. Rolling the marker back to
-            // the PRIOR head would make every retry compare the advanced
+            // the prior head would make every retry compare the advanced
             // head against a stale expectation — permanent
             // ConflictStaleTarget — while the committed marker routes a
             // retry through the idempotent no-op branch, which replays the
@@ -12087,13 +12085,13 @@ fn ydoc_settle_on_store(
             // marker/job commit: the write is durably pending and will land
             // once containment is restored. Keep both the advanced marker and
             // the self-write registration, and report the committed settle —
-            // but say plainly that DISK did not move, so no caller reports the
+            // but say plainly that disk did not move, so no caller reports the
             // document as saved over an artifact that never changed.
             materialized = false;
         }
         JobOutcome::Conflict | JobOutcome::Superseded => {
             // The target changed on disk and the job left it untouched: this
-            // settle FAILED, so the marker committed above must not stand —
+            // settle failed, so the marker committed above must not stand —
             // it would let close(settle:false) pass the settled check and
             // prune the CRDT while the artifact was never materialized.
             // (A crash before this compensation is the pending-job case: the
@@ -12156,8 +12154,8 @@ fn ydoc_resync_on_store(
     if token.is_cancelled() {
         return Err(RuntimeError::Cancelled);
     }
-    // Resync is the staleness RECOVERY path: an envelope acked-but-deferred
-    // because THIS session held the lease may be the very edit that made the
+    // Resync is the staleness recovery path: an envelope acked-but-deferred
+    // because this session held the lease may be the very edit that made the
     // client stale — drain it first or the recovery response still misses it.
     let marker = dohc_engine_collab::read_marker(store, key)?;
     let observed_lineage_claim_id = marker
@@ -12243,7 +12241,7 @@ fn ydoc_close_session_on_store(
     }
     // Close is a lineage reset (the local-only branch prunes to the bare
     // marker — a head-rewind the cache's tuple probe cannot see if the same
-    // head coordinates are later re-appended). Remove BEFORE any branch so
+    // head coordinates are later re-appended). Remove before any branch so
     // every outcome, including a mid-close crash, leaves no entry behind.
     doc_cache.remove(key);
     doc_cache.unpin(key);
@@ -12254,7 +12252,7 @@ fn ydoc_close_session_on_store(
         });
     };
     // Richdoc settles like plaintext now, so the local-only close follows the
-    // same workspace-file artifact rule (close_session refuses a DIRTY local
+    // same workspace-file artifact rule (close_session refuses a dirty local
     // prune either way, and persists every replicated lineage internally).
     // Keeping the closed CRDT authoritative here would shadow external file
     // edits on reopen: existing lineage, no seedContent, stale document.
@@ -12282,14 +12280,14 @@ fn ydoc_close_session_on_store(
     };
     let mut record_facts = Vec::new();
     if marker.regime == Regime::Replicated {
-        // The drain PROJECTS internally now (idempotent-by-sha, dependency-
+        // The drain projects internally now (idempotent-by-sha, dependency-
         // gated): drained remote content reaches the visible head with no
-        // session left to settle it. The drain HOLDS its queue-row cleanup
+        // session left to settle it. The drain holds its queue-row cleanup
         // until materialization succeeded: a failed materialization would
         // otherwise error out of this close after the rows — and the record
         // facts persisted on them — were already deleted, and no retry could
-        // ever emit the events (#1009). With the rows kept, the retried
-        // close re-drains content-deduped and reads the facts back (#1004).
+        // ever emit the events. With the rows kept, the retried
+        // close re-drains content-deduped and reads the facts back.
         let (drained, cleanup) =
             dohc_engine_sync::drain_deferred_ydoc_for_key_cached_holding_cleanup(
                 store, doc_cache, key, faults,
@@ -12389,7 +12387,7 @@ fn materialize_ydoc_drain(
 /// decline visible at this boundary, matching the existing #632 diagnostic.
 /// The caller owns the drained record facts: the open, settle, and close
 /// RPC results carry them to the service, which emits them post-commit like
-/// the pull pass (#1002).
+/// the pull pass.
 fn drain_deferred_ydoc_for_local_rpc(
     store: &mut EngineStore,
     doc_cache: &mut WriterDocCache,
@@ -12554,7 +12552,7 @@ fn versioned_binary_write_on_store(
         });
     }
 
-    // Request-ledger reconstruction returns the ORIGINAL moment. A replay must
+    // Request-ledger reconstruction returns the original moment. A replay must
     // probe that moment's durable job, not the caller's newly supplied id: a
     // transient first materialization can leave the original job pending.
     let job = match store.load_materialization_job(&result.moment.moment_id) {
@@ -12681,7 +12679,7 @@ fn relay_enabled_in_tx(
         .map_err(outbound_domain)
 }
 
-/// File moments are the ONE kind a share view can carry, so this reads the
+/// File moments are the one kind a share view can carry, so this reads the
 /// wider `workspace_journals_file_moments_in_tx`. It is not the only site
 /// that does: `ydoc_recovery.rs` journals a recovered FILE moment and asks
 /// the same question, and the two must agree or a recovery would strand a
@@ -13610,10 +13608,10 @@ fn versioned_text_rollback_on_store(
             write_job.created_at_ms,
             faults,
         ),
-        // #739 follow-up: same pairing rule as the startup replay's
-        // "binary-rename-1-delete-mat_" case — a CANCELLED write means its
+        // Follow-up: same pairing rule as the startup replay's
+        // "binary-rename-1-delete-mat_" case — a cancelled write means its
         // destination was explicitly deleted, already resolving it, so the
-        // paired delete below (the rename's OLD path) must still run rather
+        // paired delete below (the rename's old path) must still run rather
         // than being stranded.
         JobStatus::Cancelled => (true, PostCommitMaterializeOutcome::Skipped),
         JobStatus::Conflict => (false, PostCommitMaterializeOutcome::Conflict),
@@ -13702,7 +13700,7 @@ fn restore_deleted_scene_assets_in_tx(
         drawing_delete_moment_id,
         drawing_object_id,
     )?;
-    // Materialization jobs write into the ACTIVE workspace directory. A
+    // Materialization jobs write into the active workspace directory. A
     // rollback in a version the user has switched away from must restore the
     // heads without enqueueing jobs, or the general pending replay would
     // write the inactive version's asset files into the active tree and a
@@ -14010,7 +14008,7 @@ fn versioned_text_merge_on_store(
                         .map_err(map_fold_error)?;
                     }
                 }
-                // A fast-forwarded BINARY head needs no index work: the file
+                // A fast-forwarded binary head needs no index work: the file
                 // search reader drops any candidate whose live head is binary
                 // (`search::query::live_head_is_binary`), so the text this path
                 // used to hold is already unreachable.
@@ -14328,7 +14326,7 @@ fn adopt_collection_record_on_store(
     // first. The result still converges: at worst adoption writes a record
     // id the queued update also carries, which the CRDT merge and the
     // by-sha projection make idempotent, and the later drain projects the
-    // queued update over the adopted result (#1008).
+    // queued update over the adopted result.
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -14484,7 +14482,7 @@ fn cleanup_collection_relation_on_store(
     };
     // `drain_deferred = false` for the same reason as the adoption pass:
     // this caller has no event route for drained record facts, so the
-    // parked rows stay queued for a path that emits (#1008).
+    // parked rows stay queued for a path that emits.
     let state = ydoc_open_state_on_store(
         store,
         doc_cache,
@@ -16085,7 +16083,7 @@ mod scene_seed_transaction_tests {
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
-        // Two file ids with IDENTICAL bytes and mime type resolve to one
+        // Two file ids with identical bytes and mime type resolve to one
         // content-addressed path. Counting the skipped duplicate as a
         // materialization job would reject the first open as
         // ydoc-artifact-assets-pending forever.
@@ -16244,7 +16242,7 @@ mod scene_seed_transaction_tests {
     }
 }
 
-/// #646 PR3-1 — the level gate on share-view enrolment, read at the one place
+/// The level gate on share-view enrolment, read at the one place
 /// that writes the row. `EnrollShareView` never touches the transport, so
 /// this drives `execute_relay_operation` directly.
 #[cfg(test)]
@@ -16303,7 +16301,7 @@ mod share_view_identity_tests {
         assert_eq!(
             identity(&store),
             None,
-            "MUTATION: a view share must never gain a sync identity",
+            "a view share must never gain a sync identity",
         );
     }
 
@@ -16319,7 +16317,7 @@ mod share_view_identity_tests {
         assert_eq!(
             identity(&store),
             None,
-            "MUTATION: comment discussion no longer uses the workspace sync identity",
+            "comment discussion no longer uses the workspace sync identity",
         );
     }
 
@@ -16335,7 +16333,7 @@ mod share_view_identity_tests {
             .expect("read file lane")
     }
 
-    /// THE level mapping, at the one place that makes it: only Edit can send
+    /// The level mapping, at the one place that makes it: only Edit can send
     /// workspace replication ops, so only Edit records an identity and takes
     /// the file lane.
     #[test]
@@ -16351,12 +16349,9 @@ mod share_view_identity_tests {
             assert_eq!(
                 identity(&store),
                 None,
-                "MUTATION: {access:?} must not record an identity",
+                "{access:?} must not record an identity",
             );
-            assert!(
-                !file_lane(&store),
-                "MUTATION: {access:?} takes no file lane"
-            );
+            assert!(!file_lane(&store), "{access:?} takes no file lane");
         }
 
         let scratch = ScratchDir::new().expect("scratch");
@@ -16367,7 +16362,7 @@ mod share_view_identity_tests {
             ShareViewIdentityRecord::Recorded
         );
         assert_eq!(identity(&store).as_deref(), Some("origin_share-view"));
-        assert!(file_lane(&store), "MUTATION: Edit must take the file lane");
+        assert!(file_lane(&store), "Edit must take the file lane");
     }
 
     /// Edit records once; repeated refreshes cannot split the replica log.
@@ -16384,7 +16379,7 @@ mod share_view_identity_tests {
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
             ShareViewIdentityRecord::AlreadyRecorded,
-            "MUTATION: every refresh calls this; a second row would split the log",
+            "every refresh calls this; a second row would split the log",
         );
     }
 }

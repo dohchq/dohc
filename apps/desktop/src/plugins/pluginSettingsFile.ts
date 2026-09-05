@@ -15,7 +15,7 @@ import {
 //   { "t3-code-src": { "port": 4317 } }
 //
 // Keyed by directoryName, not plugin id: an id is only ever a broken
-// manifest's directory-derived fallback, which can coincide with some OTHER,
+// manifest's directory-derived fallback, which can coincide with some other,
 // unrelated plugin's real id — two rows sharing an id would otherwise share
 // one entry here too, each silently overwriting and reading the other's
 // answers. directoryName is the one identity a broken manifest cannot take
@@ -23,7 +23,7 @@ import {
 //
 // One file rather than one per plugin, because that is what the reader wants
 // open when they ask what this workspace has been told: every answer on one
-// page. Plugin CODE and its build output stay out of the workspace;
+// page. Plugin code and its build output stay out of the workspace;
 // this is data the user typed, and the manifest's declarations decide what any
 // of it means. A value the manifest does not declare is dropped on read, so a
 // file edited by hand — or arriving over sync — can only ever set a setting

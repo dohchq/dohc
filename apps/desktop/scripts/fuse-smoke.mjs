@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
-// Packaged-fuse boot gate: copies the Electron dist, flips the EXACT fuse
+// Packaged-fuse boot gate: copies the Electron dist, flips the exact fuse
 // values from electron-builder.yml (the same flip electron-builder performs
 // at package time), packs dist/ into resources/app.asar, and runs the
 // regular boot smoke against that binary. This is the only gate that can see

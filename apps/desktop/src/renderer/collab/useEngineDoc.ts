@@ -88,7 +88,7 @@ function recoveryTextFromSnapshot(
     : markdownFromSnapshot(snapshot);
 }
 
-// The immediate fallback the recovery boundary persists BEFORE the
+// The immediate fallback the recovery boundary persists before the
 // projection module is even guaranteed to load. A scene exports losslessly
 // without the module; a rich document embeds its canonical snapshot in an
 // inert comment (durableMarkdownFromSnapshot) so a crash before the faithful
@@ -116,7 +116,7 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // a mirror Y.Doc to the format editor. Solo editing runs through the engine; a
 // co-editor's edit arrives as a forwarded remote delta on the same channel.
 //
-// available:false AND opening:false => the doc is NOT engine-backed (unflagged
+// available:false and opening:false => the doc is not engine-backed (unflagged
 // workspace, secret path, or already live) — the caller stays on the plain
 // local autosave editor showing the real on-disk content. While opening:true
 // the answer is not known yet and the caller must stay read-only. Named refusal
@@ -125,7 +125,7 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // documents use their collaboration history, while drawings use Excalidraw's
 // native history and publish the resulting higher element revision.
 //
-// Duplicate views of one document share ONE session: leases are keyed by the
+// Duplicate views of one document share one session: leases are keyed by the
 // workspace, path, and active-version token, so two panes showing the same
 // file bind the same mirror Y.Doc, share its save state, and recover together.
 //
@@ -134,14 +134,14 @@ function snapshotsEqual(a: Uint8Array, b: Uint8Array): boolean {
 // workspace/path A can never bind or repaint after the user has switched to B
 // — the stale response is dropped and its session closed.
 
-// "error" = a settle FAILED, so the file on disk is behind what the editor
+// "error" = a settle failed, so the file on disk is behind what the editor
 // shows. "file-locked" = the same stale disk, but transient by contract:
 // another program holds the file's handle and the engine retries until it
-// releases (#554), so the copy names the blocker instead of advising an edit.
+// releases, so the copy names the blocker instead of advising an edit.
 // "read-only" = the workspace is a read-only shared view and the edit
 // was discarded outright; retrying cannot help, so it gets its own copy.
 // "changed-on-disk" = the file was edited outside dohc while this document was
-// open, and dohc kept that edit instead of overwriting it (#338).
+// open, and dohc kept that edit instead of overwriting it.
 // None is ever inferred — main pushes all of them from real outcomes.
 export type EngineDocSaveState =
   | "saved"
@@ -157,13 +157,13 @@ export type UseEngineDoc = {
   // permits the local autosave editor only after opening settles without a
   // named refusal outcome.
   available: boolean;
-  // No open has answered for the CURRENT request yet (#533). "Opening" and
+  // No open has answered for the current request yet. "Opening" and
   // "not engine-backed" used to be the same `available: false`, so the caller
   // showed its writable plain editor — whose autosave writes straight to disk
   // — for the whole wait. On a workspace whose capture chain is busy (startup
   // reconciliation, a version switch) that wait is seconds, and every keystroke
   // in it took a path the about-to-bind session never sees: the session then
-  // seeds from a head without them. True on the first render of an open AND on
+  // seeds from a head without them. True on the first render of an open and on
   // the first render after the request changes under a bound document (a
   // version switch), because both are the same unanswered question.
   // The caller must offer no writable surface while this is true.
@@ -174,8 +174,8 @@ export type UseEngineDoc = {
   // path because a rename does not create a new document.
   objectId: string | null;
   versionId: string | null;
-  // The document's REAL save state. "saving" the moment an edit is made,
-  // "saved" ONLY when main reports a settle that covered that edit actually
+  // The document's real save state. "saving" the moment an edit is made,
+  // "saved" Only when main reports a settle that covered that edit actually
   // committed and wrote the .md, "error" when a settle failed. This used to be
   // a 1s timer that flipped to "saved" regardless of what the engine did —
   // three dogfood journeys watched a doc read "Saved" over a zero-byte file.
@@ -184,15 +184,15 @@ export type UseEngineDoc = {
   // its generic error text so it can name the constraint and measured bytes.
   saveError: string | null;
   // The path is not in the version this workspace is on: a version switch
-  // removed it while this open was queued behind that switch (#534).
-  // The caller must NOT fall back to the writable plain editor, whose autosave
+  // removed it while this open was queued behind that switch.
+  // The caller must not fall back to the writable plain editor, whose autosave
   // would write the file back into the version the user just entered.
   notInVersion: boolean;
   // Main could no longer resolve the live file at the path the renderer read.
   // The caller replaces the stale document instead of recreating the file.
   documentUnavailable: boolean;
   // The open did not land and a session for this document may still be the
-  // engine's (#564, #657). Same no-downgrade rule as notInVersion: the caller
+  // engine's. Same no-downgrade rule as notInVersion: the caller
   // stays read-only, states the reason, and offers a retry (bump retryKey),
   // which is also what discharges what the failure left behind.
   engineMayHoldDocument: boolean;
@@ -230,7 +230,7 @@ export type UseEngineDoc = {
   flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
 };
 
-// What ONE open answers: a workspace, a path, the gate, and the active-version
+// What one open answers: a workspace, a path, the gate, and the active-version
 // token. Everything this hook returns belongs to exactly one of these. JSON
 // quotes each part, so two different requests cannot produce one key.
 function engineDocRequestKey(input: {
@@ -264,7 +264,7 @@ type EngineDocOpenOutcome =
       flushPendingLocalUpdates: EngineYDocBinding["flushPendingLocalUpdates"];
     }
   | { kind: "unavailable" }
-  // Their OWN kinds, not flags on "unavailable": only the unqualified outcome
+  // Their own kinds, not flags on "unavailable": only the unqualified outcome
   // means "fall back to the plain editor". Collapsing these outcomes would put
   // distinct user states and retry rules behind one flag.
   | { kind: "not-in-version" }
@@ -285,7 +285,7 @@ function makeTransport(
   path: string,
   sessionId: string,
   // Monotonic local-edit counter, shared with the save-state listener: main
-  // echoes back the seq each settle STARTED at, and only a settle that covers
+  // echoes back the seq each settle started at, and only a settle that covers
   // the newest edit may be reported as "Saved".
   localSeq: { current: number },
   writesRefused: { current: boolean },
@@ -394,7 +394,7 @@ type EngineDocInput = {
   // Defaults to richdoc for existing direct hook callers. Product callers pass
   // the classifier result explicitly.
   kind?: LiveDocumentKind;
-  // Bump to retry after engineMayHoldDocument (#564): a retry replaces the
+  // Bump to retry after engineMayHoldDocument: a retry replaces the
   // lease's session behind every subscriber, with the same stale-response
   // guard as any other open.
   retryKey?: number;
@@ -712,7 +712,7 @@ function createEngineDocSession(
     }
     recoveryQueue = recoveryQueue
       .then(async () => {
-        // Every refinement projects the NEWEST snapshot its slot holds, so an
+        // Every refinement projects the newest snapshot its slot holds, so an
         // older capture that resolves late can never roll the durable row
         // back to text the user has already moved past — that row is the
         // only copy of the newer edit.
@@ -786,7 +786,7 @@ function createEngineDocSession(
     // replacement, and a fresh recovery slot re-captures on its first edit.
     deletionPending = true;
     recovery.transition = "deletion";
-    // Snapshot NOW, synchronously: the doc can be destroyed (unmount) or
+    // Snapshot now, synchronously: the doc can be destroyed (unmount) or
     // the caller's reference can go stale before a lazily-loaded
     // serializer would otherwise get to read it.
     const bytes = Y.encodeStateAsUpdate(doc);
@@ -797,7 +797,7 @@ function createEngineDocSession(
         ? prepareSceneRecovery(bytes, binding)
         : null;
     if (forceCreate) {
-      // Persisted NOW, before the projection module is even guaranteed to
+      // Persisted now, before the projection module is even guaranteed to
       // load: a renderer close/reload/crash while that import is still in
       // flight must not lose text that exists only in this queue's promise
       // closure, with the file already gone and no draft for the recovery
@@ -856,7 +856,7 @@ function createEngineDocSession(
         ? prepareSceneRecovery(bytes, binding)
         : null;
     if (recovery.draftId !== null) {
-      // The newest text is durable IMMEDIATELY — the faithful projection
+      // The newest text is durable immediately — the faithful projection
       // refines this row later, and a crash before it cannot lose the edit.
       replaceOrphanedDraft(
         workspaceId,
@@ -1264,12 +1264,12 @@ function createEngineDocSession(
           // (import still in flight) correct regardless.
           if (documentKind === "richdoc") void loadProjectionModule();
           if (!bound.available || !bound.doc) {
-            // Resolved: NOT engine-backed. The caller may offer the plain
+            // Resolved: not engine-backed. The caller may offer the plain
             // local editor again — that is what `opening` was holding back.
-            // EXCEPT when the path is not in this version, where offering it
-            // would write the phantom the engine just refused (#534), and
+            // Except when the path is not in this version, where offering it
+            // would write the phantom the engine just refused, and
             // when the engine may still hold the document, where a plain
-            // autosave would race the session it still binds (#564, #657).
+            // autosave would race the session it still binds.
             if (bound.notInVersion) {
               setOutcome({ kind: "not-in-version" });
             } else if (bound.documentUnavailable) {

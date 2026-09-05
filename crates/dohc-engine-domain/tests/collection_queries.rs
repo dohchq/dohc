@@ -2005,7 +2005,7 @@ fn reconcile_indexes_non_finite_yaml_numbers_without_dropping_them() {
     );
 }
 
-// #987: both `.nan` spellings coerce to the string ".nan", so the synced
+// Both `.nan` spellings coerce to the string ".nan", so the synced
 // moment.append lane could not tell a non-finite number from a string that
 // merely spells one and flagged both expected-number. The parse provenance
 // now rides the apply; the stored value stays the coerced string.

@@ -60,7 +60,7 @@ describe("searchDemoDocuments", () => {
   });
 });
 
-// The renderer reads the joined lane as one answer per channel it NAMED, and
+// The renderer reads the joined lane as one answer per channel it named, and
 // treats a wire id the lane left out as unknown — which locks that channel.
 // A demo bridge that answered a fixed empty array modelled less than main and
 // would lock every demo channel that carried a wire identity.

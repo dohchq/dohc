@@ -21,8 +21,8 @@ import {
 
 // Post-cutover the daemon refuses stores created by the retired TS engine,
 // so e2e seeding must happen the way the product writes: over RPC to the
-// REAL engine daemon (the same debug binary the app under test spawns).
-// Seed BEFORE launching the app — the daemon is stopped afterwards so the
+// real engine daemon (the same debug binary the app under test spawns).
+// Seed before launching the app — the daemon is stopped afterwards so the
 // app's own daemon owns the store exclusively.
 //
 // Binary discovery lives in src/testing/engineBinary so the src/** daemon

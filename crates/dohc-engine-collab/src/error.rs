@@ -9,7 +9,7 @@ use dohc_engine_storage::StorageError;
 #[derive(Debug, thiserror::Error)]
 pub enum CollabError {
     /// An update failed to decode/apply (truncated or malformed). The doc is
-    /// state-unchanged and the bytes are NEVER journaled (binding constraint 5).
+    /// state-unchanged and the bytes are never journaled (binding constraint 5).
     #[error("malformed Y.Doc update: {reason}")]
     MalformedUpdate { reason: String },
 
@@ -67,7 +67,7 @@ pub enum CollabError {
     #[error("replicated lineage already has a base (base-once)")]
     BaseAlreadyClaimed,
 
-    /// An incoming base-state envelope carries DIFFERENT bytes than the
+    /// An incoming base-state envelope carries different bytes than the
     /// already-claimed base: acking it would silently drop a divergent
     /// lineage while the relay cursor advances past it.
     #[error("incoming base state diverges from the claimed base")]
