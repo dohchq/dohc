@@ -26,13 +26,16 @@ export function doctor({ ready = false } = {}) {
   }
   catch { add("electron binary", false, "Run node apps/desktop/scripts/ensure-electron-installed.mjs."); }
   for (const tool of ["rustc", "cargo"]) {
-    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8" }).trim()); }
+    try { add(tool, true, execFileSync(tool, ["--version"], { encoding: "utf8", env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }).trim()); }
     catch { add(tool, false, "Install the repository Rust toolchain."); }
   }
   const free = freeDiskGb(repoRoot);
   const floor = resolveBuildBudget()?.diskFloorGb ?? 0;
   add("disk", free !== null && free >= floor, `${free?.toFixed(1) ?? "unknown"} GB free; ${floor} GB required`);
-  for (const kind of ["engine", "desktop"]) add(`${kind} build`, preparedStatus(kind), "Run pnpm qa:prepare when inputs or artifacts differ.", !ready);
+  for (const kind of ["engine", "desktop"]) {
+    try { add(`${kind} build`, preparedStatus(kind), "Run pnpm qa:prepare when inputs or artifacts differ.", !ready); }
+    catch { add(`${kind} build`, false, "Build readiness could not be checked. Fix the toolchain or build receipt, then run pnpm qa:prepare."); }
+  }
   return { root: repoRoot, commit: git(["rev-parse", "HEAD"]), dirty: git(["status", "--porcelain"]) !== "", checks };
 }
 

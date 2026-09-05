@@ -26,7 +26,7 @@ export function sourceFingerprint(kind, root = repoRoot) {
   const environment = Object.entries(process.env).filter(([key]) => /^(VITE_|RUSTUP_TOOLCHAIN$|CC$|CXX$|CFLAGS$|CXXFLAGS$|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
   hash.update(JSON.stringify(environment));
   if (kind === "engine") {
-    hash.update(execFileSync("rustc", ["-vV"], { cwd: root }));
+    hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
     const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
     for (const name of ["config", "config.toml"]) {
       const path = join(cargoHome, name);
