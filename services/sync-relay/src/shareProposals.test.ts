@@ -17,9 +17,6 @@ import {
   testStorage,
 } from "./linkTestHelpers";
 
-// The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
-// test that proves the copy proves nothing about the route.
-
 // The proposal lane, driven through the real routes.
 //
 // Every case here is HTTP: the granter appends real moments and real blobs to

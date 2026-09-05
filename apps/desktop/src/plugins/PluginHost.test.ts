@@ -37,6 +37,7 @@ import {
   PLUGIN_HOST_METHODS,
   type PluginRuntimeStatus,
 } from "./pluginHostProtocol";
+import { deferred } from "../testing/deferred";
 
 const pluginHostProcessPath = fileURLToPath(
   new URL("./pluginHostProcess.ts", import.meta.url),
@@ -71,14 +72,6 @@ async function waitFor(
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
-
-function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
 }
 
 async function workspaceRoot(): Promise<string> {
@@ -1094,9 +1087,9 @@ describe("PluginHost", () => {
   it("waits for crash-loop state persistence before stopAll settles when shutdown rejects", async () => {
     const root = await workspaceRoot();
     const localStateDir = await stateDir();
-    const mutationStarted = deferredVoid();
-    const releaseMutation = deferredVoid();
-    const mutationFinished = deferredVoid();
+    const mutationStarted = deferred();
+    const releaseMutation = deferred();
+    const mutationFinished = deferred();
     const spawnTransport = vi.fn<PluginHostOptions["spawnTransport"]>(() => ({
       request<T = unknown>(): Promise<T> {
         return Promise.resolve({} as T);
@@ -1866,9 +1859,9 @@ describe("PluginHost", () => {
 
   it("aborts a queued panel write when the plugin crashes", async () => {
     const root = await workspaceRoot();
-    const entered = deferredVoid();
-    const release = deferredVoid();
-    const writeQueued = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
+    const writeQueued = deferred();
     const loopbackTarget = new VersionedLoopbackEngine();
     let blocked = false;
     const loopback = new Proxy(loopbackTarget, {
@@ -1977,9 +1970,9 @@ describe("PluginHost", () => {
 
   it("aborts a queued panel write when onWillStop revokes its authority", async () => {
     const root = await workspaceRoot();
-    const entered = deferredVoid();
-    const release = deferredVoid();
-    const writeQueued = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
+    const writeQueued = deferred();
     const loopbackTarget = new VersionedLoopbackEngine();
     let blocked = false;
     const loopback = new Proxy(loopbackTarget, {
@@ -2446,10 +2439,6 @@ describe("PluginHost", () => {
       "Plugin crash did not reach failure accounting.",
     );
     await stopDuringAccounting;
-    await waitFor(
-      () => host.getStatus("hello-plugin") === undefined,
-      "The stop during crash accounting did not finish.",
-    );
 
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();

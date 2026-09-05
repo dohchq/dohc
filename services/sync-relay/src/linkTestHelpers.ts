@@ -55,11 +55,11 @@ export function storagePath(storage: SyncRelayStorage): string {
   return dbPath;
 }
 
-/** Forgets a storage the test closes itself, returning its path for inspection or reopening. */
-export function releaseTestStorage(storage: SyncRelayStorage): string {
+/** Closes a storage mid-test so its database can be inspected or reopened. */
+export function closeTestStorage(storage: SyncRelayStorage): void {
+  storage.close();
   const index = storages.indexOf(storage);
   if (index >= 0) storages.splice(index, 1);
-  return storagePath(storage);
 }
 
 /** Opens (again) the database at `dbPath` under the test registry. */

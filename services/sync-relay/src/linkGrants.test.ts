@@ -23,7 +23,7 @@ import {
   json,
   jsonBody,
   linkSecret,
-  releaseTestStorage,
+  closeTestStorage,
   reopenTestStorage,
   request,
   storagePath,
@@ -127,8 +127,7 @@ describe("workspace link inventory index", () => {
       initialInspection.close();
     }
 
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const writableInspection = new InspectionDatabaseSync(dbPath);
     try {
       writableInspection.exec(`DROP INDEX ${indexName}`);
@@ -3400,8 +3399,7 @@ describe("durable link usage inventory", () => {
     expect(storage.findLinkSessionByCapabilityHash(hmac("usage-eviction-capability"))).toBeNull();
     expect(await ownerLinkInventoryRow(h, firstGrantId)).toMatchObject({ lastUsedAtMs: 3_100 });
 
-    releaseTestStorage(storage);
-    storage.close();
+    closeTestStorage(storage);
     const reopened = reopenTestStorage(dbPath, { linkSessionsPerGrantLimit: 1 });
     const reopenedHandler = handler(reopened);
     expect(await ownerLinkInventoryRow(reopenedHandler, firstGrantId)).toMatchObject({

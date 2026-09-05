@@ -8634,9 +8634,7 @@ describe("engine markdown source view", () => {
 
     // Let the armed autosave attempt its write while the independent disk
     // reread still holds the switch window open.
-    await act(async () => {
-      await advanceAutosaveDebounce();
-    });
+    await advanceAutosaveDebounce();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
     await act(async () => {
@@ -9049,9 +9047,7 @@ describe("engine markdown source view", () => {
 
     // The pending WYSIWYG autosave must answer to the same switch window as
     // the source timer and both long-lived flush callers.
-    await act(async () => {
-      await advanceAutosaveDebounce();
-    });
+    await advanceAutosaveDebounce();
     expect(bridgeMock.writeWorkspaceText).not.toHaveBeenCalled();
 
     await act(async () => {

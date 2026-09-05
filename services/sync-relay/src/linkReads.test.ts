@@ -38,7 +38,7 @@ import {
   json,
   jsonBody,
   linkSecret,
-  releaseTestStorage,
+  closeTestStorage,
   reopenTestStorage,
   request,
   sha256,
@@ -755,8 +755,7 @@ describe("relay capability reads", () => {
       await h(linkRequest(link.capability, "/sync/link/current")),
     );
     const dbPath = storagePath(storage);
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
@@ -873,8 +872,7 @@ describe("relay capability reads", () => {
     await expectConsistentDenial(h);
 
     const dbPath = storagePath(storage);
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
@@ -964,8 +962,7 @@ describe("relay capability reads", () => {
       expect(await sharedBlob.text()).toBe("# shared\n");
 
       const dbPath = storagePath(storage);
-      storage.close();
-      releaseTestStorage(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1070,8 +1067,7 @@ describe("relay capability reads", () => {
     await assertReadAgreement(h, forwardFiles);
 
     const dbPath = storagePath(storage);
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
     legacy.prepare(
@@ -1317,8 +1313,7 @@ describe("relay capability reads", () => {
       await assertNoInventedFile(h);
 
       const dbPath = storagePath(storage);
-      storage.close();
-      releaseTestStorage(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1433,8 +1428,7 @@ describe("relay capability reads", () => {
       await assertReadAgreement(h);
 
       const dbPath = storagePath(storage);
-      storage.close();
-      releaseTestStorage(storage);
+      closeTestStorage(storage);
       const legacy = new InspectionDatabaseSync(dbPath);
       legacy.exec("DROP TABLE sync_relay_current_files");
       legacy.prepare(
@@ -1642,8 +1636,7 @@ describe("relay capability reads", () => {
       }),
     ]);
     const dbPath = storagePath(originalStorage);
-    originalStorage.close();
-    releaseTestStorage(originalStorage);
+    closeTestStorage(originalStorage);
 
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");
@@ -1701,8 +1694,7 @@ describe("relay capability reads", () => {
       blobSha256: acceptedSha,
       contentKind: "text",
     }]);
-    reopened.close();
-    releaseTestStorage(reopened);
+    closeTestStorage(reopened);
 
     const openedAgain = reopenTestStorage(dbPath);
     const secondProjection = await json(
@@ -1741,8 +1733,7 @@ describe("relay capability reads", () => {
       },
     );
     const dbPath = storagePath(originalStorage);
-    originalStorage.close();
-    releaseTestStorage(originalStorage);
+    closeTestStorage(originalStorage);
 
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec("DROP TABLE sync_relay_current_files");

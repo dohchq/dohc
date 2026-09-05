@@ -15,7 +15,7 @@ import {
 import {
   closeTestStorages,
   jsonBody as jsonRequest,
-  releaseTestStorage,
+  closeTestStorage,
   reopenTestStorage,
   storagePath,
   testStorage,
@@ -2032,8 +2032,7 @@ describe("share discussion HTTP boundary", () => {
     expect(await genericRefusal(await revokedWait)).toContain("404:");
     expect(activityHub.stats()).toEqual({ shares: 0, waiters: 0 });
 
-    test.storage.close();
-    releaseTestStorage(test.storage);
+    closeTestStorage(test.storage);
     const reopened = reopenTestStorage(test.dbPath, {
       newDiscussionId: () => "discussion-after-restart",
     });
@@ -4287,8 +4286,7 @@ describe("share discussion HTTP boundary", () => {
       expect(messages(page)[0]).not.toHaveProperty("moderation");
     }
 
-    test.storage.close();
-    releaseTestStorage(test.storage);
+    closeTestStorage(test.storage);
     const reopened = reopenTestStorage(test.dbPath);
     const restarted = test.makeHandler(reopened);
     const restartedPage = await body(
@@ -4509,8 +4507,7 @@ describe("share discussion HTTP boundary", () => {
     });
     expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
 
-    test.storage.close();
-    releaseTestStorage(test.storage);
+    closeTestStorage(test.storage);
     const reopened = reopenTestStorage(test.dbPath);
     const restarted = test.makeHandler(reopened);
     for (const response of [

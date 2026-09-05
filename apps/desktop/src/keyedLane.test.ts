@@ -1,24 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { runInKeyedLane } from "./keyedLane";
-
-function deferredVoid(): {
-  promise: Promise<void>;
-  resolve: () => void;
-} {
-  let resolve!: () => void;
-  const promise = new Promise<void>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
+import { deferred } from "./testing/deferred";
 
 describe("runInKeyedLane", () => {
   it("runs operations for one key in FIFO order", async () => {
     const lanes = new Map<string, Promise<void>>();
-    const firstStarted = deferredVoid();
-    const finishFirst = deferredVoid();
-    const secondStarted = deferredVoid();
-    const finishSecond = deferredVoid();
+    const firstStarted = deferred();
+    const finishFirst = deferred();
+    const secondStarted = deferred();
+    const finishSecond = deferred();
     const order: string[] = [];
 
     const first = runInKeyedLane(lanes, "workspace", async () => {
@@ -57,10 +47,10 @@ describe("runInKeyedLane", () => {
 
   it("runs different keys independently", async () => {
     const lanes = new Map<string, Promise<void>>();
-    const finishFirst = deferredVoid();
-    const finishSecond = deferredVoid();
-    const firstStarted = deferredVoid();
-    const secondStarted = deferredVoid();
+    const finishFirst = deferred();
+    const finishSecond = deferred();
+    const firstStarted = deferred();
+    const secondStarted = deferred();
 
     const first = runInKeyedLane(lanes, "first", async () => {
       firstStarted.resolve();
@@ -82,9 +72,9 @@ describe("runInKeyedLane", () => {
 
   it("continues a lane after the preceding operation rejects", async () => {
     const lanes = new Map<string, Promise<void>>();
-    const firstStarted = deferredVoid();
-    const failFirst = deferredVoid();
-    const secondStarted = deferredVoid();
+    const firstStarted = deferred();
+    const failFirst = deferred();
+    const secondStarted = deferred();
 
     const first = runInKeyedLane(lanes, "workspace", async () => {
       firstStarted.resolve();

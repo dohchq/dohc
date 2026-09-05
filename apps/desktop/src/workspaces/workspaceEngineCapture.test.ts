@@ -82,14 +82,6 @@ function sha256Utf8(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
-function deferredVoid(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
-
 const WORKSPACE_ID = "engine-capture-test";
 const WORKSPACE_ATTACHMENT_ID = Symbol("workspace-engine-capture-test");
 
@@ -900,8 +892,8 @@ describe("workspaceEngineCapture batch capture", () => {
       filePath: "projects/busy-overlap.md",
       objectId: "object-busy-overlap",
     };
-    const firstListingEntered = deferredVoid();
-    const releaseListings = deferredVoid();
+    const firstListingEntered = deferred();
+    const releaseListings = deferred();
     let activeListings = 0;
     let maxActiveListings = 0;
     let completed = false;
@@ -3798,8 +3790,8 @@ describe("workspaceEngineCapture agent attribution", () => {
   it("rechecks panel cancellation after an authored write reaches the capture queue", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const realLoopback = new VersionedLoopbackEngine();
-    const entered = deferredVoid();
-    const release = deferredVoid();
+    const entered = deferred();
+    const release = deferred();
     let blocked = false;
     const loopback = new Proxy(realLoopback, {
       get(target, property, receiver) {

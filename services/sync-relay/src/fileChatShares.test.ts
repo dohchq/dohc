@@ -9,7 +9,7 @@ import {
   createShare as mint,
   json,
   jsonBody,
-  releaseTestStorage,
+  closeTestStorage,
   reopenTestStorage,
   request,
   sha256,
@@ -1065,8 +1065,7 @@ describe("sync_relay_object_paths seeding", () => {
 
     // Put the database back into its pre-#646 shape: the table gone and the
     // migration unrecorded, with the log untouched.
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const raw = new InspectionDatabaseSync(dbPath);
     raw.exec("DROP TABLE sync_relay_object_paths");
     raw.exec("DELETE FROM sync_relay_migrations WHERE migration_id = 'object-paths-seed-v1'");
@@ -1150,8 +1149,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
 
     // Put the database back into its pre-index shape while preserving the
     // version.create row that the original append path wrote.
-    storage.close();
-    releaseTestStorage(storage);
+    closeTestStorage(storage);
     const legacy = new InspectionDatabaseSync(dbPath);
     legacy.exec(`
       DROP TABLE sync_relay_version_snapshot_blobs;
@@ -1170,8 +1168,7 @@ describe("sync_relay_version_snapshot_blobs seeding", () => {
       "without the seed, an existing version.create snapshot blob stays undiscoverable",
     ).toHaveLength(1);
 
-    reopened.close();
-    releaseTestStorage(reopened);
+    closeTestStorage(reopened);
     const afterFirstOpen = new InspectionDatabaseSync(dbPath);
     const indexedAfterFirstOpen = afterFirstOpen
       .prepare("SELECT COUNT(*) AS count FROM sync_relay_version_snapshot_blobs")

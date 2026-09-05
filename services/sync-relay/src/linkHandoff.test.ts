@@ -12,7 +12,7 @@ import {
   json,
   jsonBody,
   linkSecret,
-  releaseTestStorage,
+  closeTestStorage,
   reopenTestStorage,
   request,
   storagePath,
@@ -461,8 +461,7 @@ describe("single-use authenticated link handoff", () => {
     const minted = await mint(state);
     const codeHash = hashLinkHandoffCode(String(minted.code));
 
-    releaseTestStorage(state.storage);
-    state.storage.close();
+    closeTestStorage(state.storage);
 
     const reopened = reopenTestStorage(state.dbPath);
     const database = inspect(state.dbPath, true);
