@@ -50,7 +50,8 @@ test('browser sign-in uses the shared auth base and exact viewer origin', () => 
   assert.equal(api.environment.DOHC_WEB_ORIGIN, shareWeb.environment.DOHC_SHARE_WEB_PUBLIC_ORIGIN)
   assert.match(api.environment.DOHC_WEB_ORIGIN, required('DOHC_SHARE_WEB_PUBLIC_ORIGIN'))
   assert.equal(shareWeb.environment.DOHC_SHARE_WEB_AUTH_URL, 'http://workspace-api:1786')
-  assert.equal(shareWeb.depends_on['workspace-api'].condition, 'service_started')
+  assert.equal(shareWeb.depends_on['workspace-api'].condition, 'service_healthy')
+  assert.ok(api.healthcheck?.test, 'the auth service declares a healthcheck')
   assert.equal(new URL(envExample.WORKSPACE_API_BASE_URL).protocol, 'https:')
 })
 
