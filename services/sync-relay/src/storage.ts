@@ -1435,6 +1435,181 @@ function initializeSessionHostControlSchema(db: SqliteDb): void {
   ).run(SESSION_HOST_CONTROL_MIGRATION_ID, Date.now());
 }
 
+const LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID = "live-document-authority-v1";
+const LIVE_DOCUMENT_AUTHORITY_SCHEMA = {
+  sync_relay_live_documents: `
+CREATE TABLE sync_relay_live_documents (
+  workspace_id TEXT NOT NULL
+    CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
+  main_version_id TEXT NOT NULL
+    CHECK (main_version_id = 'main'),
+  object_id TEXT NOT NULL
+    CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
+  lineage_claim_id TEXT NOT NULL
+    CHECK (
+      length(lineage_claim_id) = 64 AND
+      lineage_claim_id NOT GLOB '*[^0-9a-f]*'
+    ),
+  replaces_lineage_claim_id TEXT
+    CHECK (
+      replaces_lineage_claim_id IS NULL OR (
+        length(replaces_lineage_claim_id) = 64 AND
+        replaces_lineage_claim_id NOT GLOB '*[^0-9a-f]*' AND
+        replaces_lineage_claim_id <> lineage_claim_id
+      )
+    ),
+  current_path TEXT NOT NULL
+    CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
+  baseline_moment_relay_seq INTEGER NOT NULL
+    CHECK (baseline_moment_relay_seq BETWEEN 1 AND 9007199254740991),
+  baseline_projected_sha256 TEXT NOT NULL
+    CHECK (
+      length(baseline_projected_sha256) = 64 AND
+      baseline_projected_sha256 NOT GLOB '*[^0-9a-f]*'
+    ),
+  baseline_projected_byte_length INTEGER NOT NULL
+    CHECK (baseline_projected_byte_length BETWEEN 0 AND 2097152),
+  baseline_digest TEXT NOT NULL
+    CHECK (
+      length(baseline_digest) = 64 AND
+      baseline_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+  baseline_bytes BLOB NOT NULL
+    CHECK (length(baseline_bytes) BETWEEN 1 AND 20971520),
+  lineage_state TEXT NOT NULL CHECK (lineage_state IN ('current', 'retired')),
+  admission_state TEXT NOT NULL CHECK (admission_state IN ('closed', 'open')),
+  restore_fence_generation INTEGER NOT NULL
+    CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
+  registered_at_ms INTEGER NOT NULL
+    CHECK (registered_at_ms BETWEEN 0 AND 9007199254740991),
+  retired_at_ms INTEGER
+    CHECK (retired_at_ms IS NULL OR retired_at_ms BETWEEN 0 AND 9007199254740991),
+  PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id),
+  CHECK (lineage_claim_id = baseline_digest),
+  CHECK (
+    (lineage_state = 'current' AND retired_at_ms IS NULL)
+    OR
+    (lineage_state = 'retired' AND admission_state = 'closed' AND retired_at_ms IS NOT NULL)
+  ),
+  FOREIGN KEY (workspace_id)
+    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
+) STRICT;
+  `,
+  idx_sync_relay_live_documents_current: `
+CREATE UNIQUE INDEX idx_sync_relay_live_documents_current
+  ON sync_relay_live_documents(workspace_id, main_version_id, object_id)
+  WHERE lineage_state = 'current';
+  `,
+  sync_relay_live_document_baseline_ranges: `
+CREATE TABLE sync_relay_live_document_baseline_ranges (
+  workspace_id TEXT NOT NULL,
+  main_version_id TEXT NOT NULL,
+  object_id TEXT NOT NULL,
+  lineage_claim_id TEXT NOT NULL,
+  client_id INTEGER NOT NULL
+    CHECK (client_id BETWEEN 0 AND 9007199254740991),
+  start_clock INTEGER NOT NULL
+    CHECK (start_clock BETWEEN 0 AND 4294967294),
+  end_clock INTEGER NOT NULL
+    CHECK (end_clock BETWEEN 1 AND 4294967295 AND start_clock < end_clock),
+  PRIMARY KEY (
+    workspace_id, main_version_id, object_id, lineage_claim_id,
+    client_id, start_clock
+  ),
+  FOREIGN KEY (workspace_id, main_version_id, object_id, lineage_claim_id)
+    REFERENCES sync_relay_live_documents(
+      workspace_id, main_version_id, object_id, lineage_claim_id
+    ) ON DELETE CASCADE
+) STRICT;
+  `,
+  idx_sync_relay_live_document_baseline_coverage: `
+CREATE INDEX idx_sync_relay_live_document_baseline_coverage
+  ON sync_relay_live_document_baseline_ranges(
+    workspace_id, main_version_id, object_id, lineage_claim_id,
+    client_id, start_clock, end_clock
+  );
+  `,
+} as const;
+
+const LIVE_DOCUMENT_AUTHORITY_COLUMNS = {
+  sync_relay_live_documents: [
+    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
+    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
+    ["replaces_lineage_claim_id", "TEXT", 0, 0], ["current_path", "TEXT", 1, 0],
+    ["baseline_moment_relay_seq", "INTEGER", 1, 0], ["baseline_projected_sha256", "TEXT", 1, 0],
+    ["baseline_projected_byte_length", "INTEGER", 1, 0], ["baseline_digest", "TEXT", 1, 0],
+    ["baseline_bytes", "BLOB", 1, 0], ["lineage_state", "TEXT", 1, 0],
+    ["admission_state", "TEXT", 1, 0], ["restore_fence_generation", "INTEGER", 1, 0],
+    ["registered_at_ms", "INTEGER", 1, 0], ["retired_at_ms", "INTEGER", 0, 0],
+  ],
+  sync_relay_live_document_baseline_ranges: [
+    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
+    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
+    ["client_id", "INTEGER", 1, 5], ["start_clock", "INTEGER", 1, 6],
+    ["end_clock", "INTEGER", 1, 0],
+  ],
+} as const;
+
+function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
+  const fail = (): never => { throw new Error("live document authority schema is missing or damaged"); };
+  const same = (actual: unknown, expected: unknown): void => {
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
+  };
+  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
+  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
+  for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
+    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
+    const row = rows[0];
+    const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
+      ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
+    if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
+      || row.tbl_name !== table || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
+  }
+  const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
+  for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
+    same(db.prepare(`PRAGMA table_info(${table})`).all().map(row =>
+      [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
+    columns.map(([name, type, notnull, pk], cid) => [cid, name, type, notnull, null, pk]));
+    const parent = table === "sync_relay_live_documents" ? "sync_relay_workspaces" : "sync_relay_live_documents";
+    const foreignColumns = table === "sync_relay_live_documents" ? ["workspace_id"] : documentKey;
+    same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(row =>
+      [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
+    foreignColumns.map((name, seq) => [0, seq, parent, name, name, "NO ACTION", "CASCADE", "NONE"]));
+    const namedIndex = table === "sync_relay_live_documents"
+      ? "idx_sync_relay_live_documents_current" : "idx_sync_relay_live_document_baseline_coverage";
+    const primaryColumns = table === "sync_relay_live_documents" ? documentKey : [...documentKey, "client_id", "start_clock"];
+    const indexedColumns = table === "sync_relay_live_documents"
+      ? documentKey.slice(0, 3) : [...documentKey, "client_id", "start_clock", "end_clock"];
+    const expectedIndexes = [
+      [namedIndex, table === "sync_relay_live_documents" ? 1 : 0, "c", table === "sync_relay_live_documents" ? 1 : 0],
+      [`sqlite_autoindex_${table}_1`, 1, "pk", 0],
+    ];
+    const orderIndexes = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
+    same(orderIndexes(db.prepare(`PRAGMA index_list(${table})`).all().map(row =>
+      [row.name, row.unique, row.origin, row.partial])), orderIndexes(expectedIndexes));
+    for (const [name, indexColumns] of [[namedIndex, indexedColumns], [`sqlite_autoindex_${table}_1`, primaryColumns]] as const) {
+      same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
+        indexColumns.map((column, seq) => [seq, columns.findIndex(entry => entry[0] === column), column]));
+    }
+  }
+}
+
+function initializeLiveDocumentAuthoritySchema(db: SqliteDb): void {
+  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
+    .get(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID) !== undefined;
+  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
+    .all(...Object.keys(LIVE_DOCUMENT_AUTHORITY_SCHEMA));
+  if (marked) {
+    assertLiveDocumentAuthoritySchema(db);
+    return;
+  }
+  if (existing.length > 0) throw new Error("unmarked live document authority schema already exists");
+  for (const sql of Object.values(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) db.exec(sql);
+  assertLiveDocumentAuthoritySchema(db);
+  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
+    .run(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID, Date.now());
+}
+
 export function initializeSyncRelaySchema(db: SqliteDb): void {
   db.exec("BEGIN IMMEDIATE");
   try {
@@ -1731,6 +1906,7 @@ export function initializeSyncRelaySchema(db: SqliteDb): void {
       ) STRICT;
     `);
     initializeSessionHostControlSchema(db);
+    initializeLiveDocumentAuthoritySchema(db);
     const shareColumns = db
       .prepare("PRAGMA table_info(sync_relay_shares)")
       .all()
