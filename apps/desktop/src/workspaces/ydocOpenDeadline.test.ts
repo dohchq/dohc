@@ -1,7 +1,7 @@
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { performance } from "node:perf_hooks";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   DaemonRefusalError,
@@ -21,7 +21,6 @@ import {
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
@@ -33,6 +32,7 @@ import {
   type WorkspaceEngineCaptureOptions,
 } from "./workspaceEngineCapture";
 
+import { createTestScratch } from "./testTemp";
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,
 ) {
@@ -49,20 +49,6 @@ function createWorkspaceEngineCapture(
 // the measured healthy range the limit sits beyond.
 
 const WORKSPACE_ID = "ydoc-open-deadline-test";
-
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-ydoc-deadline-");
-  roots.push(root);
-  return root;
-}
 
 async function write(root: string, path: string, contents: string) {
   const absolute = join(root, path);
@@ -119,7 +105,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // daemon-down open failed there, held the chain for the full ladder,
     // and rejected with a rebind error the surface reads as an ordinary
     // fallback (the writable plain editor this bound exists to prevent).
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     let nowMs = 0;
     const sleeps: number[] = [];
@@ -185,7 +171,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // #616. The retry budget above bounds RETRY WAITING, and a daemon that
     // accepts `ydoc.open` and then says nothing never fails once — so before
     // this bound the chain was held for as long as the silence lasted.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
     // The EngineClient seam, and only it: a deadlined request arms a timer at
@@ -288,7 +274,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // Classified as an ordinary refusal, that answered the retry with the
     // WRITABLE plain editor over a daemon-held canonical Y.Doc: the double
     // writer #533 exists to prevent, reached by way of the fix for #616.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const loopback = new VersionedLoopbackEngine();
     // A daemon that takes the lease and then cannot get its reply out. It is
@@ -373,7 +359,7 @@ describe("the document open's capture-chain hold (#564)", () => {
   });
 
   it("spends one budget across the several runs the task makes", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const { sessions, runOptions } = recordingSessions();
     const engine = captureWith(root, sessions);
@@ -402,7 +388,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // RPC latency is governed separately by WORKSPACE_OPEN_DEADLINE_MS, which
     // the deadline is derived FROM — so the margin measured here understates
     // the real one only by bounded, already-budgeted amounts.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-ydoc-deadline-");
     await write(root, "note.md", "hello\n");
     const { sessions } = recordingSessions();
     const engine = captureWith(root, sessions);
@@ -498,7 +484,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     }
 
     it("reports the timeout, not an uncaptured artifact, when the release times out", async () => {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       // Content on disk: the branch that refuses whatever else is true.
       await write(root, "note.md", "uncaptured bytes\n");
 
@@ -534,7 +520,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // session, so every later open answered ydoc-session-busy and "Try again"
     // could never work again. Retain it where a close can still reach it.
     it("discharges the session it could not release, so the retry binds", async () => {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       await write(root, "note.md", "uncaptured bytes\n");
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();
@@ -622,7 +608,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // very branch had just retained as an orphan, lease and all. The
       // classification does not depend on WHAT refused the release: while the
       // session is unreleased the engine may still own the document.
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       await write(root, "note.md", "uncaptured bytes\n");
 
       const refusal = await refusalFrom(
@@ -658,7 +644,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // document stayed read-only until the daemon restarted. The orphan now
       // EVICTS: the daemon lets go of the session while its lineage stays
       // durable, so nothing is written and nothing is discarded.
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
       const { sessions } = recordingSessions();
@@ -747,7 +733,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // was ydoc-session-busy until the daemon restarted — and on these two
       // paths a restart did not help either, because the reopen still found
       // no head.
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       const excluded = "x".repeat(MAX_ENGINE_CAPTURE_TEXT_BYTES + 1024) + "\n";
       await write(root, "note.md", excluded);
       const { sessions } = recordingSessions();
@@ -822,7 +808,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     // fixture severs cleanly from that one alone — the file here is a few
     // plain bytes, well under every size cap.
     it("binds a policy-excluded orphan's resurrected lineage the same way", async () => {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       const excluded = "small, policy-excluded content\n";
       await write(root, "note.md", excluded);
       await write(
@@ -903,7 +889,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // switch, merge, rename and delete runs, and that sweep closes with
       // `{ settle: false }` alone: the provider escalates a refused close into
       // a SETTLING one, over the uncaptured file.
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       const uncaptured = "bytes the watcher has not ingested yet\n";
       await write(root, "note.md", uncaptured);
       const { sessions } = recordingSessions();
@@ -970,7 +956,7 @@ describe("the document open's capture-chain hold (#564)", () => {
       // which made captureOnePath DROP that path's events. The capture the
       // discharge waits for could never run: permanently read-only, with a
       // retry that could never succeed. The promise has to be reachable.
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       await write(root, "note.md", "the user's bytes\n");
       const { sessions } = recordingSessions();
       const doc = new Y.Doc();
@@ -1045,7 +1031,7 @@ describe("the document open's capture-chain hold (#564)", () => {
     });
 
     it("reports the shutdown, not a raced open, when quit refuses the release", async () => {
-      const root = await tempRoot();
+      const root = await createTestScratch("dohc-ydoc-deadline-");
       // No file: the sibling branch, which would otherwise claim the open
       // raced a writer and fall back the same silent way.
 

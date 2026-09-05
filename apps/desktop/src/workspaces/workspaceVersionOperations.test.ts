@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { cpus } from "node:os";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
   RESOLVE_REQUEST_FRAME_BYTES,
@@ -26,7 +26,6 @@ import {
   type EngineWorkspaceSessions,
 } from "@dohc/workspace-engine-client/daemon";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type EngineDiskWriter,
@@ -37,6 +36,7 @@ import {
   type CaptureVersionedTextStore,
 } from "./workspaceEngineCaptureLiveStore";
 
+import { createTestScratch } from "./testTemp";
 // PR 0M-4 named-version desktop orchestration: active-version capture routing,
 // switch recovery, merge/conflict handling, restore, and scale. The stateful
 // loopback uses the daemon RPC adapters and real sha256 values, but capture and
@@ -45,18 +45,6 @@ import {
 // Rust and desktop end-to-end suites.
 
 const WORKSPACE_ID = "version-ops-test";
-
-const roots: string[] = [];
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-version-ops-");
-  roots.push(root);
-  return root;
-}
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
 
 interface EngineMomentRow {
   versionId: string;
@@ -616,7 +604,7 @@ async function versionIdByName(
 }
 
 async function openDivergedTextConflict(incomingText: string | null = "draft\n") {
-  const root = await tempRoot();
+  const root = await createTestScratch("dohc-version-ops-");
   await write(root, "plan.md", "base\n");
   const loopback = new ConflictLoopbackEngine();
   const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -650,7 +638,7 @@ async function openDivergedTextConflict(incomingText: string | null = "draft\n")
 
 describe("active-version capture routing", () => {
   it("captures batches into the active named version, not Main", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
@@ -681,7 +669,7 @@ describe("active-version capture routing", () => {
   });
 
   it("reads the active version per task, not cached across a switch", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -707,7 +695,7 @@ describe("active-version capture routing", () => {
 
 describe("createVersion", () => {
   it("forks from the latest disk state and becomes active", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -736,7 +724,7 @@ describe("createVersion", () => {
   });
 
   it("rejects duplicate names without changing the active version", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     await engine.createVersion("Draft");
     await expect(engine.createVersion("Draft")).rejects.toMatchObject({
@@ -751,7 +739,7 @@ describe("createVersion", () => {
 
 describe("switchVersion", () => {
   it("swaps disk content between versions and loses nothing from either side", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const logoBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     await writeBytes(root, "logo.png", logoBytes);
@@ -784,7 +772,7 @@ describe("switchVersion", () => {
   });
 
   it("suppresses engine re-capture of its own switch writes via expected events", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     // Boundary signal for suppression: after the switch, processing the
     // simulated watcher event must never touch the engine store for the
@@ -845,7 +833,7 @@ describe("switchVersion", () => {
   });
 
   it("is a no-op when switching to the already-active version", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -862,7 +850,7 @@ describe("switchVersion", () => {
   });
 
   it("fails closed on an unknown version id without touching disk or active version", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
@@ -876,7 +864,7 @@ describe("switchVersion", () => {
   });
 
   it("recovers honestly from a mid-switch disk failure", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "a.md", "main a\n");
     await write(root, "b.md", "main b\n");
     const failures: string[] = [];
@@ -964,7 +952,7 @@ describe("switchVersion", () => {
 
 describe("compareVersions", () => {
   it("includes unsettled on-disk edits and reports statuses", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     await write(root, "keep.md", "same\n");
     const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
@@ -999,7 +987,7 @@ describe("compareVersions", () => {
 
 describe("mergeVersionIntoMain", () => {
   it("merges a clean version into Main and materializes when Main is active", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new ConflictLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -1025,7 +1013,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("does not touch the disk when a named version is active", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "v1 text\n");
     const loopback = new ConflictLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -1065,7 +1053,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("records a conflict preserving both sides when both versions changed", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "base line\n");
     const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
     engine.start();
@@ -1102,7 +1090,7 @@ describe("mergeVersionIntoMain", () => {
     // listing refused outright, and one oversized conflict hid every open
     // conflict in the workspace.
     const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "base line\n");
     const loopback = new ConflictLoopbackEngine();
     const requests: Request[] = [];
@@ -1161,7 +1149,7 @@ describe("mergeVersionIntoMain", () => {
     // MUTATION: drop `bodies: "withheld"` from the resume walk and the blob
     // read for this body reappears.
     const incomingBody = `draft ${"x".repeat(8_400_000)}\n`;
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "base line\n");
     const loopback = new ConflictLoopbackEngine();
     const requests: Request[] = [];
@@ -1189,7 +1177,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("resolves conflicts by keep-current, apply-incoming, and apply-merged", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "a.md", "base a\n");
     await write(root, "b.md", "base b\n");
     await write(root, "c.md", "base c\n");
@@ -1261,7 +1249,7 @@ describe("mergeVersionIntoMain", () => {
     //
     // MUTATION: read the merged binary status as a delete -> the merge throws
     // on the absent preimage instead of landing the asset.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
     await write(root, "plan.md", "v1 text\n");
     const loopback = new ConflictLoopbackEngine();
@@ -1285,7 +1273,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("mirrors a resolved binary side onto disk", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xbb, 0xbb]);
     await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
@@ -1325,7 +1313,7 @@ describe("mergeVersionIntoMain", () => {
     //
     // MUTATION: skip the missing-head branch and return success -> this
     // resolves and the folder keeps main's bytes.
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xee]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0xff]);
     await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
@@ -1359,7 +1347,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("leaves the folder alone when a binary conflict keeps the current side", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xcc]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xdd, 0xdd]);
     await writeBytes(root, "logo.png", Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x01]));
@@ -1476,7 +1464,7 @@ describe("mergeVersionIntoMain", () => {
     expect(Buffer.byteLength(incoming, "utf8")).toBeGreaterThan(
       MAX_DESKTOP_CAPTURE_TEXT_BYTES,
     );
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "base\n");
     const loopback = new ConflictLoopbackEngine();
     const engine = desktopOwnedVersionLoopbackCapture(root, loopback);
@@ -1615,7 +1603,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("re-running a merge resumes open conflicts instead of duplicating them", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     await write(root, "plan.md", "base\n");
     const engine = desktopOwnedVersionLoopbackCapture(root, new ConflictLoopbackEngine());
     engine.start();
@@ -1644,7 +1632,7 @@ describe("mergeVersionIntoMain", () => {
   });
 
   it("rejects merging Main into Main", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const engine = desktopOwnedVersionLoopbackCapture(root, new VersionedLoopbackEngine());
     engine.start();
     await engine.flush();
@@ -1657,7 +1645,7 @@ describe("mergeVersionIntoMain", () => {
 
 describe("restoreFileToBeforeMoment", () => {
   it("restores a binary file to prior bytes byte-exactly", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     const before = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const after = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     await writeBytes(root, "logo.png", before);
@@ -1683,7 +1671,7 @@ describe("restoreFileToBeforeMoment", () => {
 
 describe("switch scale coverage (PR 0M-4)", () => {
   it("switches a 200-file loopback fixture with 20 differing files", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-version-ops-");
     for (let index = 0; index < 200; index += 1) {
       await write(
         root,

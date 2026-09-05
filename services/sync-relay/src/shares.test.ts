@@ -1,34 +1,19 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
+import {
+  closeTestStorages,
+  createShare as mint,
+  json,
+  jsonBody,
+  request,
+  sha256,
+  testStorage,
+} from "./linkTestHelpers";
 
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs: Windows cannot unlink
-  // files that still have open handles (EBUSY).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-sync-relay-shares-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 // Mirrors the relay's test-auth seam: user identity from the bearer token,
 // emails resolvable as "<userId>@dohc.test".
@@ -78,32 +63,17 @@ function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
   };
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 const GRANTER = "granter";
 const RECIPIENT = "recipient";
 const STRANGER = "stranger";
 const WORKSPACE = "workspace-a";
+
+async function createShare(
+  h: SyncRelayHandler,
+  body: Record<string, unknown> = { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] },
+): Promise<string> {
+  return mint(h, GRANTER, WORKSPACE, body);
+}
 
 async function createWorkspace(h: SyncRelayHandler): Promise<void> {
   const response = await h(request(GRANTER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
@@ -154,19 +124,6 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   );
   expect(response.status).toBe(200);
   return sha;
-}
-
-async function createShare(
-  h: SyncRelayHandler,
-  body: Record<string, unknown> = { recipientEmail: `${RECIPIENT}@dohc.test`, paths: ["docs"] },
-): Promise<string> {
-  // The level is required at create (#646); cases that are not about levels
-  // mint at the narrowest one unless they pass their own.
-  const response = await h(
-    request(GRANTER, `/sync/${WORKSPACE}/shares`, jsonBody({ access: "view", ...body })),
-  );
-  expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
 }
 
 // Captures a denial as comparable bytes: unauthorized probes of every kind

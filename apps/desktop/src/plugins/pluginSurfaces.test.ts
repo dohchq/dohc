@@ -24,16 +24,7 @@ import {
   type PluginWebAppViewLike,
 } from "./pluginSurfaces";
 import { PluginWorkspaceEvents } from "./pluginWorkspaceEvents";
-
-function deferred<T>() {
-  let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, resolve, reject };
-}
+import { deferred } from "../testing/deferred";
 
 class FakeView implements PluginWebAppViewLike {
   static created: FakeView[] = [];

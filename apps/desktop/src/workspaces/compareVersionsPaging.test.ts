@@ -1,18 +1,17 @@
-import { rm } from "node:fs/promises";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import type {
   SecretFileComparePage,
   SecretFileStore,
 } from "@dohc/workspace-contracts/engine";
 import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStore";
 
+import { createTestScratch } from "./testTemp";
 // #562, codex round 1: the compare surface's protected rows must ride the
 // SAME page discipline as its text rows. The old shape drained every
 // `secrets.compare` page per comparison page and put every remaining
@@ -20,20 +19,6 @@ import type { CaptureVersionedTextStore } from "./workspaceEngineCaptureLiveStor
 // fake page-shaped stores, so each page's row provenance is exact.
 
 const WORKSPACE_ID = "engine-capture-test";
-
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-compare-paging-");
-  roots.push(root);
-  return root;
-}
 
 interface FakeTextPage {
   entries: Array<{ path: string; status: "added" | "modified" | "deleted" }>;
@@ -86,7 +71,7 @@ function captureWith(
 
 describe("capture.compareVersions pages both sources under one cursor", () => {
   it("carries ONE engine page of protected rows per compare page", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-compare-paging-");
     const secretCalls: Array<string | undefined> = [];
     const engine = captureWith(
       root,
@@ -144,7 +129,7 @@ describe("capture.compareVersions pages both sources under one cursor", () => {
     // boundary and appears exactly once.
     const boundary = ".md";
     const astralSecret = "\u{10000}.env";
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-compare-paging-");
     const secretCalls: Array<string | undefined> = [];
     const engine = captureWith(
       root,

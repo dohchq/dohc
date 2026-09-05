@@ -1,14 +1,21 @@
-import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  claimWorkspace as claim,
+  closeTestStorages,
+  createShare as mint,
+  json,
+  jsonBody,
+  request,
+  sha256,
+  storagePath,
+  testStorage,
+} from "./linkTestHelpers";
 
 // MU-C5 — the CONSOLIDATED cross-user isolation sweep. The per-lane suites
 // (MU-C0 authorship, MU-C1 presence, MU-C2 reactions, MU-C3 DMs, MU-C4 shared
@@ -34,28 +41,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 //      member-append route's entry and its transactional insert aborts the
 //      write via the in-transaction guard.
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  // Close sqlite handles before removing temp dirs (Windows EBUSY otherwise).
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<{ storage: SyncRelayStorage; dbPath: string }> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-sync-relay-muc5-"));
-  roots.push(root);
-  const dbPath = join(root, "relay.sqlite");
-  const storage = openSyncRelayStorage(dbPath);
-  storages.push(storage);
-  return { storage, dbPath };
-}
+afterEach(closeTestStorages);
 
 // The relay's test-auth seam: identity from the bearer token, emails resolvable
 // as "<userId>@dohc.test". A shared PresenceHub can be injected so a test can
@@ -79,28 +65,6 @@ function handler(storage: SyncRelayStorage, presence?: PresenceHub): SyncRelayHa
   });
 }
 
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 // A denial captured as comparable bytes: an unauthorized probe of ANY kind must
 // be indistinguishable from a share that never existed. Diffing these strings is
 // the whole proof of the byte-identical invariant.
@@ -118,8 +82,11 @@ const OTHER_WIRE = "channel_wire_other";
 const AGENT_WIRE = AGENT_CHANNEL_WIRE_ID;
 
 async function claimWorkspace(h: SyncRelayHandler): Promise<void> {
-  const response = await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
-  expect(response.status).toBe(200);
+  await claim(h, OWNER, WORKSPACE);
+}
+
+async function createShare(h: SyncRelayHandler, body: Record<string, unknown>): Promise<string> {
+  return mint(h, OWNER, WORKSPACE, body);
 }
 
 async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
@@ -151,16 +118,6 @@ async function appendOwner(h: SyncRelayHandler, rawOps: RawOp[]): Promise<void> 
   expect(response.status).toBe(200);
 }
 
-async function createShare(h: SyncRelayHandler, body: Record<string, unknown>): Promise<string> {
-  // The level is required at create (#646). These cases are about isolation,
-  // not levels, so they mint at the narrowest one unless they say otherwise.
-  const response = await h(
-    request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody({ access: "view", ...body })),
-  );
-  expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
-}
-
 // A member-append op: client-sequenced originSeq, relay namespaces the origin.
 function memberOp(
   originSeq: number,
@@ -183,7 +140,7 @@ function memberAppend(
 
 describe("MU-C5 · byte-identical denial across every share-scoped route", () => {
   it("denies a non-recipient identically to an absent share, on path, chat-channel, AND DM shares", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     const sharedSha = await putBlob(h, "shared body");
@@ -293,7 +250,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
   });
 
   it("refuses new agent-channel grants and makes a poisoned legacy grant absent on every recipient route", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     const privateBlobSha = await putBlob(h, "agent-private-blob");
@@ -429,7 +386,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
   });
 
   it("keeps a malformed earliest channel create permanently unshareable", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     const malformedWire = "channel_wire_malformed_first";
@@ -476,7 +433,7 @@ describe("MU-C5 · byte-identical denial across every share-scoped route", () =>
 
 describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () => {
   it("rejects a member chat op authored as another participant, 403 authorship_mismatch", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     await appendOwner(h, [
@@ -547,7 +504,7 @@ describe("MU-C5 · no-forge authorship at the member-append gate (MU-C0)", () =>
 
 describe("MU-C5 · revocation closes read AND append byte-identically", () => {
   it("after revoke, a chat-channel share read and member append both match an absent share", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
     await appendOwner(h, [
@@ -611,7 +568,7 @@ describe("MU-C5 · revocation closes read AND append byte-identically", () => {
 
 describe("MU-C5 · served payloads leak no planted sentinel across every op kind", () => {
   it("excludes every internal SENTINEL-* value from path/version AND chat-channel served views", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     const h = handler(storage);
     await claimWorkspace(h);
 
@@ -869,7 +826,8 @@ describe("MU-C5 · served payloads leak no planted sentinel across every op kind
 
 describe("MU-C5 · presence is never journaled to any durable table", () => {
   it("workspace-scope AND share-scope presence leave zero presence rows in every table", async () => {
-    const { storage, dbPath } = await testStorage();
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const presence = new PresenceHub();
     const h = handler(storage, presence);
     await claimWorkspace(h);
@@ -963,7 +921,7 @@ describe("MU-C5 · presence is never journaled to any durable table", () => {
 
 describe("MU-C5 · in-request revoke race is closed by the in-transaction guard", () => {
   it("a revoke landing between route entry and the transactional insert aborts the member append", async () => {
-    const { storage } = await testStorage();
+    const storage = await testStorage();
     // Reproduce the TOCTOU window: the revoke commits at the LAST instant —
     // after every route-level check, immediately before the transactional
     // insert. Only appendLogBatch's in-transaction guard (under BEGIN

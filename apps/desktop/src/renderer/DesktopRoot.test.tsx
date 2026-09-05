@@ -5,6 +5,7 @@ import type { ShareHandoffStatus } from "../ipc/bridgeContract";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import { DesktopRoot } from "./DesktopRoot";
 import type { Workspace } from "./DesktopWorkspaceShell";
+import { deferred } from "../testing/deferred";
 
 vi.mock("./DesktopFirstRun", () => ({
   DesktopFirstRun: (props: {
@@ -49,16 +50,6 @@ vi.mock("./DesktopWorkspaceShell", () => ({
     </div>
   ),
 }));
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((nextResolve, nextReject) => {
-    resolve = nextResolve;
-    reject = nextReject;
-  });
-  return { promise, resolve, reject };
-}
 
 function workspace(workspaceId: string): Workspace {
   return {

@@ -1,6 +1,6 @@
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import * as Y from "yjs";
 
 import {
@@ -13,8 +13,8 @@ import {
 import type { ChangeAttributionWire } from "@dohc/workspace-engine-client";
 
 import type { WorkspaceEngineYDocProviderSession } from "./workspaceEngineCapture";
-import { createTestScratch } from "./testTemp";
 
+import { createTestScratch } from "./testTemp";
 const AGENT = {
   kind: "agent",
   agentId: "plugin:notes",
@@ -68,20 +68,6 @@ function fakeSession(options: { settleError?: Error } = {}): {
   return { session, log };
 }
 
-const roots: string[] = [];
-
-afterEach(async () => {
-  await Promise.all(
-    roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
-  );
-});
-
-async function workspaceRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-collection-edits-");
-  roots.push(root);
-  return root;
-}
-
 function contextFor(
   root: string,
   session: WorkspaceEngineYDocProviderSession,
@@ -104,7 +90,7 @@ function contextFor(
 
 describe("setCollectionRecordFields", () => {
   it("sets every field in one transaction with the agent's actor origin, settles, then releases", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const context = contextFor(root, session);
 
@@ -131,7 +117,7 @@ describe("setCollectionRecordFields", () => {
   });
 
   it("records an automation author under its subscription id with its depth and claim key", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const automation = {
       kind: "automation",
@@ -161,7 +147,7 @@ describe("setCollectionRecordFields", () => {
   });
 
   it("keeps a non-agent author device-attributed, like a human edit", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
 
     await setCollectionRecordFields(contextFor(root, session), {
@@ -186,7 +172,7 @@ describe("setCollectionRecordFields", () => {
   });
 
   it("refuses the engine-owned id field, empty fields, and non-record paths without opening a session", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const context = contextFor(root, session);
 
@@ -222,7 +208,7 @@ describe("setCollectionRecordFields", () => {
   });
 
   it("propagates a settle failure and still releases the session", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession({
       settleError: new Error("settle refused"),
     });
@@ -240,7 +226,7 @@ describe("setCollectionRecordFields", () => {
 
 describe("createCollectionRecord", () => {
   it("creates the md file, waits for the minted id, and seeds fields through the same seam", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const context = contextFor(root, session, {
       withAdapter: async (work) =>
@@ -278,7 +264,7 @@ describe("createCollectionRecord", () => {
   });
 
   it("names the created record when seeding its fields fails", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession({ settleError: new Error("settle refused") });
     const context = contextFor(root, session, {
       withAdapter: async (work) =>
@@ -307,7 +293,7 @@ describe("createCollectionRecord", () => {
   });
 
   it("returns without a session when fields are absent or empty", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session, log } = fakeSession();
     const context = contextFor(root, session, {
       withAdapter: async (work) =>
@@ -344,7 +330,7 @@ describe("createCollectionRecord", () => {
   });
 
   it("refuses a record name with separators and an aborted surface before writing", async () => {
-    const root = await workspaceRoot();
+    const root = await createTestScratch("dohc-collection-edits-");
     const { session } = fakeSession();
     const aborted = new AbortController();
     aborted.abort();

@@ -173,13 +173,13 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
       workspace.workspaceId,
       "load/big.md",
     );
-    // Give the reconcile pass room to run and converge.
-    await desktop.page.waitForTimeout(3_000);
-
-    expect(
-      textFileTrackedByEngine(temp.rootPath, "load/big.md"),
-      "the startup reconcile retired the engine record for the over-cap doc",
-    ).toBe(true);
+    // The reconcile pass runs after the workspace opens; wait for its result.
+    await expect
+      .poll(() => textFileTrackedByEngine(temp.rootPath, "load/big.md"), {
+        message: "the startup reconcile retired the engine record for the over-cap doc",
+        timeout: 15_000,
+      })
+      .toBe(true);
     // And the file itself is untouched.
     expect(await readFile(absolute, "utf8")).toContain(TAIL_SENTINEL);
   } finally {

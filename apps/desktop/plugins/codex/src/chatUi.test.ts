@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { deferred } from "../../../src/testing/deferred";
 
 let lastEventSource: FakeEventSource | null = null;
 
@@ -57,20 +58,6 @@ async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
   const mod = await import(/* @vite-ignore */ `../ui/chat.js?t=${Date.now()}-${Math.random()}`);
   if (!lastEventSource) throw new Error("chat.js did not construct an EventSource.");
   return { module: mod, eventSource: lastEventSource };
-}
-
-function deferred<T = void>(): {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-  reject: (reason?: unknown) => void;
-} {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
 }
 
 async function flushMicrotasks(): Promise<void> {

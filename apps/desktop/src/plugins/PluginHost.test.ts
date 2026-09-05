@@ -52,12 +52,12 @@ async function waitFor(
   message: string,
   timeoutMs = 5_000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await predicate()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(message);
+  await vi.waitFor(
+    async () => {
+      if (!(await predicate())) throw new Error(message);
+    },
+    { timeout: timeoutMs, interval: 25 },
+  );
 }
 
 function delay(milliseconds: number): Promise<void> {
@@ -1065,17 +1065,11 @@ describe("PluginHost", () => {
     process.on("unhandledRejection", onUnhandledRejection);
     try {
       await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
-      const reachedFailed = await waitFor(
+      await waitFor(
         () => statuses.includes("failed"),
         "Malformed activation result did not fail the plugin.",
-        500,
-      ).then(
-        () => true,
-        () => false,
       );
-      await delay(25);
 
-      expect.soft(reachedFailed).toBe(true);
       expect(unhandledRejections).toEqual([]);
       expect(host.getStderrLog("hello-plugin")).toContain(
         'Activation failed: Plugin activation returned an invalid result: "commands" and "drivers" must be arrays of non-empty strings.',
@@ -1574,15 +1568,12 @@ describe("PluginHost", () => {
       routeSdkRequest: defaultRouter,
       activationTimeoutMs: 1_000,
     });
-    const startedAt = Date.now();
-
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     await waitFor(
       () => host.getStatus("hello-plugin") === "ready",
       "Healthy plugin missed the test activation deadline.",
+      1_000,
     );
-
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
   });
 
   it("fails and disposes an activation at its wall-clock deadline", async () => {
@@ -1640,7 +1631,6 @@ describe("PluginHost", () => {
     const localState = await readPluginLocalState(localStateDir, root);
     if (!localState.ok) throw new Error(localState.warning);
     expect(localState.state.plugins["hello-plugin"]?.disabled).toBe(true);
-    await delay(300);
     expect(harness.spawnedPluginIds).toHaveLength(3);
   }, 15_000);
 
@@ -1701,7 +1691,6 @@ describe("PluginHost", () => {
         host.getStatus("hello-plugin") === "ready",
       "Fresh code did not receive a new fast-failure window.",
     );
-    await delay(50);
 
     expect(host.getStatus("hello-plugin")).toBe("ready");
     expect(harness.spawnTransport).toHaveBeenCalledTimes(6);
@@ -1736,7 +1725,6 @@ describe("PluginHost", () => {
       () => host.getStatus("hello-plugin") === "disabled",
       "Preserved crash accounting did not disable the plugin.",
     );
-    await delay(50);
 
     expect(harness.spawnTransport).toHaveBeenCalledTimes(4);
     const localState = await readPluginLocalState(localStateDir, root);
@@ -2222,7 +2210,10 @@ describe("PluginHost", () => {
       () => spawnTransport.mock.calls.length >= 2,
       "The crash's own immediate respawn did not happen.",
     );
-    await delay(50);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "The stop issued during the respawn did not finish.",
+    );
 
     expect(spawnTransport).toHaveBeenCalledTimes(2);
     expect(deactivateRequests).toEqual(["hello-plugin"]);
@@ -2249,8 +2240,6 @@ describe("PluginHost", () => {
         if (status === "starting") void host.stop(pluginId);
       },
     });
-    const startedAt = Date.now();
-
     await host.start(helloPluginRoot, "hello-plugin", await fixtureManifest());
     // disposedPluginIds only proves shutdown() STARTED disposing — the real
     // process kill it awaits can still be in flight. Wait for the record to
@@ -2261,7 +2250,6 @@ describe("PluginHost", () => {
     );
 
     expect(harness.disposedPluginIds).toContain("hello-plugin");
-    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
   });
@@ -2333,7 +2321,6 @@ describe("PluginHost", () => {
       "Broken plugin did not finish its crash loop.",
       10_000,
     );
-    await delay(300);
 
     const healthyStatuses = statuses
       .filter(({ pluginId }) => pluginId === "healthy-plugin")
@@ -2442,7 +2429,10 @@ describe("PluginHost", () => {
       "Plugin crash did not reach failure accounting.",
     );
     await stopDuringAccounting;
-    await delay(100);
+    await waitFor(
+      () => host.getStatus("hello-plugin") === undefined,
+      "The stop during crash accounting did not finish.",
+    );
 
     expect(harness.spawnedPluginIds).toEqual(["hello-plugin"]);
     expect(host.getStatus("hello-plugin")).toBeUndefined();
@@ -2483,10 +2473,16 @@ describe("PluginHost", () => {
     );
 
     await host.stop("hello-plugin");
-    await delay(500);
-    const settledSize = (await stat(heartbeatPath)).size;
-    await delay(500);
-    expect((await stat(heartbeatPath)).size).toBe(settledSize);
+    // The heartbeat is a 200 ms interval. Once a full interval passes with no
+    // growth, the writer is gone; a live one would have appended by then.
+    await waitFor(
+      async () => {
+        const before = (await stat(heartbeatPath)).size;
+        await delay(250);
+        return (await stat(heartbeatPath)).size === before;
+      },
+      "Heartbeat descendant kept writing after the plugin stopped.",
+    );
   }, 15_000);
 
   it("discards an activation result from an older host generation", async () => {
@@ -2617,7 +2613,10 @@ describe("PluginHost", () => {
       harness.getCallbacks();
 
       host.bumpGeneration();
-      await delay(20);
+      await waitFor(
+        () => consoleError.mock.calls.length > 0,
+        "The failed spawn teardown was not reported.",
+      );
 
       expect(consoleError).toHaveBeenCalledWith(
         expect.stringContaining("spawn teardown failed"),

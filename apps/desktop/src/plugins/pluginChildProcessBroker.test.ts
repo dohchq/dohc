@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PLUGIN_CHILD_PROCESS_METHODS } from "@dohc/sdk/node";
 import { createTestScratch } from "../workspaces/testTemp";
+import { until } from "../testing/until";
 import { processTreePids } from "../process/posixSpawn";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import {
@@ -1086,20 +1087,6 @@ function isAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
-  }
-}
-
-async function until<T>(
-  probe: () => T | undefined | Promise<T | undefined>,
-  label: string,
-  timeoutMs = 10_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
-    await new Promise((settle) => setTimeout(settle, 25));
   }
 }
 

@@ -4,6 +4,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { OpenSharedView } from "./OpenSharedView";
+import { deferred } from "../testing/deferred";
 
 // Same deadline discipline as FileInspector.test.tsx (#568). These tests type
 // 40-character share codes keystroke by keystroke through jsdom, honest work
@@ -41,14 +42,6 @@ const SHARED_VIEW = {
   mode: "local-first" as const,
   shareView: { shareId: "share-1", granterEmail: "granter@dohc.test" },
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
-}
 
 beforeEach(() => {
   vi.resetAllMocks();

@@ -3,6 +3,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ShareHandoffSurface } from "./ShareHandoffSurface";
+import { deferred } from "../testing/deferred";
 
 const REFUSED_COPY =
   "dohc couldn't open this share link. It may have expired or already been used. Go back to the share page in your browser and choose Open in dohc again.";
@@ -74,14 +75,6 @@ function receivedShare(shareId: string, shareCode: string, grantId = `grant-${sh
 type ExactReceivedShareResult =
   | { found: false }
   | { found: true; share: ReturnType<typeof receivedShare> };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
 function placementProps(placement: "first-run" | "workspace") {
   return placement === "workspace"

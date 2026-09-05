@@ -1,35 +1,23 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   VERSIONED_METHOD,
   VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
-import { createTestScratch } from "./testTemp";
 import {
   createWorkspaceEngineCapture,
   type WorkspaceEngineCapture,
 } from "./workspaceEngineCapture";
 
+import { createTestScratch } from "./testTemp";
 // PR 0M-5: engine history reads (active-version timeline + one-moment
 // payloads), engine-routed restore (forward history, expected-event
 // registration, disk materialization, undo), the stable-object-id seam for
 // the linked-chat rail, and engine-coordinated renames.
-
-const roots: string[] = [];
-
-async function tempRoot(): Promise<string> {
-  const root = await createTestScratch("dohc-engine-restore-");
-  roots.push(root);
-  return root;
-}
-
-afterEach(async () => {
-  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
-});
 
 async function write(root: string, path: string, contents: string) {
   const absolute = join(root, path);
@@ -60,7 +48,7 @@ function capture(
 
 describe("engine history reads", () => {
   it("lists the active version's moments newest first and reads one payload", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "a.md", "first\n");
     const loopback = new VersionedLoopbackEngine();
     const requests: Request[] = [];
@@ -96,7 +84,7 @@ describe("engine history reads", () => {
   });
 
   it("scopes the timeline to the active version after a switch", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "plan.md", "main body\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -121,7 +109,7 @@ describe("engine history reads", () => {
 
 describe("engine restore", () => {
   it("restores a file to before a moment: forward moment, disk write, no re-capture", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "original\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -154,7 +142,7 @@ describe("engine restore", () => {
   });
 
   it("captures an unsaved disk edit before restoring so nothing is lost", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "original\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -182,7 +170,7 @@ describe("engine restore", () => {
   });
 
   it("restoring to before a create removes the file; undo brings it back", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
     engine.start();
@@ -204,7 +192,7 @@ describe("engine restore", () => {
   });
 
   it("undo of a text restore returns the file to its pre-restore content", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "original\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -224,7 +212,7 @@ describe("engine restore", () => {
   });
 
   it("rejects restoring a moment that belongs to another version", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "plan.md", "main body\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -240,7 +228,7 @@ describe("engine restore", () => {
   });
 
   it("rejects unknown moments", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
     engine.start();
@@ -254,7 +242,7 @@ describe("engine restore", () => {
 
 describe("stable object ids for the linked-chat rail", () => {
   it("resolves object ids from metadata without reading file bodies", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "one.md", "one body\n");
     await write(root, "two.md", "two body\n");
     const loopback = new VersionedLoopbackEngine();
@@ -279,7 +267,7 @@ describe("stable object ids for the linked-chat rail", () => {
   });
 
   it("resolves a path to its engine object id and null for untracked paths", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "doc.md", "body\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -293,7 +281,7 @@ describe("stable object ids for the linked-chat rail", () => {
   });
 
   it("preserves the object id across an engine-coordinated rename", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "before.md", "body\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -323,7 +311,7 @@ describe("stable object ids for the linked-chat rail", () => {
   });
 
   it("rolls the engine rename back when the disk move fails", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     await write(root, "before.md", "body\n");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
@@ -344,7 +332,7 @@ describe("stable object ids for the linked-chat rail", () => {
   });
 
   it("returns a no-op finisher for non-engine-owned renames", async () => {
-    const root = await tempRoot();
+    const root = await createTestScratch("dohc-engine-restore-");
     const loopback = new VersionedLoopbackEngine();
     const engine = capture(root, loopback);
     engine.start();

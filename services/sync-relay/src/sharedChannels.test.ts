@@ -1,10 +1,14 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  request,
+  testStorage,
+} from "./linkTestHelpers";
 
 // MU-C4 shared channels — the route-level adversarial suite for the
 // BIDIRECTIONAL chat-channel grant: the member append route, the chat branch
@@ -12,26 +16,7 @@ import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
 // revocation. PR-18 posture throughout: server-derived identity, fail-closed
 // filters, byte-identical generic 404s for every unauthorized probe.
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-sync-relay-shared-channels-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function countChannelKindLookups(storage: SyncRelayStorage): {
   storage: SyncRelayStorage;
@@ -74,24 +59,6 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     lookupUserEmail: (userId) => `${userId}@dohc.test`,
     newShareId: () => `share-${nextShare++}`,
   });
-}
-
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
 }
 
 const OWNER = "owner";

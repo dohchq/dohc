@@ -673,6 +673,9 @@ export interface WorkspaceEngineCaptureOptions {
   // and Y.Doc paths. Production cannot construct a capture without it.
   // Injectable stores still take precedence in focused tests.
   rustEngineSessions: EngineWorkspaceSessions;
+  // The close-retry ladders' first delay and cap. Tests shrink them so a
+  // retry window is milliseconds, not seconds.
+  teardownRetryMs?: { initial: number; cap: number };
   // The real Rust daemon owns filesystem observation and version
   // materialization. Tests backed by the in-process loopback omit this because
   // that transport has no autonomous watcher or disk writer.
@@ -1468,6 +1471,10 @@ export function createWorkspaceEngineCapture(
   const { workspaceId, rootPath, attachmentId } = options;
   const now = options.now ?? (() => Date.now());
   const createId = options.createId ?? (() => randomUUID());
+  const teardownRetry = options.teardownRetryMs ?? {
+    initial: TEARDOWN_RETRY_INITIAL_MS,
+    cap: TEARDOWN_RETRY_CAP_MS,
+  };
   const reportError =
     options.onError ??
     ((context: string, error: unknown) => {
@@ -4102,7 +4109,7 @@ export function createWorkspaceEngineCapture(
         // The payment is callable from the debt's own timer (wrapped in
         // `enqueue`) and inline by another chain task that must drain the debt
         // before touching the path — a rename, most of all.
-        let detachedRetryMs = TEARDOWN_RETRY_INITIAL_MS;
+        let detachedRetryMs = teardownRetry.initial;
         // One debt, one timer.
         let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -4511,7 +4518,7 @@ export function createWorkspaceEngineCapture(
           // proportional to the DEBT, not to how often something touched it.
           if (pendingRetryTimer !== null) clearTimeout(pendingRetryTimer);
           const delay = detachedRetryMs;
-          detachedRetryMs = Math.min(detachedRetryMs * 2, TEARDOWN_RETRY_CAP_MS);
+          detachedRetryMs = Math.min(detachedRetryMs * 2, teardownRetry.cap);
           pendingRetryTimer = setTimeout(() => {
             pendingRetryTimer = null;
             // Paid, transferred, or dropped by another edge while the timer
@@ -4615,7 +4622,7 @@ export function createWorkspaceEngineCapture(
         // teardown on a doubling delay until the lock releases — each retry
         // re-runs the pre-close settle — or a non-lock failure says retrying
         // cannot help. A paid debt removes the entry, which disarms this.
-        let transientCloseRetryMs = TEARDOWN_RETRY_INITIAL_MS;
+        let transientCloseRetryMs = teardownRetry.initial;
         let transientCloseRetryTimer: ReturnType<typeof setTimeout> | null = null;
         const scheduleTransientCloseRetry = (
           error: unknown,
@@ -4625,10 +4632,7 @@ export function createWorkspaceEngineCapture(
             return;
           if (stopped || liveYDocSessions.get(input.path) !== entry) return;
           const delay = transientCloseRetryMs;
-          transientCloseRetryMs = Math.min(
-            transientCloseRetryMs * 2,
-            TEARDOWN_RETRY_CAP_MS,
-          );
+          transientCloseRetryMs = Math.min(transientCloseRetryMs * 2, teardownRetry.cap);
           transientCloseRetryTimer = setTimeout(() => {
             transientCloseRetryTimer = null;
             if (stopped || liveYDocSessions.get(input.path) !== entry) return;

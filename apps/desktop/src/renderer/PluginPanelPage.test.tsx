@@ -11,6 +11,7 @@ import type {
 import { PluginPanelPage } from "./PluginPanelPage";
 import { THEME_ATTRIBUTES } from "./pluginPanelTheme";
 import { palette } from "./tokens";
+import { deferred } from "../testing/deferred";
 
 let panelSdkEventListener: ((event: PluginPanelSdkEvent) => void) | null = null;
 let panelInvalidatedListener: (
@@ -49,14 +50,6 @@ const bridgeMock = {
     },
   ),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((nextResolve) => {
-    resolve = nextResolve;
-  });
-  return { promise, resolve };
-}
 
 function sdkMessage(
   source: Window,

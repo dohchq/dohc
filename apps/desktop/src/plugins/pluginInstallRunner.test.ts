@@ -32,6 +32,7 @@ import {
   PINNED_PLUGIN_PNPM_VERSION,
   PLUGIN_INSTALL_TIMEOUT_MS,
 } from "./pluginSourceSnapshot";
+import { deferred } from "../testing/deferred";
 
 interface InstallFixture {
   root: string;
@@ -39,11 +40,6 @@ interface InstallFixture {
   snapshotRoot: string;
   resourcesBasePath: string;
   input: InstallPluginDependenciesInput;
-}
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
 }
 
 const roots: string[] = [];
@@ -82,20 +78,6 @@ class FakeInstallProcess implements PluginInstallProcessHandle {
   error(message: string): void {
     for (const listener of this.errorListeners) listener(message);
   }
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolvePromise: ((value: T) => void) | undefined;
-  const promise = new Promise<T>((resolveValue) => {
-    resolvePromise = resolveValue;
-  });
-  return {
-    promise,
-    resolve: (value) => {
-      if (!resolvePromise) throw new Error("Deferred promise was not initialized.");
-      resolvePromise(value);
-    },
-  };
 }
 
 async function createInstallFixture(

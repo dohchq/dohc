@@ -1,7 +1,4 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
@@ -14,7 +11,14 @@ import {
   type ShareFileChatResolver,
   type ShareSelector,
 } from "./shareFilter";
-import { openSyncRelayStorage, type SyncRelayStorage } from "./storage";
+import { type SyncRelayStorage } from "./storage";
+import {
+  closeTestStorages,
+  json,
+  jsonBody,
+  request,
+  testStorage,
+} from "./linkTestHelpers";
 
 // A resolver that knows no file-linked thread and no object: a DM grant is a
 // chat-channel selector, and the file half must never decide anything for it.
@@ -33,26 +37,7 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
 // indistinguishable from a share that never existed. These tests are the
 // BLOCKING adversarial isolation gate for that claim.
 
-let roots: string[] = [];
-let storages: SyncRelayStorage[] = [];
-
-beforeEach(() => {
-  roots = [];
-  storages = [];
-});
-
-afterEach(async () => {
-  for (const storage of storages) storage.close();
-  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true })));
-});
-
-async function testStorage(): Promise<SyncRelayStorage> {
-  const root = await mkdtemp(join(tmpdir(), "dohc-sync-relay-dm-"));
-  roots.push(root);
-  const storage = openSyncRelayStorage(join(root, "relay.sqlite"));
-  storages.push(storage);
-  return storage;
-}
+afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
   const resolveActor: ResolveActor = (request, workspaceId) => {
@@ -70,24 +55,6 @@ function handler(storage: SyncRelayStorage): SyncRelayHandler {
     lookupUserEmail: (userId) => `${userId}@dohc.test`,
     newShareId: () => `dmshare-${nextShare++}`,
   });
-}
-
-function request(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
-}
-
-function jsonBody(value: unknown): RequestInit {
-  return {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(value),
-  };
-}
-
-async function json(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
 }
 
 const OWNER = "alice";

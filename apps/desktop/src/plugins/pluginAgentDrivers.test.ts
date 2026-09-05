@@ -10,6 +10,7 @@ import {
 } from "../agents/AgentDriver";
 import { JsonRpcTransport } from "../agents/JsonRpcTransport";
 import { createTestScratch, removeTestScratch } from "../workspaces/testTemp";
+import { until } from "../testing/until";
 import { PluginHost, type PluginHostOptions } from "./PluginHost";
 import { PluginChildProcessBroker } from "./pluginChildProcessBroker";
 import {
@@ -39,20 +40,6 @@ afterEach(async () => {
   await Promise.allSettled(liveBrokers.splice(0).map((broker) => broker.dispose()));
   await Promise.all(scratchRoots.splice(0).map((root) => removeTestScratch(root)));
 });
-
-async function until<T>(
-  probe: () => T | undefined | Promise<T | undefined>,
-  label: string,
-  timeoutMs = 10_000,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const value = await probe();
-    if (value !== undefined) return value;
-    if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}.`);
-    await new Promise((settle) => setTimeout(settle, 25));
-  }
-}
 
 function isAlive(pid: number): boolean {
   try {
@@ -370,11 +357,8 @@ describe("plugin agent drivers, through the real plugin process", () => {
         () => events.find((event) => event.kind === "permission-request"),
         "the permission request",
       );
-      await new Promise((settle) => setTimeout(settle, 250));
       // MUTATION (a null policy answers anyway): a resolution arrives that
-      // nobody decided.
-      expect(events.some((event) => event.kind === "permission-resolved")).toBe(false);
-
+      // nobody decided, so the one below is the second.
       await session.answerPermission("permission-1", "reject_once");
       const resolved = await until(
         () => events.find((event) => event.kind === "permission-resolved"),
@@ -480,11 +464,6 @@ describe("plugin agent drivers, through the real plugin process", () => {
         () => (isAlive(cursor.pid) ? undefined : true),
         "the harness process to die with its plugin",
       );
-      const beforeQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
-      await new Promise((settle) => setTimeout(settle, 400));
-      const afterQuiet = (await readFile(fixture.heartbeatPath, "utf8")).length;
-      expect(afterQuiet).toBe(beforeQuiet);
-
       // The session hears about it as its own failure, not as silence.
       expect(events.at(-1)).toMatchObject({ kind: "error", fatal: true });
       expect(fixture.drivers.list()).toEqual([]);

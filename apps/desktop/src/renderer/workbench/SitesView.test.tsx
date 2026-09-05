@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { SitesView } from "./SitesView";
 import { siteTabPath } from "./workbenchState";
+import { deferred } from "../../testing/deferred";
 
 const site: SitePackageInfo = {
   root: "client-portal",
@@ -31,14 +32,6 @@ const bridgeMock = {
     sites: [site],
   })),
 };
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
-    resolve = resolvePromise;
-  });
-  return { promise, resolve };
-}
 
 describe("SitesView", () => {
   beforeEach(() => {

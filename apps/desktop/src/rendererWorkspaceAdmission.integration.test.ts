@@ -7,10 +7,7 @@ import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
 import { PresenceMutationOwner } from "./collab/presenceMutationOwner";
 import { RendererWorkspaceSessionOwner } from "./window/rendererWorkspaceSessionOwner";
 
-function deferred() {
-  return Promise.withResolvers<void>();
-}
-
+import { deferred } from "./testing/deferred";
 function sender(id: number) {
   const destroyedListeners: Array<() => void> = [];
   return {
