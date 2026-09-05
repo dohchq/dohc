@@ -396,6 +396,67 @@ it("aborts a flush refusal without stopping or starting a host", async () => {
   ).toMatchObject({ ok: true, snapshot: { admissionState: "open" } });
 });
 
+it.each([
+  { ...SERVICE, hostEpoch: 0 },
+  { ...SERVICE, hostId: "" },
+  { ...SERVICE, mode: "unknown" as ReportedHostConnection["mode"] },
+])("refuses a malformed runtime report and preserves activation for resume: %j", async (report) => {
+  const { dbPath, storage } = await newStorage();
+  provisionAndRegister(storage);
+  const authorization = permissiveAuthorization();
+  const start = vi.fn(async (): Promise<ReportedHostConnection> => report);
+  const runtime = {
+    drainAcceptedWork: vi.fn(async () => undefined),
+    stop: vi.fn(async () => undefined),
+    start,
+  };
+  const settlement = { flush: vi.fn(async () => undefined) };
+  const coordinator = createLiveHostControl({ authorization, runtime, settlement, storage });
+  await expect(coordinator.transition({
+    from: DEVICE,
+    to: { hostId: SERVICE.hostId, mode: SERVICE.mode },
+    transitionId: "malformed-report",
+  })).resolves.toEqual({ ok: false, reason: "runtime-refused" });
+  const activating = storage.getLiveHostControl();
+  expect(activating).toMatchObject({
+    admissionState: "closed",
+    configuredMode: "service",
+    hostEpoch: 2,
+    registeredConnectionId: null,
+    registeredInstanceId: null,
+    transition: { phase: "activating", transitionId: "malformed-report" },
+  });
+  expect(authorization.authorizeHostRegistration).not.toHaveBeenCalled();
+  if (activating?.transition?.phase !== "activating") throw new Error("activation absent");
+
+  closeStorage(storage);
+  const reopened = openSyncRelayStorage(dbPath);
+  storages.push(reopened);
+  expect(reopened.getLiveHostControl()).toEqual(activating);
+  const resumed = createLiveHostControl({ authorization, runtime, settlement, storage: reopened });
+  const resumeInput = {
+    transitionGeneration: activating.transition.transitionGeneration,
+    transitionId: "malformed-report",
+  };
+  await expect(resumed.resume(resumeInput))
+    .resolves.toEqual({ ok: false, reason: "runtime-refused" });
+  expect(reopened.getLiveHostControl()).toEqual(activating);
+  expect(authorization.authorizeHostRegistration).not.toHaveBeenCalled();
+
+  start.mockResolvedValue(SERVICE);
+  vi.mocked(authorization.authorizeHostRegistration).mockImplementationOnce(() => {
+    throw new Error("registration not authorized");
+  });
+  await expect(resumed.resume(resumeInput)).rejects.toThrow("registration not authorized");
+  expect(reopened.getLiveHostControl()).toEqual(activating);
+  await expect(resumed.resume(resumeInput)).resolves.toMatchObject({
+    ok: true,
+    snapshot: { admissionState: "open", hostEpoch: 2, transition: null },
+  });
+  expect(runtime.drainAcceptedWork).toHaveBeenCalledTimes(1);
+  expect(settlement.flush).toHaveBeenCalledTimes(1);
+});
+
 it("requires maintenance authority again for resume and explicit abort", async () => {
   const { storage } = await newStorage();
   provisionAndRegister(storage);
@@ -1189,6 +1250,32 @@ it("fails closed for missing, unmarked, and damaged authority tables", async () 
   raw.close();
   expect(() => openSyncRelayStorage(damagedState.dbPath)).toThrow(/damaged/);
 });
+
+it.each(["'device'", "'open'", "'activating'"])(
+  "rejects changed case in host-control constraint literal %s on reopen",
+  async (literal) => {
+    const { dbPath, storage } = await newStorage();
+    closeStorage(storage);
+    const raw = rawDatabase(dbPath);
+    try {
+      const sql = String(raw.prepare(
+        "SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'sync_relay_session_host_control'",
+      ).get()?.sql);
+      expect(sql).toContain(literal);
+      const changed = sql.replace(literal, literal.toUpperCase());
+      expect(changed).not.toBe(sql);
+      raw.exec(`DROP TABLE sync_relay_session_host_control; ${changed};`);
+    } finally {
+      raw.close();
+    }
+    let reopened: SyncRelayStorage | undefined;
+    try {
+      expect(() => { reopened = openSyncRelayStorage(dbPath); }).toThrow(/damaged/);
+    } finally {
+      reopened?.close();
+    }
+  },
+);
 
 it("persists the exact migration marker and table shape across reopen", async () => {
   const { dbPath, storage } = await newStorage();

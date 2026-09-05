@@ -119,14 +119,13 @@ export function createLiveHostControl(
       hostId: transition.toHostId,
       hostEpoch: snapshot.hostEpoch,
     };
-    let registration: HostRegistrationAttempt;
+    let reported: LiveHostConnectionCoordinate;
     try {
       await options.runtime.stop(oldCoordinate);
-      registration = await options.runtime.start(newCoordinate);
+      reported = parseReportedHostConnection(await options.runtime.start(newCoordinate));
     } catch {
       return { ok: false, reason: "runtime-refused" };
     }
-    const reported = parseReportedHostConnection(registration);
     return options.storage.activateLiveHostTransition({
       ...reported,
       transitionGeneration: transition.transitionGeneration,

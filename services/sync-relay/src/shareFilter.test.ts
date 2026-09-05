@@ -61,6 +61,10 @@ describe("share selector validation", () => {
     ] as const) {
       expect(visibleSharePath(pathShare, path), path).toBe(expected);
     }
+    expect(visibleSharePath({ ...pathShare, paths: [], versionId: "v1" }, "docs//a.md"))
+      .toBe("docs/a.md");
+    expect(visibleSharePath({ ...pathShare, paths: [], versionId: null }, "docs//a.md"))
+      .toBeNull();
   });
 
   it("requires a nonempty main-version file selector at exact Edit access", () => {

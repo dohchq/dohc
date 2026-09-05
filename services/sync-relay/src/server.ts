@@ -5213,10 +5213,10 @@ function parseLinkLogHold(value: string | null): number {
   if (
     !Number.isSafeInteger(hold) ||
     hold < 0 ||
-    hold > MAX_PRESENCE_HOLD_MS
+    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
   ) {
     throw badRequest(
-      `hold must be a non-negative integer no greater than ${String(MAX_PRESENCE_HOLD_MS)}`,
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
     );
   }
   return hold;

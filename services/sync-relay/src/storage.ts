@@ -1386,7 +1386,7 @@ CREATE TABLE sync_relay_session_host_control (
 `;
 
 function normalizedSchemaSql(value: string): string {
-  return value.trim().replace(/;$/, "").replace(/\s+/g, " ").toLowerCase();
+  return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
 }
 
 function assertSessionHostControlSchema(db: SqliteDb): void {
