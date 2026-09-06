@@ -1202,7 +1202,9 @@ function loadFrontmatterWithUnsupportedTags(raw: string): {
     unsupportedMappingTag,
   )
   return {
-    value: normalizeFrontmatterValue(yaml.load(raw, { schema })),
+    // Public values allow depth 128; YAML also counts the root mapping,
+    // terminal value, and one speculative compact-node parse.
+    value: normalizeFrontmatterValue(yaml.load(raw, { schema, maxDepth: 131 })),
     hasUnsupportedTag,
   }
 }
