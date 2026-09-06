@@ -15,7 +15,9 @@ import {
 } from "../versioned/engineTextLimits";
 import {
   VERSIONED_METHOD,
+  type AgentAuthor,
   type MomentRecord,
+  type MomentsListResult,
   type SecretMomentRecord,
   type VersionChangeStatus,
   type VersionedContentKind,
@@ -2574,7 +2576,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return state.secretMoments.get(requiredString(params, "momentId", "secret moment get"))?.wire ?? null;
   }
 
-  private momentsList(state: WorkspaceState, params: JsonObject): JsonValue {
+  private momentsList(state: WorkspaceState, params: JsonObject): MomentsListResult {
     const versionId = optionalString(params, "versionId");
     const objectId = optionalString(params, "objectId");
     const before = optionalNumber(params, "beforeMomentOrder");
@@ -2619,8 +2621,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...(params.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: params.beforeMomentOrder }
         : {}),
-    }) as JsonObject;
-    const textMoments = textMomentPage.moments as unknown as MomentRecord[];
+    });
+    const textMoments = textMomentPage.moments;
     const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
     const upperRecordedAtMs =
       beforeMomentOrder === undefined
@@ -2988,37 +2990,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
-  // Mirrors the daemon's `validated_author` (lib.rs), which is the write path:
-  // a malformed author is refused with `invalid-metadata` before any mutation.
-  // An earlier draft mirrored `parsed_moment_author` instead and recorded
-  // `{ corrupt: true }` — but that marker exists for reading malformed
-  // historical rows, so recording it here let the fake accept writes production
-  // refuses. Same class as copying the author raw: permissive where the daemon
-  // is strict.
-  //
-  // Returns the normalized author to store. `agentRunId` is OPTIONAL in the
-  // contract and never nullable, so it is omitted rather than nulled.
-  private validatedAuthorValue(params: JsonObject): JsonValue | undefined {
+  // Mirrors the daemon's `validated_author` (lib.rs): a malformed author is
+  // refused with `invalid-metadata` before any mutation, and only the
+  // recognized fields are stored. `agentRunId` is omitted, never nulled.
+  private validatedAuthorValue(params: JsonObject): AgentAuthor | undefined {
     const value = params.author;
-    const refuse = (): never => {
-      throw new Error("invalid-metadata");
-    };
     if (value === undefined || value === null) return undefined;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) refuse();
-    const object = value as JsonObject;
-    const nonEmpty = (key: string): boolean =>
-      typeof object[key] === "string" && (object[key] as string).length > 0;
-    const runId = object.agentRunId;
-    const runOk = runId === undefined || (typeof runId === "string" && runId.length > 0);
-    if (object.kind !== "agent" || !nonEmpty("agentId") || !nonEmpty("onBehalfOf") || !runOk) {
-      refuse();
+    if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
+    const { kind, agentId, onBehalfOf, agentRunId } = value;
+    if (
+      kind !== "agent" ||
+      typeof agentId !== "string" ||
+      agentId.length === 0 ||
+      typeof onBehalfOf !== "string" ||
+      onBehalfOf.length === 0 ||
+      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0))
+    ) {
+      throw new Error("invalid-metadata");
     }
     return {
       kind: "agent",
-      agentId: object.agentId,
-      onBehalfOf: object.onBehalfOf,
-      ...(runId === undefined ? {} : { agentRunId: runId }),
-    } as unknown as JsonValue;
+      agentId,
+      onBehalfOf,
+      ...(agentRunId === undefined ? {} : { agentRunId }),
+    };
   }
 
   private momentMetadataFields(params: JsonObject): JsonObject {
