@@ -3248,10 +3248,11 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     .await;
 
     write_file(scratch.path(), "load/scan-confirmed.md", b"capture barrier");
-    let mut flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut id = 2_000_000;
-    let listed = loop {
+    loop {
+        id += 1;
+        call(&transport, &handle, id, "capture.flush", json!({})).await;
         id += 1;
         let listed = call(
             &transport,
@@ -3267,16 +3268,16 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
             .iter()
             .any(|file| file["path"] == json!("load/scan-confirmed.md"))
         {
-            break listed;
+            break;
         }
         assert!(
             tokio::time::Instant::now() < deadline,
             "capture never observed the sibling"
         );
-        id += 1;
-        flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
         tokio::task::yield_now().await;
-    };
+    }
+    id += 1;
+    let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
     assert_eq!(
         flushed["settled"],
         json!(false),
@@ -3284,6 +3285,15 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     );
 
     // The same scan must leave the settled head owned by the Y.Doc.
+    id += 1;
+    let listed = call(
+        &transport,
+        &handle,
+        id,
+        "versionedText.list",
+        json!({ "versionId": "main" }),
+    )
+    .await;
     let head = listed["files"]
         .as_array()
         .expect("files")

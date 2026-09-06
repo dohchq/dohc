@@ -12000,7 +12000,7 @@ fn ydoc_close_session_on_store(
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
         }
-        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+        let _ = dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
         record_facts = drained.record_facts;
     }
     Ok(YdocCloseSessionOutcome {

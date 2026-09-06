@@ -541,22 +541,21 @@ fn complete_drain(
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    let projection_refusal = cleanup.projection_refusal.clone();
-    complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+    let projection_refusal = complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
     drained.refusals.extend(projection_refusal);
     Ok(drained)
 }
 
 /// The final queue-row cleanup a held-cleanup drain still owes: persist the
 /// pending projection refusal, then delete the drained rows. Runs the same
-/// transaction the immediate drain would have run last.
+/// transaction the immediate drain would have run last. Returns the persisted refusal.
 pub fn complete_deferred_ydoc_drain_cleanup(
     store: &mut EngineStore,
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
-) -> Result<(), SyncError> {
+) -> Result<Option<crate::ReplicationRefusal>, SyncError> {
     if cleanup.coordinates.is_empty() && cleanup.projection_refusal.is_none() {
-        return Ok(());
+        return Ok(None);
     }
     let cleared = store.write_with(faults, |tx| {
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
@@ -575,7 +574,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
     }
-    Ok(())
+    Ok(cleanup.projection_refusal)
 }
 
 /// Drain only deferred coordinates that belong to the lineage an open editor
