@@ -58,6 +58,7 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
       "moment_order",
       "payload_after_blob_sha256",
       "payload_after_content_kind",
+      "metadata_summary",
     ],
   ],
   ["blobs", ["sha256", "text"]],

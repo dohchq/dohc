@@ -3332,7 +3332,6 @@ export function DesktopWorkspaceShell(props: {
   // its "This file" tab there: the per-file surface answers for a file the
   // share already served, and a workspace-wide listing would be a superset
   // to filter (decision 5, and the shape that produced #627).
-  const engineSurfacesExist = !isShareView;
   // Whether main's capture will SERVE those surfaces. Main's status is the
   // single answer to "does anything record here": after a failed capture
   // build every version, chat and moment call is refused. It can only
@@ -3351,7 +3350,7 @@ export function DesktopWorkspaceShell(props: {
   //
   const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable =
-    engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
+    !isShareView && captureDecided && !statusSaysNoRecorder(syncStatus);
   useEffect(() => {
     if (!workspaceIsReady) return;
     void refreshHistory().catch((error) =>
@@ -5726,7 +5725,7 @@ export function DesktopWorkspaceShell(props: {
   // no page to show, which is already a load state. Adding the clause here
   // would render the same thing from a second place.
   const historyTimeline =
-    engineSurfacesExist && !statusSaysNoRecorder(syncStatus) ? (
+    !isShareView && !statusSaysNoRecorder(syncStatus) ? (
     // The timeline renders only when a read ANSWERED. Flattening a
     // null page into an empty list told the user a workspace with real
     // history had no changes, whenever a read was in flight or had failed.

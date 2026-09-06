@@ -2656,11 +2656,10 @@ export function createWorkspaceEngineCapture(
     );
   }
 
-  // Applies engine-owned text state to the workspace folder, registering
-  // every write/delete as an expected engine event (sha256 for writes) so the
-  // watcher's observation of our own writes never re-captures them. Throws on
-  // the first failed operation; the failed operation's registration is
-  // cancelled so it can never swallow a later real user edit.
+  // Applies engine-owned state to the workspace folder, registering each
+  // delete as an expected removal so the watcher does not read it as a user
+  // edit. Throws on the first failed operation; that operation's registration
+  // is cancelled so it can never swallow a later real user edit.
   async function materialize(
     operations: readonly MaterializeOperation[],
     policy: WorkspaceEnginePolicySnapshot,

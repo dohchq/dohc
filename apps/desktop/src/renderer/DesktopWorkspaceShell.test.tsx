@@ -814,7 +814,6 @@ function makeBridge(
   });
 }
 
-const makeEngineBridge = makeBridge;
 
 function renderShell(
   bridge: ReturnType<typeof makeBridge>,
@@ -984,7 +983,7 @@ describe("workspace switch performance timeline", () => {
 describe("direct message workspace picker", () => {
   it("does not offer shared-view workspaces for acceptance", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     bridge.syncDms = vi.fn(async () => ({
       available: true,
       dms: [],
@@ -1037,7 +1036,7 @@ const SHARE_VIEW: Workspace = {
 function makeShareBridge(
   uiState: Promise<WorkspaceUiState | null> = Promise.resolve(null),
 ) {
-  const bridge = makeEngineBridge(uiState);
+  const bridge = makeBridge(uiState);
   bridge.openWorkspace = vi.fn(async () => SHARE_STATUS);
   bridge.getSyncStatus = vi.fn(async () => SHARE_STATUS);
   bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
@@ -2123,7 +2122,7 @@ describe("collection folders", () => {
   });
 
   it("opens a collection folder as its views tab with the settled empty state", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({
       files: [{ path: "tasks/one.md", kind: "file" as const }],
       folders: ["tasks"],
@@ -2173,7 +2172,7 @@ describe("collection folders", () => {
   // the cell already accepted must still reach its record's live document.
   it("keeps a queued record edit when a file opens while the first save is pending", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listWorkspaceFiles = vi.fn(async () => ({
       files: [
         { path: "tasks/one.md", kind: "file" as const },
@@ -2331,7 +2330,7 @@ describe("collection folders", () => {
   }, 40_000);
 
   it("offers New collection from the palette for an engine-enabled writable workspace", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -3440,7 +3439,7 @@ describe("editor groups", () => {
     "keeps $destination selected when an older duplicate-file open finishes flushing",
     async ({ tabPath, navigate }) => {
       const save = deferred<{ status: "written"; contentHash: string }>();
-      const bridge = makeEngineBridge(
+      const bridge = makeBridge(
         Promise.resolve({
           ...STORED_STATE,
           editorGroups: [
@@ -3704,7 +3703,7 @@ describe("editor groups", () => {
   });
 
   it("shares one live document session when the active Markdown file is split", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     const doc = markdownToYDoc("# Shared\n");
@@ -3778,7 +3777,7 @@ describe("editor groups", () => {
   });
 
   it("does not keep save-first state after a dirty editor unmounts", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -3821,7 +3820,7 @@ describe("editor groups", () => {
 
 describe("application menu command routing", () => {
   it("toggles the Chats panel when the command exists", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
     // Flush the commit's passive effects before emitting: the menu-command
@@ -4255,7 +4254,7 @@ describe("workspace switch admission", () => {
     let selectedWorkspace = WORKSPACE;
     let admittedWorkspaceId = WORKSPACE.workspaceId;
     const rejectedReads: string[] = [];
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getWorkspaceUiState = vi.fn(async () => {
       if (admittedWorkspaceId !== selectedWorkspace.workspaceId) {
         rejectedReads.push(`ui-state:${selectedWorkspace.workspaceId}`);
@@ -4308,7 +4307,7 @@ describe("collection input during a version switch", () => {
     "retains late input after switch %s without crossing versions",
     async (outcome) => {
       const user = userEvent.setup();
-      const bridge = makeEngineBridge(Promise.resolve(null));
+      const bridge = makeBridge(Promise.resolve(null));
       let activeVersionId = "main";
       bridge.listWorkspaceVersions = vi.fn(async () => ({
         versions: [
@@ -4360,7 +4359,7 @@ describe("workspace admission over collection writes", () => {
     const sessions = new Map<string, string>();
     const saveListeners = new Set<(event: EngineYDocSaveStateEvent) => void>();
     const openAvailability = { available: true };
-    const bridge = Object.assign(makeEngineBridge(Promise.resolve(null)), {
+    const bridge = Object.assign(makeBridge(Promise.resolve(null)), {
       openWorkspace: vi.fn(async (payload: { workspaceId: string }) => {
         admitted.workspaceId = payload.workspaceId;
         return SYNC_STATUS;
@@ -6051,7 +6050,7 @@ describe("ui-state merge-on-load", () => {
     }>();
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["b.md", "gone.md"], "gone.md")),
     );
     // The listing is held so the close cannot happen before the navigation.
@@ -6103,7 +6102,7 @@ describe("ui-state merge-on-load", () => {
   it("discards an in-flight DM navigation when the user opens a file", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, { path: "a.md", title: "A", incoming: 0, outgoing: 0 }],
       edges: [],
@@ -6153,7 +6152,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, fileThreadNode],
       edges: [],
@@ -6208,7 +6207,7 @@ describe("ui-state merge-on-load", () => {
     const second = channelNode("thread-hiring", "hiring", "Hiring discussion");
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, first, second],
       edges: [],
@@ -6268,7 +6267,7 @@ describe("ui-state merge-on-load", () => {
   it("lands a DM navigation that nothing interrupts", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -6305,7 +6304,7 @@ describe("ui-state merge-on-load", () => {
     });
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -6348,7 +6347,7 @@ describe("ui-state merge-on-load", () => {
   it("discards an in-flight DM navigation when a search result moves within the active file", async () => {
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE],
       edges: [],
@@ -6429,7 +6428,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.readWorkspaceGraph = vi.fn(async () => ({
       nodes: [DM_GRAPH_NODE, channel],
       edges: [],
@@ -6488,7 +6487,7 @@ describe("ui-state merge-on-load", () => {
     const sessionListeners: Array<
       (event: { sessionKey: string | null; phase: "changing" | "ready" }) => void
     > = [];
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs([CHATS_TAB_PATH], CHATS_TAB_PATH),
         chatsVisible: false,
@@ -6563,7 +6562,7 @@ describe("ui-state merge-on-load", () => {
   // Chat mocks the Chats PAGE needs to load its feed and a thread. The base
   // engine bridge only stubs the navigator's overview surface.
   function chatsPageBridge(uiState: WorkspaceUiState) {
-    const bridge = makeEngineBridge(Promise.resolve(uiState));
+    const bridge = makeBridge(Promise.resolve(uiState));
     const syncAnswers: Array<(value: SyncDmsResult) => void> = [];
     bridge.syncDms = vi.fn(
       () =>
@@ -6923,7 +6922,7 @@ describe("ui-state merge-on-load", () => {
     };
     const sync = deferred<SyncDmsResult>();
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...storedStateWithTabs(["a.md"], "a.md"),
         chatsVisible: false,
@@ -7309,7 +7308,7 @@ describe("engine store recovery", () => {
     async () => {
       const rebuild = deferred<RebuildEngineStoreResult>();
       let liveSessionsGeneration = 0;
-      const bridge = makeEngineBridge(
+      const bridge = makeBridge(
         Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
       );
       bridge.openWorkspace = vi.fn(async () => ({
@@ -7395,7 +7394,7 @@ describe("engine store recovery", () => {
   it("remounts live editors in every shell when one shell rebuilds the workspace", async () => {
     const rebuild = deferred<RebuildEngineStoreResult>();
     let liveSessionsGeneration = 0;
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => ({
@@ -7527,7 +7526,7 @@ describe("engine store recovery", () => {
       ...SYNC_STATUS,
       liveSessionsGeneration: 5,
     };
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => currentStatus);
@@ -7590,7 +7589,7 @@ describe("engine store recovery", () => {
   });
 
   it("keeps a mounted live document on its current session when the rebuild rejects", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.openWorkspace = vi.fn(async () => refusedStatus);
@@ -10602,7 +10601,7 @@ describe("history page", () => {
   // error. Main's status gates the surface, and the engine fetch must never
   // fire.
   it("lets the status failure gate the history surface", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
       historyRecordingUnavailable: true,
@@ -10637,7 +10636,7 @@ describe("history page", () => {
   });
 
   it("never asks a refused store for engine moments", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const refusedStatus = {
       ...SYNC_STATUS,
       historyCaptureFailed: true as const,
@@ -10670,7 +10669,7 @@ describe("history page", () => {
       historyRecordingUnavailable: true,
     };
     const decision = deferred<typeof FAILED_HISTORY_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(() => decision.promise);
     // Main's answer while the build runs: the entry exists, and its recorder
     // fields are still the defaults it registered before awaiting the build.
@@ -10717,7 +10716,7 @@ describe("history page", () => {
   // load. Without this, holding the rail in its load state forever keeps the
   // test above green.
   it("loads history once main's capture decision says a recorder exists", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -10787,7 +10786,7 @@ describe("history page", () => {
   // capture, so every engine call can only error. The surface must state
   // the capability instead, and must never ask main for engine moments.
   it("gives a shared view the capability truth and never asks for engine moments", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
@@ -10836,7 +10835,7 @@ describe("history page", () => {
   // The ended share has no Refresh control, so its placeholder must not
   // instruct one — the false-instruction class this lane exists to kill.
   it("an ended share's placeholder does not name the Refresh it no longer has", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
@@ -10896,7 +10895,7 @@ describe("history page", () => {
 
   it("persists a moment diff opened for a valid multibyte file path", async () => {
     const filePath = `目录/${"界".repeat(500)}.md`;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([{ ...historyMoment("m-1", "Wrote the file"), path: filePath }]),
     );
@@ -10929,7 +10928,7 @@ describe("history page", () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let issued = 0;
-      const bridge = makeEngineBridge(Promise.resolve(null));
+      const bridge = makeBridge(Promise.resolve(null));
       bridge.listEngineMoments = vi.fn(async (): Promise<ListEngineMomentsResponse> => {
         issued += 1;
         return issued === 1
@@ -10961,7 +10960,7 @@ describe("history page", () => {
   it("stops retrying an updating history and leaves the retry inline", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      const bridge = makeEngineBridge(Promise.resolve(null));
+      const bridge = makeBridge(Promise.resolve(null));
       bridge.listEngineMoments = vi.fn(
         async (): Promise<ListEngineMomentsResponse> => ({ status: "updating" }),
       );
@@ -10983,7 +10982,7 @@ describe("history page", () => {
   });
 
   it("shows the protected truncation marker from the history page", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () => ({
       ...historyPage([historyMoment("m-1", "Wrote the plan")]),
       protectedTruncated: true,
@@ -11001,7 +11000,7 @@ describe("history page", () => {
 
   it("keeps a moment diff selected when an older duplicate-file open finishes flushing", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -11076,7 +11075,7 @@ describe("history page", () => {
 
   it("keeps a newer file selected when an older moment-diff flush finishes", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["race-a.txt", "b.md"], "race-a.txt")),
     );
     bridge.listWorkspaceFiles = vi.fn(async () => ({
@@ -11125,7 +11124,7 @@ describe("history page", () => {
 
   it("does not open a moment after its target group closes during the draft flush", async () => {
     const save = deferred<{ status: "written"; contentHash: string }>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -11196,7 +11195,7 @@ describe("history page", () => {
       failNewer = reject;
     });
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? older.promise : newer));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11232,7 +11231,7 @@ describe("history page", () => {
     const older = deferred<ListEngineMomentsResult>();
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() =>
       ++issued === 1 ? older.promise : newer.promise,
     );
@@ -11277,7 +11276,7 @@ describe("history page", () => {
     const earlier = deferred<ListEngineMomentsResult>();
     const pages = [first, refreshed, earlier];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11327,7 +11326,7 @@ describe("history page", () => {
     const earlier = deferred<ListEngineMomentsResult>();
     const pages = [first, refreshed, earlier];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => pages[issued++]!.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11383,7 +11382,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11439,7 +11438,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11495,7 +11494,7 @@ describe("history page", () => {
       refreshed,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -11569,7 +11568,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
@@ -11633,7 +11632,7 @@ describe("history page", () => {
       page,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The main process keeps reporting the review until it is dismissed.
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
@@ -11700,7 +11699,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace reports the try version until the switch runs, Main after.
@@ -11798,7 +11797,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
@@ -11882,7 +11881,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -11961,7 +11960,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     // Only the selector's mount read answers. Every later read hangs forever:
@@ -12048,7 +12047,7 @@ describe("history page", () => {
       repaint.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -12157,7 +12156,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -12249,7 +12248,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -12334,7 +12333,7 @@ describe("history page", () => {
   // copy is earned.
   it("claims neither empty nor failed until the first read answers", async () => {
     const first = deferred<ListEngineMomentsResult>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => first.promise);
     const user = userEvent.setup();
     renderShell(bridge);
@@ -12357,7 +12356,7 @@ describe("history page", () => {
   // that happened somewhere else — the engine had already served the page.
   // The failure is still reported; it is reported about the read that had it.
   it("keeps the history page a sibling read's failure never touched", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -12390,7 +12389,7 @@ describe("history page", () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     let nextStatus: typeof SYNC_STATUS | typeof syncingStatus = SYNC_STATUS;
     let failNextRead = false;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -12449,7 +12448,7 @@ describe("history page", () => {
   // and no way to ask again — worse than the batch it replaced, which at
   // least gave up as soon as history did.
   it("says the history read failed while a sibling read never settles", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getSyncStatus = vi.fn(() => new Promise<never>(() => {}));
     const user = userEvent.setup();
@@ -12464,7 +12463,7 @@ describe("history page", () => {
 
   // The mirror: a page the engine already served is nobody's hostage either.
   it("shows the history page while a sibling read never settles", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(async () =>
       historyPage([historyMoment("m-1", "Wrote the plan")]),
     );
@@ -12481,7 +12480,7 @@ describe("history page", () => {
   // answer either. A try session the main process reported still reaches its
   // card while the timeline says it could not load.
   it("shows the try review a failed history read did not answer for", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => Promise.reject(new Error("history failed")));
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
@@ -12503,7 +12502,7 @@ describe("history page", () => {
     });
     const newer = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? older : newer.promise));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -12540,7 +12539,7 @@ describe("history page", () => {
     });
     const second = deferred<ListEngineMomentsResult>();
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => (++issued === 1 ? first : second.promise));
     const user = userEvent.setup();
     renderShell(bridge);
@@ -12588,7 +12587,7 @@ describe("history page", () => {
       retry.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     const versionList = [
       {
@@ -12693,7 +12692,7 @@ describe("history page", () => {
       failSwitchRefresh = reject;
     });
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
@@ -12767,7 +12766,7 @@ describe("history page", () => {
   // is simply the new version's.
   it("shows the new version's timeline when the switch and its refresh succeed", async () => {
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => {
       issued += 1;
       if (issued === 1) {
@@ -12833,7 +12832,7 @@ describe("history page", () => {
   // rest of the session. Liveness and operation identity are different
   // questions.
   it("re-enables the selector when the switch re-read outlives the epoch bump", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     let switched = false;
     // Only the mount read answers at once. Every read after it — the switch's
     // own re-read, and the one the re-key issues — is held open, so the
@@ -12915,7 +12914,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     let switched = false;
@@ -13012,7 +13011,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -13127,7 +13126,7 @@ describe("history page", () => {
       dismissRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     const user = userEvent.setup();
@@ -13195,7 +13194,7 @@ describe("history page", () => {
       switchRefresh,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let switched = false;
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -13282,7 +13281,7 @@ describe("history page", () => {
       afterTheRun.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let activeRunId: string | null = null;
     bridge.getAgentRunStatus = vi.fn(async () => ({
@@ -13380,7 +13379,7 @@ describe("history page", () => {
     // reads status more than once while a workspace opens.
     let holdNextRead = false;
     let failNextRead = false;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (holdNextRead) {
         holdNextRead = false;
@@ -13432,7 +13431,7 @@ describe("history page", () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     const olderRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let nextRead: "older" | null = null;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (nextRead === "older") {
         nextRead = null;
@@ -13488,7 +13487,7 @@ describe("history page", () => {
       refreshed.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     let failSecondTryRead!: (error: Error) => void;
     const secondTryRead = new Promise<never>((_resolve, reject) => {
@@ -13547,7 +13546,7 @@ describe("history page", () => {
     });
     const newerRead = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let nextRead: "older" | "newer" | null = null;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getSyncStatus = vi.fn(() => {
       if (nextRead === "older") {
         nextRead = null;
@@ -13610,7 +13609,7 @@ describe("history page", () => {
       afterTheRun.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     // The observation's own read is the one that fails, and it is the first
     // agent read issued after the held panel read is released — nothing else
@@ -13720,7 +13719,7 @@ describe("history page", () => {
       refreshed.promise,
     ];
     let issued = 0;
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listEngineMoments = vi.fn(() => responses[issued++]!);
     bridge.getTryInVersionState = vi.fn(async () => ({ state: REVIEW_STATE }));
     // The workspace moves on before the second refresh is issued, so that
@@ -14064,7 +14063,7 @@ describe("shared view versions surface", () => {
   // e2e — which the javascript gate does not run — would catch it.
   it("keeps the real compare page for a persisted compare tab outside a shared view", async () => {
     const comparePath = versionCompareTabPath("v-old");
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     renderShell(bridge);
@@ -14107,7 +14106,7 @@ describe("versions surface after a failed capture build", () => {
   };
 
   it("renders no version surface and never asks for versions when the recorder failed to build", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
     bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
     // Main's real answer once the capture build failed (#541 copy).
@@ -14137,7 +14136,7 @@ describe("versions surface after a failed capture build", () => {
   // the selector. Without this, dropping the version surface for every
   // workspace keeps the suite above green.
   it("keeps the version selector when main's status reports a live recorder", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
 
     expect(await screen.findByTestId("version-menu-button")).toBeTruthy();
@@ -14156,7 +14155,7 @@ describe("versions surface after a failed capture build", () => {
   // So this open does not resolve in the same flush.
   it("asks for no versions before main's capture decision lands", async () => {
     const decision = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.openWorkspace = vi.fn(() => decision.promise);
     bridge.getSyncStatus = vi.fn(() => decision.promise);
     bridge.listWorkspaceVersions = vi.fn(async (): Promise<never> => {
@@ -14208,7 +14207,7 @@ describe("versions surface after a failed capture build", () => {
   it("asks main for nothing while its capture decision is still pending", async () => {
     const settings = deferred<WorkspaceSettingsResult>();
     const decision = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getWorkspaceSettings = vi.fn(() => settings.promise);
     bridge.openWorkspace = vi.fn(() => decision.promise);
     // Main's answer before the decision: the entry exists and its recorder
@@ -14272,7 +14271,7 @@ describe("versions surface after a failed capture build", () => {
   it("states the capability for a persisted compare tab when the recorder failed to build", async () => {
     const comparePath = versionCompareTabPath("v-old");
     const status = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([comparePath], comparePath)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
@@ -14468,7 +14467,7 @@ describe("shared view chats surface", () => {
   // panel with the failed-capture placeholder on every one — keeps the share
   // pins above and the pins below green.
   it("keeps Chats for a workspace that is not a shared view", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     expect(await screen.findByTestId("chats-panel")).toBeTruthy();
@@ -14537,7 +14536,7 @@ describe("shared view chats surface", () => {
   ] as const)(
     "claims %s+Alt+B for a workspace that is not a shared view",
     async (_name, modifier) => {
-      const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+      const bridge = makeBridge(Promise.resolve(STORED_STATE));
       renderShell(bridge);
       await screen.findByTestId("chats-panel");
 
@@ -14560,7 +14559,7 @@ describe("shared view chats surface", () => {
   );
 
   it("claims Command+Option+B when macOS reports the Option glyph", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
@@ -14579,7 +14578,7 @@ describe("shared view chats surface", () => {
   });
 
   it("leaves AltGr characters on physical KeyB unclaimed", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
 
@@ -14615,7 +14614,7 @@ describe("shared view chats surface", () => {
   });
 
   it("still asks for chat mentions when a normal workspace opens a file", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     await screen.findByTestId("tab-b.md");
@@ -14666,7 +14665,7 @@ describe("chats surface after a failed capture build", () => {
   // Main's real answers once the capture build failed: every Chats call goes
   // through requireEngineCapture, which has no capture to hand it.
   function makeFailedCaptureBridge() {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     bridge.openWorkspace = vi.fn(async () => FAILED_STATUS);
     bridge.getSyncStatus = vi.fn(async () => FAILED_STATUS);
     for (const call of [
@@ -14809,7 +14808,7 @@ describe("shared view moment-diff tab", () => {
   });
 
   it("keeps the real diff page for a persisted moment-diff tab outside a shared view", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.readEngineMoment = vi.fn(async (): Promise<ReadEngineMomentResult> => ({
@@ -14871,7 +14870,7 @@ describe("moment-diff tab after a failed capture build", () => {
 
   it("states the capability instead of a page that can only fail", async () => {
     const status = deferred<typeof FAILED_STATUS>();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([MOMENT_TAB], MOMENT_TAB)),
     );
     bridge.openWorkspace = vi.fn(() => status.promise);
@@ -14916,7 +14915,7 @@ describe("workbench resize commits", () => {
       configurable: true,
       value: vi.fn(),
     });
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve({
         ...STORED_STATE,
         editorGroups: [
@@ -15337,7 +15336,7 @@ describe("open editors", () => {
 
 describe("chats panel (right side)", () => {
   it("toggles from the titlebar and hides entirely when collapsed", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -15359,7 +15358,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("keeps the navigator open and switches the editor between channels", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.listChatChannels.mockResolvedValue({
       channels: [
         {
@@ -15419,7 +15418,7 @@ describe("chats panel (right side)", () => {
       configurable: true,
       value: vi.fn(),
     });
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     const panel = await screen.findByTestId("chats-panel");
@@ -15449,7 +15448,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("exposes the chats resize separator to keyboard users", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(STORED_STATE));
+    const bridge = makeBridge(Promise.resolve(STORED_STATE));
     renderShell(bridge);
 
     const panel = await screen.findByTestId("chats-panel");
@@ -15479,7 +15478,7 @@ describe("chats panel (right side)", () => {
   });
 
   it("the 'This file' tab shows the active file's chats surface", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const user = userEvent.setup();
     renderShell(bridge);
 
@@ -15817,7 +15816,7 @@ describe("drawing entry point", () => {
 
 describe("unavailable MCP launcher settings", () => {
   it("shows the launcher error without a copyable config", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     bridge.getMcpConfig = vi.fn(
       async (): Promise<McpConfigResult> => ({
         unavailable: true,
@@ -15857,7 +15856,7 @@ describe("unavailable MCP launcher settings", () => {
 // palette -> Settings -> Agents & MCP path through the shell itself.
 describe("runner note reaches the card through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
     bridge.openWorkspace = vi.fn(async () => offStatus);
     bridge.getSyncStatus = vi.fn(async () => offStatus);
@@ -15943,7 +15942,7 @@ describe("set-aside draft recovery", () => {
 
   it("marks the tab with recovery but lets a version switch proceed without a save promise", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -15991,7 +15990,7 @@ describe("set-aside draft recovery", () => {
 
   it("treats a deleted live document as terminal instead of save-first dirty", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16064,7 +16063,7 @@ describe("set-aside draft recovery", () => {
   // recovery is knowable for every tab — an inactive tab must keep its
   // marker or the user forgets the draft exists.
   it("marks an inactive tab that holds a set-aside draft", async () => {
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md", "b.md"], "a.md")),
     );
     captureOrphanedDraft(WORKSPACE.workspaceId, "b.md", "Kept!");
@@ -16098,7 +16097,7 @@ describe("set-aside draft recovery", () => {
   // edits vanish into swallowed IPC rejections.
   it("reopens the document when a switch fails after its IPC started", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16175,7 +16174,7 @@ describe("set-aside draft recovery", () => {
   // guard stays because it makes the outcome hold regardless of that order.
   it("reopens once when a successful switch's selector refresh fails", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     let switched = false;
@@ -16337,7 +16336,7 @@ describe("set-aside draft recovery", () => {
   // sets the still-editable draft aside on the same version.
   it("does not set the draft aside when a failed switch never left the version", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs(["a.md"], "a.md")),
     );
     bridge.listWorkspaceVersions = vi.fn(async () => ({
@@ -16480,7 +16479,7 @@ describe("workbench render cost", () => {
   });
 
   it("skips only an all-hidden file window and still refreshes every history lane", async () => {
-    const bridge = makeEngineBridge(Promise.resolve(null));
+    const bridge = makeBridge(Promise.resolve(null));
     renderShell(bridge);
     await waitFor(() =>
       expect(screen.getByTestId("workspace-shell").dataset.ready).toBe("true"),
@@ -16698,7 +16697,7 @@ describe("workbench render cost", () => {
 
   it("suspends the navigator's polling while a Chats tab is live", async () => {
     const user = userEvent.setup();
-    const bridge = makeEngineBridge(
+    const bridge = makeBridge(
       Promise.resolve(storedStateWithTabs([], null)),
     );
     renderShell(bridge);
@@ -16729,7 +16728,7 @@ describe("workbench render cost", () => {
   it("does not sync DMs from the suspended navigator when an open channel thread refreshes", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(
-      makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+      makeBridge(Promise.resolve(storedStateWithTabs([], null))),
       {
         listChatChannels: vi.fn(async () => ({
           channels: [
@@ -16840,7 +16839,7 @@ describe("workbench render cost", () => {
       let unreadCount = 1;
       const markRead = deferred<void>();
       const bridge = Object.assign(
-        makeEngineBridge(Promise.resolve(storedStateWithTabs([], null))),
+        makeBridge(Promise.resolve(storedStateWithTabs([], null))),
         {
           syncDms: vi.fn(async () =>
             dmSyncResult([{ ...CANONICAL_DM, unreadCount }]),

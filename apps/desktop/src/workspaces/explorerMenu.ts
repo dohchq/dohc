@@ -52,7 +52,6 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
   const canCreateFolder = canWrite && !isSharedView;
   // A collection is a folder with a schema file, plus an engine-backed
   // surface. It needs both the folder write and the workspace engine.
-  const canCreateCollection = canCreateFolder;
 
   if (scope.isMountPath) {
     return [
@@ -78,7 +77,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
             ...(canCreateFolder
               ? [
                   item("New Folder", "new-folder"),
-                  ...(canCreateCollection
+                  ...(canCreateFolder
                     ? [item("New Collection…", "new-collection")]
                     : []),
                 ]
@@ -102,7 +101,7 @@ export function explorerMenuEntries(scope: ExplorerMenuScope): ExplorerMenuEntry
           ...(canCreateFolder
             ? [
                 item("New Folder", "new-folder"),
-                ...(canCreateCollection
+                ...(canCreateFolder
                   ? [item("New Collection…", "new-collection")]
                   : []),
               ]

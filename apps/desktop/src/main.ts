@@ -4238,7 +4238,7 @@ const chatDispatchService = createChatDispatchService({
         };
       },
     );
-    if (!activity.engineCaptureFor(workspace.workspaceId)) {
+    if (!activity.engineCaptureFor(registered.workspaceId, registered.rootPath)) {
       await release();
       throw new Error(captureRefusal("Chats"));
     }

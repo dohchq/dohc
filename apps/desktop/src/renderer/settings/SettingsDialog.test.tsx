@@ -690,30 +690,10 @@ describe("SettingsDialog", () => {
   // off states differ. Opened with the engine off: main built no recorder and
   // cannot until a restart, so turning the setting on hides the note and
   // enables Test runner over a click that can only fail.
+  // A session without a recorder holds `runnerSelfTest` behind a restart:
+  // main builds the recorder once per workspace per app session, so a button
+  // here would run into a refusal. The note says so and the button is off.
   it("tells the user to restart when this session has no recorder", async () => {
-    render(
-      <SettingsDialog
-        workspaceId="ws-1"
-        workspacePath="/x"
-        initialSection="agents"
-        sessionRecorderOn={false}
-        onClose={() => {}}
-      />,
-    );
-
-    const note = await screen.findByTestId("runner-self-test-engine-note");
-    await waitFor(() =>
-      expect(note.textContent).toContain("Restart dohc to test the runner."),
-    );
-  });
-
-  // The third state (#687, codex round 6), and the one the live-setting gate
-  // got wrong: the session has NO recorder and the user has already followed
-  // the instruction, so the setting reads on. Main still holds the
-  // recorder-less activity — `runnerSelfTest` takes `prepareRunWorkspace`,
-  // which refuses without a capture — so enabling Test runner here would show
-  // a button known to fail and delete the restart instruction on the way.
-  it("keeps the restart visible after the setting is turned on without a recorder", async () => {
     const user = userEvent.setup();
     render(
       <SettingsDialog

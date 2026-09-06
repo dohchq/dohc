@@ -180,8 +180,8 @@ export function createFakeDaemonCapture(input: {
       }
       return;
     }
+    if (head?.contentKind === disk.kind && head.sha256 === disk.sha256) return;
     if (disk.kind === "text") {
-      if (head?.contentKind === "text" && head.sha256 === disk.sha256) return;
       await call(VERSIONED_METHOD.textWrite, {
         versionId,
         path,
@@ -190,7 +190,6 @@ export function createFakeDaemonCapture(input: {
       });
       return;
     }
-    if (head?.contentKind === "binary" && head.sha256 === disk.sha256) return;
     await call(VERSIONED_METHOD.binaryWrite, {
       versionId,
       path,

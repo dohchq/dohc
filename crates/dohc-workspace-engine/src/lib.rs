@@ -2242,16 +2242,15 @@ impl EngineService {
                 if !open.created_actor {
                     return (open, Ok(()));
                 }
-                let binding = match root_binding::read_root_binding(&binding_root) {
-                    Ok(Some(token)) => Ok(token),
-                    Ok(None) if open.store_freshly_created => {
-                        root_binding::write_new_root_binding(&binding_root)
-                    }
-                    Ok(None) => Err(root_binding::RootBindingError::DatabaseMismatch),
-                    Err(error) => Err(error),
-                };
-                let bound = match binding {
-                    Ok(token) => match tokio::runtime::Handle::current()
+                let bound = (|| {
+                    let token = match root_binding::read_root_binding(&binding_root)? {
+                        Some(token) => token,
+                        None if open.store_freshly_created => {
+                            root_binding::write_new_root_binding(&binding_root)?
+                        }
+                        None => return Err(root_binding::RootBindingError::DatabaseMismatch),
+                    };
+                    match tokio::runtime::Handle::current()
                         .block_on(open.actor.bind_root(token, bind_root_faults))
                     {
                         Ok(true) => Ok(()),
@@ -2260,9 +2259,8 @@ impl EngineService {
                             eprintln!("engine: root binding stamp failed: {error}");
                             Err(root_binding::RootBindingError::Unstamped)
                         }
-                    },
-                    Err(error) => Err(error),
-                };
+                    }
+                })();
                 (open, bound)
             });
             #[cfg(test)]
