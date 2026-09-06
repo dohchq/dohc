@@ -1,9 +1,6 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
-import {
-  KEY_ENVELOPE_METHOD,
-  KeyEnvelopeProtocolShapeError,
-  decodeKeyEnvelopeResult,
-} from "./keyEnvelopeWireContract";
+import { KEY_ENVELOPE_METHOD, decodeKeyEnvelopeResult } from "./keyEnvelopeWireContract";
 
 describe("key-envelope wire schemas", () => {
   it("accepts and strips extra result fields", () => {
@@ -25,6 +22,6 @@ describe("key-envelope wire schemas", () => {
   it("wraps malformed results in the public error", () => {
     expect(() =>
       decodeKeyEnvelopeResult(KEY_ENVELOPE_METHOD.upload, { etag: 1 }),
-    ).toThrow(KeyEnvelopeProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 });

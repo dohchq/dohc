@@ -1,59 +1,51 @@
-import { createRequire } from "node:module";
 import { join } from "node:path";
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
+import type { ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAX_BLOB_BYTES,
   MAX_KEY_ENVELOPE_BYTES,
   MAX_PAYLOAD_JSON_BYTES,
-  createSyncRelayHandler,
+  type CreateSyncRelayHandlerOptions,
   type SyncRelayHandler,
 } from "./server";
+import { stableJsonStringify } from "./canonicalJson";
 import {
   openSyncRelayStorage,
   referencedBlobShas,
   type SyncRelayStorage,
 } from "./storage";
 import {
+  keyEnvelopeHistory,
+  closeTestStorage,
   closeTestStorages,
+  inspect,
   json,
   jsonBody,
   reopenTestStorage,
   request,
   sha256,
+  storagePath,
   tempRoot,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
-
-interface InspectionStatement {
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): unknown;
-}
-
-interface InspectionDatabase {
-  prepare(sql: string): InspectionStatement;
-  exec(sql: string): void;
-  close(): void;
-}
-
-const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
-  "node:sqlite",
-) as {
-  DatabaseSync: new (
-    path: string,
-    options: { readOnly: boolean },
-  ) => InspectionDatabase;
-};
+} from "./testing";
 
 afterEach(closeTestStorages);
 
-function handler(storage: SyncRelayStorage): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  return createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
+const NOW_MS = 1234;
+
+function handler(
+  storage: SyncRelayStorage,
+  overrides: Partial<CreateSyncRelayHandlerOptions> = {},
+): SyncRelayHandler {
+  return testHandler(storage, {
+    nowMs: () => NOW_MS,
+    resolveUserIdByEmail: undefined,
+    lookupUserEmail: undefined,
+    linkKey: undefined,
+    shareWebOrigin: undefined,
+    ...overrides,
+  });
 }
 
 interface ConflictResolveFixture {
@@ -63,23 +55,6 @@ interface ConflictResolveFixture {
 
 interface CompactConflictResolveFixture extends ConflictResolveFixture {
   shadows: Record<string, unknown>[];
-}
-
-function stableJsonStringifyForTest(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map(stableJsonStringifyForTest).join(",")}]`;
-  }
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    return `{${Object.keys(object)
-      .sort()
-      .map(
-        (key) =>
-          `${JSON.stringify(key)}:${stableJsonStringifyForTest(object[key])}`,
-      )
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
 }
 
 function conflictResolveFixture(workspaceId = "workspace-a"): ConflictResolveFixture {
@@ -365,12 +340,12 @@ function compactConflictResolveFixture(
       {
         kind: "delete",
         momentId: "moment-delete",
-        payloadSha256: sha256(stableJsonStringifyForTest(deleteShadow)),
+        payloadSha256: sha256(stableJsonStringify(deleteShadow)),
       },
       {
         kind: "write",
         momentId: "moment-write",
-        payloadSha256: sha256(stableJsonStringifyForTest(writeShadow)),
+        payloadSha256: sha256(stableJsonStringify(writeShadow)),
       },
     ],
     lineageTransition: {
@@ -924,7 +899,7 @@ describe("sync relay handler", () => {
     // A byte-identical re-PUT is an idempotent retry, not a replacement.
     const retry = await h(putKeys(first));
     expect(retry.status).toBe(200);
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([]);
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([]);
 
     // Stale CAS: If-Match naming anything but the current envelope is a 409.
     const stale = await h(putKeys(second, sha256(third)));
@@ -945,7 +920,7 @@ describe("sync relay handler", () => {
 
     // Lockout stays recoverable server-side: the replaced envelope is
     // retained byte-for-byte with an audit trail of when and by what.
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([
       {
         envelopeJson: first,
         sha256: sha256(first),
@@ -963,7 +938,7 @@ describe("sync relay handler", () => {
     const resolveActor: ResolveActor = () => {
       throw new Error("connection terminated unexpectedly (pg pool internal detail)");
     };
-    const h = createSyncRelayHandler({ storage, resolveActor, nowMs: () => 1234 });
+    const h = handler(storage, { resolveActor });
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const response = await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" }));
@@ -1108,7 +1083,7 @@ describe("sync relay handler", () => {
     expect((await h(putKeys(firstKey))).status).toBe(200);
     expect((await h(putKeys(secondKey, sha256(firstKey)))).status).toBe(200);
     const logBefore = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
-    const historyBefore = storage.getKeyEnvelopeHistory("workspace-a");
+    const historyBefore = keyEnvelopeHistory(storagePath(storage), "workspace-a");
 
     const gc = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
@@ -1123,7 +1098,7 @@ describe("sync relay handler", () => {
 
     const logAfter = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
     expect(logAfter).toEqual(logBefore);
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual(historyBefore);
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual(historyBefore);
   });
 
   it("allows only the workspace owner to run GC", async () => {
@@ -1216,15 +1191,7 @@ describe("sync relay handler", () => {
   it("does not GC a freshly uploaded blob before its referencing log op is appended (item 4)", async () => {
     const clock = { now: 1_000_000 };
     const storage = await testStorage({ blobGraceMs: 10 * 60 * 1000 });
-    const h = createSyncRelayHandler({
-      storage,
-      resolveActor: (request, workspaceId) => {
-        const auth = request.headers.get("authorization") ?? "";
-        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-        return { userId: auth.slice("Bearer user:".length), workspaceId };
-      },
-      nowMs: () => clock.now,
-    });
+    const h = handler(storage, { nowMs: () => clock.now });
     await createWorkspace(h);
     const content = Buffer.from("blob-in-flight");
     const contentSha = sha256(content);
@@ -1356,7 +1323,7 @@ describe("sync relay handler", () => {
     writeShadow.objectId = "object-new";
     writeShadow.objectCreatedAtMs = 2;
     const effects = payload.effects as Array<{ payloadSha256: string }>;
-    effects[1].payloadSha256 = sha256(stableJsonStringifyForTest(writeShadow));
+    effects[1].payloadSha256 = sha256(stableJsonStringify(writeShadow));
 
     const refs = referencedBlobShas(
       "conflict.resolve",
@@ -1411,7 +1378,7 @@ describe("sync relay handler", () => {
     deleteShadow.payloadAfterContentKind = "binary";
     deleteShadow.beforeContentKind = "binary";
     const effects = payload.effects as Array<{ payloadSha256: string }>;
-    effects[0].payloadSha256 = sha256(stableJsonStringifyForTest(deleteShadow));
+    effects[0].payloadSha256 = sha256(stableJsonStringify(deleteShadow));
 
     expect(() =>
       referencedBlobShas("conflict.resolve", JSON.stringify(payload), {
@@ -1659,15 +1626,7 @@ describe("sync relay handler", () => {
     // exact "aged past the grace before the referencing op arrives" hole the
     // grace window alone cannot close.
     const storage = await testStorage({ blobGraceMs: 0 });
-    const h = createSyncRelayHandler({
-      storage,
-      resolveActor: (request, workspaceId) => {
-        const auth = request.headers.get("authorization") ?? "";
-        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-        return { userId: auth.slice("Bearer user:".length), workspaceId };
-      },
-      nowMs: () => clock.now,
-    });
+    const h = handler(storage, { nowMs: () => clock.now });
     await createWorkspace(h);
     const content = Buffer.from("aged-out blob");
     const contentSha = sha256(content);
@@ -2201,9 +2160,8 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 
   it("records supersession time from the injected relay clock", async () => {
-    const root = await tempRoot("epoch-clock");
-    const dbPath = join(root, "relay.sqlite");
-    const storage = reopenTestStorage(dbPath);
+    const storage = await testStorage();
+    const dbPath = storagePath(storage);
     const h = handler(storage);
     await createWorkspace(h);
     expect(
@@ -2229,19 +2187,16 @@ describe("sync relay epoch and stream identity enforcement", () => {
       ).status,
     ).toBe(200);
 
-    const inspection = new InspectionDatabaseSync(dbPath, { readOnly: true });
-    try {
-      const row = inspection
+    const row = inspect(dbPath, (db) =>
+      db
         .prepare(
           `SELECT superseded_at_ms
            FROM sync_relay_epoch_supersessions
            WHERE workspace_id = ? AND replication_epoch = ? AND stream_identity = ?`,
         )
-        .get("workspace-a", EPOCH_1, STREAM_1);
-      expect(row?.superseded_at_ms).toBe(1234);
-    } finally {
-      inspection.close();
-    }
+        .get("workspace-a", EPOCH_1, STREAM_1),
+    );
+    expect(row?.superseded_at_ms).toBe(NOW_MS);
   });
 
   it("clamps rotated pulls to the epoch log floor while first adoption keeps prior rows", async () => {
@@ -2631,10 +2586,9 @@ describe("sync relay epoch and stream identity enforcement", () => {
   });
 
   it("persists active and superseded identities across a relay restart", async () => {
-    const root = await tempRoot("epoch-restart");
-    const dbPath = join(root, "relay.sqlite");
-    const firstStorage = openSyncRelayStorage(dbPath);
-    try {
+    const firstStorage = await testStorage();
+    const dbPath = storagePath(firstStorage);
+    {
       const firstHandler = handler(firstStorage);
       await createWorkspace(firstHandler);
       expect(
@@ -2668,9 +2622,8 @@ describe("sync relay epoch and stream identity enforcement", () => {
       );
       expect(staleBeforeRestart.status).toBe(409);
       expect(await json(staleBeforeRestart)).toMatchObject({ code: "epoch_superseded" });
-    } finally {
-      firstStorage.close();
     }
+    closeTestStorage(firstStorage);
 
     const reopenedStorage = reopenTestStorage(dbPath);
     const reopenedHandler = handler(reopenedStorage);
