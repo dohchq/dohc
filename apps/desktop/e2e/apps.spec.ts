@@ -81,6 +81,7 @@ test("@apps creates and opens the first app inside an existing app folder", asyn
 
     await page.getByTestId("activity-sites").click();
     await expect(page.getByTestId("sites-count")).toContainText("0 apps");
+    await page.screenshot({ path: test.info().outputPath("apps-empty.png") });
     await page.getByRole("button", { name: "Create app" }).click();
 
     await expect(page.getByTestId("site-preview-page")).toBeVisible();

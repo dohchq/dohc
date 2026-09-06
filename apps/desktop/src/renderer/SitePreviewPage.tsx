@@ -22,11 +22,11 @@ import type {
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
-import {
-  APP_CHECK_FALLBACK_MESSAGE,
-  APP_MISSING_MESSAGE,
-  NO_SHARE_OUTPUT_MESSAGE,
-} from "./appCopy";
+import { APP_CHECK_FALLBACK_MESSAGE } from "./appCopy";
+
+const APP_MISSING_MESSAGE = "This app is no longer part of the workspace.";
+const NO_SHARE_OUTPUT_MESSAGE =
+  "This app has no static entry file or build output to share.";
 
 type WorkspacePreviewMode =
   WorkspaceSettingsResult["settings"]["sites"]["defaultPreviewMode"];
