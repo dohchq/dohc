@@ -1298,11 +1298,6 @@ enum CaptureIndexing {
 
 enum Command {
     Run(Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>),
-    BindRoot {
-        token: String,
-        faults: Arc<dyn FaultInjector>,
-        reply: oneshot::Sender<Result<bool, StorageError>>,
-    },
     VersionedTextWrite {
         input: WriteText,
         root_dir: Option<PathBuf>,
@@ -1342,10 +1337,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<RollbackExecutionResult, RuntimeError>>,
     },
-    VersionedTextCompare {
-        input: CompareTextFileVersions,
-        reply: oneshot::Sender<Result<VersionedTextComparison, RuntimeError>>,
-    },
     VersionedTextMerge {
         input: MergeTextFileFromVersion,
         root_dir: PathBuf,
@@ -1353,14 +1344,6 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<MergeExecutionResult, RuntimeError>>,
-    },
-    CompareVersionFilesPage {
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<VersionFileChangePage, RuntimeError>>,
     },
     CaptureIngest {
         input: CaptureIngest,
@@ -1386,12 +1369,6 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
-    },
-    CollectionRecordIdMismatch {
-        workspace_id: String,
-        version_id: String,
-        paths: Vec<String>,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
     },
     ReconcileCollections {
         workspace_id: String,
@@ -1429,85 +1406,12 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
     },
-    VersionedTextRead {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<TextSnapshot>, RuntimeError>>,
-    },
-    ResolvePathObject {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ListVersions {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<Vec<VersionRecord>, RuntimeError>>,
-    },
-    ListSnapshotMetadata {
-        workspace_id: String,
-        version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<Vec<SnapshotMetadata>, RuntimeError>>,
-    },
-    ListMoments {
-        query: Box<ListMomentsQuery>,
-        reply: oneshot::Sender<Result<MomentPage, RuntimeError>>,
-    },
     HistoryPage {
         workspace_id: String,
         limit: i64,
         before_moment_order: Option<i64>,
         protected_probe_limit: usize,
         reply: oneshot::Sender<Result<HistoryPageRead, RuntimeError>>,
-    },
-    GetMoment {
-        workspace_id: String,
-        moment_id: String,
-        reply: oneshot::Sender<Result<Option<MomentRecord>, RuntimeError>>,
-    },
-    ReadBinary {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<BinaryHead>, RuntimeError>>,
-    },
-    ReadBinaryBlob {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
-    },
-    ReadBinaryBlobForEgress {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError>>,
-    },
-    ReadTextBlob {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
-    },
-    ReadTextBlobForEgress {
-        workspace_id: String,
-        sha256: String,
-        reply: oneshot::Sender<Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError>>,
-    },
-    ReadTextInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandText>, RuntimeError>>,
-    },
-    ReadBinaryInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandBinary>, RuntimeError>>,
     },
     MaterializeSecretInband {
         workspace_id: String,
@@ -1538,19 +1442,6 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ListSecretMoments {
-        workspace_id: String,
-        version_id: Option<String>,
-        path: Option<String>,
-        before_moment_order: Option<i64>,
-        limit: usize,
-        reply: oneshot::Sender<Result<SecretMomentPage, RuntimeError>>,
-    },
-    GetSecretMoment {
-        workspace_id: String,
-        moment_id: String,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
     },
     CompareSecretFiles {
         workspace_id: String,
@@ -1589,34 +1480,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
     },
-    SecretFileLen {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        reply: oneshot::Sender<Result<Option<i64>, RuntimeError>>,
-    },
-    ListSecretFilesPage {
-        workspace_id: String,
-        version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        reply: oneshot::Sender<Result<Vec<SecretFileStat>, RuntimeError>>,
-    },
-    ActiveVersionId {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<String, RuntimeError>>,
-    },
-    ActiveVersion {
-        workspace_id: String,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    EnsureMainVersion {
-        workspace_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
     SetActiveVersion {
         input: ActiveVersionSwitch,
         faults: Arc<dyn FaultInjector>,
@@ -1628,16 +1491,6 @@ enum Command {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    PreflightCreateNamedVersion {
-        input: CreateNamedVersion,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<VersionRecord>, RuntimeError>>,
-    },
-    CaptureManifestSeed {
-        workspace_id: String,
-        version_id: String,
-        reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
     },
     YdocOpenState {
         workspace_id: String,
@@ -2152,19 +2005,13 @@ impl ActorHandle {
         version_id: String,
         paths: Vec<String>,
     ) -> Result<bool, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CollectionRecordIdMismatch {
-                workspace_id,
-                version_id,
-                paths,
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run_blocking(move |store, _| {
+            store
+                .read_with(|conn| {
+                    collection_record_id_mismatch_in_tx(conn, &workspace_id, &version_id, &paths)
+                })
+                .map_err(RuntimeError::from)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2333,19 +2180,12 @@ impl ActorHandle {
         token: String,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::BindRoot {
-                token,
-                faults,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?
-            .map_err(RuntimeError::Storage)
+        self.run(move |store, _| {
+            store
+                .bind_root_token(&token, faults.as_ref())
+                .map_err(RuntimeError::Storage)
+        })
+        .await
     }
 
     /// Execute a versioned-text write on the actor's single writer thread.
@@ -2489,12 +2329,12 @@ impl ActorHandle {
         &self,
         input: CompareTextFileVersions,
     ) -> Result<VersionedTextComparison, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextCompare { input, reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .compare_text_file_versions(&input)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn versioned_text_merge(
@@ -2528,19 +2368,18 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<VersionFileChangePage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CompareVersionFilesPage {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .compare_version_files_page(
+                    &workspace_id,
+                    &source_version_id,
+                    &target_version_id,
+                    after_path.as_deref(),
+                    limit,
+                )
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Capture a text file on the actor's single writer thread.
@@ -2736,15 +2575,12 @@ impl ActorHandle {
         &self,
         workspace_id: String,
     ) -> Result<Vec<VersionRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListVersions {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_versions(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// One page of snapshot METADATA (no body hydration) — the listing read
@@ -2756,30 +2592,21 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<Vec<SnapshotMetadata>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSnapshotMetadata {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_snapshot_metadata(&workspace_id, &version_id, after_path.as_deref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn list_moments(&self, query: ListMomentsQuery) -> Result<MomentPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListMoments {
-                query: Box::new(query),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .list_moments(&query)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn history_page(
@@ -2808,16 +2635,12 @@ impl ActorHandle {
         workspace_id: String,
         moment_id: String,
     ) -> Result<Option<MomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::GetMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_moment(&workspace_id, &moment_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary(
@@ -2826,17 +2649,12 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<BinaryHead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinary {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary(&workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary_blob(
@@ -2844,16 +2662,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryBlob {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_blob(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_binary_blob_for_egress(
@@ -2861,16 +2675,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::BinaryBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_blob_for_egress(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_text_blob(
@@ -2878,16 +2688,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextBlob {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_blob(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn read_text_blob_for_egress(
@@ -2895,16 +2701,12 @@ impl ActorHandle {
         workspace_id: String,
         sha256: String,
     ) -> Result<Option<dohc_engine_domain::TextBlobRead>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_blob_for_egress(&workspace_id, &sha256)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Text head with the body hydrated only under `cap` — one actor turn.
@@ -2915,18 +2717,12 @@ impl ActorHandle {
         path: String,
         cap: usize,
     ) -> Result<Option<InbandText>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadTextInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_text_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Binary head with the bytes hydrated only under `cap` — one actor turn.
@@ -2937,18 +2733,12 @@ impl ActorHandle {
         path: String,
         cap: usize,
     ) -> Result<Option<InbandBinary>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReadBinaryInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .read_binary_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Secret materialize with the cap decided in the same turn — an
@@ -3049,19 +2839,18 @@ impl ActorHandle {
         before_moment_order: Option<i64>,
         limit: usize,
     ) -> Result<SecretMomentPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretMoments {
-                workspace_id,
-                version_id,
-                path,
+        self.run(move |store, _| {
+            list_secret_moments_page_keyless(
+                store,
+                &workspace_id,
+                version_id.as_deref(),
+                path.as_deref(),
                 before_moment_order,
                 limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn get_secret_moment(
@@ -3069,16 +2858,10 @@ impl ActorHandle {
         workspace_id: String,
         moment_id: String,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::GetSecretMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            get_secret_moment_keyless(store, &workspace_id, &moment_id).map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn compare_secret_files(
@@ -3185,17 +2968,11 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<i64>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SecretFileLen {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            secret_file_len_keyless(store, &workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// One page of secret-file tips (metadata only, keyset by path).
@@ -3206,48 +2983,42 @@ impl ActorHandle {
         after_path: Option<String>,
         limit: usize,
     ) -> Result<Vec<SecretFileStat>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ListSecretFilesPage {
-                workspace_id,
-                version_id,
-                after_path,
+        self.run(move |store, _| {
+            list_secret_files_keyless_page(
+                store,
+                &workspace_id,
+                &version_id,
+                after_path.as_deref(),
                 limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// The workspace's active version id (falling back to main), read on the
     /// actor thread. The capture driver targets this so captures land in the
     /// version the user is actually on (TS oracle parity).
     pub async fn active_version_id(&self, workspace_id: String) -> Result<String, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ActiveVersionId {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)
+                .map(|version| version.version_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn active_version(
         &self,
         workspace_id: String,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ActiveVersion {
-                workspace_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .get_active_version(&workspace_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn ensure_main_version(
@@ -3257,18 +3028,16 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::EnsureMainVersion {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn set_active_version(
@@ -3314,16 +3083,16 @@ impl ActorHandle {
         input: CreateNamedVersion,
         token: CancellationToken,
     ) -> Result<Option<VersionRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::PreflightCreateNamedVersion {
-                input,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .preflight_create_named_version(&input)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     /// Every captured path with its content identity, for seeding a fresh
@@ -3334,16 +3103,10 @@ impl ActorHandle {
         workspace_id: String,
         version_id: String,
     ) -> Result<Vec<CaptureManifestSeedEntry>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureManifestSeed {
-                workspace_id,
-                version_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            capture_manifest_seed(store, &workspace_id, &version_id).map_err(RuntimeError::from)
+        })
+        .await
     }
 
     /// Capture a secret file on the actor's single writer thread.
@@ -3420,18 +3183,16 @@ impl ActorHandle {
         path: String,
         token: CancellationToken,
     ) -> Result<Option<TextSnapshot>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRead {
-                workspace_id,
-                version_id,
-                path,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .read_text(&workspace_id, &version_id, &path)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn resolve_path_object(
@@ -3440,17 +3201,12 @@ impl ActorHandle {
         version_id: String,
         path: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ResolvePathObject {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            VersionedTextStore::new(store)
+                .object_id_for_path(&workspace_id, &version_id, &path)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7014,13 +6770,6 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
-            Command::BindRoot {
-                token,
-                faults,
-                reply,
-            } => {
-                let _ = reply.send(store.bind_root_token(&token, faults.as_ref()));
-            }
             Command::VersionedTextWrite {
                 input,
                 root_dir,
@@ -7119,12 +6868,6 @@ fn worker_main(
                 });
                 let _ = reply.send(outcome);
             }
-            Command::VersionedTextCompare { input, reply } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .compare_text_file_versions(&input)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::VersionedTextMerge {
                 input,
                 root_dir,
@@ -7143,25 +6886,6 @@ fn worker_main(
                         &token,
                     )
                 });
-                let _ = reply.send(outcome);
-            }
-            Command::CompareVersionFilesPage {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .compare_version_files_page(
-                        &workspace_id,
-                        &source_version_id,
-                        &target_version_id,
-                        after_path.as_deref(),
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CaptureIngest {
@@ -7225,24 +6949,6 @@ fn worker_main(
                 });
                 let _ = reply.send(outcome);
             }
-            Command::CollectionRecordIdMismatch {
-                workspace_id,
-                version_id,
-                paths,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        collection_record_id_mismatch_in_tx(
-                            conn,
-                            &workspace_id,
-                            &version_id,
-                            &paths,
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::ReconcileCollections {
                 workspace_id,
                 version_id,
@@ -7297,38 +7003,6 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
-                let _ = reply.send(outcome);
-            }
-            Command::ListVersions {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_versions(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListSnapshotMetadata {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_snapshot_metadata(
-                        &workspace_id,
-                        &version_id,
-                        after_path.as_deref(),
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListMoments { query, reply } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .list_moments(&query)
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::HistoryPage {
@@ -7391,91 +7065,6 @@ fn worker_main(
                     })
                 })()
                 .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::GetMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_moment(&workspace_id, &moment_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinary {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryBlob {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_blob(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_blob_for_egress(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextBlob {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_blob(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextBlobForEgress {
-                workspace_id,
-                sha256,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_blob_for_egress(&workspace_id, &sha256)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadTextInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_text_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ReadBinaryInband {
-                workspace_id,
-                version_id,
-                path,
-                cap,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .read_binary_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::MaterializeSecretInband {
@@ -7558,34 +7147,6 @@ fn worker_main(
                     )
                     .map_err(RuntimeError::from)
                 };
-                let _ = reply.send(outcome);
-            }
-            Command::ListSecretMoments {
-                workspace_id,
-                version_id,
-                path,
-                before_moment_order,
-                limit,
-                reply,
-            } => {
-                let outcome = list_secret_moments_page_keyless(
-                    &store,
-                    &workspace_id,
-                    version_id.as_deref(),
-                    path.as_deref(),
-                    before_moment_order,
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::GetSecretMoment {
-                workspace_id,
-                moment_id,
-                reply,
-            } => {
-                let outcome = get_secret_moment_keyless(&store, &workspace_id, &moment_id)
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::CompareSecretFiles {
@@ -7685,68 +7246,6 @@ fn worker_main(
                 };
                 let _ = reply.send(outcome);
             }
-            Command::SecretFileLen {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = secret_file_len_keyless(&store, &workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ListSecretFilesPage {
-                workspace_id,
-                version_id,
-                after_path,
-                limit,
-                reply,
-            } => {
-                let outcome = list_secret_files_keyless_page(
-                    &store,
-                    &workspace_id,
-                    &version_id,
-                    after_path.as_deref(),
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ActiveVersionId {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_active_version(&workspace_id)
-                    .map(|version| version.version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ActiveVersion {
-                workspace_id,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .get_active_version(&workspace_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::EnsureMainVersion {
-                workspace_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .ensure_main_version(&workspace_id, "main", now_ms, faults.as_ref())
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
             Command::SetActiveVersion {
                 input,
                 faults,
@@ -7786,29 +7285,6 @@ fn worker_main(
                 };
                 let _ = reply.send(outcome);
             }
-            Command::PreflightCreateNamedVersion {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .preflight_create_named_version(&input)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureManifestSeed {
-                workspace_id,
-                version_id,
-                reply,
-            } => {
-                let outcome = capture_manifest_seed(&store, &workspace_id, &version_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
             Command::CaptureRetire {
                 input,
                 workspace_root,
@@ -7831,33 +7307,6 @@ fn worker_main(
                         &token,
                     )
                 });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRead {
-                workspace_id,
-                version_id,
-                path,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .read_text(&workspace_id, &version_id, &path)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ResolvePathObject {
-                workspace_id,
-                version_id,
-                path,
-                reply,
-            } => {
-                let outcome = VersionedTextStore::new(&mut store)
-                    .object_id_for_path(&workspace_id, &version_id, &path)
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::YdocOpenState {
