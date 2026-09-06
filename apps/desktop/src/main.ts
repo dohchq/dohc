@@ -3226,10 +3226,14 @@ const activity = {
         options,
       ),
     ),
-  reconcileCloud: (engineFor: typeof engineForWorkspace): void => {
+  reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       withWorkspaceActivityState(workspaceId, (lease) =>
-        workspaceActivity.reconcileCloud(lease.state.activity, engineFor, false),
+        workspaceActivity.reconcileCloud(
+          lease.state.activity,
+          engineForWorkspace,
+          false,
+        ),
       );
     }
     notifyRenderer();
@@ -5110,7 +5114,7 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       ),
     ),
   );
-  const server = await startCliServer({
+  return startCliServer({
     stateDir: stateDir(),
     listWorkspaces: () =>
       listWorkspaces()
@@ -5177,14 +5181,6 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       console.debug(`[desktop] CLI server: ${message}`);
     },
   });
-  return {
-    socketPath: server.socketPath,
-    tokenPath: server.tokenPath,
-    ready: server.ready,
-    async close() {
-      await server.close();
-    },
-  };
 }
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
@@ -6590,10 +6586,7 @@ const recoveryChecker = createRecoveryChecker({
   },
 });
 
-function registerIpcHandlers(
-  deps: { now?: () => number; createId?: () => string } = {},
-): void {
-  const now = deps.now ?? (() => Date.now());
+function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.reloadRenderer, async (event, payload) => {
     assertTrustedSender(event);
     const input = ReloadRendererRequestPayload.parse(payload);
@@ -7584,7 +7577,7 @@ function registerIpcHandlers(
         // Attach engines to already-open cloud-enabled workspaces that were
         // opened local-only because no session existed yet.
         reconcileCloud: () => {
-          activity.reconcileCloud(engineForWorkspace);
+          activity.reconcileCloud();
         },
         notifySessionChanging: () =>
           notifyCloudSessionChangedWithKey(incomingKey, "changing"),
@@ -10013,8 +10006,8 @@ function registerIpcHandlers(
         operationId: input.operationId,
         signal: operation.signal,
       }),
-    now,
-    createId: deps.createId ?? randomUUID,
+    now: () => Date.now(),
+    createId: randomUUID,
   });
 
   ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
@@ -13571,7 +13564,7 @@ if (!app.requestSingleInstanceLock()) {
     // Load persisted cloud credentials after the first window exists so local
     // workspaces do not pay credential-store I/O on the visible-launch path.
     void warmCredentialCache().then(() => {
-      activity.reconcileCloud(engineForWorkspace);
+      activity.reconcileCloud();
     });
 
     // Auto-updates: packaged builds use electron-builder's baked app-update.yml
