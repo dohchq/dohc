@@ -19,7 +19,7 @@ import {
   type ShareSelector,
 } from "./shareFilter";
 import {
-  LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET,
+  LINK_FRESHNESS_PAGE_BUDGET,
   MAX_BLOB_BYTES,
   MAX_RAW_ROWS_PER_LINK_PAGE,
   type SyncRelayHandler,
@@ -3846,15 +3846,15 @@ describe("relay capability reads", () => {
     }
   });
 
-  it("reports unknown freshness when the first shared row is beyond the fallback page budget", async () => {
+  it("reports unknown freshness when the first shared row is beyond the freshness page budget", async () => {
     const pageSize = 2;
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: pageSize,
+      linkFreshnessPageSize: pageSize,
     });
     const seeded = await seed(h);
     const rowsPerBudget =
-      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+      LINK_FRESHNESS_PAGE_BUDGET * pageSize;
     await appendMoments(
       h,
       Array.from({ length: rowsPerBudget - 1 }, (_, index) =>
@@ -3879,11 +3879,11 @@ describe("relay capability reads", () => {
     const pageSize = 2;
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: pageSize,
+      linkFreshnessPageSize: pageSize,
     });
     const seeded = await seed(h);
     const rowsPerBudget =
-      LINK_CAPABILITY_READ_FALLBACK_PAGE_BUDGET * pageSize;
+      LINK_FRESHNESS_PAGE_BUDGET * pageSize;
     await appendMoments(
       h,
       Array.from({ length: rowsPerBudget }, (_, index) =>
@@ -3906,7 +3906,7 @@ describe("relay capability reads", () => {
   it("keeps freshness and materialized blobs unchanged when the log fits the page budget", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkCapabilityReadFallbackPageSize: 2,
+      linkFreshnessPageSize: 2,
     });
     const seeded = await seed(h);
 

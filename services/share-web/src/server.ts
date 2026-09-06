@@ -796,7 +796,7 @@ export function createShareWebHandler({
       session: ShareWebSession;
     },
   ): Promise<
-    | { ok: true; setCookie: string | null }
+    | { ok: true; headers: Record<string, string> }
     | { ok: false; status: 404 | 503 }
   > {
     const checkedAtMs = nowMs();
@@ -804,7 +804,7 @@ export function createShareWebHandler({
       authenticated.session.expiresAtMs - checkedAtMs >
       LINK_REFRESH_WINDOW_MS
     ) {
-      return { ok: true, setCookie: null };
+      return { ok: true, headers: {} };
     }
 
     const key = sessionKey(authenticated.discriminator, authenticated.token);
@@ -875,16 +875,18 @@ export function createShareWebHandler({
       if (authenticated.session.expiresAtMs <= nowMs()) {
         return { ok: false, status: 503 };
       }
-      return { ok: true, setCookie: null };
+      return { ok: true, headers: {} };
     }
     return {
       ok: true,
-      setCookie: sessionCookie(
-        authenticated.discriminator,
-        authenticated.token,
-        attempt.session.expiresAtMs,
-        nowMs(),
-      ),
+      headers: {
+        "set-cookie": sessionCookie(
+          authenticated.discriminator,
+          authenticated.token,
+          attempt.session.expiresAtMs,
+          nowMs(),
+        ),
+      },
     };
   }
 
@@ -963,9 +965,6 @@ export function createShareWebHandler({
       if (!authenticated) return refused();
       const refreshed = await refreshSession(authenticated);
       if (!refreshed.ok) return refused(refreshed.status);
-      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
-        ? { "set-cookie": refreshed.setCookie }
-        : {};
       const capabilityToken = authenticated.session.capabilityToken;
       const boundedRelay = boundedRelayRequest(
         request.signal,
@@ -985,7 +984,7 @@ export function createShareWebHandler({
       try {
         const relayResponse = await fetchRelay(boundedRelay.request);
         if (relayResponse.status === 429) {
-          return refused(429, refreshedCookieHeaders);
+          return refused(429, refreshed.headers);
         }
         if (relayResponse.status !== 200) {
           if (relayResponse.status === 401) {
@@ -997,11 +996,11 @@ export function createShareWebHandler({
           }
           return refused(
             relayResponse.status === 401 || relayResponse.status === 404 ? 404 : 503,
-            refreshedCookieHeaders,
+            refreshed.headers,
           );
         }
         const handoff = parsedRelayHandoff(await relayResponse.json(), nowMs());
-        if (!handoff) return refused(503, refreshedCookieHeaders);
+        if (!handoff) return refused(503, refreshed.headers);
         return jsonResponse(
           {
             ok: true,
@@ -1009,10 +1008,10 @@ export function createShareWebHandler({
             relayUrl: publicRelayUrl,
             expiresAtMs: handoff.expiresAtMs,
           },
-          { headers: refreshedCookieHeaders },
+          { headers: refreshed.headers },
         );
       } catch {
-        return refused(503, refreshedCookieHeaders);
+        return refused(503, refreshed.headers);
       } finally {
         boundedRelay.dispose();
       }
@@ -1034,25 +1033,15 @@ export function createShareWebHandler({
 
       let relayPath: string;
       let relayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS;
-      let appendBody: string | null = null;
-      let profileSecret: string | null = null;
       if (isActivity) {
         const parsedPath = discussionActivityRelayPath(request);
         if (!parsedPath) return refused();
         relayPath = parsedPath.path;
         relayTimeoutMs += parsedPath.holdMs;
-        profileSecret = parseCookies(request.headers.get("cookie")).get(
-          profileCookieName(authenticated.discriminator),
-        ) ?? null;
-        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       } else if (request.method === "GET") {
         const parsedPath = discussionRelayPath(request);
         if (!parsedPath) return refused();
         relayPath = parsedPath;
-        profileSecret = parseCookies(request.headers.get("cookie")).get(
-          profileCookieName(authenticated.discriminator),
-        ) ?? null;
-        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       } else {
         if (
           !relayExchangeKey ||
@@ -1060,20 +1049,21 @@ export function createShareWebHandler({
         ) {
           return refused();
         }
-        profileSecret = parseCookies(request.headers.get("cookie")).get(
-          profileCookieName(authenticated.discriminator),
-        ) ?? null;
-        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
+        relayPath = "/sync/link/discussion";
+      }
+
+      const profileSecret = parseCookies(request.headers.get("cookie")).get(
+        profileCookieName(authenticated.discriminator),
+      ) ?? null;
+      if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
+      let appendBody: string | null = null;
+      if (request.method === "POST") {
         appendBody = await discussionInput(request);
         if (appendBody === null) return refused();
-        relayPath = "/sync/link/discussion";
       }
 
       const refreshed = await refreshSession(authenticated);
       if (!refreshed.ok) return refused(refreshed.status);
-      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
-        ? { "set-cookie": refreshed.setCookie }
-        : {};
       const capabilityToken = authenticated.session.capabilityToken;
       const releaseActivityHold = isActivity
         ? activityHoldLimiter.acquire(
@@ -1082,7 +1072,7 @@ export function createShareWebHandler({
           )
         : null;
       if (isActivity && !releaseActivityHold) {
-        return refused(429, refreshedCookieHeaders);
+        return refused(429, refreshed.headers);
       }
       const boundedRelay = boundedRelayRequest(
         request.signal,
@@ -1093,14 +1083,14 @@ export function createShareWebHandler({
           headers: {
             authorization: `LinkCapability ${capabilityToken}`,
             ...(isActivity
-              ? { "x-dohc-link-profile-secret": profileSecret! }
+              ? { "x-dohc-link-profile-secret": profileSecret }
               : request.method === "POST"
               ? {
                   "content-type": "application/json",
-                  "x-dohc-link-profile-secret": profileSecret!,
+                  "x-dohc-link-profile-secret": profileSecret,
                   "x-dohc-relay-exchange-key": relayExchangeKey!,
                 }
-              : { "x-dohc-link-profile-secret": profileSecret! }),
+              : { "x-dohc-link-profile-secret": profileSecret }),
           },
           ...(appendBody === null ? {} : { body: appendBody }),
         },
@@ -1125,7 +1115,7 @@ export function createShareWebHandler({
           return response(relayResponse.body, {
             headers: {
               "content-type": "application/json",
-              ...refreshedCookieHeaders,
+              ...refreshed.headers,
             },
           });
         }
@@ -1140,10 +1130,10 @@ export function createShareWebHandler({
                 {
                   status:
                     discussionRefusal.state === "limit-reached" ? 413 : 403,
-                  headers: refreshedCookieHeaders,
+                  headers: refreshed.headers,
                 },
               )
-            : refused(404, refreshedCookieHeaders);
+            : refused(404, refreshed.headers);
         }
         if (relayResponse.status === 401) {
           sessions.deleteIfCapability(
@@ -1151,17 +1141,17 @@ export function createShareWebHandler({
             authenticated.token,
             capabilityToken,
           );
-          return refused(404, refreshedCookieHeaders);
+          return refused(404, refreshed.headers);
         }
         if (relayResponse.status === 429) {
-          return refused(429, refreshedCookieHeaders);
+          return refused(429, refreshed.headers);
         }
         return refused(
           relayResponse.status >= 500 ? 503 : 404,
-          refreshedCookieHeaders,
+          refreshed.headers,
         );
       } catch {
-        return refused(503, refreshedCookieHeaders);
+        return refused(503, refreshed.headers);
       } finally {
         boundedRelay.dispose();
         releaseActivityHold?.();
@@ -1186,9 +1176,6 @@ export function createShareWebHandler({
 
       const refreshed = await refreshSession(authenticated);
       if (!refreshed.ok) return refused(refreshed.status);
-      const refreshedCookieHeaders: Record<string, string> = refreshed.setCookie
-        ? { "set-cookie": refreshed.setCookie }
-        : {};
 
       const isBlob = pathname.startsWith("/api/view/blob/");
       const releaseBlobProxy = isBlob
@@ -1197,7 +1184,7 @@ export function createShareWebHandler({
             authenticated.discriminator,
           )
         : null;
-      if (isBlob && !releaseBlobProxy) return refused(429, refreshedCookieHeaders);
+      if (isBlob && !releaseBlobProxy) return refused(429, refreshed.headers);
 
       try {
         const readCapabilityToken = authenticated.session.capabilityToken;
@@ -1212,7 +1199,7 @@ export function createShareWebHandler({
         if (relayResponse.status !== 200) {
           releaseBlobProxy?.();
           if (relayResponse.status === 429) {
-            return refused(429, refreshedCookieHeaders);
+            return refused(429, refreshed.headers);
           }
           if (relayResponse.status === 401) {
             sessions.deleteIfCapability(
@@ -1224,25 +1211,25 @@ export function createShareWebHandler({
           }
           return refused(
             relayResponse.status >= 500 ? 503 : 404,
-            refreshedCookieHeaders,
+            refreshed.headers,
           );
         }
         if (isBlob && releaseBlobProxy) {
           return await streamingBlobResponse(
             relayResponse,
             releaseBlobProxy,
-            refreshedCookieHeaders,
+            refreshed.headers,
           );
         }
         return response(relayResponse.body, {
           headers: {
             "content-type": "application/json",
-            ...refreshedCookieHeaders,
+            ...refreshed.headers,
           },
         });
       } catch {
         releaseBlobProxy?.();
-        return refused(503, refreshedCookieHeaders);
+        return refused(503, refreshed.headers);
       }
     }
 

@@ -2060,8 +2060,7 @@ export function openSyncRelayStorage(
     db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
     initializeSyncRelaySchema(db);
-    return new SqliteSyncRelayStorage(
-      db,
+    return new SqliteSyncRelayStorage(db, {
       workspaceQuotaBytes,
       blobGraceMs,
       linkSessionsPerGrantLimit,
@@ -2070,7 +2069,7 @@ export function openSyncRelayStorage(
       discussionLifetimeMessageLimit,
       discussionNonOwnerShareRowLimit,
       newDiscussionId,
-    );
+    });
   } catch (error) {
     try {
       db.close();
@@ -2080,17 +2079,14 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
+  private readonly newDiscussionId: () => string;
+
   constructor(
     private readonly db: SqliteDb,
-    private readonly workspaceQuotaBytes: number,
-    private readonly blobGraceMs: number,
-    private readonly linkSessionsPerGrantLimit: number,
-    private readonly linkDiscussionPrincipalLimit: number,
-    private readonly discussionMessageRateLimit: number,
-    private readonly discussionLifetimeMessageLimit: number,
-    private readonly discussionNonOwnerShareRowLimit: number,
-    private readonly newDiscussionId: () => string,
-  ) {}
+    private readonly options: Required<OpenSyncRelayStorageOptions>,
+  ) {
+    this.newDiscussionId = options.newDiscussionId;
+  }
 
   close(): void {
     this.db.close();
@@ -2523,7 +2519,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     // never be accepted, so the granter's only honest answer would be
     // "decline". A settled proposal stops protecting its blobs: an accepted
     // one has them in the log, and a declined one never will.
-    const cutoff = options.nowMs - this.blobGraceMs;
+    const cutoff = options.nowMs - this.options.blobGraceMs;
     // Phase 1 (read only, no write lock): candidate shas that are unreferenced
     // and aged past the grace window.
     const candidates = this.db
@@ -2950,9 +2946,9 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
     if (addedBytes <= 0) return;
     const currentUsage = this.workspaceUsageBytes(workspaceId);
-    if (currentUsage + addedBytes > this.workspaceQuotaBytes) {
+    if (currentUsage + addedBytes > this.options.workspaceQuotaBytes) {
       throw new SyncRelayQuotaExceededError(
-        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.workspaceQuotaBytes}`,
+        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.options.workspaceQuotaBytes}`,
       );
     }
   }
@@ -3361,7 +3357,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .get(session.grantId)?.count ?? 0,
       );
       const sessionsToDelete =
-        liveSessionCount - this.linkSessionsPerGrantLimit + 1;
+        liveSessionCount - this.options.linkSessionsPerGrantLimit + 1;
       if (sessionsToDelete > 0) {
         this.db
           .prepare(
@@ -3637,7 +3633,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(grantId, Number(authority.grant_generation))?.count ?? 0,
         );
-        if (principalCount >= this.linkDiscussionPrincipalLimit) {
+        if (principalCount >= this.options.linkDiscussionPrincipalLimit) {
           return { ok: false, reason: "principal-limit" };
         }
       }
@@ -3657,7 +3653,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
             )?.count ?? 0,
         );
-        if (rateCount >= this.discussionMessageRateLimit) {
+        if (rateCount >= this.options.discussionMessageRateLimit) {
           return { ok: false, reason: "rate-limit" };
         }
         const lifetimeCount = Number(
@@ -3669,7 +3665,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(principal.principalId)?.count ?? 0,
         );
-        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
+        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
           return { ok: false, reason: "lifetime-limit" };
         }
       }
@@ -3682,7 +3678,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           )
           .get(shareId)?.count ?? 0,
       );
-      if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
+      if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
         return { ok: false, reason: "share-limit" };
       }
 
@@ -3714,7 +3710,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       });
       if (
         this.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
-        this.workspaceQuotaBytes
+        this.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
@@ -3900,7 +3896,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
               createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
             )?.count ?? 0,
         );
-        if (rateCount >= this.discussionMessageRateLimit) {
+        if (rateCount >= this.options.discussionMessageRateLimit) {
           return { ok: false, reason: "rate-limit" };
         }
         const lifetimeCount = Number(
@@ -3914,7 +3910,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(input.shareId, input.authorUserId)?.count ?? 0,
         );
-        if (lifetimeCount >= this.discussionLifetimeMessageLimit) {
+        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
           return { ok: false, reason: "lifetime-limit" };
         }
         const shareRowCount = Number(
@@ -3926,7 +3922,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
             )
             .get(input.shareId)?.count ?? 0,
         );
-        if (shareRowCount >= this.discussionNonOwnerShareRowLimit) {
+        if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
           return { ok: false, reason: "share-limit" };
         }
       }
@@ -3949,7 +3945,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       });
       if (
         this.workspaceUsageBytes(String(share.workspace_id)) + messageStorageBytes >
-        this.workspaceQuotaBytes
+        this.options.workspaceQuotaBytes
       ) {
         return { ok: false, reason: "workspace-quota" };
       }
