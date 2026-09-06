@@ -484,7 +484,7 @@ importers:
         version: 7.0.2
       vitest:
         specifier: ^4.1.10
-        version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11))
+        version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0))
 
   packages/mcp:
     dependencies:
@@ -765,7 +765,7 @@ importers:
         version: 0.18.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
       better-auth:
         specifier: ^1.6.26
-        version: 1.6.26(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.4)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)))
+        version: 1.6.26(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.4)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)(yaml@2.9.0)))
       dompurify:
         specifier: 3.4.13
         version: 3.4.13
