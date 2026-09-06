@@ -1,6 +1,10 @@
+import { TokenBucketLimiter } from "@dohc/service-http";
 import { randomUUID } from "node:crypto";
 import { jsonResponse, sha256Hex } from "@dohc/service-http";
-import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
+import {
+  LINK_SECRET_PATTERN,
+  SHA256_HEX_PATTERN,
+} from "@dohc/security-contract/wire-patterns";
 import { asRecord } from "@dohc/workspace-core";
 import {
   isChatShareAccessValue,
@@ -18,8 +22,12 @@ import {
   hashLinkProfileSecret,
   hashRelayExchangeKey,
   LinkEgressRateLimiter,
-  LinkExchangeRateLimiter,
-  LinkReadRateLimiter,
+  LINK_EXCHANGE_BUCKET_CAPACITY,
+  LINK_EXCHANGE_REFILL_PER_SECOND,
+  LINK_EXCHANGE_MAX_IPS,
+  LINK_READ_BUCKET_CAPACITY,
+  LINK_READ_REFILL_PER_SECOND,
+  LINK_READ_MAX_CAPABILITIES,
   LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
   LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
   LINK_GRANT_READ_BUCKET_CAPACITY,
@@ -44,52 +52,8 @@ import {
   presenceScopeKey,
   type PresenceSnapshot,
 } from "./presence";
-import {
-  MAIN_VERSION_ID,
-  filterOpForShare,
-  filterOpForShareAppend,
-  filterProposedChangeForShare,
-  hasValidShareMomentShape,
-  isChatChannelSelector,
-  parseShareOpPayloadWithReferencedPaths,
-  parseStoredAnyShareSelectorJson,
-  presenceTopicAllowedForShare,
-  targetVersionId,
-  validateChatChannelShareSelector,
-  validateChatShareAccess,
-  validateFileShareAccess,
-  validateShareSelector,
-  type AnyShareSelector,
-  type ChatShareChannelKind,
-  type ChatShareThreadResolver,
-  type ShareSelector,
-  type StoredAnyShareSelector,
-  type ThreadFileBinding,
-} from "./shareFilter";
-import {
-  SHARED_BLOB_CANDIDATE_LIMIT,
-  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
-  LINK_DISCUSSION_PAGE_LIMIT,
-  normalizeDiscussionDisplayName,
-  SyncRelayBlobMissingError,
-  SyncRelayConflictError,
-  SyncRelayQuotaExceededError,
-  type EnforceWorkspaceIdentityResult,
-  type ObjectMomentRow,
-  type ShareProposalOpRow,
-  type SyncRelayLogInput,
-  type SyncRelayLogRow,
-  type SyncRelayIndependentGrantInventoryCursor,
-  type SyncRelayLinkInventoryCursor,
-  type SyncRelayLinkInventoryRow,
-  type SyncRelayShareDiscussionCursor,
-  type SyncRelayShareDiscussionMessageRow,
-  type SyncRelayShareDiscussionActivityPage,
-  type SyncRelayShareDiscussionPage,
-  type SyncRelayShareGrantRow,
-  type SyncRelayShareWithGrantRow,
-  type SyncRelayStorage,
-} from "./storage";
+import { filterOpForShare, filterOpForShareAppend, filterProposedChangeForShare, hasValidShareMomentShape, isChatChannelSelector, parseShareOpPayloadWithReferencedPaths, parseStoredAnyShareSelectorJson, presenceTopicAllowedForShare, targetVersionId, validateChatChannelShareSelector, validateChatShareAccess, validateFileShareAccess, validateShareSelector, type AnyShareSelector, type ChatShareChannelKind, type ChatShareThreadResolver, type ShareSelector, type ThreadFileBinding } from "./shareFilter";
+import { SHARED_BLOB_CANDIDATE_LIMIT, LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT, LINK_DISCUSSION_PAGE_LIMIT, normalizeDiscussionDisplayName, SyncRelayBlobMissingError, type EnforceWorkspaceIdentityResult, type ObjectMomentRow, type ShareProposalOpRow, type SyncRelayLogInput, type SyncRelayLogRow, type SyncRelayIndependentGrantInventoryCursor, type SyncRelayLinkInventoryCursor, type SyncRelayLinkInventoryRow, type SyncRelayShareDiscussionCursor, type SyncRelayShareDiscussionMessageRow, type SyncRelayShareDiscussionActivityPage, type SyncRelayShareDiscussionPage, type SyncRelayShareGrantRow, type SyncRelayShareWithGrantRow, type SyncRelayStorage } from "./storage";
 import {
   authorizeShareAction,
   authorizeLinkShareAction,
@@ -99,15 +63,7 @@ import {
   type ShareAction,
 } from "./shareAuthorization";
 import { destinationPath, proposalMomentPayload } from "./shareProposals";
-import {
-  badRequest,
-  errorResponse,
-  notFound,
-  RELAY_ERRORS,
-  relayError,
-  RelayError,
-  type RelayErrorCode,
-} from "./errors";
+import { badRequest, errorResponse, notFound, RELAY_ERRORS, relayError, RelayError } from "./errors";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
 export { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
@@ -168,12 +124,12 @@ export interface CreateSyncRelayHandlerOptions {
   linkKey?: string | Uint8Array;
   shareWebOrigin?: string;
   relayExchangeKey?: string;
-  linkExchangeRateLimiter?: LinkExchangeRateLimiter;
-  linkRedeemRateLimiter?: LinkReadRateLimiter;
-  linkReadRateLimiter?: LinkReadRateLimiter;
-  linkGrantReadRateLimiter?: LinkReadRateLimiter;
-  linkLogReadRateLimiter?: LinkReadRateLimiter;
-  linkGrantLogReadRateLimiter?: LinkReadRateLimiter;
+  linkExchangeRateLimiter?: TokenBucketLimiter;
+  linkRedeemRateLimiter?: TokenBucketLimiter;
+  linkReadRateLimiter?: TokenBucketLimiter;
+  linkGrantReadRateLimiter?: TokenBucketLimiter;
+  linkLogReadRateLimiter?: TokenBucketLimiter;
+  linkGrantLogReadRateLimiter?: TokenBucketLimiter;
   linkGrantEgressRateLimiter?: LinkEgressRateLimiter;
   linkCapabilityReadFallbackPageSize?: number;
   linkCurrentFileLimit?: number;
@@ -416,20 +372,23 @@ export function createSyncRelayHandler({
   linkKey,
   shareWebOrigin,
   relayExchangeKey,
-  linkExchangeRateLimiter = new LinkExchangeRateLimiter(),
-  linkRedeemRateLimiter = new LinkReadRateLimiter(),
-  linkReadRateLimiter = new LinkReadRateLimiter(),
-  linkGrantReadRateLimiter = new LinkReadRateLimiter(
+  linkExchangeRateLimiter = new TokenBucketLimiter(LINK_EXCHANGE_BUCKET_CAPACITY, LINK_EXCHANGE_REFILL_PER_SECOND, LINK_EXCHANGE_MAX_IPS),
+  linkRedeemRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
+  linkReadRateLimiter = new TokenBucketLimiter(LINK_READ_BUCKET_CAPACITY, LINK_READ_REFILL_PER_SECOND, LINK_READ_MAX_CAPABILITIES),
+  linkGrantReadRateLimiter = new TokenBucketLimiter(
     LINK_GRANT_READ_BUCKET_CAPACITY,
     LINK_GRANT_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
-  linkLogReadRateLimiter = new LinkReadRateLimiter(
+  linkLogReadRateLimiter = new TokenBucketLimiter(
     LINK_LOG_READ_BUCKET_CAPACITY,
     LINK_LOG_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
-  linkGrantLogReadRateLimiter = new LinkReadRateLimiter(
+  linkGrantLogReadRateLimiter = new TokenBucketLimiter(
     LINK_GRANT_LOG_READ_BUCKET_CAPACITY,
     LINK_GRANT_LOG_READ_REFILL_PER_SECOND,
+    LINK_READ_MAX_CAPABILITIES,
   ),
   linkGrantEgressRateLimiter = new LinkEgressRateLimiter(),
   linkCapabilityReadFallbackPageSize = MAX_LOG_PAGE_SIZE,
@@ -1423,8 +1382,8 @@ export function createSyncRelayHandler({
 
   const requireLinkRead = (
     request: Request,
-    capabilityRateLimiter: LinkReadRateLimiter,
-    grantRateLimiter: LinkReadRateLimiter,
+    capabilityRateLimiter: TokenBucketLimiter,
+    grantRateLimiter: TokenBucketLimiter,
   ) => {
     if (!linkKey) throw invalidLinkCapability();
     const match = /^LinkCapability ([A-Za-z0-9_-]{43})$/u.exec(

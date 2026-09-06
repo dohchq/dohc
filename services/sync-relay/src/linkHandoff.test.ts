@@ -1,10 +1,6 @@
+import { TokenBucketLimiter } from "@dohc/service-http";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-  hashLinkHandoffCode as hashHandoffCode,
-  LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
-  LinkReadRateLimiter,
-  type ValidatedLinkCapability,
-} from "./linkSecurity";
+import { hashLinkHandoffCode as hashHandoffCode, LINK_HANDOFF_CODES_PER_GRANT_LIMIT } from "./linkSecurity";
 import type { SyncRelayHandler } from "./server";
 import type { SyncRelayStorage } from "./storage";
 import {
@@ -256,7 +252,7 @@ describe("single-use authenticated link handoff", () => {
     let grantId = 0;
     const h = handler(state.storage, {
       storage: counted.storage,
-      linkRedeemRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkRedeemRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
       newGrantId: () => `admitted-dependent-grant-${grantId++}`,
     });
 
@@ -354,8 +350,8 @@ describe("single-use authenticated link handoff", () => {
   });
 
   it("requires a configured exchange key, needs no public origin, and charges both read budgets", async () => {
-    const capabilityLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
-    const grantLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const capabilityLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const grantLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const state = await setup({
       linkReadRateLimiter: capabilityLimiter,
       linkGrantReadRateLimiter: grantLimiter,

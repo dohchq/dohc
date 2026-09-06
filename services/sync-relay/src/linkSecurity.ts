@@ -5,7 +5,6 @@ import {
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
-import { TokenBucketLimiter } from "@dohc/service-http";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import type { ShareSelector } from "./shareFilter";
 import type {
@@ -99,28 +98,6 @@ type Bucket = {
   tokens: number;
   updatedAtMs: number;
 };
-
-// One bucket per client address for link exchanges and refreshes.
-export class LinkExchangeRateLimiter extends TokenBucketLimiter {
-  constructor(
-    capacity = LINK_EXCHANGE_BUCKET_CAPACITY,
-    refillPerSecond = LINK_EXCHANGE_REFILL_PER_SECOND,
-    maxIps = LINK_EXCHANGE_MAX_IPS,
-  ) {
-    super(capacity, refillPerSecond, maxIps);
-  }
-}
-
-// One bucket per capability or grant for accountless reads.
-export class LinkReadRateLimiter extends TokenBucketLimiter {
-  constructor(
-    capacity = LINK_READ_BUCKET_CAPACITY,
-    refillPerSecond = LINK_READ_REFILL_PER_SECOND,
-    maxCapabilities = LINK_READ_MAX_CAPABILITIES,
-  ) {
-    super(capacity, refillPerSecond, maxCapabilities);
-  }
-}
 
 export class LinkEgressRateLimiter {
   private readonly buckets = new Map<string, Bucket>();

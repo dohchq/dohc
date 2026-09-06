@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import { jsonResponse, requestPath, settle, setControlValue } from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -18,7 +19,6 @@ const SECOND_SESSION = "mnopqrstuvwx";
 const FIRST_HANDOFF_CODE = "A".repeat(43);
 const SECOND_HANDOFF_CODE = "B".repeat(43);
 const PUBLIC_RELAY_URL = "https://relay.example.test";
-const SETTLE_TURN_LIMIT = 200;
 
 const DEFAULT_META: ViewMeta = {
   access: "view",
@@ -30,50 +30,6 @@ const DEFAULT_META: ViewMeta = {
   lastSettledAtMs: null,
   lastSettledKnown: true,
 };
-
-function jsonResponse(value: unknown, status = 200): Response {
-  let responseValue = value;
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    if (
-      "composerState" in value &&
-      "latestRevision" in value &&
-      !("profileName" in value)
-    ) {
-      responseValue = { ...value, profileName: null };
-    } else if (
-      "ok" in value &&
-      value.ok === false &&
-      "state" in value &&
-      (value.state === "blocked" || value.state === "paused") &&
-      !("activityRevision" in value)
-    ) {
-      responseValue = { ...value, activityRevision: 7 };
-    }
-  }
-  return new Response(JSON.stringify(responseValue), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function requestPath(input: RequestInfo | URL): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return `${input.pathname}${input.search}`;
-  const url = new URL(input.url);
-  return `${url.pathname}${url.search}`;
-}
-
-async function settle(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
-    await act(async () => {
-      await Promise.resolve();
-    });
-    if (condition()) return;
-  }
-  throw new Error(
-    `Condition did not settle within ${String(SETTLE_TURN_LIMIT)} act turns`,
-  );
-}
 
 function trackImageSourceRequests(image: HTMLImageElement): {
   sources: string[];
@@ -229,21 +185,6 @@ describe("App", () => {
     expect(button).toBeDefined();
     act(() => {
       button?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    });
-  }
-
-  function setControlValue(
-    control: HTMLInputElement | HTMLTextAreaElement,
-    value: string,
-  ): void {
-    const prototype = control instanceof HTMLTextAreaElement
-      ? HTMLTextAreaElement.prototype
-      : HTMLInputElement.prototype;
-    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-    if (!setter) throw new Error("control value setter is missing");
-    act(() => {
-      setter.call(control, value);
-      control.dispatchEvent(new Event("input", { bubbles: true }));
     });
   }
 
@@ -3486,6 +3427,7 @@ describe("App", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "view",
           latestRevision: 7,
@@ -3561,6 +3503,7 @@ describe("App", () => {
       }
       if (path === "/api/view/discussion/activity?since=7&hold=0&limit=100") {
         return jsonResponse({
+          profileName: null,
           ok: true,
           access: "comment",
           latestRevision: 7,

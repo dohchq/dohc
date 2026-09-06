@@ -9,8 +9,13 @@ import {
   type SyncRelayHandler,
 } from "./server";
 import { stableJsonStringify } from "./canonicalJson";
-import { openSyncRelayStorage, referencedBlobShas, type SyncRelayStorage } from "./storage";
 import {
+  openSyncRelayStorage,
+  referencedBlobShas,
+  type SyncRelayStorage,
+} from "./storage";
+import {
+  keyEnvelopeHistory,
   closeTestStorage,
   closeTestStorages,
   inspect,
@@ -894,7 +899,7 @@ describe("sync relay handler", () => {
     // A byte-identical re-PUT is an idempotent retry, not a replacement.
     const retry = await h(putKeys(first));
     expect(retry.status).toBe(200);
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([]);
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([]);
 
     // Stale CAS: If-Match naming anything but the current envelope is a 409.
     const stale = await h(putKeys(second, sha256(third)));
@@ -915,7 +920,7 @@ describe("sync relay handler", () => {
 
     // Lockout stays recoverable server-side: the replaced envelope is
     // retained byte-for-byte with an audit trail of when and by what.
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual([
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual([
       {
         envelopeJson: first,
         sha256: sha256(first),
@@ -1078,7 +1083,7 @@ describe("sync relay handler", () => {
     expect((await h(putKeys(firstKey))).status).toBe(200);
     expect((await h(putKeys(secondKey, sha256(firstKey)))).status).toBe(200);
     const logBefore = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
-    const historyBefore = storage.getKeyEnvelopeHistory("workspace-a");
+    const historyBefore = keyEnvelopeHistory(storagePath(storage), "workspace-a");
 
     const gc = await json(
       await h(request("a", "/sync/workspace-a/maintenance/gc", { method: "POST" })),
@@ -1093,7 +1098,7 @@ describe("sync relay handler", () => {
 
     const logAfter = await json(await h(request("a", "/sync/workspace-a/log?since=0", { method: "GET" })));
     expect(logAfter).toEqual(logBefore);
-    expect(storage.getKeyEnvelopeHistory("workspace-a")).toEqual(historyBefore);
+    expect(keyEnvelopeHistory(storagePath(storage), "workspace-a")).toEqual(historyBefore);
   });
 
   it("allows only the workspace owner to run GC", async () => {

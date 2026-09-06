@@ -19,6 +19,8 @@ import {
   type SyncRelayStorage,
 } from "./storage";
 import {
+  seedDependentGrant,
+  linkWritesPausedAtMs,
   closeTestStorage,
   closeTestStorages,
   countRows,
@@ -2511,7 +2513,7 @@ describe("durable link discussion storage", () => {
     });
     const seeded = seedShare(storage, { suffix: "named-debt" });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: seeded.shareId,
         parentGrantId: seeded.grantId,
         grantId: "named-debt-dependent",
@@ -2562,7 +2564,7 @@ describe("durable link discussion storage", () => {
       }),
     ).toMatchObject({ ok: true });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: seeded.shareId,
         parentGrantId: seeded.grantId,
         grantId: "named-debt-regrant",
@@ -3095,7 +3097,7 @@ describe("durable link discussion storage", () => {
     expect(reopened.findLinkSessionByCapabilityHash(seeded.capabilityHash)).toMatchObject({
       principalId: kept.principal.principalId,
     });
-    expect(reopened.getShareLinkWritesPausedAtMs(seeded.shareId)).toBe(2_300);
+    expect(linkWritesPausedAtMs(storagePath(reopened), seeded.shareId)).toBe(2_300);
     expect(reopened.listShareDiscussionMessages({ shareId: seeded.shareId, limit: 50 })).toMatchObject({
       linkCommentsPaused: true,
       messages: [

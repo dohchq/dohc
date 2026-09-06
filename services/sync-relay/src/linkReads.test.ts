@@ -1,3 +1,4 @@
+import { TokenBucketLimiter } from "@dohc/service-http";
 import {
   accumulatorFromCurrentFiles,
   filesFromAccumulator,
@@ -9,8 +10,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   hashLinkBearer,
   LinkEgressRateLimiter,
-  LinkExchangeRateLimiter,
-  LinkReadRateLimiter,
   LINK_GRANT_EGRESS_BUCKET_CAPACITY_BYTES,
   LINK_SESSION_TTL_MS,
 } from "./linkSecurity";
@@ -73,7 +72,7 @@ function handler(storage: SyncRelayStorage, options: HandlerOverrides = {}): Syn
   return testHandler(storage, { resolveUserIdByEmail: undefined, lookupUserEmail: undefined, ...options });
 }
 
-class KeyIgnoringLinkReadRateLimiter extends LinkReadRateLimiter {
+class KeyIgnoringLinkReadRateLimiter extends TokenBucketLimiter {
   override allow(_key: string, nowMs: number): boolean {
     return super.allow("shared-test-bucket", nowMs);
   }
@@ -4111,7 +4110,7 @@ describe("relay capability reads", () => {
 
   it("rate-limits only after capability authentication", async () => {
     const storage = await newStorage();
-    const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const limiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     const seeded = await seed(h);
     expect((await h(linkRequest(UNKNOWN_CAPABILITY, "/sync/link/share"))).status).toBe(401);
@@ -4124,8 +4123,8 @@ describe("relay capability reads", () => {
   it("shares a grant read budget across capabilities minted by re-exchange", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const seeded = await seed(h);
     expect((await h(linkRequest(seeded.capability, "/sync/link/share"))).status).toBe(200);
@@ -4149,8 +4148,8 @@ describe("relay capability reads", () => {
   it("keeps grant read budgets independent for different grants", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const first = await seed(h);
     const second = await createLink(h, { paths: ["docs"], access: "view" });
@@ -4163,10 +4162,10 @@ describe("relay capability reads", () => {
   it("uses a separate read bucket for link log pages", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
-      linkGrantLogReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
+      linkGrantLogReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     const seeded = await seed(h);
 
@@ -4271,11 +4270,11 @@ describe("relay capability reads", () => {
   });
 
   it("keeps exhausted public link controls off the owner sync path", async () => {
-    const exchangeLimiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
-    const readLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
-    const grantReadLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const exchangeLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const readLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
+    const grantReadLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const logLimiter = new KeyIgnoringLinkReadRateLimiter(1, 0.000_001, 10);
-    const grantLogLimiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const grantLogLimiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const egressLimiter = new LinkEgressRateLimiter(9, 0.000_001, 10);
     const limiterCalls = [
       vi.spyOn(exchangeLimiter, "allow"),

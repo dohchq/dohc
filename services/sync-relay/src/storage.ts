@@ -83,13 +83,6 @@ interface KeyEnvelopeRow {
   updatedAtMs: number;
 }
 
-export interface KeyEnvelopeHistoryRow {
-  envelopeJson: string;
-  sha256: string;
-  replacedAtMs: number;
-  replacedBySha256: string;
-}
-
 export interface SyncRelayShareRow {
   shareId: string;
   workspaceId: string;
@@ -465,7 +458,7 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  getKeyEnvelopeHistory(workspaceId: string): KeyEnvelopeHistoryRow[];
+
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -551,13 +544,7 @@ export interface SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult;
-  convertLinkGrant(input: {
-    shareId: string;
-    parentGrantId: string;
-    grantId: string;
-    principalUserId: string;
-    createdAtMs: number;
-  }): ShareGrantTransitionResult;
+
   promoteShareGrant(input: {
     shareId: string;
     grantId: string;
@@ -627,7 +614,7 @@ export interface SyncRelayStorage {
     actorUserId: string;
     pausedAtMs: number | null;
   }): boolean;
-  getShareLinkWritesPausedAtMs(shareId: string): number | null;
+
   deleteShareDiscussionMessage(input: {
     shareId: string;
     workspaceId: string;
@@ -693,14 +680,6 @@ export interface SyncRelayStorage {
     versionId: string;
     sha256: string;
   }): SyncRelayLogRow[];
-  // The latest moment for this file identity within the one version a share
-  // exposes. Share filters run only after this lookup: the decisive row may
-  // move the file outside a selector and therefore be invisible to it.
-  latestLogRowForObjectInVersion(input: {
-    workspaceId: string;
-    objectId: string;
-    versionId: string;
-  }): SyncRelayLogRow | null;
   // MU-C4 shared channels: the channelWireId bound by the earliest
   // chat.thread.create op for this threadId in the workspace's log (relay
   // order). undefined means no create exists; null means the earliest create
@@ -2761,23 +2740,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     };
   }
 
-  getKeyEnvelopeHistory(workspaceId: string): KeyEnvelopeHistoryRow[] {
-    return this.db
-      .prepare(
-        `SELECT envelope_json, envelope_sha256, replaced_at_ms, replaced_by_sha256
-         FROM sync_relay_key_envelope_history
-         WHERE workspace_id = ?
-         ORDER BY history_seq`,
-      )
-      .all(workspaceId)
-      .map((row) => ({
-        envelopeJson: String(row.envelope_json),
-        sha256: String(row.envelope_sha256),
-        replacedAtMs: Number(row.replaced_at_ms),
-        replacedBySha256: String(row.replaced_by_sha256),
-      }));
-  }
-
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -3321,43 +3283,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
           .run(revokedAtMs, grant.grantId);
       }
       return { ok: true, grant: this.getShareGrant(grant.grantId)! };
-    });
-  }
-
-  convertLinkGrant(input: {
-    shareId: string;
-    parentGrantId: string;
-    grantId: string;
-    principalUserId: string;
-    createdAtMs: number;
-  }): ShareGrantTransitionResult {
-    return this.tx(() => {
-      const parent = this.getShareGrant(input.parentGrantId);
-      if (
-        !parent ||
-        parent.shareId !== input.shareId ||
-        parent.principalKind !== "link" ||
-        parent.status !== "active" ||
-        parent.revokedAtMs !== null ||
-        !input.principalUserId
-      ) {
-        return { ok: false };
-      }
-      const grant: SyncRelayShareGrantRow = {
-        grantId: input.grantId,
-        shareId: input.shareId,
-        principalKind: "user",
-        principalUserId: input.principalUserId,
-        principalEmail: null,
-        access: parent.access,
-        generation: 1,
-        status: "active",
-        createdAtMs: Math.trunc(input.createdAtMs),
-        revokedAtMs: null,
-        parentGrantId: parent.grantId,
-      };
-      this.insertShareGrant(grant);
-      return { ok: true, grant };
     });
   }
 
@@ -4424,17 +4349,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     });
   }
 
-  getShareLinkWritesPausedAtMs(shareId: string): number | null {
-    const row = this.db
-      .prepare(
-        `SELECT link_writes_paused_at_ms
-         FROM sync_relay_shares
-         WHERE share_id = ?`,
-      )
-      .get(shareId);
-    return row ? nullableInt(row.link_writes_paused_at_ms) : null;
-  }
-
   deleteShareDiscussionMessage(input: {
     shareId: string;
     workspaceId: string;
@@ -5308,27 +5222,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         SHARED_BLOB_CANDIDATE_LIMIT,
       )
       .map(rowToLogRow);
-  }
-
-  latestLogRowForObjectInVersion(input: {
-    workspaceId: string;
-    objectId: string;
-    versionId: string;
-  }): SyncRelayLogRow | null {
-    if (!input.objectId || !input.versionId) return null;
-    const row = this.db
-      .prepare(
-        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
-         FROM sync_relay_object_moments m
-         JOIN sync_relay_log l
-           ON l.workspace_id = m.workspace_id AND l.relay_seq = m.relay_seq
-         WHERE m.workspace_id = ? AND m.object_id = ? AND m.version_id = ?
-         ORDER BY m.relay_seq DESC
-         LIMIT 1`,
-      )
-      .get(input.workspaceId, input.objectId, input.versionId);
-    return row ? rowToLogRow(row) : null;
   }
 
   findThreadCreateChannelWireId(

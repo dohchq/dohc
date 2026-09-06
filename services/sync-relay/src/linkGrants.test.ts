@@ -1,11 +1,10 @@
+import { TokenBucketLimiter } from "@dohc/service-http";
 import { timingSafeEqual } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   constantTimeHashEqual,
   hashLinkBearer,
   hashRelayExchangeKey,
-  LinkExchangeRateLimiter,
-  LinkReadRateLimiter,
   LINK_SESSION_RENEWAL_GRACE_MS,
   LINK_SESSION_TTL_MS,
   mintLinkBearer,
@@ -16,6 +15,7 @@ import type { SyncRelayHandler } from "./server";
 import { authorizeShareAction } from "./shareAuthorization";
 import { LINK_INVENTORY_PAGE_SIZE, type SyncRelayStorage } from "./storage";
 import {
+  seedDependentGrant,
   closeTestStorage,
   closeTestStorages,
   countStorageCalls,
@@ -209,7 +209,7 @@ async function seedIndependentEditAndDependentView(
   const linkGrantId = String(link.grantId);
   const dependentGrantId = "grant-dependent-view";
   expect(
-    storage.convertLinkGrant({
+    seedDependentGrant(storage, {
       shareId: "share-existing",
       parentGrantId: linkGrantId,
       grantId: dependentGrantId,
@@ -786,7 +786,7 @@ describe("owner link contract", () => {
     ).toBe(true);
     const dependentGrantId = "storage-seeded-comment-dependent";
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: "storage-seeded-comment-link",
         grantId: dependentGrantId,
@@ -869,7 +869,7 @@ describe("owner link contract", () => {
     const oldSecret = linkSecret(created.url);
     const viewDependentId = "view-dependent";
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: viewDependentId,
@@ -942,7 +942,7 @@ describe("owner link contract", () => {
 
     const commentDependentId = "comment-dependent";
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: commentDependentId,
@@ -1292,7 +1292,7 @@ describe("owner link contract", () => {
       ["named-dependent-peer", "recipient-peer"],
     ] as const) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: "link-promotion",
           grantId,
@@ -1475,7 +1475,7 @@ describe("owner link contract", () => {
       "named-revoke-correct-workspace",
     ]) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: "link-named-workspace-parent",
           grantId,
@@ -1658,7 +1658,7 @@ describe("owner link contract", () => {
       });
       const namedGrantId = `named-workspace-race-${transition}`;
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: `link-workspace-race-${transition}`,
           grantId: namedGrantId,
@@ -1723,7 +1723,7 @@ describe("owner link contract", () => {
     seedStorageLink(storage, { grantId: "link-validation", access: "comment" });
     for (const grantId of ["named-stale", "named-promoted", "named-revoked"] as const) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: "link-validation",
           grantId,
@@ -1813,7 +1813,7 @@ describe("owner link contract", () => {
       createdAtMs: 2_005,
     });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-cross",
         parentGrantId: "link-cross",
         grantId: "named-cross",
@@ -2008,7 +2008,7 @@ describe("owner link inventory and impact preconditions", () => {
     );
     for (const [index, grantId] of expectedGrantIds.entries()) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-independent-pages",
           parentGrantId: "link-independent-pages",
           grantId,
@@ -2152,7 +2152,7 @@ describe("owner link inventory and impact preconditions", () => {
     const boundaryGrantId = originalIds[999]!;
     for (const suffix of ["a", "m", "z"] as const) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-z-tail",
           parentGrantId: boundaryGrantId,
           grantId: `dependent-boundary-${suffix}`,
@@ -2162,7 +2162,7 @@ describe("owner link inventory and impact preconditions", () => {
       ).toMatchObject({ ok: true });
     }
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-z-tail",
         parentGrantId: boundaryGrantId,
         grantId: "independent-revoked",
@@ -2370,7 +2370,7 @@ describe("owner link inventory and impact preconditions", () => {
     const activeGrantId = String(activeLink.grantId);
     const revokedGrantId = String(revokedLink.grantId);
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: activeGrantId,
         grantId: "dependent-z-resolved",
@@ -2379,7 +2379,7 @@ describe("owner link inventory and impact preconditions", () => {
       }),
     ).toMatchObject({ ok: true });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: activeGrantId,
         grantId: "dependent-a-unresolved",
@@ -2575,7 +2575,7 @@ describe("owner link inventory and impact preconditions", () => {
     expect(projectedDependentIds((await ownerLinkInventory(h))[0]!)).toEqual([]);
 
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: "link-lifecycle",
         grantId: "dependent-lifecycle",
@@ -2687,7 +2687,7 @@ describe("owner link inventory and impact preconditions", () => {
       const shown = (await ownerLinkInventory(h)).find((row) => row.grantId === grantId)!;
       expect(projectedDependentIds(shown)).toEqual([]);
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: grantId,
           grantId: `dependent-race-${operation}`,
@@ -2798,7 +2798,7 @@ describe("owner link inventory and impact preconditions", () => {
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: "dependent-promoted-race",
@@ -2855,7 +2855,7 @@ describe("owner link inventory and impact preconditions", () => {
     const grantId = String((await createLink(h)).grantId);
     for (const dependentGrantId of ["dependent-a", "dependent-b"]) {
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: "share-existing",
           parentGrantId: grantId,
           grantId: dependentGrantId,
@@ -2933,7 +2933,7 @@ describe("owner link inventory and impact preconditions", () => {
     await seedFileShare(h, "edit");
     seedStorageLink(storage, { grantId: "link-widening", access: "comment" });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: "link-widening",
         grantId: "dependent-widening",
@@ -2973,7 +2973,7 @@ describe("owner link inventory and impact preconditions", () => {
     await seedFileShare(h);
     const grantId = String((await createLink(h)).grantId);
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: "dependent-former-owner",
@@ -3115,7 +3115,7 @@ describe("durable link usage inventory", () => {
   it("does not record wrong secrets, exchange-key refusals, rate limits, or failed session inserts", async () => {
     const storage = await newStorage();
     const relayExchangeKey = "share-web-relay-usage-refusal-key";
-    const limiter = new LinkExchangeRateLimiter(1, 0.000_001, 10);
+    const limiter = new TokenBucketLimiter(1, 0.000_001, 10);
     let now = 2_000;
     const limited = handler(storage, {
       relayExchangeKey,
@@ -3530,7 +3530,7 @@ describe("relay link grants", () => {
     expect(firstCredential.secretHash).not.toContain(firstSecret);
 
     // Convert makes a dependent named grant at the link's current access.
-    const converted = storage.convertLinkGrant({
+    const converted = seedDependentGrant(storage, {
       shareId: "share-existing",
       parentGrantId: linkGrantId,
       grantId: "grant-dependent",
@@ -3644,7 +3644,7 @@ describe("relay link grants", () => {
       }),
     ).toMatchObject({ ok: true, grant: { generation: 5, parentGrantId: null } });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: linkGrantId,
         grantId: "grant-dependent-revoked",
@@ -3897,7 +3897,7 @@ describe("relay link grants", () => {
     const dependentGrantId = "grant-link-recipient";
     const linkRecipient = "link-recipient";
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: linkGrantId,
         grantId: dependentGrantId,
@@ -3999,7 +3999,7 @@ describe("relay link grants", () => {
     const created = await createLink(h);
     const grantId = String(created.grantId);
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: "grant-dependent-after-owner-loss",
@@ -4077,7 +4077,7 @@ describe("relay link grants", () => {
       }),
     ).toBe(true);
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: grantId,
         grantId: "grant-dependent-at-new-level",
@@ -4172,7 +4172,7 @@ describe("relay link grants", () => {
         }),
       ).toEqual({ ok: false });
       expect(
-        storage.convertLinkGrant({
+        seedDependentGrant(storage, {
           shareId: grantId === "grant-0" ? "share-existing" : "share-email",
           parentGrantId: grantId,
           grantId: `converted-from-${grantId}`,
@@ -4230,7 +4230,7 @@ describe("relay link grants", () => {
     ).toEqual({ ok: false });
 
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: linkGrantId,
         grantId: "grant-dependent",
@@ -4289,7 +4289,7 @@ describe("relay link grants", () => {
       }),
     ).toEqual({ ok: false });
     expect(
-      storage.convertLinkGrant({
+      seedDependentGrant(storage, {
         shareId: "share-existing",
         parentGrantId: linkGrantId,
         grantId: "converted-after-revoke",
@@ -4837,7 +4837,7 @@ describe("relay link grants", () => {
 
   it("rate-limits refresh with the capability read bucket", async () => {
     const storage = await newStorage();
-    const limiter = new LinkReadRateLimiter(1, 0.000_001, 10);
+    const limiter = new TokenBucketLimiter(1, 0.000_001, 10);
     const h = handler(storage, { linkReadRateLimiter: limiter });
     await seedFileShare(h);
     const created = await createLink(h);
@@ -4866,8 +4866,8 @@ describe("relay link grants", () => {
   it("spends refreshes from the grant read budget", async () => {
     const storage = await newStorage();
     const h = handler(storage, {
-      linkReadRateLimiter: new LinkReadRateLimiter(10, 0.000_001, 10),
-      linkGrantReadRateLimiter: new LinkReadRateLimiter(1, 0.000_001, 10),
+      linkReadRateLimiter: new TokenBucketLimiter(10, 0.000_001, 10),
+      linkGrantReadRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     await seedFileShare(h);
     const created = await createLink(h);
@@ -5174,7 +5174,7 @@ describe("relay link grants", () => {
     const relayExchangeKey = "share-web-relay-exchange-key-at-least-32";
     const h = handler(counted, {
       relayExchangeKey,
-      linkExchangeRateLimiter: new LinkExchangeRateLimiter(1, 0.000_001, 10),
+      linkExchangeRateLimiter: new TokenBucketLimiter(1, 0.000_001, 10),
     });
     await seedFileShare(h);
     const created = await createLink(h);
@@ -5408,7 +5408,7 @@ describe("relay link grants", () => {
   it("rate-limits by socket IP before a storage lookup and bounds the bucket map", async () => {
     const storage = await newStorage();
     const counted = countStorageCalls(storage, "findLinkGrantByCredentialHash");
-    const limiter = new LinkExchangeRateLimiter(1, 0.000_001, 2);
+    const limiter = new TokenBucketLimiter(1, 0.000_001, 2);
     const h = handler(counted.storage, { linkExchangeRateLimiter: limiter });
     const first = await denialBytes(
       await h(
@@ -5452,7 +5452,6 @@ describe("relay link grants", () => {
       infoLog.mockRestore();
     }
   });
-
 
   it("refuses an old-secret exchange without recording usage when rotation wins before session mint", async () => {
     const target = await newStorage();

@@ -2,9 +2,14 @@ import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
-import { DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS, type SyncRelayHandler } from "./server";
+import {
+  DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
+  type SyncRelayHandler,
+} from "./server";
 import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage";
 import {
+  seedDependentGrant,
+  linkWritesPausedAtMs,
   closeTestStorage,
   closeTestStorages,
   countRows as count,
@@ -149,7 +154,7 @@ async function fixture(
   const comment = addLink("comment", "comment", "b", "e");
   const edit = addLink("edit", "edit", "c", "f");
   expect(
-    storage.convertLinkGrant({
+    seedDependentGrant(storage, {
       shareId: SHARE,
       parentGrantId: view.grantId,
       grantId: "named-view-grant-sentinel",
@@ -158,7 +163,7 @@ async function fixture(
     }),
   ).toMatchObject({ ok: true, grant: { access: "view" } });
   expect(
-    storage.convertLinkGrant({
+    seedDependentGrant(storage, {
       shareId: SHARE,
       parentGrantId: edit.grantId,
       grantId: "named-edit-grant-sentinel",
@@ -3770,7 +3775,7 @@ describe("share discussion HTTP boundary", () => {
         userId === recipient ? "Narrowed Recipient" : null,
     });
     expect(
-      test.storage.convertLinkGrant({
+      seedDependentGrant(test.storage, {
         shareId: SHARE,
         parentGrantId: test.comment.grantId,
         grantId,
@@ -4250,7 +4255,7 @@ describe("share discussion HTTP boundary", () => {
       linkPrincipalId: principalId,
       blocked: true,
     });
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(test.storage.getLinkPrincipal(principalId)!.blockedAtMs).toBeNull();
   });
 
@@ -5209,7 +5214,7 @@ describe("share discussion HTTP boundary", () => {
     for (const response of await Promise.all(refusals)) {
       expect(await genericRefusal(response)).toBe(baseline);
     }
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
     expect(test.storage.getLinkPrincipal(crossShare.principalId)!.blockedAtMs).toBeNull();
     expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(beforeRows);
@@ -5225,7 +5230,7 @@ describe("share discussion HTTP boundary", () => {
         await test.handler(moderationRequest(OWNER, { action: "pause" })),
       ),
     ).toBe(baseline);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(
       await genericRefusal(
         await test.handler(
@@ -5447,7 +5452,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
 
     expect(
       await genericRefusal(
@@ -5460,7 +5465,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     ).toContain('"code":"not_found"');
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
 
     const paused = await test.handler(
       moderationRequest(OWNER, { action: "pause", workspaceId: WORKSPACE }),
@@ -5468,7 +5473,7 @@ describe("share discussion HTTP boundary", () => {
     expect(paused.status).toBe(200);
     await paused.arrayBuffer();
     expect(setPaused).toHaveBeenCalledTimes(1);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     setPaused.mockClear();
     await expectMissingWorkspace(
@@ -5477,7 +5482,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     expect(
       await genericRefusal(
@@ -5490,7 +5495,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     ).toContain('"code":"not_found"');
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     const resumed = await test.handler(
       moderationRequest(OWNER, { action: "resume", workspaceId: WORKSPACE }),
@@ -5498,7 +5503,7 @@ describe("share discussion HTTP boundary", () => {
     expect(resumed.status).toBe(200);
     await resumed.arrayBuffer();
     expect(setPaused).toHaveBeenCalledTimes(1);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
   });
 
   it("rechecks current workspace ownership inside every moderation transaction", async () => {
@@ -5565,7 +5570,7 @@ describe("share discussion HTTP boundary", () => {
         linkPrincipalBlocked: false,
       });
       expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
-      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
       expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
     }
   });
@@ -5634,7 +5639,7 @@ describe("share discussion HTTP boundary", () => {
         linkPrincipalBlocked: false,
       });
       expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
-      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
       expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
     }
   });

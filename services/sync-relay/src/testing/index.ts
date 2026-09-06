@@ -16,6 +16,7 @@ import {
 import {
   openSyncRelayStorage,
   type OpenSyncRelayStorageOptions,
+  type SyncRelayShareGrantRow,
   type SyncRelayStorage,
 } from "../storage";
 
@@ -579,4 +580,87 @@ export function seedLinkSession(
       },
     }),
   ).toBe(true);
+}
+
+/**
+ * Inserts a named dependent grant under an active link grant at the link's
+ * current access, the row the handoff redeem route writes. Returns the same
+ * shape as the storage transitions so a test can assert on it.
+ */
+export function seedDependentGrant(
+  storage: SyncRelayStorage,
+  input: {
+    shareId: string;
+    parentGrantId: string;
+    grantId: string;
+    principalUserId: string;
+    createdAtMs: number;
+  },
+): { ok: true; grant: SyncRelayShareGrantRow } | { ok: false } {
+  const parent = storage.getShareGrant(input.parentGrantId);
+  if (
+    !parent ||
+    parent.shareId !== input.shareId ||
+    parent.principalKind !== "link" ||
+    parent.status !== "active" ||
+    parent.revokedAtMs !== null ||
+    !input.principalUserId
+  ) {
+    return { ok: false };
+  }
+  const db = inspectDatabase(storagePath(storage));
+  try {
+    db.prepare(
+      `INSERT INTO sync_relay_share_grants (
+         grant_id, share_id, principal_kind, principal_user_id, principal_email,
+         access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
+       ) VALUES (?, ?, 'user', ?, NULL, ?, 1, 'active', ?, NULL, ?)`,
+    ).run(
+      input.grantId,
+      input.shareId,
+      input.principalUserId,
+      parent.access,
+      Math.trunc(input.createdAtMs),
+      parent.grantId,
+    );
+  } finally {
+    db.close();
+  }
+  const grant = storage.getShareGrant(input.grantId);
+  if (!grant) throw new Error("dependent grant did not insert");
+  return { ok: true, grant };
+}
+
+/** When the owner paused link discussion writes on `shareId`, or null. */
+export function linkWritesPausedAtMs(dbPath: string, shareId: string): number | null {
+  return inspect(dbPath, (db) => {
+    const row = db
+      .prepare("SELECT link_writes_paused_at_ms FROM sync_relay_shares WHERE share_id = ?")
+      .get(shareId);
+    const value = row?.link_writes_paused_at_ms;
+    return value === null || value === undefined ? null : Number(value);
+  });
+}
+
+/** The replaced key envelopes of a workspace, oldest first. */
+export function keyEnvelopeHistory(
+  dbPath: string,
+  workspaceId: string,
+): Array<{ envelopeJson: string; sha256: string; replacedAtMs: number; replacedBySha256: string }> {
+  return inspect(dbPath, (db) =>
+    db
+      .prepare(
+        `SELECT envelope_json, envelope_sha256, replaced_at_ms, replaced_by_sha256
+         FROM sync_relay_key_envelope_history
+         WHERE workspace_id = ?
+         ORDER BY history_seq`,
+      )
+      .all(workspaceId)
+      .map((row) => ({
+        envelopeJson: String(row.envelope_json),
+        sha256: String(row.envelope_sha256),
+        replacedAtMs: Number(row.replaced_at_ms),
+        replacedBySha256: String(row.replaced_by_sha256),
+      })),
+  );
 }
