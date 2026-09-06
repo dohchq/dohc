@@ -174,7 +174,7 @@ impl EngineService {
             &cancellation,
             "secrets.list",
             open.actor.list_secret_files_page(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.version_id,
                 params.after_path.clone(),
                 limit + 1,
@@ -227,7 +227,7 @@ impl EngineService {
         let exists = Self::read_under_ctx(
             &cancellation,
             "secrets.stateExists",
-            open.actor.secret_state_exists(open.workspace_id),
+            open.actor.secret_state_exists(open.workspace_id.clone()),
         )
         .await?;
         Ok(json!(exists))
@@ -313,7 +313,7 @@ impl EngineService {
             .actor
             .write_secret_file(
                 SecretWrite {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     path,
                     text,
@@ -353,7 +353,7 @@ impl EngineService {
             .actor
             .delete_secret_file(
                 SecretDelete {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     path,
                     moment_id: params.moment_id,
@@ -382,7 +382,7 @@ impl EngineService {
         let cancellation = OperationCancellation::new(ctx);
         open.actor
             .fork_secret_version(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.from_version_id,
                 params.to_version_id,
                 now_ms()?,
@@ -410,7 +410,7 @@ impl EngineService {
             &cancellation,
             "secrets.moments.list",
             open.actor.list_secret_moments(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.version_id,
                 path,
                 params.before_moment_order,
@@ -451,7 +451,7 @@ impl EngineService {
             &cancellation,
             "secrets.moments.get",
             open.actor
-                .get_secret_moment(open.workspace_id, params.moment_id),
+                .get_secret_moment(open.workspace_id.clone(), params.moment_id),
         )
         .await?;
         Ok(moment.as_ref().map_or(Value::Null, secret_moment_json))
@@ -519,7 +519,7 @@ impl EngineService {
             &cancellation,
             "secrets.compare",
             open.actor.compare_secret_files(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.source_version_id,
                 params.target_version_id,
                 params.after_path,
@@ -634,7 +634,7 @@ impl EngineService {
         let result = open
             .actor
             .apply_secret_file(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 path,
                 params.source_version_id,
                 params.target_version_id,
@@ -671,7 +671,7 @@ impl EngineService {
         let result = open
             .actor
             .restore_secret_file(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 path,
                 params.before_moment_id,
                 params.moment_id,
@@ -780,7 +780,7 @@ impl EngineService {
             &cancellation,
             "secrets.materialize",
             open.actor.materialize_secret_inband(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.version_id,
                 secret_path,
                 key,

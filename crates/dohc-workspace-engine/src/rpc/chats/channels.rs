@@ -95,7 +95,7 @@ impl EngineService {
             &cancellation,
             "chats.channels.create",
             open.actor.chat_channel_create(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.channel_id,
                 params.name,
                 kind,
@@ -120,7 +120,7 @@ impl EngineService {
             &cancellation,
             "chats.channels.ensureGeneral",
             open.actor.chat_channel_ensure_general(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.channel_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
@@ -143,7 +143,7 @@ impl EngineService {
             &cancellation,
             "chats.channels.ensureAgent",
             open.actor.chat_channel_ensure_agent(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.channel_id,
                 params.now_ms.unwrap_or(now_ms()?),
                 cancellation.token(),
@@ -218,7 +218,7 @@ impl EngineService {
             &cancellation,
             "chats.channels.findBySlug",
             open.actor
-                .chat_channel_find_by_slug(open.workspace_id, params.slug),
+                .chat_channel_find_by_slug(open.workspace_id.clone(), params.slug),
         )
         .await?;
         Ok(channel.as_ref().map(channel_json).unwrap_or(Value::Null))
@@ -237,7 +237,7 @@ impl EngineService {
             &cancellation,
             "chats.channels.getWireId",
             open.actor
-                .chat_channel_get_wire_id(open.workspace_id, params.channel_id),
+                .chat_channel_get_wire_id(open.workspace_id.clone(), params.channel_id),
         )
         .await?;
         Ok(json!({ "wireId": wire_id }))

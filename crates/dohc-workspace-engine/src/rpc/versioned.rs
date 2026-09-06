@@ -556,7 +556,7 @@ impl EngineService {
             .actor
             .versioned_text_rename(
                 RenameTextFile {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     from_path,
                     to_path,
@@ -622,7 +622,7 @@ impl EngineService {
             .actor
             .versioned_text_delete(
                 DeleteTextFile {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     path,
                     moment_id,
@@ -702,7 +702,7 @@ impl EngineService {
             .actor
             .versioned_text_rollback(
                 RollbackTextFileMutation {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     version_id: params.version_id,
                     path,
                     mutation_moment_id: params.mutation_moment_id,
@@ -741,7 +741,7 @@ impl EngineService {
             &cancellation,
             "versionedText.compare",
             open.actor.versioned_text_compare(CompareTextFileVersions {
-                workspace_id: open.workspace_id,
+                workspace_id: open.workspace_id.clone(),
                 target_version_id: params.target_version_id,
                 source_version_id: params.source_version_id,
                 path: params.path.clone(),
@@ -781,7 +781,7 @@ impl EngineService {
             .actor
             .versioned_text_merge(
                 MergeTextFileFromVersion {
-                    workspace_id: open.workspace_id,
+                    workspace_id: open.workspace_id.clone(),
                     target_version_id: params.target_version_id,
                     source_version_id: params.source_version_id,
                     path,

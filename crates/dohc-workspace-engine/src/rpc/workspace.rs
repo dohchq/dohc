@@ -37,7 +37,6 @@ use std::sync::Mutex;
 
 const MAX_OPEN_HANDLES: usize = 64;
 
-#[derive(Clone)]
 pub(crate) struct OpenWorkspace {
     pub(super) root: PathBuf,
     pub(super) db_path: PathBuf,
@@ -68,7 +67,7 @@ pub(super) enum WorkspaceOpenMode {
     ReadOnly,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq)]
 enum WorkspaceHandleKind {
     Owner,
     ReadOnlyAttach { owner: WorkspaceHandle },
@@ -85,6 +84,22 @@ impl WorkspaceHandleKind {
 }
 
 impl OpenWorkspace {
+    fn read_only_attach(&self, owner: WorkspaceHandle) -> Self {
+        Self {
+            root: self.root.clone(),
+            db_path: self.db_path.clone(),
+            workspace_id: self.workspace_id.clone(),
+            actor: self.actor.clone(),
+            mode: WorkspaceOpenMode::ReadOnly,
+            handle_kind: WorkspaceHandleKind::ReadOnlyAttach { owner },
+            relay: self.relay.clone(),
+            capture: Arc::clone(&self.capture),
+            automation_recovery: Arc::clone(&self.automation_recovery),
+            capture_apply_gate: Arc::clone(&self.capture_apply_gate),
+            session_ops: Arc::clone(&self.session_ops),
+        }
+    }
+
     pub(super) fn request_collection_reconcile(&self) {
         if let Some(driver) = lock(&self.capture).as_ref() {
             driver.status().request_collection_reconcile();
@@ -128,7 +143,7 @@ impl OpenWorkspace {
 
 impl Drop for EngineService {
     fn drop(&mut self) {
-        let open: Vec<(WorkspaceHandle, OpenWorkspace)> = match self.handles.get_mut() {
+        let open: Vec<(WorkspaceHandle, Arc<OpenWorkspace>)> = match self.handles.get_mut() {
             Ok(handles) => handles
                 .drain()
                 .filter(|(_, open)| open.handle_kind.owns_binding())
@@ -180,7 +195,7 @@ impl Drop for EngineService {
 }
 
 struct EngineServiceCleanup {
-    open: Vec<(WorkspaceHandle, OpenWorkspace)>,
+    open: Vec<(WorkspaceHandle, Arc<OpenWorkspace>)>,
     sessions: Arc<Mutex<HashMap<String, YdocSession>>>,
     self_writes: SelfWriteSuppression,
     supervisor: &'static WorkspaceSupervisor,
@@ -193,14 +208,14 @@ impl EngineServiceCleanup {
             let _sessions = Arc::clone(&workspace.session_ops).lock_owned().await;
             lock(&self.sessions).retain(|_, session| session.workspace != handle);
             workspace.shutdown_capture().await;
-            let db_path = workspace.db_path.clone();
-            let root = workspace.root.clone();
-            let workspace_id = workspace.workspace_id.clone();
+            let closing_workspace = Arc::clone(&workspace);
             let supervisor = self.supervisor;
-            let _ = tokio::task::spawn_blocking(move || supervisor.close(&db_path)).await;
+            let _ =
+                tokio::task::spawn_blocking(move || supervisor.close(&closing_workspace.db_path))
+                    .await;
             self.self_writes
-                .scoped(&root)
-                .clear_workspace(&workspace_id);
+                .scoped(&workspace.root)
+                .clear_workspace(&workspace.workspace_id);
         }
     }
 
@@ -302,7 +317,7 @@ impl EngineService {
     /// daemon start re-offers it from the dirty baseline), and this drain
     /// joins the watcher/files threads so the process exits clean.
     pub async fn shutdown_all_capture(&self) {
-        let open: Vec<OpenWorkspace> = lock(&self.handles)
+        let open: Vec<Arc<OpenWorkspace>> = lock(&self.handles)
             .values()
             .filter(|open| open.handle_kind.owns_binding())
             .cloned()
@@ -353,7 +368,7 @@ impl EngineService {
             guard
                 .iter()
                 .find(|(_, open)| open.root == root && open.handle_kind.owns_binding())
-                .map(|(handle, open)| (handle.clone(), open.clone()))
+                .map(|(handle, open)| (handle.clone(), Arc::clone(open)))
         };
         if let Some((handle, open)) = existing {
             // The root's logical binding to a workspace id holds regardless of
@@ -379,9 +394,7 @@ impl EngineService {
                         .next_handle
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let attached_handle = WorkspaceHandle(format!("ws-{sequence:016x}"));
-                    let mut attached = open;
-                    attached.mode = WorkspaceOpenMode::ReadOnly;
-                    attached.handle_kind = WorkspaceHandleKind::ReadOnlyAttach { owner: handle };
+                    let attached = Arc::new(open.read_only_attach(handle));
                     {
                         let mut handles = lock(&self.handles);
                         if handles.len() >= MAX_OPEN_HANDLES {
@@ -735,7 +748,7 @@ impl EngineService {
         };
         lock(&self.handles).insert(
             handle.clone(),
-            OpenWorkspace {
+            Arc::new(OpenWorkspace {
                 root,
                 db_path,
                 workspace_id: params.workspace_id,
@@ -749,7 +762,7 @@ impl EngineService {
                 automation_recovery: Arc::new(Mutex::new(automation_recovery)),
                 capture_apply_gate,
                 session_ops: Arc::new(tokio::sync::Mutex::new(())),
-            },
+            }),
         );
         open_guard.disarm();
         Ok(json!({ "workspace": handle }))
@@ -850,7 +863,7 @@ impl EngineService {
     pub(super) fn open(
         &self,
         handle: Option<&WorkspaceHandle>,
-    ) -> Result<OpenWorkspace, WireError> {
+    ) -> Result<Arc<OpenWorkspace>, WireError> {
         let handle = handle.ok_or_else(workspace_unavailable)?;
         lock(&self.handles)
             .get(handle)
@@ -885,6 +898,184 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_open_access_keeps_one_handle_until_rebind() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "shared-open-access",
+            "captureMode": "none",
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("initial open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let first = service.open(Some(&handle)).expect("first access");
+        let second = service.open(Some(&handle)).expect("second access");
+        assert!(Arc::ptr_eq(&first, &second));
+        let repeated = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("repeat open");
+        assert_eq!(opened, repeated);
+        assert!(Arc::ptr_eq(
+            &first,
+            &service.open(Some(&handle)).expect("repeated access"),
+        ));
+
+        let mut other_identity = params.clone();
+        other_identity["workspaceId"] = json!("another-workspace");
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), other_identity)
+            .await
+            .expect_err("a shared handle cannot change root identity");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+
+        service
+            .workspace_close(Some(handle.clone()))
+            .await
+            .expect("close");
+        assert!(service.open(Some(&handle)).is_err());
+        assert_eq!(first.actor.lifecycle(), LifecycleState::Closed);
+        let reopened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("rebind while old accesses remain");
+        let rebound: WorkspaceHandle =
+            serde_json::from_value(reopened["workspace"].clone()).expect("rebound handle");
+        let next = service.open(Some(&rebound)).expect("rebound access");
+        assert_ne!(handle, rebound);
+        assert!(!Arc::ptr_eq(&first, &next));
+        assert_eq!(first.root, next.root);
+        assert_eq!(first.workspace_id, next.workspace_id);
+        assert_eq!(next.actor.lifecycle(), LifecycleState::Ready);
+        service
+            .workspace_close(Some(rebound))
+            .await
+            .expect("final close");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_read_attachment_shares_capture_without_owning_shutdown() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "shared-attachment-capture",
+        });
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect("owner open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("owner handle");
+        let owner = service.open(Some(&handle)).expect("owner access");
+        let mut attach_params = params;
+        attach_params["skipStartupMaintenance"] = json!(true);
+        let attached = service
+            .workspace_open(&RequestContext::unbounded(), attach_params.clone())
+            .await
+            .expect("read attach");
+        let attached_handle: WorkspaceHandle =
+            serde_json::from_value(attached["workspace"].clone()).expect("attached handle");
+        let retained = service
+            .open(Some(&attached_handle))
+            .expect("attached access");
+        assert!(!Arc::ptr_eq(&owner, &retained));
+        assert_eq!(owner.mode, WorkspaceOpenMode::Full);
+        assert_eq!(retained.mode, WorkspaceOpenMode::ReadOnly);
+        assert!(retained.handle_kind.is_attached_to(&handle));
+        assert!(Arc::ptr_eq(&owner.capture, &retained.capture));
+        assert!(Arc::ptr_eq(
+            &owner.automation_recovery,
+            &retained.automation_recovery
+        ));
+        assert!(Arc::ptr_eq(
+            &owner.capture_apply_gate,
+            &retained.capture_apply_gate
+        ));
+        assert!(Arc::ptr_eq(&owner.session_ops, &retained.session_ops));
+        assert!(lock(&owner.capture).is_some());
+        assert_eq!(
+            service
+                .workspace_close(Some(attached_handle.clone()))
+                .await
+                .expect("attach close"),
+            json!({ "closed": false, "attachmentClosed": true }),
+        );
+        assert!(service.open(Some(&attached_handle)).is_err());
+        assert_eq!(owner.actor.lifecycle(), LifecycleState::Ready);
+        assert!(lock(&retained.capture).is_some());
+
+        let attached = service
+            .workspace_open(&RequestContext::unbounded(), attach_params)
+            .await
+            .expect("second read attach");
+        let attached_handle: WorkspaceHandle =
+            serde_json::from_value(attached["workspace"].clone()).expect("second attached handle");
+        let second = service
+            .open(Some(&attached_handle))
+            .expect("second attached access");
+        service
+            .workspace_close(Some(handle))
+            .await
+            .expect("owner close");
+        assert!(service.open(Some(&attached_handle)).is_err());
+        assert_eq!(retained.actor.lifecycle(), LifecycleState::Closed);
+        assert!(lock(&owner.capture).is_none());
+        assert!(lock(&second.capture).is_none());
+        assert!(
+            retained
+                .begin_capture_shutdown()
+                .into_iter()
+                .all(|task| task.is_none())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn service_drop_closes_capture_with_retained_shared_access() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let service = EngineService::with_supervisor(supervisor);
+        let opened = service
+            .workspace_open(
+                &RequestContext::unbounded(),
+                json!({
+                    "rootDir": scratch.path().to_string_lossy(),
+                    "workspaceId": "shared-access-service-drop",
+                }),
+            )
+            .await
+            .expect("workspace open");
+        let handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("handle");
+        let retained = service.open(Some(&handle)).expect("retained access");
+        assert!(lock(&retained.capture).is_some());
+        drop(service);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while retained.actor.lifecycle() != LifecycleState::Closed {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("service cleanup closes the actor without waiting for Arc release");
+        assert!(lock(&retained.capture).is_none());
+        assert!(
+            retained
+                .begin_capture_shutdown()
+                .into_iter()
+                .all(|task| task.is_none())
+        );
+    }
 
     /// #874 repro shape: a July-era `engine.db` — user tables, `user_version`
     /// still 0 — sitting in a real workspace root. `workspace.open` must
@@ -1789,6 +1980,8 @@ mod tests {
         let handle: WorkspaceHandle =
             serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
 
+        let retained = service.open(Some(&handle)).expect("retained dead binding");
+
         lock(&service.pending_cursors).insert(
             "evicted-token".to_owned(),
             PendingCursor {
@@ -1823,6 +2016,12 @@ mod tests {
         let rebound: WorkspaceHandle =
             serde_json::from_value(reopened["workspace"].clone()).expect("rebound handle");
         assert_ne!(rebound, handle, "eviction must mint a fresh handle");
+        let next = service.open(Some(&rebound)).expect("rebound access");
+        assert!(!Arc::ptr_eq(&retained, &next));
+        assert_eq!(retained.actor.lifecycle(), LifecycleState::Closed);
+        assert!(lock(&retained.capture).is_none());
+        assert!(lock(&next.capture).is_some());
+        assert!(!Arc::ptr_eq(&retained.capture, &next.capture));
 
         assert!(
             lock(&service.pending_cursors).is_empty(),

@@ -77,7 +77,7 @@ impl EngineService {
             &cancellation,
             "chats.feed.markSeen",
             open.actor.chat_feed_mark_seen(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.owner_user_id,
                 params.replication_owner_user_id,
                 params.head_cursor,
@@ -102,7 +102,7 @@ impl EngineService {
             &cancellation,
             "chats.feed.listPersonal",
             open.actor.chat_feed_list_personal(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.owner_user_id,
                 params.limit,
                 params.cursor,

@@ -487,7 +487,7 @@ impl EngineService {
     async fn fence_version_snapshot(
         &self,
         cancellation: &OperationCancellation,
-        open: &OpenWorkspace,
+        open: &Arc<OpenWorkspace>,
         handle: &WorkspaceHandle,
         operation: &str,
         settle_summary: &str,
@@ -587,7 +587,7 @@ impl EngineService {
                     "capture driver unavailable",
                 )
             })?;
-        let open = open.clone();
+        let open = Arc::clone(open);
         let handle = handle.clone();
         let sessions = Arc::clone(&self.sessions);
         let leases = self.leases.clone();
@@ -766,7 +766,7 @@ impl EngineService {
             &cancellation,
             "versions.compareFiles",
             open.actor.compare_version_files_page(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.source_version_id,
                 params.target_version_id,
                 params.after_path,
@@ -825,7 +825,7 @@ impl EngineService {
             () = cancellation.token.cancelled() => {
                 return Err(cancellation.interruption("versions.active"));
             }
-            result = open.actor.active_version(open.workspace_id) => match result {
+            result = open.actor.active_version(open.workspace_id.clone()) => match result {
                 Ok(version) => version,
                 Err(RuntimeError::Domain(DomainError::WorkspaceNotFound)) => return Ok(Value::Null),
                 Err(error) => return Err(map_runtime(error)),
@@ -847,7 +847,7 @@ impl EngineService {
         let version = open
             .actor
             .ensure_main_version(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 now_ms()?,
                 Arc::new(NoFaults),
                 cancellation.token(),
@@ -927,7 +927,7 @@ impl EngineService {
         let mut versions = Self::read_under_ctx(
             &cancellation,
             "versions.list",
-            open.actor.list_versions(open.workspace_id),
+            open.actor.list_versions(open.workspace_id.clone()),
         )
         .await?;
         // Keyset resume over the domain's stable ordering: the composite

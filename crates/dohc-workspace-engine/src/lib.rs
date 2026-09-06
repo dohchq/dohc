@@ -49,7 +49,7 @@ use std::sync::MutexGuard;
 /// cross-service or aliased attachments remain rejected so barriers cannot split.
 pub struct EngineService {
     supervisor: &'static WorkspaceSupervisor,
-    handles: Mutex<HashMap<WorkspaceHandle, OpenWorkspace>>,
+    handles: Mutex<HashMap<WorkspaceHandle, Arc<OpenWorkspace>>>,
     pending_cursors: Mutex<HashMap<String, PendingCursor>>,
     open_lock: Arc<tokio::sync::Mutex<()>>,
     next_handle: std::sync::atomic::AtomicU64,

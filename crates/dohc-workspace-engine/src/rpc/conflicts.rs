@@ -554,7 +554,7 @@ impl EngineService {
         let conflicts = open
             .actor
             .conflict_list(
-                open.workspace_id,
+                open.workspace_id.clone(),
                 params.status,
                 params.after_conflict_id,
                 cancellation.token(),
