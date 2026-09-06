@@ -2,10 +2,7 @@ import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
-import type { Event } from "../ydoc/generated/Event";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import {
   YDOC_EVENT,

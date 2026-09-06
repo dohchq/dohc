@@ -3,7 +3,7 @@ import {
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { WorkspaceHandle } from "../protocol";
 import {
   CHATS_METHOD,
   decodeChatsResult,

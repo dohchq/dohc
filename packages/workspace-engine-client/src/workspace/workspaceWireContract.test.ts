@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionValue } from "@dohc/workspace-contracts/collection";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-field-pipeline.json";
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {

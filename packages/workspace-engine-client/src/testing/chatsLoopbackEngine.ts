@@ -1,10 +1,7 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import type { Event } from "../ydoc/generated/Event";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import {
   CHATS_METHOD,

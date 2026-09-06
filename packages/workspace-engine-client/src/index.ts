@@ -1,10 +1,6 @@
 // The daemon client surface the desktop app, CLI, and tools import. Test
 // fakes and fixture helpers live under `@dohc/workspace-engine-client/testing`.
-export type { Event } from "./ydoc/generated/Event";
-export type { Request } from "./ydoc/generated/Request";
-export type { Response } from "./ydoc/generated/Response";
-export type { Retryability } from "./ydoc/generated/Retryability";
-export type { JsonValue } from "./ydoc/generated/serde_json/JsonValue";
+export type { Event, JsonValue, Request, Response, Retryability } from "./protocol";
 
 export {
   DaemonRefusalError,

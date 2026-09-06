@@ -14,9 +14,7 @@ import {
   DaemonRefusalError,
   type DaemonErrorCode,
 } from "../live/daemonLiveAdapter";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { Request, Response, WorkspaceHandle } from "../protocol";
 import { EngineClientError } from "./engineClient";
 import {
   EngineDaemonUnavailableError,

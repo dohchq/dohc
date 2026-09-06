@@ -2,7 +2,7 @@ import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
 import * as Struct from "effect/Struct";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 
 export const YDOC_METHOD = {
   open: "ydoc.open",

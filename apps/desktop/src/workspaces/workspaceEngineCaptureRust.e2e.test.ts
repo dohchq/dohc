@@ -31,7 +31,7 @@ import { createTestScratch } from "./testTemp";
 import { waitForPathMoments } from "./waitForPathMoments";
 import { encodeFixtureBigInts } from "@dohc/workspace-engine-client/testing";
 import { decodeCollectionValue } from "../../../../packages/workspace-engine-client/src/workspace/workspaceWireContract";
-import type { JsonValue } from "../../../../packages/workspace-engine-client/src/ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "@dohc/workspace-engine-client";
 
 function createWorkspaceEngineCapture(
   options: Omit<WorkspaceEngineCaptureOptions, "attachmentId">,

@@ -1,12 +1,7 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
-import type { ErrorCode } from "../ydoc/generated/ErrorCode";
-import type { Event } from "../ydoc/generated/Event";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WireError } from "../ydoc/generated/WireError";
+import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
 import {
