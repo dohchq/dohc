@@ -1,3 +1,5 @@
+import { WaiterRegistry } from "@dohc/service-http";
+
 // MU-C1 — the EPHEMERAL awareness transport (presence / typing / co-viewing).
 //
 // This is the in-memory pub/sub the design calls "the ephemeral awareness
@@ -127,7 +129,6 @@ interface Scope {
   group: string;
   entries: Map<string, PresenceEntry>;
   version: number;
-  waiters: Set<(snapshot: PresenceSnapshot) => void>;
 }
 
 interface GroupStats {
@@ -144,9 +145,8 @@ function entryKey(userId: string, clientId: string): string {
 export class PresenceHub {
   private readonly scopes = new Map<string, Scope>();
   private readonly groups = new Map<string, GroupStats>();
-  private readonly actorWaiters = new Map<string, number>();
+  private readonly waiters: WaiterRegistry<PresenceSnapshot>;
   private totalEntries = 0;
-  private totalWaiters = 0;
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
 
   private readonly entryTtlMs: number;
@@ -155,9 +155,6 @@ export class PresenceHub {
   private readonly maxTotalEntries: number;
   private readonly maxScopesPerGroup: number;
   private readonly maxEntriesPerGroup: number;
-  private readonly maxTotalWaiters: number;
-  private readonly maxWaitersPerScope: number;
-  private readonly maxWaitersPerActor: number;
   private readonly sweepIntervalMs: number;
   private readonly now: () => number;
   private readonly groupOf: (scopeKey: string) => string;
@@ -172,11 +169,11 @@ export class PresenceHub {
       options.maxScopesPerGroup ?? DEFAULT_PRESENCE_MAX_SCOPES_PER_GROUP;
     this.maxEntriesPerGroup =
       options.maxEntriesPerGroup ?? DEFAULT_PRESENCE_MAX_ENTRIES_PER_GROUP;
-    this.maxTotalWaiters = options.maxTotalWaiters ?? DEFAULT_PRESENCE_MAX_TOTAL_WAITERS;
-    this.maxWaitersPerScope =
-      options.maxWaitersPerScope ?? DEFAULT_PRESENCE_MAX_WAITERS_PER_SCOPE;
-    this.maxWaitersPerActor =
-      options.maxWaitersPerActor ?? DEFAULT_PRESENCE_MAX_WAITERS_PER_ACTOR;
+    this.waiters = new WaiterRegistry({
+      maxTotal: options.maxTotalWaiters ?? DEFAULT_PRESENCE_MAX_TOTAL_WAITERS,
+      maxPerGroup: options.maxWaitersPerScope ?? DEFAULT_PRESENCE_MAX_WAITERS_PER_SCOPE,
+      maxPerActor: options.maxWaitersPerActor ?? DEFAULT_PRESENCE_MAX_WAITERS_PER_ACTOR,
+    });
     this.sweepIntervalMs =
       options.sweepIntervalMs ?? Math.max(1_000, Math.min(this.entryTtlMs, 10_000));
     this.now = options.nowMs ?? (() => Date.now());
@@ -212,7 +209,7 @@ export class PresenceHub {
     }
     const scope = this.scopeFor(scopeKey); // may throw on the scope-count caps
     this.setEntry(scope, key, { userId, clientId, state, updatedAtMs: nowMs });
-    this.bump(scope);
+    this.bump(scopeKey, scope);
     return this.snapshotOf(scope);
   }
 
@@ -227,7 +224,7 @@ export class PresenceHub {
     // peer here, and that departure must wake parked waiters too.
     const pruned = this.prune(scope, nowMs);
     const deleted = this.deleteEntry(scope, entryKey(userId, clientId));
-    if (pruned || deleted) this.bump(scope);
+    if (pruned || deleted) this.bump(scopeKey, scope);
     const snapshot = this.snapshotOf(scope);
     this.gc(scopeKey, scope);
     return snapshot;
@@ -236,7 +233,7 @@ export class PresenceHub {
   snapshot(scopeKey: string, nowMs: number): PresenceSnapshot {
     const scope = this.scopes.get(scopeKey);
     if (!scope) return { version: 0, peers: [] };
-    if (this.prune(scope, nowMs)) this.bump(scope);
+    if (this.prune(scope, nowMs)) this.bump(scopeKey, scope);
     const snapshot = this.snapshotOf(scope);
     this.gc(scopeKey, scope);
     return snapshot;
@@ -249,64 +246,36 @@ export class PresenceHub {
   // beyond the caps this throws PresenceCapacityError instead of parking.
   wait(scopeKey: string, since: number, options: PresenceWaitOptions): Promise<PresenceSnapshot> {
     const scope = this.scopeFor(scopeKey); // may throw on the scope-count caps
-    if (this.prune(scope, options.nowMs)) this.bump(scope);
+    if (this.prune(scope, options.nowMs)) this.bump(scopeKey, scope);
     if (scope.version !== since) {
       const snapshot = this.snapshotOf(scope);
       this.gc(scopeKey, scope);
       return Promise.resolve(snapshot);
     }
-    const actorId = options.actorId;
-    if (
-      this.totalWaiters >= this.maxTotalWaiters ||
-      scope.waiters.size >= this.maxWaitersPerScope ||
-      (actorId !== undefined && (this.actorWaiters.get(actorId) ?? 0) >= this.maxWaitersPerActor)
-    ) {
+    if (this.waiters.atCapacity(scopeKey, options.actorId)) {
       this.gc(scopeKey, scope);
       throw new PresenceCapacityError("too many parked presence polls");
     }
-    return new Promise<PresenceSnapshot>((resolve) => {
-      let settled = false;
-      this.totalWaiters += 1;
-      if (actorId !== undefined) {
-        this.actorWaiters.set(actorId, (this.actorWaiters.get(actorId) ?? 0) + 1);
-      }
-      const finish = (snapshot: PresenceSnapshot): void => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        scope.waiters.delete(waiter);
-        this.totalWaiters -= 1;
-        if (actorId !== undefined) {
-          const count = (this.actorWaiters.get(actorId) ?? 1) - 1;
-          if (count <= 0) this.actorWaiters.delete(actorId);
-          else this.actorWaiters.set(actorId, count);
-        }
-        options.signal?.removeEventListener("abort", onAbort);
-        resolve(snapshot);
+    return this.waiters
+      .park(scopeKey, options.actorId, {
+        holdMs: options.holdMs,
+        signal: options.signal,
+        settle: () => this.snapshotOf(scope),
+      })
+      .then((snapshot) => {
         this.gc(scopeKey, scope);
-      };
-      const waiter = (snapshot: PresenceSnapshot): void => finish(snapshot);
-      const onAbort = (): void => finish(this.snapshotOf(scope));
-      const timer = setTimeout(() => finish(this.snapshotOf(scope)), options.holdMs);
-      // Never keep the process alive purely to hold a presence poll open.
-      if (typeof timer === "object" && timer && "unref" in timer) {
-        (timer as { unref: () => void }).unref();
-      }
-      scope.waiters.add(waiter);
-      if (options.signal) {
-        if (options.signal.aborted) {
-          finish(this.snapshotOf(scope));
-          return;
-        }
-        options.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    });
+        return snapshot;
+      });
   }
 
   // In-memory footprint, for tests/no-leak assertions. There is no durable
   // counterpart anywhere — this IS the entire presence state.
   stats(): { scopes: number; entries: number; waiters: number } {
-    return { scopes: this.scopes.size, entries: this.totalEntries, waiters: this.totalWaiters };
+    return {
+      scopes: this.scopes.size,
+      entries: this.totalEntries,
+      waiters: this.waiters.stats().waiters,
+    };
   }
 
   // Stop the sweep timer (tests / orderly shutdown). Scopes remain readable;
@@ -326,7 +295,7 @@ export class PresenceHub {
       if ((groupStats?.scopes ?? 0) >= this.maxScopesPerGroup) {
         throw new PresenceCapacityError("workspace presence is at capacity");
       }
-      scope = { group, entries: new Map(), version: 0, waiters: new Set() };
+      scope = { group, entries: new Map(), version: 0 };
       this.scopes.set(scopeKey, scope);
       this.groupStatsFor(group).scopes += 1;
       this.ensureSweeper();
@@ -372,13 +341,10 @@ export class PresenceHub {
     return removed;
   }
 
-  private bump(scope: Scope): void {
+  private bump(scopeKey: string, scope: Scope): void {
     scope.version += 1;
-    if (scope.waiters.size === 0) return;
-    const snapshot = this.snapshotOf(scope);
-    const waiters = [...scope.waiters];
-    scope.waiters.clear();
-    for (const waiter of waiters) waiter(snapshot);
+    if (this.waiters.waiting(scopeKey) === 0) return;
+    this.waiters.wake(scopeKey, this.snapshotOf(scope));
   }
 
   private snapshotOf(scope: Scope): PresenceSnapshot {
@@ -391,7 +357,7 @@ export class PresenceHub {
   // Reclaim an empty, unwatched scope so a workspace that opens and closes
   // thousands of docs never accumulates dead scope objects.
   private gc(scopeKey: string, scope: Scope): void {
-    if (scope.entries.size !== 0 || scope.waiters.size !== 0) return;
+    if (scope.entries.size !== 0 || this.waiters.waiting(scopeKey) !== 0) return;
     if (this.scopes.get(scopeKey) !== scope) return;
     this.scopes.delete(scopeKey);
     const stats = this.groups.get(scope.group);
@@ -408,7 +374,7 @@ export class PresenceHub {
   private sweep(): void {
     const nowMs = this.now();
     for (const [scopeKey, scope] of [...this.scopes]) {
-      if (this.prune(scope, nowMs)) this.bump(scope);
+      if (this.prune(scope, nowMs)) this.bump(scopeKey, scope);
       this.gc(scopeKey, scope);
     }
     if (this.scopes.size === 0) this.stopSweeper();

@@ -2,7 +2,7 @@ import { createRequire } from 'node:module'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHash } from 'node:crypto'
+import { sha256Hex } from '@dohc/workspace-core/hash'
 
 export type DatabaseColumn = {
   name: string
@@ -131,14 +131,6 @@ async function withTempDir<T>(prefix: string, fn: (dir: string) => Promise<T>): 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
-}
-
-function sha256Hex(bytes: Buffer): string {
-  return createHash('sha256').update(bytes).digest('hex')
-}
-
-function sha256Text(text: string): string {
-  return createHash('sha256').update(text).digest('hex')
 }
 
 async function materializeSnapshotToBytes(
@@ -436,7 +428,7 @@ export async function createSqliteEngine() {
       }
       const materialized = await materializeSnapshotToBytes(DatabaseSync, snapshot)
       if (!materialized.ok) return materialized
-      const sourceHash = sha256Text(input.body)
+      const sourceHash = sha256Hex(input.body)
       const table = snapshot[tableName]
       return {
         ok: true as const,
