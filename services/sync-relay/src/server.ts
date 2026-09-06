@@ -1,6 +1,5 @@
-import { TokenBucketLimiter } from "@dohc/service-http";
+import { jsonResponse, sha256Hex, TokenBucketLimiter } from "@dohc/service-http";
 import { randomUUID } from "node:crypto";
-import { jsonResponse, sha256Hex } from "@dohc/service-http";
 import {
   LINK_SECRET_PATTERN,
   SHA256_HEX_PATTERN,
@@ -2622,8 +2621,7 @@ export function createSyncRelayHandler({
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedGrant(
-              "link",
-
+          "link",
           route.shareId,
           route.grantId,
           actor,
@@ -2642,7 +2640,6 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "link",
-
               share.shareId,
               grant.grantId,
               actor,
@@ -2678,8 +2675,7 @@ export function createSyncRelayHandler({
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedGrant(
-              "link",
-
+          "link",
           route.shareId,
           route.grantId,
           actor,
@@ -2704,7 +2700,6 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "link",
-
               share.shareId,
               grant.grantId,
               actor,
@@ -2745,8 +2740,7 @@ export function createSyncRelayHandler({
         const input = await readJsonObject(request);
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share } = requireOwnedGrant(
-              "user",
-
+          "user",
           route.shareId,
           route.grantId,
           actor,
@@ -2762,7 +2756,6 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "user",
-
               route.shareId,
               route.grantId,
               actor,
@@ -2786,8 +2779,7 @@ export function createSyncRelayHandler({
           throw badRequest("request body contains an unknown field");
         }
         const { share } = requireOwnedGrant(
-              "user",
-
+          "user",
           route.shareId,
           route.grantId,
           actor,
@@ -2800,7 +2792,6 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "user",
-
               route.shareId,
               route.grantId,
               actor,
