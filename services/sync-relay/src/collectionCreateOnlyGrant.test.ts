@@ -2,14 +2,17 @@
 // policy ("The create-only collection contract" in docs/plans/share-links.md):
 // the link-create surface, the public access levels, and the grant wire shape.
 import { afterEach, describe, expect, it } from "vitest";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import type { SyncRelayHandler } from "./server";
 import {
+  claimWorkspace,
   closeTestStorages,
+  createShare,
   json,
   jsonBody,
   request,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 // Lane D conformance: the create-only collection grant policy handed to the
 // share-links program ("The create-only collection contract" in
@@ -22,55 +25,19 @@ import {
 const OWNER = "owner";
 const RECIPIENT = "recipient";
 const WORKSPACE = "workspace-collection-grant";
-const LINK_KEY = "test-link-key-with-at-least-thirty-two-bytes";
 const COLLECTION_PATH = "trips";
 
 afterEach(closeTestStorages);
 
 async function newHandler(): Promise<SyncRelayHandler> {
-  const storage = await testStorage();
-  let id = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor(incoming: Request, workspaceId: string) {
-      const match = /^Bearer user:([^ ]+)$/u.exec(
-        incoming.headers.get("authorization") ?? "",
-      );
-      if (!match) throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-      return { userId: match[1]!, workspaceId };
-    },
-    nowMs: () => 2_000,
-    newShareId: () => "share-collection",
-    newGrantId: () => `grant-${id++}`,
-    newId: () => `id-${id++}`,
-    resolveUserIdByEmail: () => null,
-    linkKey: LINK_KEY,
-    shareWebOrigin: "https://share.example.test",
-  });
+  return testHandler(await testStorage(), { newShareId: () => "share-collection" });
 }
 
 // A named share over the collection folder: the topology the create-only
 // grant policy attaches to.
 async function seedCollectionShare(h: SyncRelayHandler): Promise<void> {
-  expect(
-    (await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE }))))
-      .status,
-  ).toBe(200);
-  expect(
-    (
-      await h(
-        request(
-          OWNER,
-          `/sync/${WORKSPACE}/shares`,
-          jsonBody({
-            recipientUserId: RECIPIENT,
-            paths: [COLLECTION_PATH],
-            access: "view",
-          }),
-        ),
-      )
-    ).status,
-  ).toBe(200);
+  await claimWorkspace(h, OWNER, WORKSPACE);
+  await createShare(h, OWNER, WORKSPACE, { recipientUserId: RECIPIENT, paths: [COLLECTION_PATH] });
 }
 
 describe("the seam the create-only grant policy extends", () => {

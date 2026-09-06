@@ -1,9 +1,13 @@
 import type { ServerResponse } from "node:http";
 
+/**
+ * Streams a fetch Response body into a node:http response with backpressure.
+ * A closed or errored socket cancels the source stream so an upstream relay
+ * stops producing bytes that nothing will read.
+ */
 export async function pipeResponseBody(
   body: ReadableStream<Uint8Array>,
   outgoing: ServerResponse,
-  emitResponseErrorDuringPipeTestSeam: boolean,
 ): Promise<void> {
   const reader = body.getReader();
   const cancelOnClose = (): void => {
@@ -21,17 +25,7 @@ export async function pipeResponseBody(
         outgoing.end();
         return;
       }
-      const needsDrain = !outgoing.write(read.value);
-      if (emitResponseErrorDuringPipeTestSeam) {
-        emitResponseErrorDuringPipeTestSeam = false;
-        queueMicrotask(() => {
-          outgoing.emit("error", new Error("controlled response error during pipe"));
-        });
-      }
-      if (needsDrain) {
-        const drained = await waitForDrain(outgoing);
-        if (!drained) return;
-      }
+      if (!outgoing.write(read.value) && !(await waitForDrain(outgoing))) return;
     }
   } catch {
     if (!outgoing.destroyed) outgoing.destroy();

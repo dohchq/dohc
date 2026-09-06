@@ -1,10 +1,11 @@
+import type { MinimalDaemonClient } from "../live/daemonLiveAdapter";
 import { randomBytes, randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
-import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
+
 import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   createEngineClient,
@@ -101,15 +102,9 @@ const DEFAULT_MAX_PING_EXPIRIES = 3;
 // clear the streak either — a process that exits answered nothing.
 const DEFAULT_MAX_CONSECUTIVE_WEDGES = 2;
 
-export interface EngineDaemonClient {
-  sendRequest(request: Request): Promise<Response>;
-  readonly helloAck?: {
-    readonly capabilities: readonly string[];
-  };
+export interface EngineDaemonClient extends MinimalDaemonClient {
   cancelRequest?(requestId: number): Promise<void>;
-  onBlob?(handler: (blob: CompletedDaemonBlob) => void): () => void;
   onEvent?(handler: (event: Event) => void): () => void;
-  close(): void;
   // Kill a daemon that stopped answering. `close` reports a deliberate
   // shutdown, which retry-enabled callers must not retry through; a wedge kill
   // is a replacement, which they must. A client that cannot tell the two apart

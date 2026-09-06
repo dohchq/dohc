@@ -1,3 +1,4 @@
+import { isRecord } from "./records";
 export type SiteKind = "static" | "package" | "configured";
 export type SiteConfidence = "high" | "medium" | "low";
 export type SitePackageManager = "pnpm" | "npm" | "yarn" | "bun";
@@ -229,10 +230,6 @@ const IGNORED_SITE_SEGMENTS = new Set([
   ".yarn",
   "node_modules",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function diagnostic(
   path: string,

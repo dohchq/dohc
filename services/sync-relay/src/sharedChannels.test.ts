@@ -1,14 +1,22 @@
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it } from "vitest";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { type SyncRelayStorage } from "./storage";
+import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import {
+  chatChannelCreate,
+  chatMessageAppend,
+  chatThreadCreate,
   closeTestStorages,
+  countStorageCalls,
+  denialBytes,
+  interceptStorage,
   json,
   jsonBody,
+  logOp,
   request,
+  resetOpSeq,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 // MU-C4 shared channels — the route-level adversarial suite for the
 // bidirectional chat-channel grant: the member append route, the chat branch
@@ -18,47 +26,8 @@ import {
 
 afterEach(closeTestStorages);
 
-function countChannelKindLookups(storage: SyncRelayStorage): {
-  storage: SyncRelayStorage;
-  lookupsFor: (workspaceId: string, channelWireId: string) => number;
-} {
-  const lookups = new Map<string, number>();
-  const counted = new Proxy(storage, {
-    get(target, property) {
-      if (property === "findChannelCreateKind") {
-        return (workspaceId: string, channelWireId: string) => {
-          const key = `${workspaceId}\0${channelWireId}`;
-          lookups.set(key, (lookups.get(key) ?? 0) + 1);
-          return target.findChannelCreateKind(workspaceId, channelWireId);
-        };
-      }
-      const value = Reflect.get(target, property);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
-  return {
-    storage: counted,
-    lookupsFor: (workspaceId, channelWireId) =>
-      lookups.get(`${workspaceId}\0${channelWireId}`) ?? 0,
-  };
-}
-
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  let nextShare = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    nowMs: () => 5555,
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail: (userId) => `${userId}@dohc.test`,
-    newShareId: () => `share-${nextShare++}`,
-  });
+  return testHandler(storage, { nowMs: () => 5555 });
 }
 
 const OWNER = "owner";
@@ -69,59 +38,30 @@ const WORKSPACE = "workspace-chat";
 const SHARED_WIRE = "wire-shared-channel";
 const PRIVATE_WIRE = "wire-private-channel";
 
-async function denialBytes(response: Response): Promise<string> {
-  expect(response.status).toBe(404);
-  return `${response.status}:${await response.text()}`;
-}
-
-let ownerSeq = 0;
-
-function chatOp(
-  opKind: string,
-  payload: Record<string, unknown>,
-): { originSeq: number; opKind: string; payload: Record<string, unknown>; recordedAtMs: number } {
-  const originSeq = ownerSeq++;
-  return { originSeq, opKind, payload, recordedAtMs: 1000 + originSeq };
-}
-
 function channelCreate(wireId: string, name: string, kind: "channel" | "agent" = "channel") {
-  return chatOp("chat.channel.create", {
-    channelId: `chan-${wireId}`,
-    name,
-    slug: name.toLowerCase(),
-    kind,
-    createdAtMs: 1,
-    wireId,
-  });
+  return logOp(
+    "chat.channel.create",
+    chatChannelCreate(wireId, { channelId: `chan-${wireId}`, name, slug: name.toLowerCase(), kind })
+      .payload,
+  );
 }
 
 function threadCreate(threadId: string, wireId: string, slug: string) {
-  return chatOp("chat.thread.create", {
-    threadId,
-    title: "",
-    createdAtMs: 1,
-    channelSlug: slug,
-    channelWireId: wireId,
-  });
+  return logOp("chat.thread.create", chatThreadCreate(threadId, wireId, { slug }).payload);
 }
 
 function messageAppend(messageId: string, threadId: string, body: string, authorUserId?: string) {
-  return chatOp("chat.message.append", {
-    messageId,
-    threadId,
-    authorKind: "human",
-    authorDisplayName: "Someone",
-    ...(authorUserId !== undefined ? { authorUserId } : {}),
-    body,
-    createdAtMs: 1,
-  });
+  return logOp(
+    "chat.message.append",
+    chatMessageAppend(messageId, threadId, body, { authorUserId }).payload,
+  );
 }
 
 // Seeds the owner bucket with a shared channel (one thread, one message), a
 // PRIVATE channel with sentinel content, a sentinel file moment, and a secret
 // op — everything a leaking filter would expose.
 async function seedOwnerWorkspace(h: SyncRelayHandler): Promise<void> {
-  ownerSeq = 0;
+  resetOpSeq();
   const create = await h(request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
   expect(create.status).toBe(200);
   const ops = [
@@ -131,7 +71,7 @@ async function seedOwnerWorkspace(h: SyncRelayHandler): Promise<void> {
     channelCreate(PRIVATE_WIRE, "SENTINEL-private-channel"),
     threadCreate("thread-private-1", PRIVATE_WIRE, "sentinel-private-channel"),
     messageAppend("msg-private-1", "thread-private-1", "SENTINEL-private-message", OWNER),
-    chatOp("chat.thread.create", {
+    logOp("chat.thread.create", {
       threadId: "thread-file-private",
       title: "",
       createdAtMs: 1,
@@ -139,23 +79,15 @@ async function seedOwnerWorkspace(h: SyncRelayHandler): Promise<void> {
       linkedPathHint: "private/file.md",
       linkedAtMs: 1,
     }),
-    {
-      originSeq: ownerSeq++,
-      opKind: "secret.file.put",
-      payload: {
-        versionId: "main",
-        path: "notes/.env.local",
-        metadata: { origin: "user" },
-        ivBase64: "AA==",
-        authTagBase64: "AA==",
-        // No blob uploaded: referencedBlobShas requires stored blobs, so use a
-        // moment-free secret marker instead? No — secret.file.put requires its
-        // ciphertext blob. Upload below before appending.
-        ciphertextSha256: null,
-        byteLength: 0,
-      },
-      recordedAtMs: 2000,
-    },
+    logOp("secret.file.put", {
+      versionId: "main",
+      path: "notes/.env.local",
+      metadata: { origin: "user" },
+      ivBase64: "AA==",
+      authTagBase64: "AA==",
+      ciphertextSha256: null,
+      byteLength: 0,
+    }),
   ];
   const response = await h(
     request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })),
@@ -362,17 +294,20 @@ describe("shared channels (MU-C4)", () => {
 
   it("checks a stable readable channel once while listing it for the recipient", async () => {
     const storage = await testStorage();
-    const counted = countChannelKindLookups(storage);
+    const counted = countStorageCalls(storage, "findChannelCreateKind");
     const h = handler(counted.storage);
     await seedOwnerWorkspace(h);
     const shareId = await createChannelShare(h, MEMBER_A);
-    const beforeList = counted.lookupsFor(WORKSPACE, SHARED_WIRE);
+    const lookups = () =>
+      counted.calls.filter(([workspaceId, wireId]) => workspaceId === WORKSPACE && wireId === SHARED_WIRE)
+        .length;
+    const beforeList = lookups();
 
     const received = (await json(await h(request(MEMBER_A, "/sync/shares"))))
       .received as Array<Record<string, unknown>>;
 
     expect(received).toContainEqual(expect.objectContaining({ shareId }));
-    expect(counted.lookupsFor(WORKSPACE, SHARED_WIRE) - beforeList).toBe(1);
+    expect(lookups() - beforeList).toBe(1);
   });
 
   it("refuses invalid chat selectors at grant time", async () => {
@@ -591,7 +526,7 @@ describe("shared channels (MU-C4)", () => {
         jsonBody({
           originId: "origin-member-a",
           ops: [
-            chatOp("chat.reaction.set", {
+            logOp("chat.reaction.set", {
               reactionId: "r-forged",
               messageId: "msg-owner-1",
               threadId: "thread-shared-1",
@@ -663,7 +598,7 @@ describe("shared channels (MU-C4)", () => {
       },
       // A forged re-bind: thread.create claiming the granted channel for the
       // owner's existing private thread (earliest-binding must win).
-      chatOp("chat.thread.create", {
+      logOp("chat.thread.create", {
         threadId: "thread-private-1",
         title: "",
         createdAtMs: 1,
@@ -821,7 +756,7 @@ describe("shared channels (MU-C4)", () => {
         jsonBody({
           originId: "origin-owner",
           ops: [
-            chatOp("chat.message.append", {
+            logOp("chat.message.append", {
               messageId: "msg-extra",
               threadId: "thread-shared-1",
               authorKind: "human",
@@ -898,17 +833,11 @@ describe("shared channels (MU-C4)", () => {
     // The revoke fires during the append validation (on the thread-binding
     // lookup), after the entry check — the pre-append re-check must fail
     // closed and nothing may land.
-    const racing = new Proxy(storage, {
-      get(target, prop, receiver) {
-        if (prop === "findThreadCreateChannelWireId") {
-          return (workspaceId: string, threadId: string) => {
-            const result = target.findThreadCreateChannelWireId(workspaceId, threadId);
-            target.revokeShare("share-0", 6000);
-            return result;
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+    const racing = interceptStorage(storage, {
+      findThreadCreateChannelWireId: (target, workspaceId, threadId) => {
+        const result = target.findThreadCreateChannelWireId(workspaceId, threadId);
+        target.revokeShare("share-0", 6000);
+        return result;
       },
     });
     const h = handler(racing);
@@ -937,16 +866,10 @@ describe("shared channels (MU-C4)", () => {
     // final shareForRecipient re-check, immediately before the transactional
     // insert. Only the in-transaction guard (running under appendLogBatch's
     // BEGIN IMMEDIATE write lock) can still stop the write.
-    const raced = new Proxy(storage, {
-      get(target, prop, receiver) {
-        if (prop === "appendLogBatch") {
-          return (input: Parameters<SyncRelayStorage["appendLogBatch"]>[0]) => {
-            target.revokeShare("share-0", 6000);
-            return target.appendLogBatch(input);
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+    const raced = interceptStorage(storage, {
+      appendLogBatch: (target, input) => {
+        target.revokeShare("share-0", 6000);
+        return target.appendLogBatch(input);
       },
     });
     const h = handler(raced);
