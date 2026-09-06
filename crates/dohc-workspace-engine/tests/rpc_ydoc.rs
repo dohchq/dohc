@@ -2595,15 +2595,47 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     .await;
     assert_eq!(fetched["afterText"], json!("settled text"));
 
-    reconcile_until_settled(&transport, &handle, 9).await;
+    // Keep the watcher's pre-settle manifest so it observes the Changed write.
+    write_file(
+        scratch.path(),
+        "notes/scan-confirmed.md",
+        b"capture barrier",
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut id = 2_000_000;
+    let flushed = loop {
+        id += 1;
+        let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
+        id += 1;
+        let listed = call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.list",
+            json!({ "versionId": "main" }),
+        )
+        .await;
+        if listed["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|file| file["path"] == json!("notes/scan-confirmed.md"))
+            && flushed["settled"] == json!(true)
+        {
+            break flushed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture never settled after observing the post-settle sibling"
+        );
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(flushed["settled"], json!(true));
     let after_moments = moment_count_for_object(&transport, &handle, 10, object_id).await;
     assert_eq!(after_moments, before_moments + 1);
-    // Mutation check: disable the SelfWriteSuppression::record call after
-    // settlement to restore the bug. Identical-content ingest is a deduped
-    // no-op moment-wise, so the count above stays +1 either way — the real
-    // damage is the claimed dedupe transferring ownership: capture's Changed
-    // observation flips the settled head's metadata origin from "ydoc" to the
-    // capture origin. This assertion fails under that mutation.
+    // Without settlement's suppression registration, the live lease defers
+    // the Changed ingest and capture cannot settle at the barrier above.
+    // Successful suppression must also preserve the Y.Doc's ownership.
     let head = call(
         &transport,
         &handle,
