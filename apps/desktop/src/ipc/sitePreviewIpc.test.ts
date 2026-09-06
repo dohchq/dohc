@@ -185,7 +185,7 @@ describe("start site preview IPC", () => {
         siteRoot: "ancestor/stale-child",
         mode: "dev",
       }),
-    ).rejects.toThrow("Not a detected site: ancestor/stale-child");
+    ).rejects.toThrow("Not a detected app: ancestor/stale-child");
 
     expect(test.get).toHaveBeenCalledWith(
       test.workspace,

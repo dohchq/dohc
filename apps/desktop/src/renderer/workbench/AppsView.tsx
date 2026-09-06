@@ -12,16 +12,16 @@ import { PrimaryButton } from "../ui/controls";
 import { useAsyncResponseEffect } from "../useAsyncResponseEffect";
 import { siteTabPath } from "./workbenchState";
 
-type SitesLoadState =
+type AppsLoadState =
   | { status: "loading" }
-  | { status: "ready"; sites: SitePackageInfo[] }
+  | { status: "ready"; apps: SitePackageInfo[] }
   | { status: "error"; message: string };
 
-function useSites(
+function useApps(
   workspaceId: string,
   filesSettledRevision: number,
-): SitesLoadState {
-  const [state, setState] = useState<SitesLoadState>({ status: "loading" });
+): AppsLoadState {
+  const [state, setState] = useState<AppsLoadState>({ status: "loading" });
 
   useAsyncResponseEffect(
     () => {
@@ -30,12 +30,12 @@ function useSites(
     },
     {
       onSuccess: (result) => {
-        setState({ status: "ready", sites: result.sites });
+        setState({ status: "ready", apps: result.sites });
       },
       onError: (error) => {
         setState({
           status: "error",
-          message: error instanceof Error ? error.message : "Could not load sites.",
+          message: error instanceof Error ? error.message : "Could not load apps.",
         });
       },
     },
@@ -45,40 +45,40 @@ function useSites(
   return state;
 }
 
-function siteDiagnosticLabel(site: SitePackageInfo): string | null {
+function appDiagnosticLabel(app: SitePackageInfo): string | null {
   const diagnostic =
-    site.diagnostics.find((entry) => entry.severity === "error") ??
-    site.diagnostics[0];
+    app.diagnostics.find((entry) => entry.severity === "error") ??
+    app.diagnostics[0];
   if (!diagnostic) return null;
   const prefix = diagnostic.severity === "error" ? "Error" : "Warning";
-  const detail = diagnostic.message || "Could not check this site fully.";
+  const detail = diagnostic.message || "Could not check this app fully.";
   return diagnostic.path ? `${prefix}: ${detail} (${diagnostic.path})` : `${prefix}: ${detail}`;
 }
 
-export function SitesView(props: {
+export function AppsView(props: {
   workspaceId: string;
   // Bumped once per settled workspace file listing — including a
   // content-only edit to an existing file (e.g. dohc.json, package.json),
   // not just an add/remove. A structural hash over path/kind/icon alone
   // produces the same value for a content edit, so the effect would never
-  // rerun and the Sites view would keep stale titles, diagnostics,
+  // rerun and the Apps view would keep stale titles, diagnostics,
   // scripts, and preview modes until the user manually refreshed it.
   filesSettledRevision: number;
   onOpenPath: (path: string) => void;
-  onCreateFirstSite: () => Promise<void>;
+  onCreateFirstApp: () => Promise<void>;
   // A received share workspace rejects folder creation in main, including
   // for edit grants. Mounted shares inside a normal workspace do not set it.
   receivedShareWorkspace?: boolean;
 }) {
-  const state = useSites(props.workspaceId, props.filesSettledRevision);
-  const sites = state.status === "ready" ? state.sites : [];
+  const state = useApps(props.workspaceId, props.filesSettledRevision);
+  const apps = state.status === "ready" ? state.apps : [];
   const [creating, setCreating] = useState(false);
 
-  const createFirstSite = async () => {
+  const createFirstApp = async () => {
     if (creating || props.receivedShareWorkspace) return;
     setCreating(true);
     try {
-      await props.onCreateFirstSite();
+      await props.onCreateFirstApp();
     } finally {
       setCreating(false);
     }
@@ -89,54 +89,54 @@ export function SitesView(props: {
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-line px-3">
         <Globe2 size={13} aria-hidden className="text-subtle" />
         <output data-testid="sites-count" className="font-mono text-[11px] text-muted">
-          {sites.length} site{sites.length === 1 ? "" : "s"}
+          {apps.length} app{apps.length === 1 ? "" : "s"}
         </output>
       </div>
 
       {state.status === "loading" ? (
         <div className="flex flex-1 items-center justify-center px-4 text-xs text-subtle">
-          Loading sites…
+          Loading apps…
         </div>
       ) : state.status === "error" ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-4 text-center">
           <AlertTriangle size={18} aria-hidden className="text-warning" />
           <span className="max-w-sm text-xs text-muted">{state.message}</span>
         </div>
-      ) : sites.length === 0 ? (
+      ) : apps.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
           <Globe2 size={18} aria-hidden className="text-subtle" />
-          <span className="text-xs font-medium text-ink">No sites yet</span>
+          <span className="text-xs font-medium text-ink">No apps yet</span>
           <span className="max-w-52 text-xs leading-relaxed text-muted">
             {props.receivedShareWorkspace
-              ? "This shared view cannot create a site. Ask the workspace owner to add one."
+              ? "This shared view cannot create an app. Ask the workspace owner to add one."
               : "Start with one editable HTML file in your workspace."}
           </span>
           {!props.receivedShareWorkspace ? (
             <PrimaryButton
               data-testid="sites-create-first"
               disabled={creating}
-              onClick={() => void createFirstSite()}
+              onClick={() => void createFirstApp()}
               className="mt-1"
             >
-              {creating ? "Creating site…" : "Create site"}
+              {creating ? "Creating app…" : "Create app"}
             </PrimaryButton>
           ) : null}
         </div>
       ) : (
         <ul className="m-0 flex min-h-0 flex-1 list-none flex-col gap-2 overflow-y-auto p-2">
-          {sites.map((site) => {
-            const diagnosticLabel = siteDiagnosticLabel(site);
+          {apps.map((app) => {
+            const diagnosticLabel = appDiagnosticLabel(app);
             return (
-              <li key={site.root}>
+              <li key={app.root}>
                 <button
                   type="button"
                   data-testid="sites-row"
-                  data-root={site.root}
-                  onClick={() => props.onOpenPath(siteTabPath(site.root))}
+                  data-root={app.root}
+                  onClick={() => props.onOpenPath(siteTabPath(app.root))}
                   className="flex w-full items-start gap-3 rounded-lg border border-line bg-panel p-3 text-left transition-colors hover:bg-panel-2"
                 >
                   <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-md border border-line bg-bg text-subtle">
-                    {site.packagePath ? (
+                    {app.packagePath ? (
                       <Box size={14} aria-hidden />
                     ) : (
                       <FileCode2 size={14} aria-hidden />
@@ -145,9 +145,9 @@ export function SitesView(props: {
                   <span className="min-w-0 flex-1">
                     <span className="flex min-w-0 items-center gap-1.5">
                       <span className="truncate text-[13px] font-medium text-ink">
-                        {site.title}
+                        {app.title}
                       </span>
-                      {site.authority.kind === "share" ? (
+                      {app.authority.kind === "share" ? (
                         <span
                           data-testid="sites-shared-label"
                           className="shrink-0 text-[11px] text-muted"
@@ -164,7 +164,7 @@ export function SitesView(props: {
                         >
                           <AlertTriangle size={12} aria-hidden />
                         </span>
-                      ) : site.confidence === "low" ? (
+                      ) : app.confidence === "low" ? (
                         <span
                           data-testid="sites-low-confidence"
                           aria-label="Low confidence detection"
@@ -176,7 +176,7 @@ export function SitesView(props: {
                       ) : null}
                     </span>
                     <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">
-                      {site.root}
+                      {app.root}
                     </span>
                     {diagnosticLabel ? (
                       <span

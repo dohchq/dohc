@@ -260,7 +260,7 @@ import {
   type WorkbenchTab,
 } from "./workbench/workbenchState";
 import { useCommitOnRelease } from "./workbench/useCommitOnRelease";
-import { createFirstSiteFiles } from "./workbench/createFirstSite";
+import { createFirstAppFiles } from "./workbench/createFirstApp";
 
 // Mounted-share paths (shared-with-me/…) are read-only projections of
 // someone else's files. This check is a renderer UX affordance only — main
@@ -715,8 +715,8 @@ function scheduleMarkdownEditorPreload(): () => void {
 const LazyGraphView = lazy(() =>
   import("./workbench/GraphView").then((mod) => ({ default: mod.GraphView })),
 );
-const LazySitesView = lazy(() =>
-  import("./workbench/SitesView").then((mod) => ({ default: mod.SitesView })),
+const LazyAppsView = lazy(() =>
+  import("./workbench/AppsView").then((mod) => ({ default: mod.AppsView })),
 );
 const LazySitePreviewPage = lazy(() =>
   import("./SitePreviewPage").then((mod) => ({ default: mod.SitePreviewPage })),
@@ -2775,7 +2775,7 @@ export function DesktopWorkspaceShell(props: {
   );
 
   const refreshSites = useCallback(() => {
-    // refreshFiles's own settle bumps listingsSettled, which SitesView
+    // refreshFiles's own settle bumps listingsSettled, which AppsView
     // already keys its refetch off of (as filesSettledRevision) — nothing
     // else needs to signal that refresh separately.
     void refreshFiles().catch((error) =>
@@ -4530,9 +4530,9 @@ export function DesktopWorkspaceShell(props: {
       reportShellError("Could not create a drawing.", error);
     }
   }, [files, folders, openFile, refreshFiles, reportShellError, workspaceId]);
-  const createFirstSite = useCallback(async () => {
+  const createFirstApp = useCallback(async () => {
     try {
-      const { root } = await createFirstSiteFiles({
+      const { root } = await createFirstAppFiles({
         workspaceId,
         files,
         folders,
@@ -4542,14 +4542,14 @@ export function DesktopWorkspaceShell(props: {
         await refreshFiles();
       } catch (error) {
         reportShellError(
-          "The site was created, but the workspace could not refresh.",
+          "The app was created, but the workspace could not refresh.",
           error,
         );
         return;
       }
       openVirtualTab(siteTabPath(root));
     } catch (error) {
-      reportShellError("Could not create the site.", error);
+      reportShellError("Could not create the app.", error);
       await refreshFiles().catch(() => undefined);
     }
   }, [
@@ -6253,8 +6253,8 @@ export function DesktopWorkspaceShell(props: {
                 <button
                   type="button"
                   data-testid="sites-refresh"
-                  aria-label="Refresh sites"
-                  title="Refresh sites"
+                  aria-label="Refresh apps"
+                  title="Refresh apps"
                   onClick={refreshSites}
                   className="grid size-6 place-items-center rounded text-subtle hover:bg-line/50 hover:text-ink"
                 >
@@ -6285,12 +6285,12 @@ export function DesktopWorkspaceShell(props: {
                 />
               </Suspense>
             ) : wb.activeView === "sites" ? (
-              <Suspense fallback={<PanelLoading label="sites" />}>
-                <LazySitesView
+              <Suspense fallback={<PanelLoading label="apps" />}>
+                <LazyAppsView
                   workspaceId={workspaceId}
                   filesSettledRevision={listingsSettled}
                   onOpenPath={openPathWithHeading}
-                  onCreateFirstSite={createFirstSite}
+                  onCreateFirstApp={createFirstApp}
                   receivedShareWorkspace={shareView !== null}
                 />
               </Suspense>
@@ -6696,7 +6696,7 @@ export function DesktopWorkspaceShell(props: {
               )
             ) : isSiteTabPath(tabPath) ? (
               groupSiteRoot ? (
-                <Suspense fallback={<PanelLoading label="site" />}>
+                <Suspense fallback={<PanelLoading label="app" />}>
                   <LazySitePreviewPage
                     workspaceId={workspaceId}
                     siteRoot={groupSiteRoot}

@@ -119,10 +119,10 @@ describe("site preview lifecycle", () => {
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
-          throw new Error("Not a detected site: site");
+          throw new Error("Not a detected app: site");
         },
       }),
-    ).rejects.toThrow("Not a detected site: site");
+    ).rejects.toThrow("Not a detected app: site");
 
     expect(current.stop).not.toHaveBeenCalled();
     expect(lifecycle.status("workspace-1", "site").running).toBe(true);

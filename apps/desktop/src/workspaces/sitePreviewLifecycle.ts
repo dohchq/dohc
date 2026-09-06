@@ -29,7 +29,7 @@ function previewKey(workspaceId: string, siteRoot: string): string {
 
 const EXITED_LOG_ENTRY_BUDGET = MAX_LOG_ENTRIES - 1;
 const START_CANCELLED_MESSAGE =
-  "Site preview start was cancelled because the renderer restarted.";
+  "App preview start was cancelled because the renderer restarted.";
 
 type RunningPreview = {
   state: "running";
@@ -257,7 +257,7 @@ export function createSitePreviewLifecycle(input: {
     if (active) {
       if (active.handle !== handle) {
         throw new Error(
-          "A different site preview already owns this workspace and site.",
+          "A different app preview already owns this workspace and app.",
         );
       }
       await stopCurrent(key, handle);
@@ -285,7 +285,7 @@ export function createSitePreviewLifecycle(input: {
       await cleanup();
     } catch (cleanupError) {
       const message =
-        error instanceof Error ? error.message : "Site preview start failed.";
+        error instanceof Error ? error.message : "App preview start failed.";
       throw new AggregateError([error, cleanupError], message);
     }
     throw error;
@@ -400,7 +400,7 @@ export function createSitePreviewLifecycle(input: {
           };
         }
         throw new Error(
-          "The site preview stopped before it opened. Start the preview again.",
+          "The app preview stopped before it opened. Start the preview again.",
         );
       });
     } finally {
@@ -505,7 +505,7 @@ export function createSitePreviewLifecycle(input: {
         .map((result) => result.reason);
       if (errors.length === 1) throw errors[0];
       if (errors.length > 1) {
-        throw new AggregateError(errors, "Some site previews did not stop.");
+        throw new AggregateError(errors, "Some app previews did not stop.");
       }
     });
     stopAllPromise = attempt;
