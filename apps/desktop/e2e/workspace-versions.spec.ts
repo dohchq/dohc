@@ -151,7 +151,7 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
 
-    // The selector shows Main by default for a flagged workspace.
+    // The selector shows Main by default.
     await expectActiveVersion(page, "Main");
 
     // 1. Create "Draft" through the UI — it becomes the working version.

@@ -15,12 +15,14 @@ const TOKEN_HEX_LEN: usize = 64;
 pub enum RootBindingError {
     #[error("workspace root is unavailable")]
     RootUnavailable,
-    #[error("workspace root binding is unreadable")]
+    #[error("workspace root binding is malformed")]
     Malformed,
     #[error("workspace root binding is unreadable")]
     Unreadable,
     #[error("workspace root binding could not be written")]
     Unwritable,
+    #[error("engine database could not record its root binding")]
+    Unstamped,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
 }
@@ -31,9 +33,12 @@ pub fn canonical_root(root: &Path) -> Result<PathBuf, RootBindingError> {
 }
 
 /// The root's binding token, or `None` when the root has never been bound.
+/// An empty marker is a mint that created the file and never wrote it, so
+/// it binds nothing either.
 pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError> {
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
     let token = match std::fs::read(&marker) {
+        Ok(token) if token.is_empty() => return Ok(None),
         Ok(token) => token,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(_) => return Err(RootBindingError::Unreadable),
@@ -48,7 +53,8 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
 
 /// Mint and record a binding for a root that has none. Two opens racing on
 /// one fresh root both reach here; `create_new` lets exactly one write, and
-/// the other binds to the token it finds.
+/// the other binds to the token it finds. A marker whose write failed is
+/// removed again, so the next mint starts clean instead of reading it.
 pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| RootBindingError::Unwritable)?;
@@ -65,13 +71,22 @@ pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return read_root_binding(root)?.ok_or(RootBindingError::Unreadable);
+            return match read_root_binding(root)? {
+                Some(token) => Ok(token),
+                // An empty marker left by an interrupted mint: take it over.
+                None => std::fs::write(&marker, &token)
+                    .map(|()| token)
+                    .map_err(|_| RootBindingError::Unwritable),
+            };
         }
         Err(_) => return Err(RootBindingError::Unwritable),
     };
     use std::io::Write as _;
-    file.write_all(token.as_bytes())
-        .map_err(|_| RootBindingError::Unwritable)?;
+    if file.write_all(token.as_bytes()).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&marker);
+        return Err(RootBindingError::Unwritable);
+    }
     Ok(token)
 }
 
@@ -138,6 +153,22 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_marker_binds_nothing_and_the_next_mint_takes_it_over() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let first = write_new_root_binding(scratch.path()).expect("first mint");
+        let marker = scratch.join(ROOT_BINDING_RELATIVE_PATH);
+        std::fs::write(&marker, b"").expect("truncate");
+        assert_eq!(read_root_binding(scratch.path()).expect("read"), None);
+        let second = write_new_root_binding(scratch.path()).expect("second mint");
+        assert_ne!(second, first);
+        assert_eq!(second.len(), TOKEN_HEX_LEN);
+        assert_eq!(
+            read_root_binding(scratch.path()).expect("read"),
+            Some(second)
+        );
+    }
+
+    #[test]
     fn a_second_mint_binds_to_the_token_already_on_disk() {
         let scratch = ScratchDir::new().expect("scratch");
         let first = write_new_root_binding(scratch.path()).expect("first mint");
@@ -153,7 +184,7 @@ mod tests {
         );
         assert_eq!(
             RootBindingError::Malformed.to_string(),
-            "workspace root binding is unreadable"
+            "workspace root binding is malformed"
         );
         assert_eq!(
             RootBindingError::Unreadable.to_string(),
@@ -162,6 +193,10 @@ mod tests {
         assert_eq!(
             RootBindingError::Unwritable.to_string(),
             "workspace root binding could not be written"
+        );
+        assert_eq!(
+            RootBindingError::Unstamped.to_string(),
+            "engine database could not record its root binding"
         );
         assert_eq!(
             RootBindingError::DatabaseMismatch.to_string(),

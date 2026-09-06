@@ -15,7 +15,7 @@ import {
 // The history timeline shows engine moments (real summaries) and the diff
 // page restores through the engine with a forward moment and an undo.
 
-test("flagged workspace shows engine moments and restores a file end-to-end", async () => {
+test("a workspace shows engine moments and restores a file end-to-end", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 

@@ -102,9 +102,13 @@ impl EngineStore {
     /// The actor calls this before exposing a workspace for writes. The row
     /// lives in the `shadow_clone` table until the baseline schema is
     /// rewritten.
-    pub fn bind_root_token(&mut self, token: &str) -> Result<bool, StorageError> {
+    pub fn bind_root_token(
+        &mut self,
+        token: &str,
+        faults: &dyn FaultInjector,
+    ) -> Result<bool, StorageError> {
         if self.freshly_created {
-            match self.write_with(&crate::NoFaults, |tx| -> Result<(), StorageError> {
+            match self.write_with(faults, |tx| -> Result<(), StorageError> {
                 tx.execute(
                     "INSERT INTO shadow_clone (rowid_guard, token) VALUES (1, ?1) \
                      ON CONFLICT(rowid_guard) DO NOTHING",

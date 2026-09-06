@@ -708,9 +708,6 @@ function makeBaseBridge(
   };
 }
 
-// Engine-flagged variant: the same bridge with the workspace-engine alpha on
-// plus the minimal engine/chats IPC surface the flagged shell touches on
-// mount (empty history, no try-session, Main only, no chats yet).
 // Every workspace has the engine, so every bridge answers the engine
 // surfaces: collections, history, versions, chats. Typed to the contracts so
 // a test that drives real rows can swap an implementation in.
@@ -3828,10 +3825,8 @@ describe("application menu command routing", () => {
     renderShell(bridge);
     await screen.findByTestId("chats-panel");
     // Flush the commit's passive effects before emitting: the menu-command
-    // listener re-subscribes with a closure that sees the chats surface in
-    // an effect, and under load the panel's DOM node appears before that
-    // effect runs — the emit would land on a listener still holding
-    // chatsSurfaceExists=false and no-op.
+    // listener subscribes in an effect, and under load the panel's DOM node
+    // appears before that effect runs.
     await act(async () => {});
 
     act(() => bridge.emitMenuCommand("toggle-chats"));

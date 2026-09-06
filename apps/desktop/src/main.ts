@@ -10825,7 +10825,7 @@ function registerIpcHandlers(
     tryInVersionSessions.dismiss(input.workspaceId);
   });
 
-  // Engine history + linked Chats (PR 0M-5). Flagged workspaces read their
+  // Engine history + linked Chats (PR 0M-5). Workspaces read their
   // timeline from engine moments; every handler resolves the workspace via
   // requireWorkspace and rejects when the engine capture is not attached.
   // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,

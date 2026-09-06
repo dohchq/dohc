@@ -16,7 +16,7 @@ import {
 } from "./helpers/workspace";
 
 // WS-D — INDEXED ENGINE SEARCH MOUNTED IN THE DESKTOP (plan PR 11/17 scope):
-// a flagged workspace's search panel routes through the engine's FTS index
+// a workspace's search panel routes through the engine's FTS index
 // and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
 // a distinguishable row and opens the Chats panel on its thread. The `.env`
 // family (including `.env.local`) is never findable and never present in the
@@ -76,7 +76,7 @@ function dumpSearchIndexTables(rootPath: string): string {
   }
 }
 
-test("flagged: search finds file content and a chat message; .env.local content never surfaces", async () => {
+test("search finds file content and a chat message; .env.local content never surfaces", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "engine-search-e2e";
@@ -161,7 +161,7 @@ test("flagged: search finds file content and a chat message; .env.local content 
   }
 });
 
-test("flagged: a newly saved editor change is searchable before relaunch", async () => {
+test("a newly saved editor change is searchable before relaunch", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "engine-live-search-e2e";

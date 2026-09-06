@@ -18,8 +18,8 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-G2-C-2 editor-on-engine round trip. A rich markdown file on an engine-
-// flagged workspace edits through the engine Y.Doc provider (recordUpdate +
+// WS-G2-C-2 editor-on-engine round trip. A rich markdown file edits
+// through the engine Y.Doc provider (recordUpdate +
 // debounced settle). The load-bearing proof: a
 // live edit journals only as ydoc.update — not a duplicate moment.append that
 // would collide (P0D) with the ydoc.update stream on a shared workspace — and

@@ -8,7 +8,7 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_storage::EngineStore;
+use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::{
     CAPTURE_MOMENT_RECORDED_EVENT, CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES,
@@ -153,7 +153,11 @@ async fn workspace_open_without_startup_maintenance_does_not_capture_disk() {
     let db_path = scratch.path().join(".dohc/engine/engine.db");
     std::fs::create_dir_all(db_path.parent().expect("engine parent")).expect("engine directory");
     let mut store = EngineStore::open(&db_path, 1).expect("fixture store");
-    assert!(store.bind_root_token(TOKEN).expect("bind root token"));
+    assert!(
+        store
+            .bind_root_token(TOKEN, &NoFaults)
+            .expect("bind root token")
+    );
     drop(store);
     write_file(scratch.path(), "must-stay-on-disk.md", b"typescript-owned");
 

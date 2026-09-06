@@ -27,7 +27,6 @@ export interface ExplorerMenuScope {
   hasMountRecord: boolean;
   // Sharing onward is offered only from a synced workspace this account owns.
   canShare: boolean;
-  // Collection creation requires the workspace engine.
   // The share view this workspace IS, or null for an ordinary workspace.
   shareView: ShareViewWriteScope | null;
 }

@@ -165,6 +165,9 @@ describe("engine restore", () => {
     // unsaved edit, which the restore flushed before it read the file.
     expect(moments[0].metadata.summary).toBe("Restored doc.md");
     expect(moments[0].metadata.origin).toBe("restore");
+    // The daemon does not group this capture with the restore. A shared
+    // correlationId and a "Saved latest edits" summary were the deleted JS
+    // path's own minting.
     expect(moments[1].metadata.origin).toBe("local-file");
     const saved = await engine.readMoment(moments[1].id);
     const savedPayload = saved?.protected === false ? saved.moment.payload : undefined;

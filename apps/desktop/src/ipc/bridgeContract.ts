@@ -1344,7 +1344,7 @@ export type RestoreEngineMomentFileResult = z.infer<
   typeof RestoreEngineMomentFileResult
 >;
 
-// Linked Chats (PR 0M-5, workspace-engine alpha): per-file Chats stored in
+// Linked Chats (PR 0M-5): per-file Chats stored in
 // the engine, linked to the file's stable engine object id so the link
 // survives renames. The renderer never supplies identity — main derives the
 // author for every sent message.
@@ -2228,7 +2228,7 @@ export const PresenceResult = z.discriminatedUnion("ok", [
 ]);
 export type PresenceResult = z.infer<typeof PresenceResult>;
 
-// Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
+// Named versions (PR 0M-4). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
 // attached.
@@ -2437,7 +2437,7 @@ export type ResolveWorkspaceVersionConflictResult = z.infer<
 
 // "Try it in a version" (PR 0N-2): one gesture — fork a version named after
 // the task, switch into it, start a dohc-tracked agent run. Gated in main on
-// the workspace-engine alpha capture like every version operation.
+// the workspace's engine capture like every version operation.
 const TRY_IN_VERSION_TASK_MAX = 2000;
 
 // How a driver is named wherever a payload or a result carries one. Every

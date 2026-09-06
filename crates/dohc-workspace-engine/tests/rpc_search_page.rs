@@ -96,7 +96,11 @@ fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatch
     let db = scratch.engine_db_path().expect("engine db path");
     let faults = NoFaults;
     let mut store = EngineStore::open(&db, 1).expect("seed store");
-    assert!(store.bind_root_token(TOKEN).expect("bind root token"));
+    assert!(
+        store
+            .bind_root_token(TOKEN, &NoFaults)
+            .expect("bind root token")
+    );
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &faults)
         .expect("ensure main version");

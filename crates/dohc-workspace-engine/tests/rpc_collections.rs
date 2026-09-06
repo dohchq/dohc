@@ -56,7 +56,7 @@ fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
 fn seed_collection_state(scratch: &ScratchDir) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -79,7 +79,7 @@ fn seed_collection_state(scratch: &ScratchDir) {
 fn seed_schema(scratch: &ScratchDir, schema: &str) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -623,7 +623,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -868,7 +868,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
         );
         let db = scratch.engine_db_path().expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
-        store.bind_root_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
         store
             .write_with(&NoFaults, |tx| {
@@ -1298,7 +1298,7 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1397,7 +1397,7 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1547,7 +1547,7 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1786,7 +1786,7 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -1930,7 +1930,7 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -2099,7 +2099,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2267,7 +2267,7 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -2426,7 +2426,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
     );
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
     store
         .write_with(&NoFaults, |tx| {
@@ -3057,7 +3057,7 @@ async fn collections_list_pages_with_the_exclusive_cursor() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -3161,7 +3161,7 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");
@@ -3299,7 +3299,7 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, "main", 1, &NoFaults)
         .expect("main version");

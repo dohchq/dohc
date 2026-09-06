@@ -97,7 +97,7 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
 fn seed_claims(scratch: &ScratchDir) {
     let db = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             subscribe_automation_in_tx(tx, WORKSPACE_ID, AUTOMATION, "tasks", 10)?;

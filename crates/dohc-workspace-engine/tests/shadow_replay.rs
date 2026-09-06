@@ -521,11 +521,11 @@ fn engine_files(scratch: &ScratchDir) -> Vec<String> {
     names
 }
 
-/// A fresh root whose binding cannot be read refuses with the binding's
+/// A fresh root whose binding is malformed refuses with the binding's
 /// cause, both times, and leaves no engine.db behind to turn the second
 /// open into a mismatch.
 #[tokio::test]
-async fn a_fresh_root_with_an_unreadable_binding_refuses_twice_and_keeps_no_store() {
+async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store() {
     let scratch = ScratchDir::new().expect("scratch");
     std::fs::create_dir_all(scratch.join(".dohc/engine")).expect("engine dir");
     std::fs::write(scratch.join(".dohc/engine/ROOT_BINDING"), "0123456789").expect("planted");
@@ -534,7 +534,7 @@ async fn a_fresh_root_with_an_unreadable_binding_refuses_twice_and_keeps_no_stor
     for id in [1, 2] {
         let error = open_error(&transport, &scratch, id, false).await;
         assert_eq!(error.code, ErrorCode::InvalidParams);
-        assert_eq!(error.message, "workspace root binding is unreadable");
+        assert_eq!(error.message, "workspace root binding is malformed");
         assert_eq!(engine_files(&scratch), vec!["ROOT_BINDING".to_owned()]);
     }
 }

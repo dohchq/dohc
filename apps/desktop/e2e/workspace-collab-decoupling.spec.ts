@@ -14,8 +14,8 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// The desktop editor does not need a collaboration server. An engine-flagged
-// personal workspace edits a rich doc through the engine Y.Doc provider
+// The desktop editor does not need a collaboration server. A personal
+// workspace edits a rich doc through the engine Y.Doc provider
 // (recordUpdate + debounced settle)
 // with no relay — the editor loads, editing lands on the .md and in engine.db
 // as ydoc.update ops, with zero collab-server involvement: no WebSocket is ever
@@ -24,7 +24,7 @@ import {
 // workspace-engine-editor.spec via ./helpers/engineDb — one source of truth for
 // the load-bearing "no double-journal" scaffolding.
 
-test("engine-flagged local workspace edits a rich doc through the engine provider without a collaboration server", async () => {
+test("a local workspace edits a rich doc through the engine provider without a collaboration server", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const sentinel = "Typed with no collab server anywhere.";
@@ -109,7 +109,7 @@ test("engine-flagged local workspace edits a rich doc through the engine provide
   }
 });
 
-test("collab-style materializations (bridge text writes) on an engine-flagged workspace produce engine moments", async () => {
+test("collab-style materializations (bridge text writes) produce engine moments", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 

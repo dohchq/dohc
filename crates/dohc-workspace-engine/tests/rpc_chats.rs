@@ -834,7 +834,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -939,7 +939,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1070,7 +1070,7 @@ async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
         .write_with(&NoFaults, |tx| {
             tx.execute(

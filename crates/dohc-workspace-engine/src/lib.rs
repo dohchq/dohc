@@ -43,10 +43,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RuntimeError, SearchError, SearchPageDisposition, SearchResultKey, SearchSurface,
-    WorkspaceSupervisor,
+    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, FaultInjector,
+    LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
+    RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition, SearchResultKey,
+    SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -1080,6 +1080,9 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
+    /// Faults for the root-binding stamp a fresh open writes.
+    #[cfg(test)]
+    bind_root_faults: Option<Arc<dyn FaultInjector>>,
     /// PER-EngineService by design. Production runs exactly one EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -1290,6 +1293,8 @@ impl EngineService {
             capture_apply_probe: None,
             #[cfg(test)]
             open_install_probe: None,
+            #[cfg(test)]
+            bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -2189,6 +2194,13 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
+        #[cfg(test)]
+        let bind_root_faults: Arc<dyn FaultInjector> = self
+            .bind_root_faults
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoFaults));
+        #[cfg(not(test))]
+        let bind_root_faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
         let binding_root = root.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
@@ -2220,10 +2232,12 @@ impl EngineService {
             // was copied or moved here, and adopting it would let one
             // database serve two roots.
             //
-            // A fresh store whose binding cannot be read or written is
-            // deleted again before the refusal returns. Leaving it would
-            // make the next open find an existing engine.db under an unbound
-            // root and refuse it as a mismatch, for good.
+            // A fresh store whose binding cannot be read, written, or
+            // stamped is deleted again before the refusal returns. Leaving it
+            // would make the next open find an existing engine.db under a
+            // bound root it never recorded and refuse it as a mismatch, for
+            // good. So the stamp's storage failure lands in the same `bound`
+            // error as the marker's, not in the open's own error.
             let opened = opened.and_then(|open| {
                 if !open.created_actor {
                     return Ok((open, Ok(())));
@@ -2237,15 +2251,16 @@ impl EngineService {
                     Err(error) => Err(error),
                 };
                 let bound = match binding {
-                    Ok(token) => {
-                        let matched = tokio::runtime::Handle::current()
-                            .block_on(open.actor.bind_root(token))?;
-                        if matched {
-                            Ok(())
-                        } else {
-                            Err(root_binding::RootBindingError::DatabaseMismatch)
+                    Ok(token) => match tokio::runtime::Handle::current()
+                        .block_on(open.actor.bind_root(token, bind_root_faults))
+                    {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                        Err(error) => {
+                            eprintln!("engine: root binding stamp failed: {error}");
+                            Err(root_binding::RootBindingError::Unstamped)
                         }
-                    }
+                    },
                     Err(error) => Err(error),
                 };
                 Ok((open, bound))
@@ -2297,10 +2312,20 @@ impl EngineService {
                     let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
                 }
                 open_guard.disarm();
+                // A delete that fails leaves the store the next open refuses
+                // as a mismatch. The refusal stands; the path says why.
                 for suffix in ["", "-wal", "-shm"] {
                     let mut path = db_path.clone().into_os_string();
                     path.push(suffix);
-                    let _ = std::fs::remove_file(path);
+                    let path = std::path::PathBuf::from(path);
+                    if let Err(error) = std::fs::remove_file(&path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "engine: could not delete the orphaned store file {}: {error}",
+                            path.display()
+                        );
+                    }
                 }
             }
             return Err(map_root_binding(error));
@@ -13648,9 +13673,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
-    use dohc_engine_testkit::{GateFaults, ScratchDir};
+    use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
     use std::time::Duration;
 
     const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -14545,7 +14570,7 @@ mod tests {
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         store
-            .bind_root_token(BINDING_TOKEN)
+            .bind_root_token(BINDING_TOKEN, &NoFaults)
             .expect("bind root token");
         drop(store);
         for (capture_enabled, read_only, seed_claim) in [
@@ -14623,7 +14648,7 @@ mod tests {
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_root_token(BINDING_TOKEN)
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
                 .expect("bind root token")
         );
         drop(store);
@@ -14680,7 +14705,7 @@ mod tests {
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_root_token(BINDING_TOKEN)
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
                 .expect("bind root token")
         );
         drop(store);
@@ -15636,6 +15661,51 @@ mod tests {
         drop(held);
     }
 
+    /// A fresh store whose root-binding stamp fails is deleted with the
+    /// refusal, so the next open mints again instead of finding an engine.db
+    /// that never recorded the marker and refusing it as a mismatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fresh_store_whose_stamp_fails_is_deleted_and_the_next_open_binds() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        // One-shot: the first stamp's transaction rolls back as a
+        // `PersistFailed`; the second open's stamp commits.
+        service.bind_root_faults = Some(ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist));
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "stamp-fails",
+            "captureMode": "none"
+        });
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect_err("a stamp that fails refuses the open");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            refused.message,
+            "engine database could not record its root binding"
+        );
+        assert!(!db_path.exists(), "the unstamped store is deleted");
+        assert!(
+            root_binding::read_root_binding(scratch.path())
+                .expect("read")
+                .is_some(),
+            "the marker the open minted stays"
+        );
+
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("the next open binds the fresh store to the marker");
+        let _handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        assert!(db_path.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
         let scratch = ScratchDir::new().expect("scratch");
@@ -15644,7 +15714,7 @@ mod tests {
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_root_token(BINDING_TOKEN)
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
                 .expect("bind root token")
         );
         drop(store);

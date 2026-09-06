@@ -10,14 +10,14 @@ import {
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// WS-E — CHATS EXPANSION (plan PR 12/13): a flagged workspace gets a Chats
+// WS-E — CHATS EXPANSION (plan PR 12/13): a workspace gets a Chats
 // view with channels. The default #general channel exists on first use, the
 // composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
 // agent messages create unread badges that mark-read clears, and engine
 // search finds channel messages.
 
-test("flagged: general channel, composer-first chats, relaunch persistence, unread, search", async () => {
+test("general channel, composer-first chats, relaunch persistence, unread, search", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
   const workspaceId = "chats-e2e";
@@ -169,7 +169,7 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
 
 // Slack-style navigation: the panel remains an overview while selections open
 // and switch a first-class Chats editor tab.
-test("flagged: the persistent chats navigator opens conversations in the editor", async () => {
+test("the persistent chats navigator opens conversations in the editor", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 

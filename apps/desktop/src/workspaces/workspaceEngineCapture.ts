@@ -603,7 +603,7 @@ export interface WorkspaceEngineCaptureOptions {
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
-  // reconciliation passes). With the engine as a flagged workspace's sole
+  // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
   // silently — this hook lets the product raise a capture-failure notice on
   // ok:false and clear it when a later pass succeeds. Deliberately narrower

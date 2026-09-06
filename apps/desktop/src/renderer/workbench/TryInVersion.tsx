@@ -9,8 +9,8 @@ import { VersionMergeDialog, ipcErrorMessage } from "./WorkspaceVersions";
 
 // "Try it in a version" surfaces (PR 0N-2): the honest during-run banner and
 // the review card that appears when the run ends. Product vocabulary only.
-// Both mount only for flagged workspaces (the shell gates on versionsEnabled)
-// and every async response is liveness-token gated before it touches state.
+// Both mount only when the shell's capture gate allows versions, and every
+// async response is liveness-token gated before it touches state.
 
 // While the agent works: one calm line, no new streaming surface — the
 // History rail already shows the agent's edits as they land, and a run

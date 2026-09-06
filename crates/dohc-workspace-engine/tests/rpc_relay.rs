@@ -1291,7 +1291,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     let db_path = scratch.engine_db_path().expect("engine db path");
     let mut store = EngineStore::open(&db_path, 1_000).expect("open store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
         .expect("main version");

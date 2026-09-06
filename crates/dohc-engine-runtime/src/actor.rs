@@ -1293,6 +1293,7 @@ enum CaptureIndexing {
 enum Command {
     BindRoot {
         token: String,
+        faults: Arc<dyn FaultInjector>,
         reply: oneshot::Sender<Result<bool, StorageError>>,
     },
     VersionedTextWrite {
@@ -2945,10 +2946,18 @@ impl ActorHandle {
     /// Stamp a fresh database with its root's binding token, or verify an
     /// existing binding, on the actor-owned connection before the workspace
     /// can accept writes.
-    pub async fn bind_root(&self, token: String) -> Result<bool, RuntimeError> {
+    pub async fn bind_root(
+        &self,
+        token: String,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::BindRoot { token, reply })
+            .send(Command::BindRoot {
+                token,
+                faults,
+                reply,
+            })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx
@@ -7911,8 +7920,12 @@ fn worker_main(
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            Command::BindRoot { token, reply } => {
-                let _ = reply.send(store.bind_root_token(&token));
+            Command::BindRoot {
+                token,
+                faults,
+                reply,
+            } => {
+                let _ = reply.send(store.bind_root_token(&token, faults.as_ref()));
             }
             Command::VersionedTextWrite {
                 input,

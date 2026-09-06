@@ -4475,7 +4475,7 @@ async fn rollback_rejects_sync_record_only_moment() {
     std::fs::create_dir_all(db_path.parent().expect("engine dir")).expect("engine dir");
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_root_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -5213,7 +5213,7 @@ fn seed_versions(root: &Path, workspace_id: &str) {
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
     // The seed creates the engine db, so the binding token must bind here:
     // a pre-existing unbound db is exactly what workspace.open refuses.
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned
@@ -5747,7 +5747,7 @@ async fn compare_files_pages_via_db_keyset_not_full_vector() {
     let db = scratch.path().join(".dohc/engine/engine.db");
     let expected = {
         let mut store = EngineStore::open(&db, 1).expect("store");
-        store.bind_root_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -6019,7 +6019,7 @@ async fn over_cap_text_read_blob_hydrates_a_workspace_referenced_store_write() {
     let other_sha = dohc_engine_storage::hex_sha256(other_text.as_bytes());
     {
         let mut store = EngineStore::open(&db_path, 1).expect("store");
-        store.bind_root_token(TOKEN).expect("bind token");
+        store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         let faults = NoFaults;
         let mut versioned = VersionedTextStore::new(&mut store);
         versioned
@@ -6928,7 +6928,7 @@ fn seed_binary_before_fork(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    store.bind_root_token(TOKEN).expect("bind token");
+    store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);
     versioned
