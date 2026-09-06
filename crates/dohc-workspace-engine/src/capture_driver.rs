@@ -56,10 +56,31 @@ pub const EARLY_IMPORT_MIN_ADDED_FILES: usize = 1_000;
 /// that has already prepared a reconcile plan. Production builds do not
 /// allocate probe state. The optional probe has one type in every build.
 #[derive(Clone)]
-#[cfg_attr(feature = "harness", derive(Default))]
+#[cfg_attr(any(test, feature = "harness"), derive(Default))]
 pub struct CaptureApplyProbe {
     #[cfg(feature = "harness")]
     inner: Arc<CaptureApplyProbeInner>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_armed: Arc<std::sync::atomic::AtomicBool>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_reached: Arc<tokio::sync::Notify>,
+    #[cfg(any(test, feature = "harness"))]
+    open_install_release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(any(test, feature = "harness"))]
+impl CaptureApplyProbe {
+    pub fn pause_next_open_install(&self) {
+        self.open_install_armed.store(true, Ordering::Release);
+    }
+
+    pub async fn wait_until_open_install_paused(&self) {
+        self.open_install_reached.notified().await;
+    }
+
+    pub fn release_open_install(&self) {
+        self.open_install_release.notify_one();
+    }
 }
 
 #[cfg(feature = "harness")]
@@ -254,6 +275,15 @@ impl CaptureApplyProbe {
 }
 
 impl CaptureApplyProbe {
+    pub(crate) fn pause_open_install_if_armed(&self) {
+        #[cfg(any(test, feature = "harness"))]
+        if self.open_install_armed.swap(false, Ordering::AcqRel) {
+            self.open_install_reached.notify_one();
+            // The open guard must stay owned here after caller cancellation.
+            tokio::runtime::Handle::current().block_on(self.open_install_release.notified());
+        }
+    }
+
     async fn pause_if_armed(&self) {
         #[cfg(feature = "harness")]
         {

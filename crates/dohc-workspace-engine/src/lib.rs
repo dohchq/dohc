@@ -66,12 +66,6 @@ pub struct EngineService {
     events: EngineEvents,
     capture_apply_probe: Option<capture_driver::CaptureApplyProbe>,
     #[cfg(test)]
-    open_install_probe: Option<(
-        Arc<tokio::sync::Notify>,
-        Arc<tokio::sync::Notify>,
-        Arc<std::sync::atomic::AtomicBool>,
-    )>,
-    #[cfg(test)]
     owner_outbox_append_probe: Option<(
         Arc<tokio::sync::Notify>,
         Arc<tokio::sync::Notify>,
@@ -168,8 +162,6 @@ impl EngineService {
             },
             events: EngineEvents::default(),
             capture_apply_probe: None,
-            #[cfg(test)]
-            open_install_probe: None,
             #[cfg(test)]
             owner_outbox_append_probe: None,
             #[cfg(test)]
