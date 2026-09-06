@@ -2623,7 +2623,7 @@ export function createSyncRelayHandler({
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedGrant(
               "link",
-              
+
           route.shareId,
           route.grantId,
           actor,
@@ -2642,7 +2642,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "link",
-              
+
               share.shareId,
               grant.grantId,
               actor,
@@ -2679,7 +2679,7 @@ export function createSyncRelayHandler({
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share, grant } = requireOwnedGrant(
               "link",
-              
+
           route.shareId,
           route.grantId,
           actor,
@@ -2704,7 +2704,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "link",
-              
+
               share.shareId,
               grant.grantId,
               actor,
@@ -2746,7 +2746,7 @@ export function createSyncRelayHandler({
         const workspaceId = parseWorkspaceId(input.workspaceId);
         const { share } = requireOwnedGrant(
               "user",
-              
+
           route.shareId,
           route.grantId,
           actor,
@@ -2762,7 +2762,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "user",
-              
+
               route.shareId,
               route.grantId,
               actor,
@@ -2787,7 +2787,7 @@ export function createSyncRelayHandler({
         }
         const { share } = requireOwnedGrant(
               "user",
-              
+
           route.shareId,
           route.grantId,
           actor,
@@ -2800,7 +2800,7 @@ export function createSyncRelayHandler({
           guard: () => {
             const current = requireOwnedGrant(
               "user",
-              
+
               route.shareId,
               route.grantId,
               actor,
