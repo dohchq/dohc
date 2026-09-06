@@ -82,7 +82,7 @@ async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
   return upload(h, OWNER, WORKSPACE, content);
 }
 
-type MomentOptions = Omit<Parameters<typeof buildMoment>[2], "originSeq" | "recordedAtMs">;
+type MomentOptions = Omit<NonNullable<Parameters<typeof buildMoment>[2]>, "originSeq" | "recordedAtMs">;
 
 function moment(
   originSeq: number,

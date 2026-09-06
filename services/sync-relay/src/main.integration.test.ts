@@ -92,6 +92,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
+  bootstrap: { rejectPoolEnd?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = new URL("./main.ts", import.meta.url);
   const childArguments = [
@@ -115,7 +116,16 @@ async function spawnRunningRelay(
         process.stdout.write(marker);
         process.stderr.write(marker);
       }
-    }); await import(${JSON.stringify(mainUrl.href)});`,
+    });
+    if (${bootstrap.rejectPoolEnd === true}) {
+      const { Pool } = await import("pg");
+      const { writeSync } = await import("node:fs");
+      Pool.prototype.end = async function () {
+        writeSync(2, "SYNC_RELAY_TEST_POOL_END_REJECTED\\n");
+        throw new Error("injected pool shutdown failure");
+      };
+    }
+    await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
     cwd: packageRoot(),
@@ -392,6 +402,34 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
       kind: "settled",
       value: { code: 0, signal: null },
     });
+  });
+
+  it("exits with code 0 on SIGTERM when the Postgres pool rejects shutdown", async () => {
+    const relayRoot = await tempRoot("relay-pool-shutdown-rejection");
+    const relay = await spawnRunningRelay(
+      join(relayRoot, "relay.sqlite"),
+      {
+        SYNC_RELAY_TEST_AUTH: "0",
+        SYNC_RELAY_BIND: "127.0.0.1",
+        BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
+        POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
+      },
+      { rejectPoolEnd: true },
+    );
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => relay.child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+
+    sendTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(closed, 1_000),
+      `sync relay did not exit cleanly after pool shutdown rejection\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
+    });
+    expect(relay.stderr()).toContain("SYNC_RELAY_TEST_POOL_END_REJECTED\n");
   });
 
   // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first

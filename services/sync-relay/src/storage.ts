@@ -458,7 +458,6 @@ export interface SyncRelayStorage {
     expectedSha256: string | null;
   }): { sha256: string };
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-
   appendLogBatch(input: {
     workspaceId: string;
     originId: string;
@@ -544,7 +543,6 @@ export interface SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult;
-
   promoteShareGrant(input: {
     shareId: string;
     grantId: string;
@@ -614,7 +612,6 @@ export interface SyncRelayStorage {
     actorUserId: string;
     pausedAtMs: number | null;
   }): boolean;
-
   deleteShareDiscussionMessage(input: {
     shareId: string;
     workspaceId: string;
