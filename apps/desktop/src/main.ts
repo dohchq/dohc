@@ -1,3 +1,4 @@
+import { createAppLifecycle } from "./appLifecycle";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
 import {
   databaseOpLogPath,
@@ -820,11 +821,9 @@ import { ensureAgentsChatBlock } from "./cli/agentsChatBlock";
 import { createWorkspaceChatLifecycle } from "./workspaces/workspaceChatLifecycle";
 import { makeProcessDiagnosticsNonFatal } from "./process/stdioResilience";
 import {
-  classifyShareHandoffArguments,
   createShareHandoffIntentSlot,
   focusShareHandoffWindow,
   focusShareHandoffWindowWhenReady,
-  receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
 import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
@@ -4888,9 +4887,6 @@ async function stopAllPluginWorkspaces(): Promise<void> {
 // resolves the registry workspace and derives identity exactly like renderer
 // chat sends. The client can claim only the behavior-bearing human/agent kind;
 // it never supplies the user id or display identity.
-let cliServer: CliServerHandle | null = null;
-let cliServerStartup: Promise<CliServerHandle | null> | null = null;
-
 async function openCliWorkspace(
   requested: CliRegistryWorkspace,
 ): Promise<CliWorkspaceContext> {
@@ -5337,7 +5333,7 @@ function refreshSystemThemeDesktopIcons(): void {
 async function refreshDispatchTray(): Promise<boolean> {
   const { settings } = await readCachedUserSettingsFile(stateDir());
   const enabled = configuredRunnerEnabled(settings);
-  if (enabled && !quitting) {
+  if (enabled && !appLifecycle.isQuitting()) {
     ensureDispatchTray();
   } else if (dispatchTray) {
     dispatchTray.destroy();
@@ -5346,10 +5342,6 @@ async function refreshDispatchTray(): Promise<boolean> {
   return enabled;
 }
 
-// Quit must wait for the final settle-window flush and its history record to
-// be durably written — otherwise a save right before quit is silently lost.
-// Bounded so a wedged disk can't make the app unquittable.
-let quitting = false;
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
 let rustEngineWorkspaceSessions: EngineWorkspaceSessions | null = null;
 let rustEngineRelayClient: EngineRelayClient | null = null;
@@ -6185,67 +6177,157 @@ async function closeAllRelayTransportWorkspaces(): Promise<void> {
   }
 }
 
-app.on("will-quit", (event) => {
-  if (quitting) return;
-  quitting = true;
-  event.preventDefault();
-  // First, synchronously: a document open mid transport-retry holds
-  // the capture chain, and workspaceAuthorityStop below queues behind it. This resolves
-  // its armed backoff and makes the next failure final, so the chain frees in
-  // at most one attempt instead of spending the whole 3 s budget. Nothing is
-  // abandoned that a user could see: an opening document is read-only,
-  // so no edit exists yet on the path being given up.
-  //
-  // That claim only holds because the sessions scope this to a BOUNDED region
-  // — the document open. An already-open document retrying a write the engine
-  // accepted keeps retrying, without backoff, for whatever the quit timer
-  // leaves it: its update exists only in the canonical in-memory Y.Doc, so
-  // abandoning that retry would discard the edit.
-  rustEngineWorkspaceSessions?.beginShutdown();
-  const searchStop = workspaceSearchOwner.dispose().catch(() => undefined);
-  // Here, not at before-quit: every window has closed, so every beforeunload
-  // has had its chance to veto and this quit is now certain (#579 review,
-  // r19). Fire-and-forget — skip locks and do not await async stops so
-  // termination stays quick; child.unref() and the OS finish the cleanup.
-  const pluginStop = stopAllPluginWorkspaces();
-  const agentSessionStop = (
-    cachedAgentSessions?.stopAll() ?? Promise.resolve()
-  ).catch(() => undefined);
-  const chatDispatchStop = chatDispatchService.stop().catch(() => undefined);
-  const cliServerStop = chatDispatchStop.then(() =>
-    (cliServerStartup ?? Promise.resolve(cliServer))
-    .then((server) => server?.close())
-    .catch(() => undefined),
-  );
-  // Close live engine Y.Doc sessions (settle + release reservations) before the
-  // engine stores stop — a session must never settle onto a closed store.
-  const engineYDocStop = closeAllEngineYDocSessions();
-  const agentIntegrationStop = agentSessionStop
-    .then(() => agentIntegration.stopAll())
-    .catch(() => undefined);
-  // The physical authority owns the capture and every per-workspace surface.
-  // Stop every producer first; chaining an already-started close promise here
-  // would not impose this order.
-  const workspaceAuthorityStop = Promise.allSettled([
-    engineYDocStop,
-    agentSessionStop,
-    chatDispatchStop,
-    cliServerStop,
-    searchStop,
-    agentIntegrationStop,
-    pluginStop,
-  ])
-    .then(() => workspaceAuthorities.close())
-    .catch(() => undefined);
-  const workspaceShutdown = workspaceAuthorityStop
-    .then(async () => await workspaceDatabaseWorker.dispose())
-    .then(async () => await closeAllRelayTransportWorkspaces())
-    .catch(() => undefined)
-    .then(async () => await rustEngineDaemon?.stop());
-  void Promise.race([
-    workspaceShutdown,
-    new Promise<void>((resolve) => setTimeout(resolve, WILL_QUIT_BUDGET_MS)),
-  ]).finally(() => app.exit(0));
+const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, DesktopUserSettingsResult>({
+  app,
+  runtime: process,
+  handoff: {
+    slot: shareHandoffIntentSlot,
+    pendingCodeChanged: () => shareHandoffRedemption.pendingCodeChanged(),
+  },
+  windows: {
+    create: () => trackWorkspaceWindow(
+      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
+    ),
+    whenLoaded: (window) => new Promise<void>((resolve) => {
+      window.webContents.once("did-finish-load", resolve);
+    }),
+    current: () => targetWindow(undefined),
+    hasWorkspace: () => liveWorkspaceWindow() !== undefined,
+    hasAny: () => BrowserWindow.getAllWindows().length !== 0,
+    showOrCreate: showOrCreateMainWindow,
+    activate: sendWorkspaceActivated,
+  },
+  workspaces: {
+    openPath: openWorkspacePath,
+    refreshNativeSurfaces: refreshNativeWorkspaceSurfaces,
+  },
+  bootstrap: {
+    markReady: () => {
+      launchMarks.appReady();
+      desktopMarks.markOnce("app-ready");
+    },
+    startEngine: () => {
+      engineDaemonStartup = startRustEngineDaemon();
+      return engineDaemonStartup;
+    },
+    loadSettings: () => readCachedUserSettingsFile(stateDir()),
+    applySettings: ({ settings }) => {
+      cachedPreferredName = settings.profile.preferredName;
+      knownZoomLevel ??= settings.appearance.zoomLevel;
+    },
+    prepareCli: () => {
+      if (!app.isPackaged || process.platform !== "linux" || !isAppImageBoot()) return;
+      return refreshLinuxStableCliBin({
+        resourcesCliBinDir: resolveDohcCliBinDirectory({
+          appRoot: app.getAppPath(),
+          isPackaged: app.isPackaged,
+          resourcesPath: process.resourcesPath,
+        }),
+        targetDir: join(stateDir(), "cli-bin"),
+        onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
+      }).then((directory) => { linuxStableCliBinDir = directory; });
+    },
+    registerHandlers: () => {
+      nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
+      registerIpcHandlers();
+      // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
+      // Registered before the window so the first load can already fetch.
+      protocol.handle(DOHC_FILE_SCHEME, async (request) => {
+        try {
+          const url = new URL(request.url);
+          const workspace = findWorkspace(url.hostname);
+          if (!workspace) return new Response("Unknown workspace", { status: 404 });
+          const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
+          const { bytes, mediaType } = await readOwnedWorkspaceAsset(
+            workspace,
+            relPath,
+          );
+          // A Uint8Array VIEW over the Buffer's memory — not a second full copy.
+          // (Node Buffers are ArrayBuffer-backed; the cast narrows the generic
+          // ArrayBufferLike that TS 5.9 infers from .buffer.)
+          const body = new Uint8Array(
+            bytes.buffer,
+            bytes.byteOffset,
+            bytes.byteLength,
+          ) as Uint8Array<ArrayBuffer>;
+          const allowOrigin = trustedDohcFileCorsOrigin(request);
+          const headers = new Headers({
+            "content-type": mediaType,
+            // Never let served workspace bytes be sniffed into active content.
+            "x-content-type-options": "nosniff",
+          });
+          if (allowOrigin) {
+            // The renderer fetch()es text files from this scheme; a custom
+            // scheme is a distinct origin, so only allow the trusted renderer.
+            headers.set("access-control-allow-origin", allowOrigin);
+          }
+          return new Response(body, {
+            headers,
+          });
+        } catch {
+          return new Response("Not found", { status: 404 });
+        }
+      });
+    },
+    markFirstWindow: () => {
+      launchMarks.firstWindow();
+      desktopMarks.markOnce("first-window");
+    },
+    reportFailure: (error) => {
+      const message = error instanceof Error ? error.message : "Unknown desktop startup error.";
+      console.error("[desktop] Desktop startup failed:", error);
+      dialog.showErrorBox(
+        "dohc failed to start",
+        `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
+      );
+    },
+  },
+  services: {
+    startCli: startDesktopCliServer,
+    reportCliFailure: (error) => console.error("[desktop] CLI server failed to start:", error),
+    dispatch: chatDispatchService,
+    refreshTray: refreshDispatchTray,
+    reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
+    warmCredentials: warmCredentialCache,
+    reconcileCloud: () => { activity.reconcileCloud(engineForWorkspace); },
+    startUpdates: () => {
+      // Auto-updates: packaged builds use electron-builder's baked app-update.yml
+      // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
+      // Failures are absorbed — updates must never take the app down.
+      void startAutoUpdates({
+        isPackaged: app.isPackaged,
+        currentVersion: app.getVersion(),
+        // A restart already staged has no install left to make — quitAndInstall
+        // started its own quit on the first call and has none left to start.
+        // Main makes it, so the fact lives here and not in a renderer module a
+        // reload would reset. The quit is already approved:
+        // the IPC handler approves before asking the controller.
+        quitForStagedRestart: () => app.quit(),
+        onState: (_state, state) => {
+          broadcastUpdateState(state);
+        },
+      })
+        .then((controller) => {
+          autoUpdateController = controller;
+          broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
+        })
+        .catch(() => undefined);
+    },
+  },
+  beforeQuit: (event) => { quitGuard.beforeQuit(event); },
+  shutdown: {
+    budgetMs: WILL_QUIT_BUDGET_MS,
+    beginEngineShutdown: () => rustEngineWorkspaceSessions?.beginShutdown(),
+    stopSearch: () => workspaceSearchOwner.dispose(),
+    stopPlugins: stopAllPluginWorkspaces,
+    stopAgentSessions: () => cachedAgentSessions?.stopAll() ?? Promise.resolve(),
+    settleYDocs: closeAllEngineYDocSessions,
+    stopAgentIntegration: () => agentIntegration.stopAll(),
+    closeWorkspaces: () => workspaceAuthorities.close(),
+    disposeDatabase: () => workspaceDatabaseWorker.dispose(),
+    closeRelay: closeAllRelayTransportWorkspaces,
+    stopEngine: async () => { await rustEngineDaemon?.stop(); },
+  },
 });
 
 // Workspace roots the main process itself produced — the default suggestion
@@ -6270,40 +6352,6 @@ function isApprovedRoot(normalized: string): boolean {
     }
   }
   return false;
-}
-
-const OPEN_WORKSPACE_ARG = "--open-workspace";
-const pendingOpenPaths: string[] = [];
-
-// `app.isReady()` turns true before the whenReady continuation finishes
-// awaiting the Rust engine daemon, so it cannot gate window creation. This
-// flag turns true only once the daemon is up, IPC is registered, and the first
-// window exists. Until then, handlers queue their paths instead of opening a
-// window the bootstrap cannot serve.
-let bootstrapComplete = false;
-
-function collectOpenWorkspaceArgs(argv: string[]): string[] {
-  const paths: string[] = [];
-  for (let index = 1; index < argv.length; index += 1) {
-    const arg = argv[index] ?? "";
-    if (arg === OPEN_WORKSPACE_ARG) {
-      const next = argv[index + 1];
-      if (next) {
-        paths.push(next);
-        index += 1;
-      }
-      continue;
-    }
-    if (arg.startsWith(`${OPEN_WORKSPACE_ARG}=`)) {
-      paths.push(arg.slice(OPEN_WORKSPACE_ARG.length + 1));
-      continue;
-    }
-    if (arg.startsWith("--")) continue;
-    const portable = arg.replace(/\\/g, "/");
-    if (portable.endsWith("/dist/main/main.js")) continue;
-    if (isAbsolute(arg) && arg !== process.execPath) paths.push(arg);
-  }
-  return [...new Set(paths)];
 }
 
 function nearestWorkspaceRoot(startPath: string): string | null {
@@ -6361,26 +6409,6 @@ async function openWorkspacePath(
   sendWorkspaceActivated(window, workspace);
   refreshNativeWorkspaceSurfaces();
   return workspace;
-}
-
-async function openWorkspacePaths(
-  paths: string[],
-  window?: BrowserWindow,
-): Promise<WorkspaceSummary | null> {
-  let lastOpened: WorkspaceSummary | null = null;
-  for (const path of paths) {
-    const opened = await openWorkspacePath(path, window).catch(() => null);
-    if (opened) lastOpened = opened;
-  }
-  return lastOpened;
-}
-
-async function flushPendingOpenPaths(
-  window?: BrowserWindow,
-): Promise<WorkspaceSummary | null> {
-  if (pendingOpenPaths.length === 0) return null;
-  const paths = pendingOpenPaths.splice(0);
-  return openWorkspacePaths(paths, window);
 }
 
 // The navigation policy is constant for the process lifetime (env var and
@@ -13145,7 +13173,7 @@ async function startRustEngineDaemon(): Promise<boolean> {
         // counts and wedge budgets, which tell a developer or an agent exactly
         // which limit was hit. It goes to the log in full.
         console.error("[desktop] Rust engine daemon:", error);
-        if (terminal && !quitting) {
+        if (terminal && !appLifecycle.isQuitting()) {
           // The dialog is for the user, so it says what broke and what to do
           // instead — no internal names, one instruction per sentence
           // (the dohc-interface skill). "The workspace engine" is the noun the
@@ -13265,272 +13293,4 @@ async function startRustEngineDaemon(): Promise<boolean> {
   }
 }
 
-// Single-instance lock gates the entire bootstrap, not just a quit() call.
-if (!app.requestSingleInstanceLock()) {
-  app.quit();
-} else {
-  if (process.platform !== "darwin") {
-    if (receiveShareHandoffArguments(process.argv, shareHandoffIntentSlot)) {
-      shareHandoffRedemption.pendingCodeChanged();
-    }
-  }
-
-  app.on("open-url", (event, rawArgument) => {
-    event.preventDefault();
-    const accepted = receiveShareHandoffArguments([rawArgument], shareHandoffIntentSlot);
-    if (accepted) shareHandoffRedemption.pendingCodeChanged();
-    if (!accepted || !bootstrapComplete) return;
-    void showOrCreateMainWindow();
-  });
-
-  app.on("open-file", (event, path) => {
-    event.preventDefault();
-    pendingOpenPaths.push(path);
-    if (!bootstrapComplete) return;
-    const window = targetWindow(undefined);
-    if (window) {
-      void flushPendingOpenPaths(window);
-    } else {
-      void showOrCreateMainWindow().then((createdWindow) =>
-        flushPendingOpenPaths(createdWindow),
-      );
-    }
-  });
-
-  app.on("second-instance", (_event, argv) => {
-    const handoffIntent = classifyShareHandoffArguments(argv);
-    const accepted = receiveShareHandoffArguments(argv, shareHandoffIntentSlot);
-    if (accepted) shareHandoffRedemption.pendingCodeChanged();
-    const workspacePaths = collectOpenWorkspaceArgs(argv);
-    if (!bootstrapComplete) {
-      pendingOpenPaths.push(...workspacePaths);
-      return;
-    }
-    if (handoffIntent === "rejected" && workspacePaths.length === 0) return;
-    void showOrCreateMainWindow().then((window) =>
-      openWorkspacePaths(workspacePaths, window),
-    );
-  });
-
-  // Quit interception: a set-aside draft storage
-  // could not keep lives only in renderer memory, and a quit is its
-  // one irreversible exit — the renderer must get to warn before any
-  // destructive teardown runs. It answers for those drafts alone. This
-  // matters doubly for updates: electron-updater's quitAndInstall is
-  // ONE-SHOT, so the decision has to come before it is ever called. The
-  // renderer answers every ask promptly: resume (no drafts, or the user
-  // confirmed) or hold (its dialog owns the decision). A silent renderer
-  // gets the guard's MAIN-side dialog, never a silent force-quit.
-  app.on("before-quit", (event) => {
-    // No workspace window means nobody to ask and no renderer-held drafts to
-    // lose — a hidden export window is not a reason to intercept, and not a
-    // renderer that could answer.
-    if (!liveWorkspaceWindow()) return;
-    quitGuard.beforeQuit(event);
-  });
-
-  void app.whenReady().then(async () => {
-    // Electron is ready; marked before any startup work so the mark measures
-    // Electron itself (it used to land after the daemon await, which recorded
-    // daemon boot as "app ready").
-    launchMarks.appReady();
-    desktopMarks.markOnce("app-ready");
-
-    // The daemon spawn + handshake runs while the window is created and the
-    // renderer loads. The continuation below awaits it before anything that
-    // needs the engine; boot-time IPC awaits engineDaemonStartup on its own
-    // paths.
-    engineDaemonStartup = startRustEngineDaemon();
-    // Warms the promise cache the zoom read in trackWorkspaceWindow shares;
-    // awaited just before the window is created, so the persisted zoom is
-    // known by then and the read overlaps the daemon handshake meanwhile.
-    const cachedSettingsRead = readCachedUserSettingsFile(stateDir());
-    if (app.isPackaged && process.platform === "linux" && isAppImageBoot()) {
-      // A failed refresh must not block startup or discard an intact pair
-      // from an earlier boot. With no usable pair, report the launcher
-      // unavailable instead of exposing the AppImage mount path. The await
-      // overlaps the daemon handshake above.
-      linuxStableCliBinDir = await refreshLinuxStableCliBin({
-        resourcesCliBinDir: resolveDohcCliBinDirectory({
-          appRoot: app.getAppPath(),
-          isPackaged: app.isPackaged,
-          resourcesPath: process.resourcesPath,
-        }),
-        targetDir: join(stateDir(), "cli-bin"),
-        onError: (error) => console.error("[desktop] Stable Linux cli-bin refresh failed:", error),
-      });
-    }
-    // BrowserWindow and Dock APIs are only safe after Electron is ready.
-    nativeTheme.on("updated", refreshSystemThemeDesktopIcons);
-    // Handlers exist before the window: the renderer's first IPC call races
-    // the daemon handshake now, and an unregistered handler would reject it.
-    registerIpcHandlers();
-
-    // Serve workspace file bytes for dohc-file://<workspaceId>/<relpath>.
-    // Registered before the window so the first load can already fetch.
-    protocol.handle(DOHC_FILE_SCHEME, async (request) => {
-      try {
-        const url = new URL(request.url);
-        const workspace = findWorkspace(url.hostname);
-        if (!workspace) return new Response("Unknown workspace", { status: 404 });
-        const relPath = decodeURIComponent(url.pathname.replace(/^\/+/, ""));
-        const { bytes, mediaType } = await readOwnedWorkspaceAsset(
-          workspace,
-          relPath,
-        );
-        // A Uint8Array VIEW over the Buffer's memory — not a second full copy.
-        // (Node Buffers are ArrayBuffer-backed; the cast narrows the generic
-        // ArrayBufferLike that TS 5.9 infers from .buffer.)
-        const body = new Uint8Array(
-          bytes.buffer,
-          bytes.byteOffset,
-          bytes.byteLength,
-        ) as Uint8Array<ArrayBuffer>;
-        const allowOrigin = trustedDohcFileCorsOrigin(request);
-        const headers = new Headers({
-          "content-type": mediaType,
-          // Never let served workspace bytes be sniffed into active content.
-          "x-content-type-options": "nosniff",
-        });
-        if (allowOrigin) {
-          // The renderer fetch()es text files from this scheme; a custom
-          // scheme is a distinct origin, so only allow the trusted renderer.
-          headers.set("access-control-allow-origin", allowOrigin);
-        }
-        return new Response(body, {
-          headers,
-        });
-      } catch {
-        return new Response("Not found", { status: 404 });
-      }
-    });
-
-    // The persisted zoom must be known before the first window exists:
-    // trackWorkspaceWindow applies a known level synchronously at creation,
-    // before any show(), while its async read lands only after
-    // createMainWindow's ready-to-show show() — a wrong-scale first frame
-    // that firstPaint then describes. The read is promise-cached local IO
-    // warmed above, so this await costs the read only; the renderer load
-    // stays concurrent with the daemon handshake.
-    const cachedSettings = (await cachedSettingsRead).settings;
-    cachedPreferredName = cachedSettings.profile.preferredName;
-    knownZoomLevel ??= cachedSettings.appearance.zoomLevel;
-
-    // The window exists and its renderer loads while the daemon handshakes;
-    // everything below that needs the daemon still waits for it.
-    const window = trackWorkspaceWindow(
-      createMainWindow({ beforeRendererReload: prepareAfterRendererCrash }),
-    );
-    // Same tick as the window, so the load cannot finish before this listener.
-    // The activation send chains on it below, once the daemon is up and the
-    // launch workspaces are open.
-    const windowLoaded = new Promise<void>((resolve) => {
-      window.webContents.once("did-finish-load", resolve);
-    });
-    launchMarks.firstWindow();
-    desktopMarks.markOnce("first-window");
-
-    if (!(await engineDaemonStartup)) return;
-
-    cliServerStartup = startDesktopCliServer()
-      .then(async (server) => {
-        if (quitting) {
-          await server.close();
-          return null;
-        }
-        cliServer = server;
-        return server;
-      })
-      .catch((error: unknown) => {
-        console.error("[desktop] CLI server failed to start:", error);
-        return null;
-      });
-    void cliServerStartup.then(() => {
-      if (!quitting) chatDispatchService.start();
-    });
-    void refreshDispatchTray().catch((error) => {
-      console.error("[desktop] dispatch tray:", error);
-    });
-
-    const launchWorkspace = await openWorkspacePaths(
-      collectOpenWorkspaceArgs(process.argv),
-    );
-    // A path the handlers queued during the bootstrap is a later intent than
-    // the launch arguments, so it wins.
-    const pendingWorkspace = await flushPendingOpenPaths();
-    const activatedWorkspace = pendingWorkspace ?? launchWorkspace;
-    refreshNativeWorkspaceSurfaces();
-    // The renderer has subscribed once the load finishes, so this send lands —
-    // and being last, it wins over any activation an open above sent into a
-    // still-loading window.
-    void windowLoaded.then(() => {
-      if (activatedWorkspace) sendWorkspaceActivated(window, activatedWorkspace);
-      // A path that arrived while the awaits above were pending is still
-      // queued when the gate opens below, and no later event is guaranteed to
-      // flush it. This one is the backstop, and its opens send their own
-      // activations after the send above, so the later intent still wins.
-      void flushPendingOpenPaths(window);
-    });
-    // The daemon is up, IPC is registered, and a window exists, so the deferred
-    // handlers can act directly.
-    bootstrapComplete = true;
-
-    // Load persisted cloud credentials after the first window exists so local
-    // workspaces do not pay credential-store I/O on the visible-launch path.
-    void warmCredentialCache().then(() => {
-      activity.reconcileCloud(engineForWorkspace);
-    });
-
-    // Auto-updates: packaged builds use electron-builder's baked app-update.yml
-    // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
-    // Failures are absorbed — updates must never take the app down.
-    void startAutoUpdates({
-      isPackaged: app.isPackaged,
-      currentVersion: app.getVersion(),
-      // A restart already staged has no install left to make — quitAndInstall
-      // started its own quit on the first call and has none left to start.
-      // Main makes it, so the fact lives here and not in a renderer module a
-      // reload would reset. The quit is already approved:
-      // the IPC handler approves before asking the controller.
-      quitForStagedRestart: () => app.quit(),
-      onState: (_state, state) => {
-        broadcastUpdateState(state);
-      },
-    })
-      .then((controller) => {
-        autoUpdateController = controller;
-        broadcastUpdateState(autoUpdateController?.publicState() ?? fallbackUpdateState());
-      })
-      .catch(() => undefined);
-  }).catch((error: unknown) => {
-    // A throw after the daemon started would otherwise leave the gate closed
-    // forever: the app stays alive with no window and every handler deferring
-    // to a bootstrap that already died.
-    const message =
-      error instanceof Error ? error.message : "Unknown desktop startup error.";
-    console.error("[desktop] Desktop startup failed:", error);
-    dialog.showErrorBox(
-      "dohc failed to start",
-      `${message}\n\nRestart dohc. If it fails again, review the desktop logs.`,
-    );
-    app.quit();
-  });
-
-  app.on("window-all-closed", () => {
-    if (process.platform === "darwin") return;
-    void refreshDispatchTray()
-      .then((enabled) => {
-        if (!enabled && !quitting) app.quit();
-      })
-      .catch(() => {
-        if (!quitting) app.quit();
-      });
-  });
-
-  app.on("activate", () => {
-    if (!bootstrapComplete) return;
-    if (BrowserWindow.getAllWindows().length === 0) {
-      void showOrCreateMainWindow();
-    }
-  });
-}
+void appLifecycle.start();
