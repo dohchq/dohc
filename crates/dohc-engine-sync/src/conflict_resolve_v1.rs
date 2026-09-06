@@ -1691,7 +1691,7 @@ fn preflight_imported_lineage(
     })?;
     if disposition == ImportedHeadDisposition::AlreadyResult {
         if let Some(successor) = transition.successor.as_ref() {
-            let marker = dohc_engine_collab::read_marker_in_tx(tx, key)
+            let marker = dohc_engine_collab::read_marker_in(tx, key)
                 .map_err(map_local_collab_error)?
                 .ok_or(SyncError::RetryableState {
                     reason: "ydoc-lineage-result-missing",
@@ -1704,7 +1704,7 @@ fn preflight_imported_lineage(
                 });
             }
             let doc =
-                dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_local_collab_error)?;
+                dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
             if doc.has_pending_dependencies()
                 || dohc_engine_storage::hex_sha256(&doc.encode_state_vector())
                     != successor.state_vector_blob_sha256
@@ -1739,7 +1739,7 @@ fn preflight_imported_lineage(
             })
         };
     }
-    let marker = dohc_engine_collab::read_marker_in_tx(tx, key)
+    let marker = dohc_engine_collab::read_marker_in(tx, key)
         .map_err(map_local_collab_error)?
         .ok_or(SyncError::RetryableState {
             reason: "ydoc-lineage-missing",
@@ -1761,7 +1761,7 @@ fn preflight_imported_lineage(
             reason: "ydoc-deferred-updates-pending",
         });
     }
-    let doc = dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_local_collab_error)?;
+    let doc = dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
     if doc.has_pending_dependencies() {
         return Err(SyncError::RetryableState {
             reason: "ydoc-incomplete-lineage",
@@ -2697,7 +2697,7 @@ fn prepare_local_lineage_in_tx(
         reason: "conflict.resolve Y.Doc coordinates are invalid",
     })?;
     let Some(marker) =
-        dohc_engine_collab::read_marker_in_tx(tx, &key).map_err(map_local_collab_error)?
+        dohc_engine_collab::read_marker_in(tx, &key).map_err(map_local_collab_error)?
     else {
         return Ok(LocalLineagePlan::None);
     };
@@ -2714,7 +2714,7 @@ fn prepare_local_lineage_in_tx(
             reason: "ydoc-deferred-updates-pending",
         });
     }
-    let doc = dohc_engine_collab::load_doc_in_tx(tx, &key).map_err(map_local_collab_error)?;
+    let doc = dohc_engine_collab::load_doc_in(tx, &key).map_err(map_local_collab_error)?;
     if doc.has_pending_dependencies() {
         return Err(SyncError::RetryableState {
             reason: "ydoc-incomplete-lineage",
@@ -5177,7 +5177,7 @@ mod tests {
         let projected = store
             .write_with(&NoFaults, |tx| {
                 let doc =
-                    dohc_engine_collab::load_doc_in_tx(tx, key).map_err(map_local_collab_error)?;
+                    dohc_engine_collab::load_doc_in(tx, key).map_err(map_local_collab_error)?;
                 doc.project(marker.content_kind)
                     .map(|projection| projection.content)
                     .map_err(map_local_collab_error)

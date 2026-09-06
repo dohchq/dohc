@@ -26,8 +26,8 @@ use crate::doc_cache::{GateBaseSource, RemoteAppendProbe, ServedGateBase};
 use dohc_engine_domain::ChangeAttribution;
 
 use crate::durable::{
-    append_validated_and_index_update, blob_seq_in_log, load_for_replay_gate, maybe_compact,
-    query_marker, validate_update_bytes, CompactOutcome, Regime,
+    append_validated_and_index_update, blob_seq_in_log, load_doc_in, maybe_compact,
+    read_marker_in, validate_update_bytes, CompactOutcome, Regime,
 };
 use crate::error::CollabError;
 use crate::limits::DEFAULT_COMPACTION_THRESHOLD;
@@ -240,7 +240,7 @@ fn apply_remote_update_in_transaction(
     let sha = crate::hex_sha256(&remote.bytes);
     let origin = remote_update_origin(remote, actor_origin_id)?;
 
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
         return Err(CollabError::InvalidIdentifier {
             reason: "remote update applied to a non-replicated lineage".to_owned(),
@@ -250,7 +250,7 @@ fn apply_remote_update_in_transaction(
     if let Some(existing) = blob_seq_in_log(tx, key, &sha, &remote.bytes)? {
         return Ok((ReplicationApplyOutcome::Deduped { seq: existing }, None));
     }
-    let base = load_for_replay_gate(tx, key)?;
+    let base = load_doc_in(tx, key)?;
     *candidate = Some(crate::replay_parity::validate_replay_parity_with_delta(
         &base,
         &remote.bytes,
@@ -305,7 +305,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
     }
     let sha = crate::hex_sha256(&remote.bytes);
     let origin = remote_update_origin(remote, actor_origin_id)?;
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
+    let marker = read_marker_in(tx, key)?.ok_or(CollabError::NoMarker)?;
     if marker.regime != Regime::Replicated {
         return Err(CollabError::InvalidIdentifier {
             reason: "remote update applied to a non-replicated lineage".to_owned(),
@@ -317,7 +317,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
         // an owned doc by applying a cached full-state encode.
         return Ok(RemoteApplyProjection {
             outcome: ReplicationApplyOutcome::Deduped { seq: existing },
-            doc: load_for_replay_gate(tx, key)?,
+            doc: load_doc_in(tx, key)?,
             content_kind: marker.content_kind,
             record_facts: None,
         });
@@ -358,7 +358,7 @@ pub fn apply_remote_update_in_transaction_with_projection(
             )
         }
         None => {
-            let base = load_for_replay_gate(tx, key)?;
+            let base = load_doc_in(tx, key)?;
             let mut validation = crate::replay_parity::validate_replay_parity_for_cached_gate(
                 &base,
                 None,

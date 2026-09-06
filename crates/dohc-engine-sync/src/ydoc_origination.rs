@@ -48,7 +48,7 @@ pub fn originate_ydoc_base_in_tx(
     now_ms: i64,
 ) -> Result<BaseOrigination, SyncError> {
     let Some(marker) =
-        dohc_engine_collab::read_marker_in_tx(tx, key).map_err(SyncError::corrupt)?
+        dohc_engine_collab::read_marker_in(tx, key).map_err(SyncError::corrupt)?
     else {
         return Ok(BaseOrigination::NothingToDo);
     };
