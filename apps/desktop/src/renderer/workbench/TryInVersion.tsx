@@ -1,3 +1,5 @@
+import { PrimaryButton, SecondaryButton } from "../ui/controls";
+import { useRequestSequence } from "../useRequestSequence";
 import { Bot, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
@@ -5,7 +7,8 @@ import type {
   WorkspaceVersionRecord,
 } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
-import { VersionMergeDialog, ipcErrorMessage } from "./WorkspaceVersions";
+import { VersionMergeDialog } from "./WorkspaceVersions";
+import { ipcErrorMessage } from "../ipcError";
 
 // "Try it in a version" surfaces (PR 0N-2): the honest during-run banner and
 // the review card that appears when the run ends. Product vocabulary only.
@@ -44,11 +47,6 @@ export function TryInVersionBanner(props: {
     </div>
   );
 }
-
-const CARD_ACTION_CLASS =
-  "h-7 cursor-pointer rounded-md border border-line px-2.5 text-[11px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
-const CARD_PRIMARY_ACTION_CLASS =
-  "h-7 cursor-pointer rounded-md bg-accent px-2.5 text-[11px] font-semibold text-bg hover:opacity-90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50";
 
 function reviewHeading(state: TryInVersionRunState): string {
   if (state.runOutcome === "failed") return "The agent stopped before finishing";
@@ -99,30 +97,24 @@ export function TryInVersionReviewCard(props: {
   const [inlineError, setInlineError] = useState<string | null>(null);
   const [mergeSource, setMergeSource] = useState<WorkspaceVersionRecord | null>(null);
   const cardRef = useRef<HTMLDivElement | null>(null);
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence();
   useEffect(() => {
     cardRef.current?.focus();
   }, []);
 
   const dismiss = useCallback(async () => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setBusy("dismiss");
     setInlineError(null);
     try {
       await bridge().dismissTryInVersionReview({ workspaceId });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onDismissed();
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setInlineError(ipcErrorMessage(error, "Could not dismiss this."));
     } finally {
-      if (token === liveToken.current) setBusy(null);
+      if (liveToken.isCurrent(token)) setBusy(null);
     }
   }, [props, workspaceId]);
 
@@ -130,7 +122,7 @@ export function TryInVersionReviewCard(props: {
   // is lost), switch, then clear the review. Used by Set aside and by the
   // post-merge return.
   const backToMain = useCallback(async () => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setBusy("back-to-main");
     setInlineError(null);
     // Which version this call has proven active, for the shell's boundary.
@@ -147,15 +139,15 @@ export function TryInVersionReviewCard(props: {
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await props.beginLineageOperation();
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       const versions = await bridge().listWorkspaceVersions({ workspaceId });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       const main = versions.versions.find((version) => version.kind === "main");
       if (!main) throw new Error("Main is not available right now.");
       if (versions.activeVersionId !== main.id) {
         switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId: main.id });
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
       }
       // Main is where we are now — whether this call switched or it already
       // was the active version. Announce it before the dismissal: that is
@@ -165,10 +157,10 @@ export function TryInVersionReviewCard(props: {
       if (switchIssued) props.onWorkspaceStateChanged(landedOn);
       else props.onWorkspaceStateChanged(landedOn, false);
       await bridge().dismissTryInVersionReview({ workspaceId });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onDismissed();
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setInlineError(ipcErrorMessage(error, "Could not switch back to Main."));
       // Make the shell reflect reality — but only the reality this call may
       // have changed, and only ONCE.
@@ -186,27 +178,27 @@ export function TryInVersionReviewCard(props: {
       props.onWorkspaceStateChanged(undefined);
     } finally {
       releaseOperation?.();
-      if (token === liveToken.current) setBusy(null);
+      if (liveToken.isCurrent(token)) setBusy(null);
     }
   }, [props, workspaceId]);
 
   const beginMerge = useCallback(async () => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setBusy("merge");
     setInlineError(null);
     try {
       const versions = await bridge().listWorkspaceVersions({ workspaceId });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       const source = versions.versions.find(
         (version) => version.id === state.versionId,
       );
       if (!source) throw new Error("This version is no longer available.");
       setMergeSource(source);
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setInlineError(ipcErrorMessage(error, "Could not start the merge."));
     } finally {
-      if (token === liveToken.current) setBusy(null);
+      if (liveToken.isCurrent(token)) setBusy(null);
     }
   }, [state.versionId, workspaceId]);
 
@@ -219,7 +211,7 @@ export function TryInVersionReviewCard(props: {
       role="region"
       aria-label="Agent result, ready to review"
       data-testid="try-review-card"
-      className="shrink-0 border-b border-line bg-panel px-3 py-2.5 focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent"
+      className="shrink-0 border-b border-line bg-panel px-3 py-2.5 dohc-focus-visible focus-visible:-outline-offset-2"
     >
       <div className="flex items-start gap-2">
         <Bot size={14} aria-hidden className="mt-0.5 shrink-0 text-agent" />
@@ -241,7 +233,7 @@ export function TryInVersionReviewCard(props: {
           title="Keep working in this version"
           disabled={busy !== null}
           onClick={() => void dismiss()}
-          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-50"
+          className="grid size-6 shrink-0 cursor-pointer place-items-center rounded-md text-subtle hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-50"
         >
           <X size={13} aria-hidden />
         </button>
@@ -249,66 +241,66 @@ export function TryInVersionReviewCard(props: {
       <div className="mt-2 flex flex-wrap items-center gap-2 pl-6">
         {noChanges ? (
           <>
-            <button
+            <PrimaryButton size="compact"
               type="button"
               data-testid="try-review-back-to-main"
               disabled={busy !== null}
               onClick={() => void backToMain()}
-              className={CARD_PRIMARY_ACTION_CLASS}
+
             >
               {busy === "back-to-main" ? "Going back…" : "Back to Main"}
-            </button>
-            <button
+            </PrimaryButton>
+            <SecondaryButton size="compact"
               type="button"
               data-testid="try-review-keep-working"
               disabled={busy !== null}
               onClick={() => void dismiss()}
-              className={CARD_ACTION_CLASS}
+
             >
               Keep working in it
-            </button>
+            </SecondaryButton>
           </>
         ) : (
           <>
-            <button
+            <PrimaryButton size="compact"
               type="button"
               data-testid="try-review-open-compare"
               disabled={busy !== null}
               onClick={() => props.onOpenCompare(state.versionId)}
-              className={CARD_PRIMARY_ACTION_CLASS}
+
             >
               Review changes
-            </button>
+            </PrimaryButton>
             {state.mergeAvailable ? (
-              <button
+              <SecondaryButton size="compact"
                 type="button"
                 data-testid="try-review-merge"
                 disabled={busy !== null}
                 onClick={() => void beginMerge()}
-                className={CARD_ACTION_CLASS}
+
               >
                 {busy === "merge" ? "Preparing…" : "Merge into Main"}
-              </button>
+              </SecondaryButton>
             ) : null}
-            <button
+            <SecondaryButton size="compact"
               type="button"
               data-testid="try-review-keep-working"
               disabled={busy !== null}
               onClick={() => void dismiss()}
-              className={CARD_ACTION_CLASS}
+
             >
               Keep working in it
-            </button>
-            <button
+            </SecondaryButton>
+            <SecondaryButton size="compact"
               type="button"
               data-testid="try-review-set-aside"
               disabled={busy !== null}
               title="Go back to Main. The version stays in your versions list."
               onClick={() => void backToMain()}
-              className={CARD_ACTION_CLASS}
+
             >
               {busy === "back-to-main" ? "Setting aside…" : "Set aside"}
-            </button>
+            </SecondaryButton>
           </>
         )}
       </div>

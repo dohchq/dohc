@@ -1,3 +1,4 @@
+import { SecondaryButton } from "./ui/controls";
 import { DohcMark } from "@dohc/brand";
 import { Cloud, FolderOpen } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -138,31 +139,31 @@ export function DesktopFirstRun(props: {
           {creating ? "Creating…" : "Create workspace"}
         </PrimaryButton>
 
-        <button
+        <SecondaryButton
           type="button"
           onClick={() => void openExisting()}
-          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+
         >
           Open an existing folder as a workspace
-        </button>
+        </SecondaryButton>
 
-        <button
+        <SecondaryButton
           type="button"
           data-testid="first-run-join-synced"
           onClick={() => setJoining(true)}
-          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+
         >
           Join a synced workspace from another machine
-        </button>
+        </SecondaryButton>
 
-        <button
+        <SecondaryButton
           type="button"
           data-testid="first-run-open-share"
           onClick={() => setOpeningShare(true)}
-          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+
         >
           Open a share someone sent you
-        </button>
+        </SecondaryButton>
 
         {error ? <p className="m-0 text-xs text-danger">{error}</p> : null}
 

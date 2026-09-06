@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import {
   useCallback,
   useEffect,
@@ -65,14 +66,14 @@ export interface CollectionPageProps {
 
 function NewRecordButton({ onClick }: { onClick: () => void }) {
   return (
-    <button
+    <SecondaryButton
       type="button"
       data-testid="collection-new-record"
       onClick={onClick}
-      className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+
     >
       New record
-    </button>
+    </SecondaryButton>
   );
 }
 
@@ -93,19 +94,19 @@ export function CollectionPage({
   // is keyed by its path and the shell remounts per workspace, so the pair
   // (workspaceId, collectionPath) is fixed for this component's lifetime —
   // the token guards out-of-order responses within it.
-  const detailsRequest = useRef(0);
+  const detailsRequest = useRequestSequence();
   const refreshDetails = useCallback(async () => {
-    const request = ++detailsRequest.current;
+    const request = detailsRequest.next();
     try {
       const result = await bridge().getCollection({
         workspaceId,
         collectionPath,
       });
-      if (request !== detailsRequest.current) return;
+      if (!detailsRequest.isCurrent(request)) return;
       setDetails({ schema: result.schema });
       setLoadError(null);
     } catch (error) {
-      if (request !== detailsRequest.current) return;
+      if (!detailsRequest.isCurrent(request)) return;
       setLoadError(error instanceof Error ? error.message : String(error));
     }
   }, [workspaceId, collectionPath]);
@@ -113,7 +114,7 @@ export function CollectionPage({
     void refreshDetails();
     return () => {
       // A response landing after unmount must not write state.
-      detailsRequest.current += 1;
+      detailsRequest.next();
     };
   }, [refreshDetails]);
 
@@ -364,16 +365,16 @@ export function CollectionPage({
         <span className="text-sm text-muted">
           dohc could not load this collection. {loadError}
         </span>
-        <button
+        <SecondaryButton
           type="button"
           onClick={() => {
             void refreshDetails();
             void store.refresh();
           }}
-          className="rounded-lg border border-line bg-transparent px-3 py-1.5 text-xs text-muted transition-colors hover:bg-panel-2 hover:text-ink"
+
         >
           Retry
-        </button>
+        </SecondaryButton>
       </div>
     );
   }

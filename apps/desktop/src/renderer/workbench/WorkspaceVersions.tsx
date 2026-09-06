@@ -1,3 +1,6 @@
+import { SecondaryButton, PrimaryButton } from "../ui/controls";
+import { useRequestSequence } from "../useRequestSequence";
+import { ipcErrorMessage } from "../ipcError";
 import { Bot, Check, ChevronDown, FileArchive, FileText, Layers, Lock, RefreshCw, Share2 } from "lucide-react";
 import {
   useCallback,
@@ -38,16 +41,6 @@ export interface WorkspaceVersionsSnapshot {
   activeVersionId: string;
 }
 
-// Electron wraps handler rejections as
-// "Error invoking remote method 'channel': Error: <real message>" — show the
-// real message, or the fallback when there is none. Shared with the
-// try-in-version surfaces (TryInVersion.tsx).
-export function ipcErrorMessage(error: unknown, fallback: string): string {
-  const raw = error instanceof Error ? error.message : "";
-  const message = raw.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, "");
-  return message.trim().length > 0 ? message.trim() : fallback;
-}
-
 function versionName(
   snapshot: WorkspaceVersionsSnapshot | null,
   versionId: string | null,
@@ -59,7 +52,7 @@ function versionName(
 }
 
 const MENU_ITEM_CLASS =
-  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-not-allowed disabled:opacity-50";
+  "flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50";
 const WORKSPACE_UPDATING_MESSAGE = "Workspace is still updating. Try again.";
 const VERSION_LOAD_RETRY_MS = 1_000;
 const VERSION_LOAD_FAILURE_ATTEMPTS = 5;
@@ -124,18 +117,12 @@ export function VersionMenu(props: {
   // succeeded is itself what re-keys this component, so a shared counter let
   // the switch invalidate its own token — its finally then skipped, and the
   // selector sat disabled on "Switching…" for the rest of the session.
-  const operationToken = useRef(0);
-  useEffect(
-    () => () => {
-      operationToken.current += 1;
-    },
-    [],
-  );
+  const operationToken = useRequestSequence();
   // A mutation supersedes both: it is the running operation now, and any read
   // issued before it describes the world it is about to change.
   const beginOperation = useCallback(() => {
     snapshotToken.current += 1;
-    return ++operationToken.current;
+    return operationToken.next();
   }, []);
 
   const refresh = useCallback(async () => {
@@ -230,10 +217,10 @@ export function VersionMenu(props: {
         // Re-check liveness after every awaited step: the begin (or the
         // switch) may resolve after this panel was unmounted or superseded,
         // and a stale continuation must not mutate or repaint.
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         switchIssued = true;
         await bridge().switchWorkspaceVersion({ workspaceId, versionId });
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         // The switch succeeded, so this IS the active version now — say so
         // before awaiting anything else. Main notifies the renderer before
         // this invoke returns, so a history refresh for the old version can
@@ -243,13 +230,13 @@ export function VersionMenu(props: {
         announced = true;
         await refresh();
       } catch (error) {
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         props.onError(ipcErrorMessage(error, "Could not switch versions."));
         // The switch may have partially applied before failing; make the
         // selector and editors reflect reality. Whatever stuck is what the
         // re-read reports, and if that read fails too, nobody knows.
         const recovered = await refresh().catch(() => null);
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         // Suppress the reopen only when the failure happened before the
         // switch IPC started (the pre-switch flush): nothing main-side ran,
         // the live sessions are untouched, and a reopen would set the
@@ -274,10 +261,10 @@ export function VersionMenu(props: {
         );
       } finally {
         releaseOperation?.();
-        if (token === operationToken.current) setBusy(null);
+        if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, props, refresh, workspaceId],
+    [beginOperation, props.beginLineageOperation, props.onError, props.onWorkspaceStateChanged, refresh, workspaceId],
   );
 
   const requestSwitch = useCallback(
@@ -311,25 +298,25 @@ export function VersionMenu(props: {
       let releaseOperation: (() => void) | null = null;
       try {
         releaseOperation = await props.beginLineageOperation();
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         const result = await bridge().createWorkspaceVersion({
           workspaceId,
           name: trimmed,
         });
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         setSnapshot(result);
         // Create-and-switch: the new version is the active one.
         props.onWorkspaceStateChanged(result.activeVersionId);
         closeMenu();
       } catch (error) {
-        if (token !== operationToken.current) return;
+        if (!operationToken.isCurrent(token)) return;
         setInlineError(ipcErrorMessage(error, "Could not create that version."));
       } finally {
         releaseOperation?.();
-        if (token === operationToken.current) setBusy(null);
+        if (operationToken.isCurrent(token)) setBusy(null);
       }
     },
-    [beginOperation, closeMenu, props, workspaceId],
+    [beginOperation, closeMenu, props.beginLineageOperation, props.onWorkspaceStateChanged, workspaceId],
   );
 
   // Keyboard-navigable menu: arrows move focus, Home/End jump, Escape closes
@@ -388,7 +375,7 @@ export function VersionMenu(props: {
         title={`You're working in the ${activeName} version`}
         disabled={busy !== null}
         onClick={() => (menuOpen ? closeMenu() : setMenuOpen(true))}
-        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent disabled:cursor-wait disabled:opacity-60"
+        className="flex h-7 max-w-56 cursor-pointer items-center gap-1.5 rounded-md px-2 text-[12px] text-muted hover:bg-line/50 hover:text-ink dohc-focus-visible focus-visible:-outline-offset-2 disabled:cursor-wait disabled:opacity-60"
       >
         <Layers size={13} aria-hidden className="shrink-0" />
         <span data-testid="version-menu-active" className="min-w-0 truncate">
@@ -415,9 +402,9 @@ export function VersionMenu(props: {
             onKeyDown={onMenuKeyDown}
             className="dohc-popover dohc-pop-in absolute right-0 top-full z-30 mt-1 w-64 rounded-lg border border-line bg-panel p-1"
           >
-            <div className="px-2 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel as="div" className="px-2 pb-1 pt-1.5">
               Versions
-            </div>
+            </SectionLabel>
             {namedVersions.map((version) => {
               const isActive = version.id === snapshot.activeVersionId;
               return (
@@ -529,7 +516,7 @@ export function VersionMenu(props: {
                       setInlineError(null);
                     }
                   }}
-                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                  className="h-7 w-full rounded-md border border-line bg-bg px-2 text-[13px] text-ink placeholder:text-subtle dohc-focus-input"
                 />
                 <p className="mb-0 mt-1 text-[11px] leading-4 text-subtle">
                   {busy === "create"
@@ -704,20 +691,14 @@ export function TryTaskDialog(props: {
     | { status: "driver"; driverId: string; driverName: string }
     | { status: "none" }
   >({ status: "checking" });
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
+  const liveToken = useRequestSequence();
 
   useEffect(() => {
-    const token = liveToken.current;
+    const token = liveToken.current();
     void bridge()
       .probeAgentDrivers({ workspaceId })
       .then((panel) => {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         // Which driver does the work is dohc's choice, not this dialog's: it
         // reads the workspace's own default and falls back for us.
         const selected = panel.drivers.find(
@@ -734,7 +715,7 @@ export function TryTaskDialog(props: {
         );
       })
       .catch(() => {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setHelper({ status: "none" });
       });
   }, [workspaceId]);
@@ -746,28 +727,28 @@ export function TryTaskDialog(props: {
       return;
     }
     if (helper.status === "checking" || busy) return;
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setBusy(true);
     setError(null);
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await props.beginLineageOperation();
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       const started = await bridge().tryInWorkspaceVersion({
         workspaceId,
         task: trimmed,
         ...(helper.status === "driver" ? { driverId: helper.driverId } : {}),
       });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onStarted(started.versionId);
     } catch (caught) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setError(ipcErrorMessage(caught, "Could not start trying this."));
       setBusy(false);
     } finally {
       releaseOperation?.();
     }
-  }, [busy, helper, props, task, workspaceId]);
+  }, [busy, helper, props.beginLineageOperation, props.onStarted, task, workspaceId]);
 
   return (
     <Overlay onClose={() => (busy ? undefined : props.onClose())}>
@@ -809,7 +790,7 @@ export function TryTaskDialog(props: {
               void start();
             }
           }}
-          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+          className="mt-1 w-full resize-none rounded-md border border-line bg-bg px-2 py-1.5 text-[13px] leading-5 text-ink placeholder:text-subtle dohc-focus-input"
         />
         <p
           data-testid="try-task-helper"
@@ -892,32 +873,26 @@ export function VersionMergeDialog(props: {
 }) {
   const { workspaceId, source } = props;
   const [stage, setStage] = useState<MergeStage>({ stage: "confirm" });
-  const liveToken = useRef(0);
+  const liveToken = useRequestSequence();
   // Which loaded conflict window a "Show more" answer belongs to. Every
   // replacement of the window (the merge result, each resolution's remaining
   // page) advances it: a stale page for a replaced window would append rows
   // the replacement already repositioned (the renderer async-state
   // invariant).
   const windowGeneration = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
 
   const runMerge = useCallback(async () => {
-    const token = ++liveToken.current;
+    const token = liveToken.next();
     setStage({ stage: "running" });
     let releaseOperation: (() => void) | null = null;
     try {
       releaseOperation = await props.beginLineageOperation();
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       const result = await bridge().mergeWorkspaceVersion({
         workspaceId,
         versionId: source.id,
       });
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       props.onWorkspaceStateChanged();
       // The merge's own count decides the stage: the rows are the first page
       // of all open conflicts, and a lingering sync conflict must not turn a
@@ -942,7 +917,7 @@ export function VersionMergeDialog(props: {
         setStage({ stage: "clean", mergedFileCount: result.mergedFileCount });
       }
     } catch (error) {
-      if (token !== liveToken.current) return;
+      if (!liveToken.isCurrent(token)) return;
       setStage({
         stage: "error",
         message: ipcErrorMessage(error, "Could not merge this version into Main."),
@@ -950,7 +925,7 @@ export function VersionMergeDialog(props: {
     } finally {
       releaseOperation?.();
     }
-  }, [props, source.id, workspaceId]);
+  }, [props.beginLineageOperation, props.onWorkspaceStateChanged, source.id, workspaceId]);
 
   const onResolved = useCallback(
     (remaining: ResolveWorkspaceVersionConflictResult) => {
@@ -970,13 +945,13 @@ export function VersionMergeDialog(props: {
 
   const loadMoreConflicts = useCallback(async () => {
     if (stage.stage !== "conflicts" || stage.nextAfterConflictId === null) return;
-    const token = liveToken.current;
+    const token = liveToken.current();
     const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: stage.nextAfterConflictId,
     });
-    if (token !== liveToken.current) return;
+    if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;
@@ -1008,7 +983,7 @@ export function VersionMergeDialog(props: {
           : ("cancelled" as const);
     props.onOutcome?.(outcome);
     props.onClose();
-  }, [props, stage.stage]);
+  }, [props.onClose, props.onOutcome, stage.stage]);
 
   return (
     <Overlay onClose={() => (canCloseFromBackdrop ? finish() : undefined)}>
@@ -1162,9 +1137,9 @@ function ConflictSidePane(props: {
   );
   return (
     <div className="flex min-w-0 flex-col overflow-hidden rounded-md border border-line">
-      <div className="border-b border-line bg-panel-2 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-subtle">
+      <SectionLabel as="div" className="border-b border-line bg-panel-2 px-2 py-1">
         {props.heading}
-      </div>
+      </SectionLabel>
       {preview === null ? (
         <p className="m-0 px-2 py-2 text-[11px] italic leading-4 text-subtle">
           {props.note}
@@ -1380,13 +1355,7 @@ function ConflictResolver(props: {
       incomingMissing,
     ],
   );
-  const liveToken = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [workspaceId, conflict.conflictId],
-  );
+  const liveToken = useRequestSequence([workspaceId, conflict.conflictId]);
 
   // The combined copy in state is never over the apply cap: every value it can
   // hold comes from here or from a seed that already fits, so the controlled
@@ -1416,30 +1385,30 @@ function ConflictResolver(props: {
         | { kind: "keep-incoming" }
         | { kind: "keep-combined"; text: string },
     ) => {
-      const token = ++liveToken.current;
+      const token = liveToken.next();
       setBusy(true);
       setError(null);
       let releaseOperation: (() => void) | null = null;
       try {
         releaseOperation = await props.beginLineageOperation();
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         const result = await bridge().resolveWorkspaceVersionConflict({
           workspaceId,
           conflictId: conflict.conflictId,
           resolution,
         });
         props.onWorkspaceStateChanged();
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         props.onResolved(result);
       } catch (caught) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setError(ipcErrorMessage(caught, "Could not apply that choice."));
         setBusy(false);
       } finally {
         releaseOperation?.();
       }
     },
-    [conflict.conflictId, props, workspaceId],
+    [conflict.conflictId, props.beginLineageOperation, props.onResolved, props.onWorkspaceStateChanged, workspaceId],
   );
 
   return (
@@ -1495,15 +1464,15 @@ function ConflictResolver(props: {
                 text={conflict.currentText}
                 note={sideNote(conflict.currentBinary, labels.currentMissing)}
               />
-              <button
+              <SecondaryButton size="compact"
                 type="button"
                 data-testid="version-conflict-keep-current"
                 disabled={busy}
                 onClick={() => void resolve({ kind: "keep-current" })}
-                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                className="px-2"
               >
                 {labels.keepCurrent}
-              </button>
+              </SecondaryButton>
             </div>
             <div className="flex min-w-0 flex-col gap-1.5">
               <ConflictSidePane
@@ -1511,15 +1480,15 @@ function ConflictResolver(props: {
                 text={conflict.incomingText}
                 note={sideNote(conflict.incomingBinary, labels.incomingMissing)}
               />
-              <button
+              <SecondaryButton size="compact"
                 type="button"
                 data-testid="version-conflict-keep-incoming"
                 disabled={busy}
                 onClick={() => void resolve({ kind: "keep-incoming" })}
-                className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+                className="px-2"
               >
                 {labels.keepIncoming}
-              </button>
+              </SecondaryButton>
             </div>
           </div>
           {combined === null && combineSeed !== null ? (
@@ -1535,7 +1504,7 @@ function ConflictResolver(props: {
           ) : !isBinary ? (
             <div className="mt-2 flex flex-col gap-1.5">
               <label
-                className="text-[10px] font-semibold uppercase tracking-wide text-subtle"
+                className="dohc-section-label"
                 htmlFor={`combined-${conflict.conflictId}`}
               >
                 Combined copy for Main
@@ -1555,7 +1524,7 @@ function ConflictResolver(props: {
                 disabled={busy}
                 rows={6}
                 onChange={(event) => onCombinedChange(event.target.value)}
-                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink focus:outline focus:outline-2 focus:-outline-offset-1 focus:outline-accent"
+                className="w-full resize-y rounded-md border border-line bg-bg px-2 py-1.5 font-mono text-[11px] leading-4 text-ink dohc-focus-input"
               />
               {refusedBytes !== null ? (
                 <p
@@ -1580,15 +1549,15 @@ function ConflictResolver(props: {
                 >
                   Cancel
                 </button>
-                <button
+                <PrimaryButton size="compact"
                   type="button"
                   data-testid="version-conflict-apply-combined"
                   disabled={busy}
                   onClick={() => void resolve({ kind: "keep-combined", text: combined ?? "" })}
-                  className="h-7 cursor-pointer rounded-md bg-accent px-2 text-[11px] font-semibold text-bg hover:opacity-90 disabled:cursor-wait disabled:opacity-50"
+                  className="px-2"
                 >
                   Use this combined copy
-                </button>
+                </PrimaryButton>
               </div>
             </div>
           ) : null}
@@ -1692,15 +1661,15 @@ function ConflictList(props: {
       ))}
       {props.hasMore ? (
         <div className="flex flex-col items-start gap-1">
-          <button
+          <SecondaryButton size="compact"
             type="button"
             data-testid="conflict-list-show-more"
             disabled={loadingMore}
             onClick={loadMore}
-            className="h-7 cursor-pointer rounded-md border border-line px-2 text-[11px] text-muted hover:bg-line/50 hover:text-ink disabled:cursor-wait disabled:opacity-50"
+            className="px-2"
           >
             {loadingMore ? "Loading…" : "Show more files"}
-          </button>
+          </SecondaryButton>
           {loadMoreError ? (
             <p className="m-0 text-[11px] leading-4 text-danger" role="alert">
               {loadMoreError}
@@ -2037,20 +2006,14 @@ export function ConflictReviewDialog(props: {
       }
   >({ status: "loading" });
   const [versionNames, setVersionNames] = useState<Map<string, string>>(new Map());
-  const liveToken = useRef(0);
+  const liveToken = useRequestSequence();
   // Same rule as the merge dialog: a "Show more" answer may only append to
   // the window that asked, and every window replacement (the initial load,
   // each resolution's remaining page) advances this.
   const windowGeneration = useRef(0);
-  useEffect(
-    () => () => {
-      liveToken.current += 1;
-    },
-    [],
-  );
 
   useEffect(() => {
-    const token = liveToken.current;
+    const token = liveToken.current();
     void (async () => {
       try {
         const [result, versions] = await Promise.all([
@@ -2061,7 +2024,7 @@ export function ConflictReviewDialog(props: {
             .listWorkspaceVersions({ workspaceId })
             .catch(() => null),
         ]);
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setVersionNames(
           new Map(
             (versions?.versions ?? []).map((version) => [version.id, version.name]),
@@ -2075,7 +2038,7 @@ export function ConflictReviewDialog(props: {
           resolvedAny: false,
         });
       } catch (error) {
-        if (token !== liveToken.current) return;
+        if (!liveToken.isCurrent(token)) return;
         setState({
           status: "error",
           message: ipcErrorMessage(error, "Couldn't load the conflicting files."),
@@ -2099,13 +2062,13 @@ export function ConflictReviewDialog(props: {
 
   const loadMoreConflicts = useCallback(async () => {
     if (state.status !== "ready" || state.nextAfterConflictId === null) return;
-    const token = liveToken.current;
+    const token = liveToken.current();
     const generation = windowGeneration.current;
     const page = await bridge().listWorkspaceVersionConflicts({
       workspaceId,
       afterConflictId: state.nextAfterConflictId,
     });
-    if (token !== liveToken.current) return;
+    if (!liveToken.isCurrent(token)) return;
     // A resolution replaced the window while this page was in flight; its
     // rows belong to the window that asked, not the one that remains.
     if (generation !== windowGeneration.current) return;

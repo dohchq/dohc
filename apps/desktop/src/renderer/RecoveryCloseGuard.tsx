@@ -1,6 +1,5 @@
 import {
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -15,8 +14,7 @@ import {
   hasPendingCollectionFieldWrites,
   settleCollectionFieldWrites,
 } from "./collections/recordFieldWrites";
-import { isTopOverlay, pushOverlay, removeOverlay } from "./guestBlockingUi";
-import { trapModalTabKey } from "./modalFocus";
+import { Overlay } from "./Overlay";
 import { atRiskOrphanedDraftIds, useAllOrphanedDrafts } from "./orphanedDrafts";
 import { RecoveryList } from "./RecoveryList";
 
@@ -266,7 +264,6 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   const warningOpen = closeWarning !== null;
   const warningVisible = warningOpen && liveCount > 0;
   const warningRef = useRef<HTMLDivElement | null>(null);
-  const warningLayerId = useRef(Symbol("recovery-close-warning"));
   const returnFocusRef = useRef<HTMLElement | null>(null);
   const showCloseWarning = (warning: {
     kind: UnloadKind;
@@ -284,30 +281,9 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
   useEffect(() => {
     if (warningOpen && liveCount === 0) setCloseWarning(null);
   }, [warningOpen, liveCount]);
-  useLayoutEffect(() => {
-    if (warningVisible) warningRef.current?.focus();
-  }, [warningVisible]);
-  // This warning paints above every ordinary Overlay. Register it in the
-  // same modal stack so an underlying Overlay's document listener stands
-  // down instead of briefly moving focus behind this dialog on every Tab.
-  // Registration also hides an open plugin guest while the warning is up.
   useEffect(() => {
     if (!warningVisible) return;
-    const id = warningLayerId.current;
-    pushOverlay(id);
-    return () => removeOverlay(id);
-  }, [warningVisible]);
-  useEffect(() => {
-    if (!warningVisible) return;
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (!isTopOverlay(warningLayerId.current)) return;
-      trapModalTabKey(event, warningRef.current);
-    };
-
-    document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("keydown", onKeyDown, true);
       const returnTarget = returnFocusRef.current;
       if (returnTarget?.isConnected) returnTarget.focus();
       returnFocusRef.current = null;
@@ -439,16 +415,17 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
     <>
       {props.children}
       {closeWarning !== null && liveCount > 0 ? (
-        <div className="fixed inset-0 z-50 grid place-items-center bg-ink/20">
-          <div
-            ref={warningRef}
-            data-testid="recovery-close-warning"
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="recovery-close-warning-title"
-            tabIndex={-1}
-            className="dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5"
-          >
+        <Overlay
+          appearance="warning"
+          panelRef={warningRef}
+          panelProps={{
+            "data-testid": "recovery-close-warning",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "recovery-close-warning-title",
+            className: "dohc-elevated w-[min(480px,calc(100vw-32px))] rounded-xl border border-line bg-panel p-5",
+          }}
+        >
             <h3
               id="recovery-close-warning-title"
               className="m-0 text-sm font-semibold text-ink"
@@ -549,8 +526,7 @@ export function RecoveryCloseGuard(props: { children: ReactNode }) {
                       : "Close anyway"}
               </button>
             </div>
-          </div>
-        </div>
+        </Overlay>
       ) : null}
     </>
   );

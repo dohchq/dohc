@@ -144,15 +144,15 @@ import {
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
-import { leafOf } from "./workbench/path-tree";
+import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
 // derives its document key on every render, and every explorer surface names
-// its rows through leafOf — so these call counts show whether the inspector
+// its rows through basenameOf — so these call counts show whether the inspector
 // and the tree actually re-rendered across a shell render.
 vi.mock("./documentVersionKey", { spy: true });
-vi.mock("./workbench/path-tree", { spy: true });
+vi.mock("./path", { spy: true });
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.
@@ -811,7 +811,6 @@ function makeBridge(
     ),
   });
 }
-
 
 function renderShell(
   bridge: ReturnType<typeof makeBridge>,
@@ -16428,10 +16427,10 @@ describe("workbench render cost", () => {
     // still in flight cannot inflate them: nothing async can interleave
     // between the capture, the rerender, and the assertions.
     const keyCalls = vi.mocked(documentVersionKey).mock.calls.length;
-    const leafCalls = vi.mocked(leafOf).mock.calls.length;
+    const leafCalls = vi.mocked(basenameOf).mock.calls.length;
     view.rerender(shellElement());
     expect(vi.mocked(documentVersionKey).mock.calls.length).toBe(keyCalls);
-    expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
+    expect(vi.mocked(basenameOf).mock.calls.length).toBe(leafCalls);
   });
 
   it("caps a sustained activity burst and keeps its trailing refresh", async () => {

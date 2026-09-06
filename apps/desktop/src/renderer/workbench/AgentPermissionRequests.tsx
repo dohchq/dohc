@@ -1,3 +1,4 @@
+import { SectionLabel } from "../ui/controls";
 import { Check, ShieldAlert, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentPermissionDecision } from "../../ipc/bridgeContract";
@@ -106,9 +107,9 @@ export function AgentPermissionRequests(props: {
         >
           <div className="mb-1 flex items-center gap-2">
             <ShieldAlert size={13} aria-hidden className="shrink-0 text-warning" />
-            <span className="text-[10px] font-semibold uppercase tracking-wide text-subtle">
+            <SectionLabel >
               Your agent asked
-            </span>
+            </SectionLabel>
           </div>
           <h3 className="m-0 mb-1 text-[13px] font-medium leading-snug text-ink">
             {request.title}

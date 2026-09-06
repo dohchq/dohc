@@ -290,10 +290,10 @@ describe("table controls grips", () => {
     cells[4]?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
 
     const visibleRows = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--row.is-visible",
+      ".dohc-table-grip--row.is-active",
     );
     const visibleColumns = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--col.is-visible",
+      ".dohc-table-grip--col.is-active",
     );
     expect(visibleRows).toHaveLength(1);
     expect(visibleRows[0]?.getAttribute("data-table-row")).toBe("1");
@@ -317,7 +317,7 @@ describe("table controls grips", () => {
     expect(activeCols[0]?.dataset.col).toBe("1");
     expect(activeRows[0]?.dataset.row).toBe("1");
     const visibleResize = dom.querySelectorAll<HTMLElement>(
-      ".dohc-table-row-resize.is-visible",
+      ".dohc-table-row-resize.is-active",
     );
     expect(visibleResize).toHaveLength(1);
     expect(visibleResize[0]?.dataset.tableRowResize).toBe("1");
