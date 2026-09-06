@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-agent="{{agent}}">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Claude Code Chat</title>
+    <title>{{agent}} Chat</title>
     <link rel="stylesheet" href="/chat.css">
   </head>
   <body>
     <div class="app-shell">
       <header class="toolbar">
         <div>
-          <h1>Claude Code Chat</h1>
+          <h1>{{agent}} Chat</h1>
           <p>Approval required</p>
         </div>
         <div class="toolbar-actions">
@@ -21,17 +21,17 @@
 
       <main id="transcript" class="transcript">
         <div id="empty-state" class="empty-state">
-          <p>Send a message to start a Claude Code session.</p>
+          <p>Send a message to start a {{agent}} session.</p>
         </div>
       </main>
       <div id="status" class="visually-hidden" role="status" aria-live="polite"></div>
 
       <form id="composer" class="composer">
-        <label for="message">Message Claude Code</label>
+        <label for="message">Message {{agent}}</label>
         <textarea
           id="message"
           rows="3"
-          placeholder="Ask Claude Code to work in this workspace"
+          placeholder="Ask {{agent}} to work in this workspace"
           required
         ></textarea>
         <div class="composer-footer">

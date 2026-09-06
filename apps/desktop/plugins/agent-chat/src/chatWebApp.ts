@@ -15,8 +15,8 @@ import type {
   PluginPermissionDecision,
   PluginWebAppStart,
 } from "@dohc/sdk/node";
+import { isRecord } from "./shared.ts";
 
-const CHAT_WEB_APP_ID = "chat";
 // A memory guard, not a measured retention target -- no healthy turn size
 // was measured before choosing 500. ui/chat.js resets its transcript on
 // every EventSource open and rebuilds it purely from what this log
@@ -83,8 +83,8 @@ interface EventLogEntry {
 }
 
 export interface ChatWebApp {
-  startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
-  stopWebApp(webAppId: string, instanceKey: string | null): Promise<void>;
+  startWebApp(): Promise<PluginWebAppStart>;
+  stopWebApp(): Promise<void>;
   deactivate(): Promise<void>;
 }
 
@@ -178,10 +178,6 @@ async function jsonBody(request: IncomingMessage): Promise<unknown> {
   }
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function writeEmpty(response: ServerResponse, statusCode: number): void {
   response.writeHead(statusCode, {
     "cache-control": "no-store",
@@ -222,6 +218,7 @@ export interface ChatWebAppTestHooks {
 }
 
 async function listen(
+  agent: string,
   server: Server,
   beforeListen?: (server: Server) => Promise<void> | void,
 ): Promise<string> {
@@ -251,17 +248,23 @@ async function listen(
   });
   const address = server.address();
   if (!address || typeof address === "string") {
-    throw new Error("The Claude Code chat server did not start.");
+    throw new Error(`The ${agent} chat server did not start.`);
   }
   return "http://127.0.0.1:" + address.port + "/";
 }
 
-export function createChatWebApp(
-  driver: PluginAgentDriver,
-  workspaceRoot: string,
-  uiRoot: string,
-  testHooks?: ChatWebAppTestHooks,
-): ChatWebApp {
+export interface ChatWebAppOptions {
+  /** What the page calls the agent: its title, its empty state, and the
+   * author of every card the driver's events become. */
+  agent: string;
+  driver: PluginAgentDriver;
+  workspaceRoot: string;
+  uiRoot: string;
+  testHooks?: ChatWebAppTestHooks;
+}
+
+export function createChatWebApp(options: ChatWebAppOptions): ChatWebApp {
+  const { agent, driver, workspaceRoot, uiRoot, testHooks } = options;
   let server: Server | null = null;
   let serverUrl: string | null = null;
   let serverStart: Promise<string> | null = null;
@@ -624,8 +627,8 @@ export function createChatWebApp(
       throw requestError(
         503,
         ended
-          ? "The Claude Code session ended while it started."
-          : "The Claude Code session was stopped while it started.",
+          ? "The " + agent + " session ended while it started."
+          : "The " + agent + " session was stopped while it started.",
       );
     }
     processSession = created;
@@ -649,7 +652,7 @@ export function createChatWebApp(
     // the stop as the outcome, not an unrelated fatal error and a recovery
     // card for nothing left to recover.
     if (pendingPrompt?.stopRequested) {
-      throw requestError(503, "The Claude Code session was stopped while it started.");
+      throw requestError(503, "The " + agent + " session was stopped while it started.");
     }
     if (!probeResult.ok) {
       const message = errorMessage(probeResult.error);
@@ -664,7 +667,7 @@ export function createChatWebApp(
       // instruction never showed. Lead with the guidance; the diagnostic
       // rides along as detail for anyone who needs it.
       const guidance =
-        "Claude Code isn't installed. Install the Claude Code CLI and add it to your PATH.";
+        agent + " isn't installed. Install the " + agent + " CLI and add it to your PATH.";
       const diagnostic = available.errorMessage?.trim();
       const message = diagnostic ? guidance + " (" + diagnostic + ")" : guidance;
       publish({ kind: "error", message, fatal: true });
@@ -996,7 +999,10 @@ export function createChatWebApp(
       // use.
       const asset = request.method === "GET" ? staticAsset(url.pathname) : null;
       if (asset) {
-        const body = await readFile(join(uiRoot, asset.file));
+        const raw = await readFile(join(uiRoot, asset.file), "utf8");
+        // The page is one template for every agent this plugin serves;
+        // the name is filled in here, once per request.
+        const body = asset.file === "index.html" ? raw.replaceAll("{{agent}}", agent) : raw;
         response.writeHead(200, {
           "cache-control": "no-store",
           "content-type": asset.contentType,
@@ -1050,7 +1056,7 @@ export function createChatWebApp(
     nextServer.unref();
     server = nextServer;
     try {
-      serverUrl = await listen(nextServer, testHooks?.beforeListen);
+      serverUrl = await listen(agent, nextServer, testHooks?.beforeListen);
       return serverUrl;
     } catch (error) {
       server = null;
@@ -1118,12 +1124,7 @@ export function createChatWebApp(
   }
 
   return {
-    async startWebApp(webAppId, instanceKey) {
-      if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {
-        throw new Error(
-          'The Claude Code plugin serves only the singleton "' + CHAT_WEB_APP_ID + '" web app.',
-        );
-      }
+    async startWebApp() {
       if (serverUrl) return { url: urlWithToken() };
       serverStart ??= startServer().finally(() => {
         serverStart = null;
@@ -1131,12 +1132,7 @@ export function createChatWebApp(
       await serverStart;
       return { url: urlWithToken() };
     },
-    async stopWebApp(webAppId, instanceKey) {
-      if (webAppId !== CHAT_WEB_APP_ID || instanceKey !== null) {
-        throw new Error(
-          'The Claude Code plugin serves only the singleton "' + CHAT_WEB_APP_ID + '" web app.',
-        );
-      }
+    async stopWebApp() {
       // The host calls this to retire a pairing whose guest failed to load
       // (recovery after a bad start) so the next start pairs completely
       // fresh -- not on an ordinary tab close, which never dispatches this

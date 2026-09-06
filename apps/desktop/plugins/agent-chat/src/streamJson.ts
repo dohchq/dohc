@@ -1,4 +1,5 @@
 import type { PluginChildProcessCommandHandle } from "@dohc/sdk/node";
+import { LineReader } from "./shared.ts";
 
 /**
  * Claude Code's stream-json protocol over a brokered command child.
@@ -11,22 +12,6 @@ import type { PluginChildProcessCommandHandle } from "@dohc/sdk/node";
  * and no replies to wait for: Claude streams messages, and dohc answers the
  * ones that are questions.
  */
-
-/** Splits a stream's chunks into whole lines, keeping the partial tail. */
-export class LineReader {
-  private buffered = "";
-
-  read(chunk: string, onLine: (line: string) => void): void {
-    this.buffered += chunk;
-    let breakAt = this.buffered.indexOf("\n");
-    while (breakAt >= 0) {
-      const line = this.buffered.slice(0, breakAt).replace(/\r$/, "");
-      this.buffered = this.buffered.slice(breakAt + 1);
-      if (line.length > 0) onLine(line);
-      breakAt = this.buffered.indexOf("\n");
-    }
-  }
-}
 
 interface ClaudeStreamOptions {
   onMessage(message: unknown): void;

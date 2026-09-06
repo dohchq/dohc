@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type {
-  PluginActivateContext,
   PluginAgentDriver,
   PluginAgentProbe,
   PluginAgentSession,
@@ -8,15 +7,23 @@ import type {
   PluginPermissionDecision,
 } from "@dohc/sdk/node";
 import {
-  asString,
   claudeAuth,
   claudeSessionArgs,
   isFatalStderr,
-  isRecord,
   mapStreamMessage,
   permissionControlResponse,
   permissionRequestEvent,
 } from "./claudeProtocol.ts";
+import {
+  absent,
+  asString,
+  commandSpec,
+  isRecord,
+  runProbeCommand,
+  type CommandSpec,
+  type ProbeCommandResult,
+  type SpawnCommand,
+} from "./shared.ts";
 import { ClaudeStream } from "./streamJson.ts";
 
 /** How long a one-shot `claude` command has to answer a probe. */
@@ -45,33 +52,10 @@ const MAX_PROBE_ERROR_CHARS = 300;
 /** The id dohc's readiness handshake carries, which is never a Claude id. */
 const HANDSHAKE_ID = "dohc-initialize";
 
-interface ClaudeCommandSpec {
-  command: string;
-  args: string[];
+/** Where the `claude` command is, and what to pass it. */
+export function claudeCommandSpec(env: Record<string, string | undefined>): CommandSpec {
+  return commandSpec(env, "CLAUDE_CODE", "claude");
 }
-
-/**
- * Where the `claude` command is, and what to pass it.
- *
- * The two overrides point the driver at another build of Claude Code, or at a
- * stand-in, without changing the plugin.
- */
-export function claudeCommandSpec(env: Record<string, string | undefined>): ClaudeCommandSpec {
-  const command = env.DOHC_AGENT_CLAUDE_CODE_COMMAND?.trim() || "claude";
-  const raw = env.DOHC_AGENT_CLAUDE_CODE_ARGS_JSON?.trim();
-  if (!raw) return { command, args: [] };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    const args = Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-    return { command, args };
-  } catch {
-    return { command, args: raw.split(" ").filter(Boolean) };
-  }
-}
-
-type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
 
 interface PendingPermission {
   request: unknown;
@@ -199,41 +183,14 @@ class ClaudeSession implements PluginAgentSession {
 
 export function createClaudeDriver(
   spawnCommand: SpawnCommand,
-  spec: ClaudeCommandSpec,
+  spec: CommandSpec,
   readyTimeout: number = READY_TIMEOUT_MS,
 ): PluginAgentDriver {
-  interface CommandResult {
-    code: number | null;
-    stdout: string;
-    stderr: string;
-  }
-
-  /** Runs one short `claude` command and reads what it printed. */
-  async function runCommand(args: string[]): Promise<CommandResult | { timedOut: true }> {
-    const child = await spawnCommand({
-      command: spec.command,
-      args: [...spec.args, ...args],
-      cwd: { workspaceRoot: true },
-    });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), PROBE_TIMEOUT_MS);
-    });
-    try {
-      const result = await Promise.race([child.wait(), timedOut]);
-      if (result === "timeout") return { timedOut: true };
-      const logs = await child.logs();
-      const read = (stream: "stdout" | "stderr"): string =>
-        logs.filter((line) => line.stream === stream).map((line) => line.text).join("");
-      return { code: result.code, stdout: read("stdout"), stderr: read("stderr") };
-    } finally {
-      if (timer) clearTimeout(timer);
-      await child.terminate().catch(() => undefined);
-    }
-  }
+  const runCommand = (args: string[]) =>
+    runProbeCommand(spawnCommand, spec, args, PROBE_TIMEOUT_MS);
 
   async function probe(): Promise<PluginAgentProbe> {
-    let version: CommandResult | { timedOut: true };
+    let version: ProbeCommandResult | { timedOut: true };
     try {
       version = await runCommand(["--version"]);
     } catch (error) {
@@ -369,13 +326,4 @@ export function createClaudeDriver(
   }
 
   return { probe, startSession };
-}
-
-function absent(errorMessage: string): PluginAgentProbe {
-  return {
-    installed: false,
-    auth: { status: "unknown", loginHint: "Install and log in with the provider CLI." },
-    models: [],
-    errorMessage,
-  };
 }

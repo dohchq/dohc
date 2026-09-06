@@ -32,7 +32,7 @@ class FakeEventSource extends EventTarget {
  * history.replaceState last left it as (empty, after a real first load).
  * That is exactly what a real page reload looks like: the same origin's
  * sessionStorage survives, the URL's fragment does not. */
-async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
+async function loadChatModule(options: { reload?: boolean; agent?: string } = {}): Promise<{
   module: typeof import("../ui/chat.js");
   eventSource: FakeEventSource;
 }> {
@@ -48,6 +48,9 @@ async function loadChatModule(options: { reload?: boolean } = {}): Promise<{
       <button id="send" type="submit"></button>
     </form>
   `;
+  // What the served template carries: the server fills the agent's name
+  // into the page, and chat.js reads it from here.
+  document.documentElement.dataset.agent = options.agent ?? "Claude Code";
   lastEventSource = null;
   if (!options.reload) {
     sessionStorage.clear();
@@ -367,6 +370,29 @@ describe("replay fidelity (against the live EventSource wiring)", () => {
     expect(notice?.textContent).toBe(
       "Only recent messages are shown. Earlier ones were trimmed to save memory.",
     );
+  });
+
+  it("names the agent the page was rendered for on every card it authors", async () => {
+    const { eventSource } = await loadChatModule({ agent: "Codex" });
+    sendEvent(eventSource, {
+      kind: "text-delta",
+      itemId: "i1",
+      stream: "assistant",
+      text: "hello",
+      controls: { canSend: false, canStop: true, turnId: 1 },
+      seq: 1,
+    });
+    sendEvent(eventSource, {
+      kind: "error",
+      message: "Codex refused the turn.",
+      fatal: false,
+      controls: { canSend: true, canStop: false, turnId: null },
+      seq: 2,
+    });
+    const authors = [...document.querySelectorAll(".message.agent strong")].map(
+      (name) => name.textContent,
+    );
+    expect(authors).toEqual(["Codex", "Codex"]);
   });
 
   it("renders a streamed reply's fragments in order, each stream in its own card", async () => {

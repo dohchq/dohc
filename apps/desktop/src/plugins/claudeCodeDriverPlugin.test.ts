@@ -26,9 +26,9 @@ import { readPluginManifestFile } from "./pluginManifest";
  * double instead of the driver.
  */
 
-const claudePluginSource = fileURLToPath(new URL("../../plugins/claude-code", import.meta.url));
+const pluginSource = fileURLToPath(new URL("../../plugins/agent-chat", import.meta.url));
 const fakeClaude = fileURLToPath(
-  new URL("../../plugins/claude-code/test/fakeClaudeCli.mjs", import.meta.url),
+  new URL("../../plugins/agent-chat/test/fakeClaudeCli.mjs", import.meta.url),
 );
 const pluginHostProcessPath = fileURLToPath(new URL("./pluginHostProcess.ts", import.meta.url));
 
@@ -65,8 +65,8 @@ async function startClaudePlugin(
   scratchRoots.push(root);
   const workspaceRoot = join(root, "workspace");
   await mkdir(join(workspaceRoot, "notes"), { recursive: true });
-  const pluginRoot = join(root, "plugins", "claude-code");
-  await cp(claudePluginSource, pluginRoot, { recursive: true });
+  const pluginRoot = join(root, "plugins", "agent-chat");
+  await cp(pluginSource, pluginRoot, { recursive: true });
 
   const broker = new PluginChildProcessBroker({ dohcDir: root, workspaceRoot });
   liveBrokers.push(broker);
@@ -148,10 +148,10 @@ async function startClaudePlugin(
     target: "node22",
     logLevel: "silent",
   });
-  await host.start(pluginRoot, "claude-code", { ...manifest.manifest, entry: "bundle.mjs" });
+  await host.start(pluginRoot, "agent-chat", { ...manifest.manifest, entry: "bundle.mjs" });
   await until(
-    () => (host?.getStatus("claude-code") === "ready" ? true : undefined),
-    `the claude-code plugin to activate (${host.getStderrLog("claude-code").join(" | ")})`,
+    () => (host?.getStatus("agent-chat") === "ready" ? true : undefined),
+    `the agent-chat plugin to activate (${host.getStderrLog("agent-chat").join(" | ")})`,
     20_000,
   );
 
@@ -159,8 +159,8 @@ async function startClaudePlugin(
 }
 
 function claudeDriver(fixture: ClaudeFixture): AgentDriver {
-  const driver = fixture.drivers.list()[0];
-  if (!driver) throw new Error("The claude-code plugin registered no driver.");
+  const driver = fixture.drivers.list().find((candidate) => candidate.id === "claude-code");
+  if (!driver) throw new Error("The agent-chat plugin registered no claude-code driver.");
   return driver;
 }
 
@@ -208,7 +208,7 @@ describe("dohc's Claude Code driver, as a plugin", () => {
   it("registers as a plugin driver", async () => {
     const fixture = await startClaudePlugin();
 
-    expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["claude-code"]);
+    expect(fixture.drivers.list().map((driver) => driver.id)).toEqual(["claude-code", "codex"]);
     expect(claudeDriver(fixture).displayName).toBe("Claude Code");
   });
 
@@ -218,13 +218,16 @@ describe("dohc's Claude Code driver, as a plugin", () => {
     // (pluginInstallRunner.ts). A driver should have no dependencies — but a
     // plugin without the lockfile does not install at all.
     const manifest = JSON.parse(
-      await readFile(join(claudePluginSource, "dohc-plugin.json"), "utf8"),
+      await readFile(join(pluginSource, "dohc-plugin.json"), "utf8"),
     ) as { drivers?: Array<{ id: string }> };
-    expect(manifest.drivers).toEqual([{ id: "claude-code", displayName: "Claude Code" }]);
-    await expect(readFile(join(claudePluginSource, "pnpm-lock.yaml"), "utf8")).resolves
+    expect(manifest.drivers).toEqual([
+      { id: "claude-code", displayName: "Claude Code" },
+      { id: "codex", displayName: "Codex" },
+    ]);
+    await expect(readFile(join(pluginSource, "pnpm-lock.yaml"), "utf8")).resolves
       .toContain("lockfileVersion");
     const pkg = JSON.parse(
-      await readFile(join(claudePluginSource, "package.json"), "utf8"),
+      await readFile(join(pluginSource, "package.json"), "utf8"),
     ) as { dependencies?: Record<string, string> };
     expect(pkg.dependencies ?? {}).toEqual({});
   });

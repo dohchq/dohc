@@ -1,4 +1,5 @@
 import type { PluginAgentEvent, PluginPermissionDecision, PluginPermissionOption } from "@dohc/sdk/node";
+import { asString, isRecord } from "./shared.ts";
 
 /**
  * What `codex app-server` says, as dohc's agent events.
@@ -7,14 +8,6 @@ import type { PluginAgentEvent, PluginPermissionDecision, PluginPermissionOption
  * which sandbox a dohc mode asks Codex for, which notification becomes which
  * event, and which of Codex's own fields never leave this file.
  */
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
 
 function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];

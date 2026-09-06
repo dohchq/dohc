@@ -4,6 +4,7 @@ import type {
   PluginPermissionDecision,
   PluginPermissionOption,
 } from "@dohc/sdk/node";
+import { asString, isRecord } from "./shared.ts";
 
 /**
  * What the `claude` CLI says, as dohc's agent events.
@@ -12,14 +13,6 @@ import type {
  * which arguments dohc starts Claude with, which stream message becomes which
  * event, and which of Claude's own fields never leave this file.
  */
-
-export function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
-}
 
 type ClaudeMode = "approval-required" | "auto-accept-edits" | "full-access";
 
