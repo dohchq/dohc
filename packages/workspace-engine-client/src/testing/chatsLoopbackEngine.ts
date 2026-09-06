@@ -3,6 +3,7 @@ import { classifyEngineFilePath } from "@dohc/security-contract";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
+import { asObject, optionalString } from "./json";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -114,13 +115,6 @@ type SeedRunInput = {
 
 type LedgerEntry = { fingerprint: string; result: JsonValue };
 
-function asObject(value: JsonValue, label: string): ChatsJsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`${label} must be an object`);
-  }
-  return value;
-}
-
 function strictObject(
   value: JsonValue,
   label: string,
@@ -136,13 +130,6 @@ function strictObject(
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
   const value = object[key];
   if (typeof value !== "string") throw new Error(code);
-  return value;
-}
-
-function optionalString(object: ChatsJsonObject, key: string): string | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new Error("invalid-parameters");
   return value;
 }
 

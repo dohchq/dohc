@@ -4,6 +4,7 @@ import { validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
+import { asObject, decodeBase64, encodeBase64, optionalString, sha256 } from "./json";
 import {
   CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
@@ -454,13 +455,6 @@ interface SeedSecretInput {
   origin?: VersionedOrigin;
 }
 
-function asObject(value: JsonValue, label: string): JsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-
 function requiredString(object: JsonObject, key: string, label: string): string {
   const value = object[key];
   if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
@@ -616,13 +610,6 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
       }
       break;
   }
-}
-
-function optionalString(object: JsonObject, key: string): string | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new Error(`${key} is invalid.`);
-  return value;
 }
 
 function serdeOptionalString(object: JsonObject, key: string): string | undefined {
@@ -862,22 +849,6 @@ function stableJsonStringify(value: JsonValue): string {
     ) as JsonObject;
   };
   return JSON.stringify(stableValue(value));
-}
-
-function sha256(value: string | number[]): string {
-  return createHash("sha256")
-    .update(typeof value === "string" ? value : Uint8Array.from(value))
-    .digest("hex");
-}
-
-function encodeBase64(bytes: number[]): string {
-  return Buffer.from(bytes).toString("base64");
-}
-
-function decodeBase64(value: string): number[] {
-  const bytes = [...Buffer.from(value, "base64")];
-  if (encodeBase64(bytes) !== value) throw new Error("invalid-input");
-  return bytes;
 }
 
 function comparePaths(left: string, right: string): number {
@@ -1489,7 +1460,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (Array.isArray(rawBytes) && rawBase64 === undefined) {
       bytes = [...rawBytes];
     } else if (typeof rawBase64 === "string" && rawBytes === undefined) {
-      bytes = decodeBase64(rawBase64);
+      bytes = [...decodeBase64(rawBase64)];
     } else {
       throw new Error("invalid-input");
     }
@@ -1642,7 +1613,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     const bytes =
       encoded === undefined
         ? state.blobs.get(expectedSha)
-        : decodeBase64(encoded);
+        : [...decodeBase64(encoded)];
     if (bytes === undefined) throw new Error("file-not-found");
     if (encoded !== undefined && bytes.length > MAX_CAPTURE_BINARY_FILE_BYTES) {
       throw new Error("content-exceeds-capture-cap");
