@@ -1298,114 +1298,6 @@ enum CaptureIndexing {
 
 enum Command {
     Run(Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>),
-    VersionedTextWrite {
-        input: WriteText,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
-    },
-    VersionedBinaryWrite {
-        input: WriteBinary,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<BinaryWriteExecutionResult, RuntimeError>>,
-    },
-    VersionedTextRename {
-        input: RenameTextFile,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RenameResult, RuntimeError>>,
-    },
-    VersionedTextDelete {
-        input: DeleteTextFile,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<DeleteResult, RuntimeError>>,
-    },
-    VersionedTextRollback {
-        input: RollbackTextFileMutation,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<RollbackExecutionResult, RuntimeError>>,
-    },
-    VersionedTextMerge {
-        input: MergeTextFileFromVersion,
-        root_dir: PathBuf,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<MergeExecutionResult, RuntimeError>>,
-    },
-    CaptureIngest {
-        input: CaptureIngest,
-        indexing: CaptureIndexing,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<WriteResult, RuntimeError>>,
-    },
-    CaptureIngestBatch {
-        inputs: Vec<CaptureIngest>,
-        search_policy: Arc<SearchPolicySnapshot>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        root_dir: PathBuf,
-        root_guard: Arc<dyn WorkspaceRootGuard>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError>>,
-    },
-    CaptureIngestBinary {
-        input: CaptureIngestBinary,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<CaptureIngestBinaryResult, RuntimeError>>,
-    },
-    ReconcileCollections {
-        workspace_id: String,
-        version_id: String,
-        root_dir: PathBuf,
-        root_guard: Option<Arc<dyn WorkspaceRootGuard>>,
-        leases: LeaseRegistry,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
-    CaptureSecret {
-        // Boxed: the plaintext + key payload should not size every command
-        // slot, and the key must never be duplicated by channel copies.
-        payload: Box<(CaptureSecret, SecretDataKey)>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    CaptureSecretRetire {
-        input: CaptureSecretRetire,
-        workspace_root: Option<CommandWorkspaceRoot>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
-    },
-    CaptureRetire {
-        input: CaptureRetire,
-        workspace_root: Option<CommandWorkspaceRoot>,
-        self_writes: Option<Arc<dyn SelfWriteRecorder>>,
-        leases: LeaseRegistry,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
-    },
     SetActiveVersion {
         input: ActiveVersionSwitch,
         faults: Arc<dyn FaultInjector>,
@@ -1794,23 +1686,20 @@ impl ActorHandle {
         root_dir: PathBuf,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<Result<WriteResult, RuntimeError>>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngestBatch {
-                inputs,
-                search_policy,
-                leases,
-                faults,
-                root_dir,
-                root_guard,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_batch_on_store(
+                    store,
+                    &inputs,
+                    &search_policy,
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                    (&root_dir, root_guard.as_ref()),
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     fn capture_ingest_blocking_with_indexing(
@@ -1820,21 +1709,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<WriteResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Capture a binary file on the actor's writer, blocking the caller.
@@ -1844,20 +1724,12 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_binary_on_store(store, &input, &leases, faults.as_ref(), &token)
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Check changed collection records against their durable id bindings,
@@ -1889,25 +1761,23 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Vec<String>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard: Some(root_guard),
-                leases,
-                self_writes,
+        let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = Some(root_guard);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                &workspace_id,
+                &version_id,
+                &root_dir,
+                root_guard.as_deref(),
+                &leases,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
     }
 
     /// Capture a secret file on the actor's writer, blocking the caller. The
@@ -1919,19 +1789,10 @@ impl ActorHandle {
         key: SecretDataKey,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureSecret {
-                payload: Box::new((input, key)),
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, _cache| {
+            capture_secret_on_store(store, &input, &key, faults.as_ref(), &token)
+        })
     }
 
     /// Retire a captured secret path on the actor's writer, blocking the
@@ -1943,20 +1804,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureSecretRetire {
-                input,
-                workspace_root: Some((root_dir, Some(root_guard))),
-                faults,
-                token: CancellationToken::new(),
-                reply,
-            })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, _cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            capture_secret_retire_on_store(
+                store,
+                &input,
+                root_dir,
+                root_guard,
+                faults.as_ref(),
+                &token,
+            )
+        })
     }
 
     /// Whether the workspace holds any encrypted secret state — the async
@@ -1986,22 +1846,24 @@ impl ActorHandle {
         leases: LeaseRegistry,
         faults: Arc<dyn FaultInjector>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureRetire {
-                input,
-                workspace_root: None,
-                self_writes: None,
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let workspace_root: Option<CommandWorkspaceRoot> = None;
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     /// Retire a captured path and immediately apply any durable disk cleanup
@@ -2015,22 +1877,24 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         root_guard: Arc<dyn WorkspaceRootGuard>,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        debug_assert_sync_context();
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .blocking_send(Command::CaptureRetire {
-                input,
-                workspace_root: Some((root_dir, Some(root_guard))),
-                self_writes: Some(self_writes),
-                leases,
-                faults,
-                token: CancellationToken::new(),
-                reply,
+        let workspace_root: Option<CommandWorkspaceRoot> = Some((root_dir, Some(root_guard)));
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = Some(self_writes);
+        let token: CancellationToken = CancellationToken::new();
+        self.run_blocking(move |store, cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx
-            .blocking_recv()
-            .map_err(|_| RuntimeError::ActorUnavailable)?
+        })
     }
 
     // --- Async API (drives the tokio loop from within a runtime) ---
@@ -2058,18 +1922,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextWrite {
-                input,
-                root_dir: None,
-                faults,
-                token,
-                reply,
+        let root_dir: Option<PathBuf> = None;
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_write_on_store(
+                    store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Execute an RPC text write with its FTS row in the same transaction.
@@ -2080,18 +1945,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextWrite {
-                input,
-                root_dir: Some(root_dir),
-                faults,
-                token,
-                reply,
+        let root_dir: Option<PathBuf> = Some(root_dir);
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_write_on_store(
+                    store,
+                    &input,
+                    root_dir.as_deref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Execute, index, and materialize a caller-originated binary write on the
@@ -2104,19 +1970,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<BinaryWriteExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedBinaryWrite {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_binary_write_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_rename(
@@ -2127,19 +1993,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<RenameResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRename {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_rename_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_delete(
@@ -2150,19 +2016,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<DeleteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextDelete {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_delete_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_rollback(
@@ -2173,19 +2039,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<RollbackExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextRollback {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_rollback_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn versioned_text_compare(
@@ -2208,19 +2074,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<MergeExecutionResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::VersionedTextMerge {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                versioned_text_merge_on_store(
+                    store,
+                    &input,
+                    &root_dir,
+                    self_writes.as_ref(),
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn compare_version_files_page(
@@ -2280,19 +2146,12 @@ impl ActorHandle {
         token: CancellationToken,
     ) -> Result<WriteResult, RuntimeError> {
         let indexing = root_dir.map_or(CaptureIndexing::Skip, CaptureIndexing::ReadRoot);
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_on_store(store, &input, &indexing, &leases, faults.as_ref(), &token)
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Capture a binary file on the actor's single writer thread.
@@ -2303,18 +2162,12 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureIngestBinaryResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token,
-                reply,
+        self.run(move |store, cache| {
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_ingest_binary_on_store(store, &input, &leases, faults.as_ref(), &token)
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2329,23 +2182,23 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard: None,
-                leases,
-                self_writes,
+        let root_guard: Option<Arc<dyn WorkspaceRootGuard>> = None;
+        self.run(move |store, cache| {
+            reconcile_collections_on_store(
+                store,
+                cache,
+                &workspace_id,
+                &version_id,
+                &root_dir,
+                root_guard.as_deref(),
+                &leases,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn collections_list(
@@ -3036,17 +2889,10 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureSecret {
-                payload: Box::new((input, key)),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            capture_secret_on_store(store, &input, &key, faults.as_ref(), &token)
+        })
+        .await
     }
 
     /// Retire a captured secret path on the actor's single writer thread.
@@ -3056,18 +2902,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureSecretRetire {
-                input,
-                workspace_root: None,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        let workspace_root: Option<CommandWorkspaceRoot> = None;
+        self.run(move |store, _cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            capture_secret_retire_on_store(
+                store,
+                &input,
+                root_dir,
+                root_guard,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     /// Retire a captured path on the actor's single writer thread.
@@ -3078,20 +2925,24 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<CaptureRetireResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CaptureRetire {
-                input,
-                workspace_root: None,
-                self_writes: None,
-                leases,
-                faults,
-                token,
-                reply,
+        let workspace_root: Option<CommandWorkspaceRoot> = None;
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        self.run(move |store, cache| {
+            let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+            with_local_file_mutation_cache_reset(cache, || {
+                capture_retire_on_store(
+                    store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    self_writes.as_deref(),
+                    &leases,
+                    faults.as_ref(),
+                    &token,
+                )
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Read one versioned text snapshot on the actor-owned connection.
@@ -6689,241 +6540,6 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
-            Command::VersionedTextWrite {
-                input,
-                root_dir,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_write_on_store(
-                        &mut store,
-                        &input,
-                        root_dir.as_deref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedBinaryWrite {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_binary_write_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRename {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_rename_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextDelete {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_delete_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextRollback {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_rollback_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::VersionedTextMerge {
-                input,
-                root_dir,
-                self_writes,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    versioned_text_merge_on_store(
-                        &mut store,
-                        &input,
-                        &root_dir,
-                        self_writes.as_ref(),
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngest {
-                input,
-                indexing,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_on_store(
-                        &mut store,
-                        &input,
-                        &indexing,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngestBatch {
-                inputs,
-                search_policy,
-                leases,
-                faults,
-                root_dir,
-                root_guard,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_batch_on_store(
-                        &mut store,
-                        &inputs,
-                        &search_policy,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                        (&root_dir, root_guard.as_ref()),
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureIngestBinary {
-                input,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_ingest_binary_on_store(
-                        &mut store,
-                        &input,
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::ReconcileCollections {
-                workspace_id,
-                version_id,
-                root_dir,
-                root_guard,
-                leases,
-                self_writes,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = reconcile_collections_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &workspace_id,
-                    &version_id,
-                    &root_dir,
-                    root_guard.as_deref(),
-                    &leases,
-                    self_writes.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureSecret {
-                payload,
-                faults,
-                token,
-                reply,
-            } => {
-                let (input, key) = *payload;
-                let outcome =
-                    capture_secret_on_store(&mut store, &input, &key, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureSecretRetire {
-                input,
-                workspace_root,
-                faults,
-                token,
-                reply,
-            } => {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = capture_secret_retire_on_store(
-                    &mut store,
-                    &input,
-                    root_dir,
-                    root_guard,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
             Command::SetActiveVersion {
                 input,
                 faults,
@@ -6940,30 +6556,6 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
-                let _ = reply.send(outcome);
-            }
-            Command::CaptureRetire {
-                input,
-                workspace_root,
-                self_writes,
-                leases,
-                faults,
-                token,
-                reply,
-            } => {
-                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
-                let outcome = with_local_file_mutation_cache_reset(&mut doc_cache, || {
-                    capture_retire_on_store(
-                        &mut store,
-                        &input,
-                        root_dir,
-                        root_guard,
-                        self_writes.as_deref(),
-                        &leases,
-                        faults.as_ref(),
-                        &token,
-                    )
-                });
                 let _ = reply.send(outcome);
             }
             Command::YdocOpenState {
@@ -13396,57 +12988,82 @@ mod capture_secret_root_guard_tests {
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
         let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        let input: CaptureRetire = CaptureRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: "missing.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 2,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let workspace_root: Option<CommandWorkspaceRoot> =
+            Some((root.clone(), Some(blocker_guard)));
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        let leases: LeaseRegistry = LeaseRegistry::new();
+        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let token: CancellationToken = CancellationToken::new();
         actor
             .tx
-            .blocking_send(Command::CaptureRetire {
-                input: CaptureRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: "missing.md".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 2,
-                    request_id: None,
-                    only_if_text_head: false,
-                    only_if_capture_origin: true,
-                    allow_ydoc_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(blocker_guard))),
-                self_writes: None,
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: blocker_reply,
-            })
+            .blocking_send(Command::Run(Box::new(move |store, cache| {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+                let outcome = with_local_file_mutation_cache_reset(cache, || {
+                    capture_retire_on_store(
+                        store,
+                        &input,
+                        root_dir,
+                        root_guard,
+                        self_writes.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
+                let _ = blocker_reply.send(outcome);
+            })))
             .expect("queue actor blocker");
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
         let (batch_reply, batch_reply_rx) = oneshot::channel();
+        let inputs: Vec<CaptureIngest> = vec![CaptureIngest {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: PATH.to_owned(),
+            text: "original body".to_owned(),
+            metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
+            metadata_summary: Some("Reconciled offline edits".to_owned()),
+            metadata_correlation_id: Some("queued-root-swap".to_owned()),
+            author_json: None,
+            now_ms: 3,
+            request_id: None,
+            claim_foreign_head: false,
+        }];
+        let search_policy: Arc<SearchPolicySnapshot> = Arc::new(read_engine_search_policy(&root));
+        let leases: LeaseRegistry = LeaseRegistry::new();
+        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let root_dir: PathBuf = root.clone();
+        let root_guard: Arc<dyn WorkspaceRootGuard> = captured_guard;
+        let token: CancellationToken = CancellationToken::new();
         actor
             .tx
-            .blocking_send(Command::CaptureIngestBatch {
-                inputs: vec![CaptureIngest {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: PATH.to_owned(),
-                    text: "original body".to_owned(),
-                    metadata_origin: dohc_engine_domain::store::CAPTURE_ORIGIN.to_owned(),
-                    metadata_summary: Some("Reconciled offline edits".to_owned()),
-                    metadata_correlation_id: Some("queued-root-swap".to_owned()),
-                    author_json: None,
-                    now_ms: 3,
-                    request_id: None,
-                    claim_foreign_head: false,
-                }],
-                search_policy: Arc::new(read_engine_search_policy(&root)),
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                root_dir: root.clone(),
-                root_guard: captured_guard,
-                token: CancellationToken::new(),
-                reply: batch_reply,
-            })
+            .blocking_send(Command::Run(Box::new(move |store, cache| {
+                let outcome = with_local_file_mutation_cache_reset(cache, || {
+                    capture_ingest_batch_on_store(
+                        store,
+                        &inputs,
+                        &search_policy,
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                        (&root_dir, root_guard.as_ref()),
+                    )
+                });
+                let _ = batch_reply.send(outcome);
+            })))
             .expect("queue capture batch behind blocker");
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
@@ -13546,50 +13163,74 @@ mod capture_secret_root_guard_tests {
         let blocker = PausedRootGuard::bind(&root);
         let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
         let (blocker_reply, blocker_reply_rx) = oneshot::channel();
+        let input: CaptureRetire = CaptureRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: "missing.md".to_owned(),
+            metadata_summary: None,
+            metadata_correlation_id: None,
+            now_ms: 3,
+            request_id: None,
+            only_if_text_head: false,
+            only_if_capture_origin: true,
+            allow_ydoc_origin: true,
+        };
+        let workspace_root: Option<CommandWorkspaceRoot> =
+            Some((root.clone(), Some(blocker_guard)));
+        let self_writes: Option<Arc<dyn SelfWriteRecorder>> = None;
+        let leases: LeaseRegistry = LeaseRegistry::new();
+        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let token: CancellationToken = CancellationToken::new();
         actor
             .tx
-            .blocking_send(Command::CaptureRetire {
-                input: CaptureRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: "missing.md".to_owned(),
-                    metadata_summary: None,
-                    metadata_correlation_id: None,
-                    now_ms: 3,
-                    request_id: None,
-                    only_if_text_head: false,
-                    only_if_capture_origin: true,
-                    allow_ydoc_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(blocker_guard))),
-                self_writes: None,
-                leases: LeaseRegistry::new(),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: blocker_reply,
-            })
+            .blocking_send(Command::Run(Box::new(move |store, cache| {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+                let outcome = with_local_file_mutation_cache_reset(cache, || {
+                    capture_retire_on_store(
+                        store,
+                        &input,
+                        root_dir,
+                        root_guard,
+                        self_writes.as_deref(),
+                        &leases,
+                        faults.as_ref(),
+                        &token,
+                    )
+                });
+                let _ = blocker_reply.send(outcome);
+            })))
             .expect("queue actor blocker");
         blocker.wait_until_reached();
 
         let captured_guard: Arc<dyn WorkspaceRootGuard> = Arc::new(BoundRootGuard::bind(&root));
         let (retire_reply, retire_reply_rx) = oneshot::channel();
+        let input: CaptureSecretRetire = CaptureSecretRetire {
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: VERSION_ID.to_owned(),
+            path: SECRET_PATH.to_owned(),
+            metadata_origin: "local-file".to_owned(),
+            metadata_correlation_id: None,
+            now_ms: 4,
+            only_if_own_origin: true,
+        };
+        let workspace_root: Option<CommandWorkspaceRoot> =
+            Some((root.clone(), Some(captured_guard)));
+        let faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let token: CancellationToken = CancellationToken::new();
         actor
             .tx
-            .blocking_send(Command::CaptureSecretRetire {
-                input: CaptureSecretRetire {
-                    workspace_id: WORKSPACE_ID.to_owned(),
-                    version_id: VERSION_ID.to_owned(),
-                    path: SECRET_PATH.to_owned(),
-                    metadata_origin: "local-file".to_owned(),
-                    metadata_correlation_id: None,
-                    now_ms: 4,
-                    only_if_own_origin: true,
-                },
-                workspace_root: Some((root.clone(), Some(captured_guard))),
-                faults: Arc::new(NoFaults),
-                token: CancellationToken::new(),
-                reply: retire_reply,
-            })
+            .blocking_send(Command::Run(Box::new(move |store, _cache| {
+                let (root_dir, root_guard) = command_workspace_root_parts(workspace_root.as_ref());
+                let outcome = capture_secret_retire_on_store(
+                    store,
+                    &input,
+                    root_dir,
+                    root_guard,
+                    faults.as_ref(),
+                    &token,
+                );
+                let _ = retire_reply.send(outcome);
+            })))
             .expect("queue secret retire behind blocker");
 
         std::fs::rename(&root, &moved_root).expect("move original workspace root");
