@@ -192,7 +192,7 @@
   </section>
 
   <!-- ============ humans and agents ============ -->
-  <section class="section" id="two-readers" aria-labelledby="two-readers-title">
+  <section class="section feature-section" id="two-readers" aria-labelledby="two-readers-title">
     <div class="section-head reveal">
       <h2 id="two-readers-title">Built for humans and agents.</h2>
       <p class="section-lede">
@@ -231,7 +231,7 @@
   </section>
 
   <!-- ============ agent chat ============ -->
-  <section class="section" id="agent-chat" aria-labelledby="agent-chat-title">
+  <section class="section feature-section" id="agent-chat" aria-labelledby="agent-chat-title">
     <div class="section-head reveal">
       <h2 id="agent-chat-title">Chat as a primitive.</h2>
       <p class="section-lede">
@@ -253,7 +253,7 @@
         </div>
         <div class="agent-thread">
           <div class="chat-msg"><span class="chat-who">Maya</span>ok how much do we each owe? i had way less than you two</div>
-          <div class="chat-msg is-you"><span class="chat-who">you</span><span class="chat-mention">@My Agent</span> build something for this. receipts attached
+          <div class="chat-msg"><span class="chat-who">you</span><span class="chat-mention">@My Agent</span> build something for this. receipts attached
             <span class="chat-attachments" aria-label="Three receipt photos">
               <span class="chat-receipt"><i></i><i></i><i></i><b>izakaya.jpg</b></span>
               <span class="chat-receipt"><i></i><i></i><b>ramen.jpg</b></span>
@@ -262,7 +262,7 @@
           </div>
           <div class="chat-msg is-agent">
             <span class="agent-line"><span class="agent-avatar" aria-hidden="true">M</span><b>My Agent</b><span class="agent-line-runs">your agent · on <svg class="agent-logo" aria-hidden="true"><use data-agent-logo href="#logo-claude"/></svg><span data-agent-name>Claude</span></span></span>
-            <span>Read the receipts and made you an app. Tick what you had and it works out the rest.</span>
+            <span class="agent-message">Read the receipts and made you an app. Tick what you had and it works out the rest.</span>
             <span class="chat-appchip"><span class="app-icon" aria-hidden="true"></span>Split<span class="chat-appchip-meta">app · shared with Maya, Sam</span></span>
           </div>
         </div>
@@ -291,7 +291,7 @@
   </section>
 
   <!-- ============ local first, sync ============ -->
-  <section class="section" id="sync" aria-labelledby="sync-title">
+  <section class="section feature-section" id="sync" aria-labelledby="sync-title">
     <div class="section-head reveal">
       <h2 id="sync-title">Files on your computer. Sync when you need it.</h2>
       <p class="section-lede">
@@ -300,62 +300,64 @@
         your devices.
       </p>
     </div>
-    <div class="sync-demo reveal d1" data-sync-demo>
-      <div class="device laptop">
-        <div class="laptop-lid">
-          <span class="laptop-notch" aria-hidden="true"></span>
-          <div class="laptop-screen">
-            <div class="device-bar"><span class="device-bar-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>notes.md</span><span class="device-state" data-sync-state="a">in sync</span></div>
+    <div class="sync-stage reveal d1">
+      <div class="sync-demo" data-sync-demo>
+        <div class="device laptop">
+          <div class="laptop-lid">
+            <span class="laptop-notch" aria-hidden="true"></span>
+            <div class="laptop-screen">
+              <div class="device-bar"><span class="device-bar-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>notes.md</span><span class="device-state" data-sync-state="a">in sync</span></div>
+              <div class="device-doc">
+                <div class="device-doc-title">Reading notes</div>
+                <textarea class="device-editor" data-sync-editor="a" aria-label="The notes on your laptop" spellcheck="false" rows="4">Chapter 3 is about attention, not time. Reread the Tuesday section.</textarea>
+              </div>
+              <div class="device-foot" data-sync-foot="a">saved on this laptop</div>
+            </div>
+          </div>
+          <div class="laptop-base" aria-hidden="true"><span class="laptop-trackpad"></span></div>
+        </div>
+
+        <div class="sync-link" data-sync-link>
+          <span class="sync-link-label" data-sync-link-label>connected</span>
+          <span class="sync-wire" aria-hidden="true"><i></i></span>
+        </div>
+
+        <div class="device phone">
+          <span class="phone-button phone-button-action" aria-hidden="true"></span>
+          <span class="phone-button phone-button-vol phone-button-vol-up" aria-hidden="true"></span>
+          <span class="phone-button phone-button-vol phone-button-vol-down" aria-hidden="true"></span>
+          <span class="phone-button phone-button-power" aria-hidden="true"></span>
+          <div class="phone-bezel">
+          <div class="phone-screen">
+            <div class="phone-status" aria-hidden="true">
+              <span data-sync-clock>9:41</span>
+              <span class="phone-island"></span>
+              <span class="phone-signal" data-sync-signal><i></i><i></i><i></i><i></i></span>
+            </div>
+            <div class="device-bar"><span>notes.md</span><span class="device-state" data-sync-state="b">in sync</span></div>
             <div class="device-doc">
               <div class="device-doc-title">Reading notes</div>
-              <textarea class="device-editor" data-sync-editor="a" aria-label="The notes on your laptop" spellcheck="false" rows="4">Chapter 3 is about attention, not time. Reread the Tuesday section.</textarea>
+              <textarea class="device-editor" data-sync-editor="b" aria-label="The notes on your phone" spellcheck="false" rows="7">Chapter 3 is about attention, not time. Reread the Tuesday section.</textarea>
             </div>
-            <div class="device-foot" data-sync-foot="a">saved on this laptop</div>
+            <div class="device-foot" data-sync-foot="b">saved on this phone</div>
+            <span class="phone-home" aria-hidden="true"></span>
+          </div>
           </div>
         </div>
-        <div class="laptop-base" aria-hidden="true"><span class="laptop-trackpad"></span></div>
       </div>
-
-      <div class="sync-link" data-sync-link>
-        <span class="sync-link-label" data-sync-link-label>connected</span>
-        <span class="sync-wire" aria-hidden="true"><i></i></span>
+      <div class="sync-controls">
+        <label class="sync-switch">
+          <input type="checkbox" checked data-sync-toggle />
+          <span class="sync-switch-track" aria-hidden="true"></span>
+          <span>connection</span>
+        </label>
+        <span class="sync-hint" data-sync-hint>watching. click or type to take over.</span>
       </div>
-
-      <div class="device phone">
-        <span class="phone-button phone-button-action" aria-hidden="true"></span>
-        <span class="phone-button phone-button-vol phone-button-vol-up" aria-hidden="true"></span>
-        <span class="phone-button phone-button-vol phone-button-vol-down" aria-hidden="true"></span>
-        <span class="phone-button phone-button-power" aria-hidden="true"></span>
-        <div class="phone-bezel">
-        <div class="phone-screen">
-          <div class="phone-status" aria-hidden="true">
-            <span data-sync-clock>9:41</span>
-            <span class="phone-island"></span>
-            <span class="phone-signal" data-sync-signal><i></i><i></i><i></i><i></i></span>
-          </div>
-          <div class="device-bar"><span>notes.md</span><span class="device-state" data-sync-state="b">in sync</span></div>
-          <div class="device-doc">
-            <div class="device-doc-title">Reading notes</div>
-            <textarea class="device-editor" data-sync-editor="b" aria-label="The notes on your phone" spellcheck="false" rows="7">Chapter 3 is about attention, not time. Reread the Tuesday section.</textarea>
-          </div>
-          <div class="device-foot" data-sync-foot="b">saved on this phone</div>
-          <span class="phone-home" aria-hidden="true"></span>
-        </div>
-        </div>
-      </div>
-    </div>
-    <div class="sync-controls reveal d2">
-      <label class="sync-switch">
-        <input type="checkbox" checked data-sync-toggle />
-        <span class="sync-switch-track" aria-hidden="true"></span>
-        <span>connection</span>
-      </label>
-      <span class="sync-hint" data-sync-hint>watching. click or type to take over.</span>
     </div>
   </section>
 
   <!-- ============ downloads ============ -->
-  <section class="section downloads-home" id="downloads" aria-labelledby="downloads-title">
+  <section class="section feature-section" id="downloads" aria-labelledby="downloads-title">
     <div class="downloads-inner">
       <div class="downloads-heading reveal">
         <h2 id="downloads-title">Runs on your machine.</h2>
@@ -388,7 +390,7 @@
   </section>
 
   <!-- ============ cloud ============ -->
-  <section class="section cloud-home" id="cloud" aria-labelledby="ownership-title">
+  <section class="section feature-section" id="cloud" aria-labelledby="ownership-title">
     <div class="cloud-summary">
       <div class="ownership-summary reveal d1">
         <h2 id="ownership-title">Free, open source, and self-hostable.</h2>
