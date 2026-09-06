@@ -1805,343 +1805,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
-    ChatAttachmentsListForThread {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatAttachment>, RuntimeError>>,
-    },
-    ChatAttachmentsListFileMentions {
-        workspace_id: String,
-        object_id: Option<String>,
-        path_hint: Option<String>,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatFileMention>, RuntimeError>>,
-    },
-    ChatMentionsBackfill {
-        workspace_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatMentionsListForHandle {
-        workspace_id: String,
-        handle: String,
-        unread_only: bool,
-        after: Option<MentionCursor>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatMention>, RuntimeError>>,
-    },
-    ChatDispatchRecordEligibleTriggers {
-        workspace_id: String,
-        verified_user_id: Option<String>,
-        at_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatDecisionResolve {
-        input: Box<ResolveDecision>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatDecision, RuntimeError>>,
-    },
-    ChatDecisionsList {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatDecision>, RuntimeError>>,
-    },
-    ChatReactionSet {
-        input: Box<SetReaction>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatReaction, RuntimeError>>,
-    },
-    ChatReactionsList {
-        workspace_id: String,
-        thread_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<ChatReaction>, RuntimeError>>,
-    },
-    ChatReadStateMarkThreadRead {
-        workspace_id: String,
-        thread_id: String,
-        up_to_sequence: i64,
-        expected_revision: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatThreadReadState, RuntimeError>>,
-    },
-    ChatReadStateGet {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<ChatThreadReadState, RuntimeError>>,
-    },
-    ChatReadStateListUnreadFileThreads {
-        workspace_id: String,
-        after_thread_id: Option<String>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<UnreadFileThread>, RuntimeError>>,
-    },
-    ChatAgentUnreadThreads {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<AgentUnreadThreadRow>, RuntimeError>>,
-    },
-    ChatAgentMarkThreadRead {
-        workspace_id: String,
-        thread_id: String,
-        up_to_created_at_ms: i64,
-        up_to_message_id: String,
-        expected_revision: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatAgentReadState, RuntimeError>>,
-    },
-    ChatFollowSet {
-        input: Box<SetFollow>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatFollow, RuntimeError>>,
-    },
-    ChatFollowsList {
-        workspace_id: String,
-        owner_user_id: String,
-        state: Option<String>,
-        reply: oneshot::Sender<Result<Vec<ChatFollow>, RuntimeError>>,
-    },
-    ChatFollowsEnsureDefaults {
-        workspace_id: String,
-        owner_user_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatBookmarkFind {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        reply: oneshot::Sender<Result<Option<ChatBookmark>, RuntimeError>>,
-    },
-    ChatBookmarksListPending {
-        workspace_id: String,
-        owner_user_id: String,
-        limit: i64,
-        after: Option<(i64, String)>,
-        reply: oneshot::Sender<Result<Vec<PendingBookmarkRow>, RuntimeError>>,
-    },
-    ChatFeedMarkSeen {
-        workspace_id: String,
-        owner_user_id: String,
-        replication_owner_user_id: Option<String>,
-        head_cursor: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatFeedReadState, RuntimeError>>,
-    },
-    ChatFeedListPersonal {
-        workspace_id: String,
-        owner_user_id: String,
-        limit: Option<i64>,
-        cursor: Option<String>,
-        reply: oneshot::Sender<Result<ChatFeedPage, RuntimeError>>,
-    },
-    ChatBookmarkSave {
-        input: Box<SaveBookmark>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarksList {
-        workspace_id: String,
-        owner_user_id: String,
-        state: Option<String>,
-        reply: oneshot::Sender<Result<Vec<ChatBookmark>, RuntimeError>>,
-    },
-    ChatBookmarkMarkReady {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        projected_at_ms: i64,
-        projection_object_id: Option<String>,
-        projection_path: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatBookmarkArchive {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarkMarkPending {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        request_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmark, RuntimeError>>,
-    },
-    ChatBookmarkMarkFailed {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        failure_reason: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatBookmarkMarkStale {
-        workspace_id: String,
-        owner_user_id: String,
-        bookmark_id: String,
-        generation: i64,
-        failure_reason: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ChatBookmarkTransition, RuntimeError>>,
-    },
-    ChatDispatchEnqueue {
-        workspace_id: String,
-        trigger_message_id: String,
-        thread_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchClaimNextPending {
-        workspace_id: String,
-        run_id: String,
-        command: String,
-        log_path: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<DispatchClaim>, RuntimeError>>,
-    },
-    ChatDispatchListPending {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError>>,
-    },
-    ChatDispatchOpenRuns {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<DispatchClaim>, RuntimeError>>,
-    },
-    ChatDispatchListRunMessages {
-        workspace_id: String,
-        run_id: String,
-        after_message_id: Option<String>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
-    ChatDispatchRunIdForMessage {
-        workspace_id: String,
-        message_id: String,
-        reply: oneshot::Sender<Result<Option<String>, RuntimeError>>,
-    },
-    ChatDispatchRunRecordsForThread {
-        workspace_id: String,
-        thread_id: String,
-        run_limit: Option<i64>,
-        after: Option<(i64, String, String)>,
-        page_limit: i64,
-        reply: oneshot::Sender<Result<Vec<RunRecordLink>, RuntimeError>>,
-    },
-    ChatDispatchGetRunRecord {
-        workspace_id: String,
-        run_id: String,
-        reply: oneshot::Sender<Result<Option<AgentRunRecord>, RuntimeError>>,
-    },
-    ChatDispatchThreadPaused {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchGetThreadPauseState {
-        workspace_id: String,
-        thread_id: String,
-        reply: oneshot::Sender<Result<Option<ThreadDispatchPause>, RuntimeError>>,
-    },
-    ChatDispatchRecentCount {
-        workspace_id: String,
-        thread_id: String,
-        since_ms: f64,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatDispatchFailPendingForThread {
-        workspace_id: String,
-        thread_id: String,
-        reason: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<i64, RuntimeError>>,
-    },
-    ChatDispatchRecordRunMessage {
-        workspace_id: String,
-        message_id: String,
-        run_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchSetThreadPaused {
-        workspace_id: String,
-        thread_id: String,
-        paused: bool,
-        reason: Option<String>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ThreadDispatchPause, RuntimeError>>,
-    },
-    ChatDispatchMarkFailureNotePosted {
-        workspace_id: String,
-        run_id: String,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<AgentRunRecord, RuntimeError>>,
-    },
-    ChatDispatchRequeueFailedTrigger {
-        workspace_id: String,
-        trigger_message_id: String,
-        run_id: String,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
-    ChatDispatchListAppQuitRecoveries {
-        workspace_id: String,
-        after: Option<(i64, String)>,
-        limit: i64,
-        reply: oneshot::Sender<Result<Vec<DispatchRecovery>, RuntimeError>>,
-    },
-    ChatDispatchComplete {
-        workspace_id: String,
-        run_id: String,
-        exit_code: i64,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatDispatchFail {
-        workspace_id: String,
-        run_id: String,
-        reason: String,
-        exit_code: Option<i64>,
-        now_ms: i64,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ChatDispatchReclaimRunning {
-        workspace_id: String,
-        max_attempts: i64,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<Vec<String>, RuntimeError>>,
-    },
     Relay {
         transport: DeferredRelayTransport,
         operation: RelayOperation,
@@ -4555,18 +4218,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatAttachment>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAttachmentsListForThread {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_thread_attachments(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_attachments_list_file_mentions(
@@ -4577,19 +4234,18 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatFileMention>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAttachmentsListFileMentions {
-                workspace_id,
-                object_id,
-                path_hint,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_file_mentions(
+                    &workspace_id,
+                    object_id.as_deref(),
+                    path_hint.as_deref(),
+                    after,
+                    limit,
+                )
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_mentions_backfill(
@@ -4597,16 +4253,16 @@ impl ActorHandle {
         workspace_id: String,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMentionsBackfill {
-                workspace_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .backfill_mentions(&workspace_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_mentions_list_for_handle(
@@ -4617,19 +4273,12 @@ impl ActorHandle {
         after: Option<MentionCursor>,
         limit: i64,
     ) -> Result<Vec<ChatMention>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatMentionsListForHandle {
-                workspace_id,
-                handle,
-                unread_only,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_record_eligible_triggers(
@@ -4639,18 +4288,21 @@ impl ActorHandle {
         at_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecordEligibleTriggers {
-                workspace_id,
-                verified_user_id,
-                at_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .record_eligible_triggers(
+                        &workspace_id,
+                        verified_user_id.as_deref(),
+                        at_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_message_send(
@@ -4675,16 +4327,16 @@ impl ActorHandle {
         input: ResolveDecision,
         token: CancellationToken,
     ) -> Result<ChatDecision, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDecisionResolve {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .resolve_decision(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_decisions_list(
@@ -4694,18 +4346,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatDecision>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDecisionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_thread_decisions(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_reaction_set(
@@ -4713,16 +4359,16 @@ impl ActorHandle {
         input: SetReaction,
         token: CancellationToken,
     ) -> Result<ChatReaction, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReactionSet {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_reaction(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_reactions_list(
@@ -4732,18 +4378,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<ChatReaction>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReactionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_reactions(&workspace_id, &thread_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_messages_list(
@@ -4784,20 +4424,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_sequence,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_thread_read(
+                        &workspace_id,
+                        &thread_id,
+                        up_to_sequence,
+                        expected_revision,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_read_state_get(
@@ -4805,16 +4448,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<ChatThreadReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateGet {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .read_state(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_read_state_list_unread_file_threads(
@@ -4823,17 +4462,12 @@ impl ActorHandle {
         after_thread_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<UnreadFileThread>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatReadStateListUnreadFileThreads {
-                workspace_id,
-                after_thread_id,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_agent_unread_threads(
@@ -4842,17 +4476,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<AgentUnreadThreadRow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAgentUnreadThreads {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_agent_unread_threads(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4866,21 +4495,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatAgentReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatAgentMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_created_at_ms,
-                up_to_message_id,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_thread_read_by_agent(
+                        &workspace_id,
+                        &thread_id,
+                        up_to_created_at_ms,
+                        &up_to_message_id,
+                        expected_revision,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_follow_set(
@@ -4888,16 +4520,16 @@ impl ActorHandle {
         input: SetFollow,
         token: CancellationToken,
     ) -> Result<ChatFollow, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowSet {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_follow(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_follows_list(
@@ -4906,17 +4538,12 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatFollow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowsList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_follows(&workspace_id, &owner_user_id, state.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_follows_ensure_defaults(
@@ -4925,17 +4552,16 @@ impl ActorHandle {
         owner_user_id: String,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFollowsEnsureDefaults {
-                workspace_id,
-                owner_user_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .ensure_default_channel_follows(&workspace_id, &owner_user_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmark_find(
@@ -4944,17 +4570,12 @@ impl ActorHandle {
         owner_user_id: String,
         bookmark_id: String,
     ) -> Result<Option<ChatBookmark>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkFind {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_bookmarks_list_pending(
@@ -4964,18 +4585,12 @@ impl ActorHandle {
         limit: i64,
         after: Option<(i64, String)>,
     ) -> Result<Vec<PendingBookmarkRow>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarksListPending {
-                workspace_id,
-                owner_user_id,
-                limit,
-                after,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_pending_bookmarks_page(&workspace_id, &owner_user_id, limit, after)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_feed_mark_seen(
@@ -4987,20 +4602,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatFeedReadState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFeedMarkSeen {
-                workspace_id,
-                owner_user_id,
-                replication_owner_user_id,
-                head_cursor,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_feed_seen(
+                        &workspace_id,
+                        &owner_user_id,
+                        replication_owner_user_id.as_deref(),
+                        &head_cursor,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_feed_list_personal(
@@ -5010,18 +4628,12 @@ impl ActorHandle {
         limit: Option<i64>,
         cursor: Option<String>,
     ) -> Result<ChatFeedPage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatFeedListPersonal {
-                workspace_id,
-                owner_user_id,
-                limit,
-                cursor,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_personal_feed(&workspace_id, &owner_user_id, limit, cursor.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_bookmark_save(
@@ -5029,16 +4641,16 @@ impl ActorHandle {
         input: SaveBookmark,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkSave {
-                input: Box::new(input),
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .save_bookmark(&input, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmarks_list(
@@ -5047,17 +4659,12 @@ impl ActorHandle {
         owner_user_id: String,
         state: Option<String>,
     ) -> Result<Vec<ChatBookmark>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarksList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5072,22 +4679,25 @@ impl ActorHandle {
         projection_path: Option<String>,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkReady {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                projected_at_ms,
-                projection_object_id,
-                projection_path,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_ready(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        projected_at_ms,
+                        projection_object_id.as_deref(),
+                        projection_path.as_deref(),
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_bookmark_archive(
@@ -5098,19 +4708,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkArchive {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .archive_bookmark(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5123,20 +4736,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmark, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkPending {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                request_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_pending(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        &request_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5150,21 +4766,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkFailed {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_failed(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        &failure_reason,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5178,21 +4797,24 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ChatBookmarkTransition, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatBookmarkMarkStale {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_bookmark_stale(
+                        &workspace_id,
+                        &owner_user_id,
+                        &bookmark_id,
+                        generation,
+                        failure_reason.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_enqueue(
@@ -5203,19 +4825,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchEnqueue {
-                workspace_id,
-                trigger_message_id,
-                thread_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .enqueue_dispatch(
+                        &workspace_id,
+                        &trigger_message_id,
+                        &thread_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5228,20 +4853,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<Option<DispatchClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchClaimNextPending {
-                workspace_id,
-                run_id,
-                command,
-                log_path,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .claim_next_pending(
+                        &workspace_id,
+                        &run_id,
+                        &command,
+                        log_path.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_pending(
@@ -5250,17 +4878,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<dohc_engine_domain::DispatchRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListPending {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_pending_dispatches(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_open_runs(
@@ -5269,17 +4892,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchClaim>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchOpenRuns {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_open_dispatch_runs(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_run_messages(
@@ -5289,18 +4907,12 @@ impl ActorHandle {
         after_message_id: Option<String>,
         limit: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListRunMessages {
-                workspace_id,
-                run_id,
-                after_message_id,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_run_messages(&workspace_id, &run_id, after_message_id, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_run_id_for_message(
@@ -5308,16 +4920,12 @@ impl ActorHandle {
         workspace_id: String,
         message_id: String,
     ) -> Result<Option<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRunIdForMessage {
-                workspace_id,
-                message_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .dispatch_run_id_for_message(&workspace_id, &message_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5329,19 +4937,12 @@ impl ActorHandle {
         after: Option<(i64, String, String)>,
         page_limit: i64,
     ) -> Result<Vec<RunRecordLink>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRunRecordsForThread {
-                workspace_id,
-                thread_id,
-                run_limit,
-                after,
-                page_limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .run_records_for_thread(&workspace_id, &thread_id, run_limit, after, page_limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_get_run_record(
@@ -5349,16 +4950,12 @@ impl ActorHandle {
         workspace_id: String,
         run_id: String,
     ) -> Result<Option<AgentRunRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchGetRunRecord {
-                workspace_id,
-                run_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_run_record(&workspace_id, &run_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_thread_paused(
@@ -5366,16 +4963,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchThreadPaused {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .thread_dispatch_paused(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_get_thread_pause_state(
@@ -5383,16 +4976,12 @@ impl ActorHandle {
         workspace_id: String,
         thread_id: String,
     ) -> Result<Option<ThreadDispatchPause>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchGetThreadPauseState {
-                workspace_id,
-                thread_id,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .get_thread_dispatch_pause_state(&workspace_id, &thread_id)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_recent_count(
@@ -5401,17 +4990,12 @@ impl ActorHandle {
         thread_id: String,
         since_ms: f64,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecentCount {
-                workspace_id,
-                thread_id,
-                since_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .recent_dispatch_count(&workspace_id, &thread_id, since_ms)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5423,19 +5007,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<i64, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchFailPendingForThread {
-                workspace_id,
-                thread_id,
-                reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .fail_pending_for_thread(&workspace_id, &thread_id, &reason, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_record_run_message(
@@ -5445,18 +5026,16 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRecordRunMessage {
-                workspace_id,
-                message_id,
-                run_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .record_run_message(&workspace_id, &message_id, &run_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5469,20 +5048,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<ThreadDispatchPause, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchSetThreadPaused {
-                workspace_id,
-                thread_id,
-                paused,
-                reason,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .set_thread_dispatch_paused(
+                        &workspace_id,
+                        &thread_id,
+                        paused,
+                        reason.as_deref(),
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_mark_failure_note_posted(
@@ -5491,17 +5073,16 @@ impl ActorHandle {
         run_id: String,
         token: CancellationToken,
     ) -> Result<AgentRunRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchMarkFailureNotePosted {
-                workspace_id,
-                run_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_requeue_failed_trigger(
@@ -5512,19 +5093,22 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchRequeueFailedTrigger {
-                workspace_id,
-                trigger_message_id,
-                run_id,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .requeue_failed_trigger(
+                        &workspace_id,
+                        &trigger_message_id,
+                        &run_id,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_list_app_quit_recoveries(
@@ -5533,17 +5117,12 @@ impl ActorHandle {
         after: Option<(i64, String)>,
         limit: i64,
     ) -> Result<Vec<DispatchRecovery>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchListAppQuitRecoveries {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .list_app_quit_recoveries(&workspace_id, after, limit)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn chat_dispatch_complete(
@@ -5554,19 +5133,16 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchComplete {
-                workspace_id,
-                run_id,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .complete_dispatch(&workspace_id, &run_id, exit_code, now_ms, &NoFaults)
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_fail(
@@ -5578,20 +5154,23 @@ impl ActorHandle {
         now_ms: i64,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchFail {
-                workspace_id,
-                run_id,
-                reason,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                LinkedChatStore::new(store)
+                    .fail_dispatch(
+                        &workspace_id,
+                        &run_id,
+                        &reason,
+                        exit_code,
+                        now_ms,
+                        &NoFaults,
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_dispatch_reclaim_running(
@@ -5600,17 +5179,12 @@ impl ActorHandle {
         max_attempts: i64,
         now_ms: i64,
     ) -> Result<Vec<String>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ChatDispatchReclaimRunning {
-                workspace_id,
-                max_attempts,
-                now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            LinkedChatStore::new(store)
+                .reclaim_running_dispatches(&workspace_id, max_attempts, now_ms, &NoFaults)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn automation_subscribe(
@@ -8673,789 +8247,6 @@ fn worker_main(
                 // A replicated conflict envelope can replace or archive a
                 // lineage (probe-covered; reset hooks stay unconditional).
                 doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAttachmentsListForThread {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_thread_attachments(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAttachmentsListFileMentions {
-                workspace_id,
-                object_id,
-                path_hint,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_file_mentions(
-                        &workspace_id,
-                        object_id.as_deref(),
-                        path_hint.as_deref(),
-                        after,
-                        limit,
-                    )
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMentionsBackfill {
-                workspace_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .backfill_mentions(&workspace_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatMentionsListForHandle {
-                workspace_id,
-                handle,
-                unread_only,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_mentions_for_handle(&workspace_id, &handle, unread_only, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecordEligibleTriggers {
-                workspace_id,
-                verified_user_id,
-                at_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .record_eligible_triggers(
-                            &workspace_id,
-                            verified_user_id.as_deref(),
-                            at_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDecisionResolve {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .resolve_decision(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDecisionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_thread_decisions(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReactionSet {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_reaction(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReactionsList {
-                workspace_id,
-                thread_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_reactions(&workspace_id, &thread_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_sequence,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_thread_read(
-                            &workspace_id,
-                            &thread_id,
-                            up_to_sequence,
-                            expected_revision,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateGet {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .read_state(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatReadStateListUnreadFileThreads {
-                workspace_id,
-                after_thread_id,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_unread_file_threads(&workspace_id, after_thread_id.as_deref(), limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAgentUnreadThreads {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_agent_unread_threads(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatAgentMarkThreadRead {
-                workspace_id,
-                thread_id,
-                up_to_created_at_ms,
-                up_to_message_id,
-                expected_revision,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_thread_read_by_agent(
-                            &workspace_id,
-                            &thread_id,
-                            up_to_created_at_ms,
-                            &up_to_message_id,
-                            expected_revision,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowSet {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_follow(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowsList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_follows(&workspace_id, &owner_user_id, state.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFollowsEnsureDefaults {
-                workspace_id,
-                owner_user_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .ensure_default_channel_follows(&workspace_id, &owner_user_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkFind {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .find_bookmark(&workspace_id, &owner_user_id, &bookmark_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarksListPending {
-                workspace_id,
-                owner_user_id,
-                limit,
-                after,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_pending_bookmarks_page(&workspace_id, &owner_user_id, limit, after)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFeedMarkSeen {
-                workspace_id,
-                owner_user_id,
-                replication_owner_user_id,
-                head_cursor,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_feed_seen(
-                            &workspace_id,
-                            &owner_user_id,
-                            replication_owner_user_id.as_deref(),
-                            &head_cursor,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatFeedListPersonal {
-                workspace_id,
-                owner_user_id,
-                limit,
-                cursor,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_personal_feed(&workspace_id, &owner_user_id, limit, cursor.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkSave {
-                input,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .save_bookmark(&input, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarksList {
-                workspace_id,
-                owner_user_id,
-                state,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_bookmarks(&workspace_id, &owner_user_id, state.as_deref())
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkReady {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                projected_at_ms,
-                projection_object_id,
-                projection_path,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_ready(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            projected_at_ms,
-                            projection_object_id.as_deref(),
-                            projection_path.as_deref(),
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkArchive {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .archive_bookmark(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkPending {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                request_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_pending(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            &request_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkFailed {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_failed(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            &failure_reason,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatBookmarkMarkStale {
-                workspace_id,
-                owner_user_id,
-                bookmark_id,
-                generation,
-                failure_reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_bookmark_stale(
-                            &workspace_id,
-                            &owner_user_id,
-                            &bookmark_id,
-                            generation,
-                            failure_reason.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchEnqueue {
-                workspace_id,
-                trigger_message_id,
-                thread_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .enqueue_dispatch(
-                            &workspace_id,
-                            &trigger_message_id,
-                            &thread_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchClaimNextPending {
-                workspace_id,
-                run_id,
-                command,
-                log_path,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .claim_next_pending(
-                            &workspace_id,
-                            &run_id,
-                            &command,
-                            log_path.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListPending {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_pending_dispatches(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchOpenRuns {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_open_dispatch_runs(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListRunMessages {
-                workspace_id,
-                run_id,
-                after_message_id,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_run_messages(&workspace_id, &run_id, after_message_id, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRunIdForMessage {
-                workspace_id,
-                message_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .dispatch_run_id_for_message(&workspace_id, &message_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRunRecordsForThread {
-                workspace_id,
-                thread_id,
-                run_limit,
-                after,
-                page_limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .run_records_for_thread(&workspace_id, &thread_id, run_limit, after, page_limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchGetRunRecord {
-                workspace_id,
-                run_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_run_record(&workspace_id, &run_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchThreadPaused {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .thread_dispatch_paused(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchGetThreadPauseState {
-                workspace_id,
-                thread_id,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .get_thread_dispatch_pause_state(&workspace_id, &thread_id)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecentCount {
-                workspace_id,
-                thread_id,
-                since_ms,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .recent_dispatch_count(&workspace_id, &thread_id, since_ms)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchFailPendingForThread {
-                workspace_id,
-                thread_id,
-                reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .fail_pending_for_thread(
-                            &workspace_id,
-                            &thread_id,
-                            &reason,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRecordRunMessage {
-                workspace_id,
-                message_id,
-                run_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .record_run_message(&workspace_id, &message_id, &run_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchSetThreadPaused {
-                workspace_id,
-                thread_id,
-                paused,
-                reason,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .set_thread_dispatch_paused(
-                            &workspace_id,
-                            &thread_id,
-                            paused,
-                            reason.as_deref(),
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchMarkFailureNotePosted {
-                workspace_id,
-                run_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .mark_failure_note_posted(&workspace_id, &run_id, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchRequeueFailedTrigger {
-                workspace_id,
-                trigger_message_id,
-                run_id,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .requeue_failed_trigger(
-                            &workspace_id,
-                            &trigger_message_id,
-                            &run_id,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchListAppQuitRecoveries {
-                workspace_id,
-                after,
-                limit,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .list_app_quit_recoveries(&workspace_id, after, limit)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchComplete {
-                workspace_id,
-                run_id,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .complete_dispatch(&workspace_id, &run_id, exit_code, now_ms, &NoFaults)
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchFail {
-                workspace_id,
-                run_id,
-                reason,
-                exit_code,
-                now_ms,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    LinkedChatStore::new(&mut store)
-                        .fail_dispatch(
-                            &workspace_id,
-                            &run_id,
-                            &reason,
-                            exit_code,
-                            now_ms,
-                            &NoFaults,
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ChatDispatchReclaimRunning {
-                workspace_id,
-                max_attempts,
-                now_ms,
-                reply,
-            } => {
-                let outcome = LinkedChatStore::new(&mut store)
-                    .reclaim_running_dispatches(&workspace_id, max_attempts, now_ms, &NoFaults)
-                    .map_err(RuntimeError::from);
                 let _ = reply.send(outcome);
             }
             Command::SearchPage {
