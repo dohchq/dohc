@@ -26,7 +26,7 @@ import {
 } from "./ipc/workspaceRegistryIpc";
 import { createAppLifecycle } from "./appLifecycle";
 import { runInWorkspaceAuthorityLane } from "./workspaces/workspaceAuthorityLane";
-import { databaseOpLogPath, normalizeAbsolutePath, preferredBuildOutput } from "@dohc/workspace-core";
+import { databaseOpLogPath, normalizeAbsolutePath } from "@dohc/workspace-core";
 import type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 import { randomUUID } from "node:crypto";
 import {
@@ -58,8 +58,8 @@ import {
   type WebContents,
 } from "electron";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { mkdir, readdir, realpath } from "node:fs/promises";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { mkdir, readdir } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import {
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
@@ -76,7 +76,6 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
-import type { SitePreviewExecutionInput } from "./ipc/sitePreviewIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
@@ -113,7 +112,6 @@ import {
   createWorkspaceWindowRegistry,
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
-import { isInside } from "./security/pathContainment";
 import {
   applyDesktopIconToPlatform,
   resolveDesktopIconDirectory,
@@ -217,7 +215,6 @@ import {
   shareMountRecordsForId,
 } from "./workspaces/shareMounts";
 import { createShareMountCommands } from "./workspaces/shareMountCommands";
-import { prepareOwnedStaticSitePreview } from "./workspaces/ownedStaticSiteFileSource";
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
@@ -308,17 +305,12 @@ import {
   createLiveAgentDispatchStore,
   type LiveAgentDispatchStoreHandle,
 } from "./agents/liveAgentDispatchStore";
-import { buildOutputSiteRoot } from "./workspaces/sitePackage";
 import { createOwnedSiteCatalog } from "./workspaces/ownedSiteCatalog";
+import { createAppPreviewExecution } from "./workspaces/appPreviewExecution";
 import {
-  buildSite,
-  startSiteDevServer,
-  startStaticSitePreview,
   WILL_QUIT_BUDGET_MS,
-  type SiteLogEntry,
 } from "./workspaces/siteRunner";
-import { commandForSiteScript } from "./workspaces/siteScriptCommand";
-import { createSitePreviewLifecycle, START_CANCELLED_MESSAGE } from "./workspaces/sitePreviewLifecycle";
+import { createSitePreviewLifecycle } from "./workspaces/sitePreviewLifecycle";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
 import { PluginHostOwnership } from "./plugins/pluginHostOwnership";
@@ -868,165 +860,10 @@ function createPluginWorkspaceRuntimeParts(
   return { pipeline, agentDrivers: pluginDrivers, workspaceEvents, automations };
 }
 
-async function relativeWorkspacePath(
-  workspaceRoot: string,
-  absolutePath: string,
-): Promise<string> {
-  const [realWorkspaceRoot, realAbsolutePath] = await Promise.all([
-    realpath(workspaceRoot),
-    realpath(absolutePath),
-  ]);
-  const rel = relative(realWorkspaceRoot, realAbsolutePath).replaceAll("\\", "/");
-  // Strict on purpose: the workspace root itself is not a build output.
-  if (rel === "" || !isInside(realWorkspaceRoot, realAbsolutePath)) {
-    throw new Error(`Build output escaped the workspace: ${absolutePath}`);
-  }
-  return rel;
-}
-
-function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: string): string {
-  if (siteRoot === ".") return workspaceRelativeOutput;
-  if (workspaceRelativeOutput === siteRoot) return ".";
-  if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
-    throw new Error(
-      `Build output must be inside the app folder: ${workspaceRelativeOutput}`,
-    );
-  }
-  return workspaceRelativeOutput.slice(siteRoot.length + 1);
-}
-
-function recentSiteBuildLogText(logs: SiteLogEntry[]): string {
-  const text = logs
-    .slice(-3)
-    .map((log) => log.text)
-    .join("\n")
-    .trim();
-  return text.length > 2000 ? `[truncated]\n${text.slice(-2000)}` : text;
-}
-
-async function executePreviewForSite(input: SitePreviewExecutionInput) {
-  if (input.mode === "static") {
-    const target = await prepareOwnedStaticSitePreview({
-      site: input.site,
-      sharedView: input.sharedView,
-      resolveOwner: (path) =>
-        shareViewFilesTargetForPath({ workspaceId: input.workspaceId }, path),
-      readOwner: async (ownerTarget, ownerPath) => {
-        const read = await shareViewFiles.read(ownerTarget, {
-          kind: "asset",
-          path: ownerPath,
-        });
-        if (read.kind !== "asset") {
-          throw new Error("Shared app file returned an invalid result.");
-        }
-        return read.bytes;
-      },
-    });
-    const handle = await startStaticSitePreview(input.workspaceRoot, target.root, {
-      authority: input.site.authority,
-      entry: target.entry,
-      ...(target.fileSource ? { fileSource: target.fileSource } : {}),
-    });
-    return {
-      handle,
-      result: {
-        siteRoot: input.site.root,
-        mode: input.mode,
-        logs: [],
-      },
-    };
-  }
-
-  if (input.mode === "dev") {
-    if (
-      !input.site.configuredScripts.dev &&
-      !input.site.scripts.dev &&
-      !input.site.configuredScripts.start &&
-      !input.site.scripts.start
-    ) {
-      throw new Error(`App has no dev or start script: ${input.site.root}`);
-    }
-    const script =
-      input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
-    const command = commandForSiteScript(input.site, script);
-    const handle = await startSiteDevServer({
-      workspaceRoot: input.workspaceRoot,
-      siteRoot: input.site.root,
-      command: command.command,
-      args: command.args,
-      signal: input.signal,
-    });
-    return {
-      handle,
-      result: {
-        siteRoot: input.site.root,
-        mode: input.mode,
-        logs: handle.logs(),
-      },
-    };
-  }
-
-  let logs: SiteLogEntry[] = [];
-  let build:
-    | {
-        ok: boolean;
-        command: string;
-        args: string[];
-        outputPath: string | null;
-        exitCode: number | null;
-      }
-    | undefined;
-  let outputRoot = preferredBuildOutput(input.site);
-  if (input.site.configuredScripts.build || input.site.scripts.build) {
-    const command = commandForSiteScript(input.site, "build");
-    const result = await buildSite({
-      workspaceRoot: input.workspaceRoot,
-      siteRoot: input.site.root,
-      command: command.command,
-      args: command.args,
-      output: outputRoot ?? undefined,
-      signal: input.signal,
-    });
-    logs = result.logs;
-    build = {
-      ok: result.ok,
-      command: result.command,
-      args: result.args,
-      outputPath: result.outputPath,
-      exitCode: result.exitCode,
-    };
-    if (!result.ok || !result.outputPath) {
-      const recentLogs = recentSiteBuildLogText(result.logs);
-      throw new Error(
-        `App build failed or did not produce a static output folder.${
-          recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
-        }`,
-      );
-    }
-    outputRoot = buildOutputRelativeToSite(
-      input.site.root,
-      await relativeWorkspacePath(input.workspaceRoot, result.outputPath),
-    );
-  }
-  if (!input.isCurrent() || input.signal.aborted) {
-    throw new Error(START_CANCELLED_MESSAGE);
-  }
-  if (!outputRoot) throw new Error(`App has no build output to preview: ${input.site.root}`);
-  const handle = await startStaticSitePreview(
-    input.workspaceRoot,
-    buildOutputSiteRoot(input.site, outputRoot),
-    { authority: input.site.authority },
-  );
-  return {
-    handle,
-    result: {
-      siteRoot: input.site.root,
-      mode: input.mode,
-      logs,
-      ...(build ? { build } : {}),
-    },
-  };
-}
+const executeAppPreview = createAppPreviewExecution({
+  get shareViewFiles() { return shareViewFiles; },
+  get shareViewFilesTargetForPath() { return shareViewFilesTargetForPath; },
+});
 
 // Lazy: safeStorage and userData are only safe to touch after app ready, and
 // handlers register inside whenReady. The session token lives encrypted in
@@ -5817,7 +5654,7 @@ function registerIpcHandlers(): void {
     assertTrustedSender, senderWorkspaceAuthority, withRendererWorkspaceOperation,
     appCatalog: ownedSiteCatalog, appPreviews: sitePreviews,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
-    executeAppPreview: executePreviewForSite,
+    executeAppPreview,
   });
 
   registerPluginIpcHandlers<
