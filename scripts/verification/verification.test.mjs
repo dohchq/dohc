@@ -12,6 +12,55 @@ import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.
 import { createPrepareFixture } from "./prepare-fixture.mjs";
 import { runEarlyCloseDebugFixture } from "./debug-fixture.mjs";
 
+test("doctor requires a disk measurement only when a build budget is configured", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-doctor-disk-"));
+  const put = (path, contents) => {
+    mkdirSync(dirname(join(root, path)), { recursive: true });
+    writeFileSync(join(root, path), contents);
+  };
+  try {
+    put("package.json", '{"type":"module","engines":{"pnpm":"11.20.0"}}');
+    put("apps/desktop/package.json", "{}");
+    put("scripts/verification/build.mjs", "export const preparedStatus=()=>true;");
+    put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=args=>args[0]==='rev-parse'?'fixture-commit':'';");
+    put("node_modules/pnpm/index.js", "exports.version='11.20.0';");
+    for (const name of ["electron", "playwright"]) put(`node_modules/${name}/package.json`, '{"version":"fixture"}');
+    put("node_modules/electron/path.txt", "fixture-runtime");
+    put("node_modules/electron/dist/fixture-runtime", "fixture");
+    copyFileSync(new URL("./doctor.mjs", import.meta.url), join(root, "scripts/verification/doctor.mjs"));
+    mkdirSync(join(root, "tools/rust-engine-program"), { recursive: true });
+    copyFileSync(new URL("../../tools/rust-engine-program/build-slot.mjs", import.meta.url), join(root, "tools/rust-engine-program/build-slot.mjs"));
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import cp from 'node:child_process';
+      import {syncBuiltinESMExports} from 'node:module';
+      let measurement;
+      fs.statfsSync=()=>{
+        if(measurement===null)throw new Error('fixture disk probe unavailable');
+        return {bsize:1024**3,bavail:measurement};
+      };
+      cp.execFileSync=(command)=>{
+        assert.ok(['pwsh.exe','rustc','cargo'].includes(command),'unexpected external probe: '+command);
+        return command==='pwsh.exe'?'7.6.5':'fixture-toolchain';
+      };
+      syncBuiltinESMExports();
+      const {doctor}=await import('./scripts/verification/doctor.mjs');
+      process.env.CI='true';
+      for(const [floor,free,expected] of [[null,null,'PENDING'],[40,null,'FAIL'],[0,null,'FAIL'],[40,39,'FAIL'],[40,41,'PASS']]) {
+        if(floor===null) {delete process.env.DOHC_BUILD_SLOT_ROOT;delete process.env.DOHC_GATE_DISK_FLOOR_GB;}
+        else {process.env.DOHC_BUILD_SLOT_ROOT='fixture-slots';process.env.DOHC_GATE_DISK_FLOOR_GB=String(floor);}
+        measurement=free;
+        const result=doctor();
+        assert.equal(result.checks.find(check=>check.name==='disk').state,expected,JSON.stringify({floor,free}));
+        assert.ok(result.checks.filter(check=>check.name!=='disk').every(check=>check.state==='PASS'));
+      }
+    `], { cwd: root, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
   test(`queued preparation ${signal} removes its lock without touching occupied slots`, () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-prepare-queue-"));

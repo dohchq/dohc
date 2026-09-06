@@ -38,8 +38,9 @@ export function doctor({ ready = false } = {}) {
     catch { add(tool, false, "Install the repository Rust toolchain."); }
   }
   const free = freeDiskGb(repoRoot);
-  const floor = resolveBuildBudget()?.diskFloorGb ?? 0;
-  add("disk", free !== null && free >= floor, `${free?.toFixed(1) ?? "unknown"} GB free; ${floor} GB required`);
+  const budget = resolveBuildBudget();
+  const floor = budget?.diskFloorGb ?? 0;
+  add("disk", free !== null && free >= floor, `${free?.toFixed(1) ?? "unknown"} GB free; ${budget ? `${floor} GB required` : "no build budget configured"}`, !budget);
   for (const kind of ["engine", "desktop"]) {
     try { add(`${kind} build`, preparedStatus(kind), "Run pnpm qa:prepare when inputs or artifacts differ.", !ready); }
     catch { add(`${kind} build`, false, "Build readiness could not be checked. Fix the toolchain or build receipt, then run pnpm qa:prepare."); }

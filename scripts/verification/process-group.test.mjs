@@ -8,14 +8,6 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { run } from "./process.mjs";
 
-function killRecorded(path, group = false) {
-  if (!existsSync(path)) return;
-  const { pid } = JSON.parse(readFileSync(path, "utf8"));
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  try { process.kill(group ? -pid : pid, "SIGKILL"); }
-  catch (error) { if (error.code !== "ESRCH") throw error; }
-}
-
 for (const signal of ["SIGINT", "SIGTERM"]) {
   test(`POSIX repeated ${signal} waits for owned group escalation and caller cleanup`, {
     skip: process.platform === "win32" ? "Real POSIX signal delivery" : false,
@@ -114,18 +106,39 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 
 test("POSIX timeout kills descendants holding pipes after their leader exits", {
   skip: process.platform === "win32" ? "POSIX detached process-group lifecycle" : false,
-}, () => {
+}, async () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-process-group-"));
-  let completed = false;
+  let supervisor;
+  let supervisorClosed;
+  let deadline;
+  let descendantSocket;
+  let descendantClosed;
+  let cleaning = false;
+  const server = createServer((socket) => {
+    descendantSocket = socket;
+    descendantClosed = new Promise((done) => socket.once("close", done));
+    socket.on("error", () => {});
+    socket.resume();
+    if (cleaning) socket.end();
+  });
   try {
+    await new Promise((done, reject) => {
+      server.once("error", reject);
+      server.listen(join(root, "cleanup.sock"), done);
+    });
     writeFileSync(join(root, "descendant.mjs"), `
-      import { writeFileSync } from "node:fs";
+      import { connect } from "node:net";
       import { join } from "node:path";
-      writeFileSync(join(process.argv[2], "descendant.json"), JSON.stringify({ pid: process.pid }));
+      const cleanup = connect(join(process.argv[2], "cleanup.sock"));
+      cleanup.on("end", () => process.exit(0));
+      cleanup.on("error", () => process.exit(1));
+      cleanup.resume();
       process.on("SIGTERM", () => process.stderr.write("descendant ignored SIGTERM\\n"));
       setInterval(() => {}, 1000);
-      process.stdout.write("descendant ready\\n");
-      process.send("ready");
+      cleanup.once("connect", () => {
+        process.stdout.write("descendant ready\\n");
+        process.send("ready");
+      });
     `);
     writeFileSync(join(root, "leader.mjs"), `
       import { spawn } from "node:child_process";
@@ -136,7 +149,7 @@ test("POSIX timeout kills descendants holding pipes after their leader exits", {
       });
       descendant.once("message", () => { descendant.disconnect(); process.exit(0); });
     `);
-    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+    supervisor = spawn(process.execPath, ["--input-type=module", "-e", `
       import assert from "node:assert/strict";
       import { readFileSync, writeFileSync } from "node:fs";
       import { join } from "node:path";
@@ -148,7 +161,6 @@ test("POSIX timeout kills descendants holding pipes after their leader exits", {
       await assert.rejects(run(process.execPath, [join(root, "leader.mjs"), root], {
         timeoutMs: 2500, log,
         onSpawn: leader => {
-          writeFileSync(join(root, "leader.json"), JSON.stringify({ pid: leader.pid }));
           leader.once("exit", (code, signal) => { leaderExit = { code, signal }; });
           leader.once("close", () => { closed = true; });
         },
@@ -159,19 +171,30 @@ test("POSIX timeout kills descendants holding pipes after their leader exits", {
       assert.match(evidence, /descendant ready/);
       assert.match(evidence, /descendant ignored SIGTERM/);
       writeFileSync(join(root, "completed.json"), JSON.stringify({ leaderExit, closed }));
-    `, root], { encoding: "utf8", timeout: 20_000, killSignal: "SIGKILL" });
-    completed = existsSync(join(root, "completed.json"));
-    assert.equal(result.error, undefined, result.stderr);
-    assert.equal(result.status, 0, result.stderr);
-    assert.equal(completed, true);
+    `, root], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    supervisor.stderr.on("data", (chunk) => { stderr += chunk; });
+    supervisorClosed = new Promise((done, reject) => {
+      supervisor.once("error", reject);
+      supervisor.once("close", (status, signal) => done({ status, signal }));
+    });
+    deadline = setTimeout(() => supervisor.kill("SIGKILL"), 20_000);
+    const result = await supervisorClosed;
+    assert.equal(result.signal, null, stderr);
+    assert.equal(result.status, 0, stderr);
+    assert.ok(descendantSocket);
+    await descendantClosed;
+    assert.equal(descendantSocket.destroyed, true);
     assert.deepEqual(JSON.parse(readFileSync(join(root, "completed.json"), "utf8")), {
       leaderExit: { code: 0, signal: null }, closed: true,
     });
   } finally {
-    if (!completed) {
-      killRecorded(join(root, "descendant.json"));
-      killRecorded(join(root, "leader.json"), true);
-    }
+    clearTimeout(deadline);
+    cleaning = true;
+    descendantSocket?.end();
+    if (supervisor?.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
+    await supervisorClosed?.catch(() => {});
+    await new Promise((done) => server.close(done));
     rmSync(root, { recursive: true, force: true });
   }
 });
