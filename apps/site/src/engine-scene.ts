@@ -107,15 +107,13 @@ export function mountEngine(host: HTMLElement) {
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  let hovered = host.matches(":hover");
   let dragging = false;
   let visible = true;
   let frame = 0;
   let last = 0;
   let disposed = false;
   function syncRotation() {
-    controls.autoRotate = !motion.matches && !hovered && !dragging &&
-      !renderer.domElement.matches(":focus-visible");
+    controls.autoRotate = !motion.matches && !dragging;
     requestDraw();
   }
   function draw(time: number) {
@@ -177,17 +175,6 @@ export function mountEngine(host: HTMLElement) {
     { signal },
   );
   motion.addEventListener("change", syncRotation, { signal });
-  renderer.domElement.addEventListener("pointerenter", (event) => {
-    if (event.pointerType === "touch") return;
-    hovered = true;
-    syncRotation();
-  }, { signal });
-  renderer.domElement.addEventListener("pointerleave", () => {
-    hovered = false;
-    syncRotation();
-  }, { signal });
-  renderer.domElement.addEventListener("focus", syncRotation, { signal });
-  renderer.domElement.addEventListener("blur", syncRotation, { signal });
   controls.addEventListener("start", () => {
     dragging = true;
     syncRotation();
@@ -203,7 +190,7 @@ export function mountEngine(host: HTMLElement) {
   renderer.domElement.setAttribute("role", "img");
   renderer.domElement.setAttribute(
     "aria-label",
-    "DOHC inline-six engine model. Hover or focus to pause. Drag or use arrow keys to rotate.",
+    "DOHC inline-six engine model. Grab and hold to pause. Drag or use arrow keys to rotate.",
   );
   renderer.domElement.addEventListener(
     "keydown",
@@ -227,7 +214,7 @@ export function mountEngine(host: HTMLElement) {
         .add(new THREE.Vector3().setFromSpherical(spherical));
       controls.autoRotate = false;
       controls.update();
-      requestDraw();
+      syncRotation();
     },
     { signal },
   );
