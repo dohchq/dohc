@@ -1,7 +1,6 @@
+import { ProtocolShapeError } from "./wireSchema";
 import { describe, expect, it } from "vitest";
 import {
-  ChatsProtocolShapeError,
-  WorkspaceProtocolShapeError,
   decodeGranularChatMessageSearchResponse,
   decodeUnreadFileThreads,
 } from "./index";
@@ -49,7 +48,7 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeGranularChatMessageSearchResponse({
         results: [
@@ -61,7 +60,7 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeGranularChatMessageSearchResponse({
         results: [
@@ -74,13 +73,13 @@ describe("CLI daemon read decoders", () => {
         ],
         saturated: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeGranularChatMessageSearchResponse({
         results: [],
         saturated: "yes",
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("decodes unread file-thread aggregates", () => {
@@ -126,7 +125,7 @@ describe("CLI daemon read decoders", () => {
       },
     ]) {
       expect(() => decodeUnreadFileThreads([row])).toThrow(
-        ChatsProtocolShapeError,
+        ProtocolShapeError,
       );
     }
   });

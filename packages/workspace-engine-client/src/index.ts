@@ -41,19 +41,7 @@ export {
 } from "./ydoc/ydocWireContract";
 
 export { ChatsLiveAdapter } from "./chats/chatsLiveAdapter";
-export {
-  CHATS_METHOD,
-  ChatsProtocolShapeError,
-  decodeUnreadFileThreads,
-  type ChatChannel,
-  type ChatChannelSummary,
-  type ChatDispatch,
-  type ChatDispatchClaim,
-  type ChatFileMention,
-  type ChatRecoveriesPage,
-  type ChatRunMessagesPage,
-  type ChatUnreadFileThread,
-} from "./chats/chatsWireContract";
+export { CHATS_METHOD, decodeUnreadFileThreads, type ChatChannel, type ChatChannelSummary, type ChatDispatch, type ChatDispatchClaim, type ChatFileMention, type ChatRecoveriesPage, type ChatRunMessagesPage, type ChatUnreadFileThread } from "./chats/chatsWireContract";
 
 export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
 export {
@@ -73,23 +61,4 @@ export {
   type KeyEnvelopeUploadResult,
 } from "./relay/keyEnvelopeWireContract";
 
-export {
-  AUTOMATION_CLAIMED_EVENT,
-  MAX_GRANULAR_CHAT_QUERY_CHARS,
-  WORKSPACE_METHOD,
-  WorkspaceProtocolShapeError,
-  decodeCollectionValue,
-  decodeGranularChatMessageSearchResponse,
-  decodeSearchQueryPageResult,
-  encodeCollectionValue,
-  type AutomationClaim,
-  type CollectionPendingAdoptionCursor,
-  type CollectionPendingAdoptionsPage,
-  type ConflictFileState,
-  type ConflictRecord,
-  type GranularChatMessageSearchResponse,
-  type GranularChatMessageSearchResult,
-  type SearchQueryPageParams,
-  type SearchResult,
-  type WatcherStatusResult,
-} from "./workspace/workspaceWireContract";
+export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeCollectionValue, decodeGranularChatMessageSearchResponse, decodeSearchQueryPageResult, encodeCollectionValue, type AutomationClaim, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
