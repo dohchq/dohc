@@ -2,6 +2,7 @@ import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProt
 import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createWindowIpc } from "./ipc/windowIpc";
 import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
+import { registerAppPreviewIpcHandlers } from "./ipc/appPreviewIpc";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -62,9 +63,6 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import {
   ImportToDatabasePayload,
   ImportToDatabaseResult,
-  GetSitePreviewLogsPayload,
-  GetSitePreviewLogsResult,
-  StopSitePreviewPayload,
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   PluginPanelInvalidatedEvent,
@@ -80,10 +78,7 @@ import {
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
-import {
-  createStartSitePreviewHandler,
-  type SitePreviewExecutionInput,
-} from "./ipc/sitePreviewIpc";
+import type { SitePreviewExecutionInput } from "./ipc/sitePreviewIpc";
 import { registerShareMountIpcHandlers } from "./ipc/shareMountIpc";
 import { registerPluginIpcHandlers } from "./ipc/pluginIpcHandlers";
 import { createEngineYDocSessionIpc } from "./workspaces/engineYDocSessionIpc";
@@ -5487,33 +5482,6 @@ const senderWorkspaceAuthority = {
   },
 };
 
-const sitePreviewSenderWorkspaceAuthority = {
-  requireTrustedSender: senderWorkspaceAuthority.requireTrustedSender,
-  withActiveWorkspace<Result>(
-    sender: WebContents,
-    workspaceId: string,
-    subject: string,
-    action: string,
-    work: (input: {
-      workspace: CreatedWorkspace;
-      session: { isCurrent(): boolean };
-    }) => Promise<Result>,
-  ): Promise<Result> {
-    return withRendererWorkspaceOperation(
-      sender,
-      workspaceId,
-      `The ${subject} does not target the active workspace. Open the workspace and ${action}.`,
-      (operation) =>
-        work({
-          workspace: operation.workspace,
-          session: {
-            isCurrent: operation.isCurrent,
-          },
-        }),
-    );
-  },
-};
-
 // Injectable clock/id seams (oracle/tests) for renderer-initiated database
 // edits, whose nowMs becomes appliedAt (and createId the operationId) in the
 // persisted JSONL operation log. Omitted ⇒ the real wall clock / randomUUID,
@@ -5904,53 +5872,12 @@ function registerIpcHandlers(): void {
   ipcMain.handle(CHANNELS.listSites, siteIpcHandlers.listSites);
   ipcMain.handle(CHANNELS.getSitePackage, siteIpcHandlers.getSitePackage);
 
-  const startSitePreview = createStartSitePreviewHandler({
-    authority: sitePreviewSenderWorkspaceAuthority,
-    catalog: ownedSiteCatalog,
-    lifecycle: sitePreviews,
+  registerAppPreviewIpcHandlers<WebContents, IpcMainInvokeEvent, CreatedWorkspace, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, senderWorkspaceAuthority, withRendererWorkspaceOperation,
+    appCatalog: ownedSiteCatalog, appPreviews: sitePreviews,
     isSharedView: (workspaceId) => !!sharedViewOf(workspaceId),
-    execute: executePreviewForSite,
-  });
-  ipcMain.handle(CHANNELS.startSitePreview, startSitePreview);
-
-  ipcMain.handle(CHANNELS.getSitePreviewLogs, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetSitePreviewLogsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "The app preview logs request does not target the active workspace. Open the workspace and try again.",
-      (operation) =>
-        GetSitePreviewLogsResult.parse(
-          operation.state.sitePreviews.status(
-            operation.workspace.workspaceId,
-            input.siteRoot,
-          ),
-        ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.stopSitePreview, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StopSitePreviewPayload.parse(payload);
-    await withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "The app preview stop request does not target the active workspace. Open the workspace and try again.",
-      (operation) =>
-        operation.state.sitePreviews.stop({
-          getActiveWorkspaceId: () => {
-            try {
-              operation.assertCurrent();
-              return operation.workspace.workspaceId;
-            } catch {
-              return undefined;
-            }
-          },
-          workspaceId: operation.workspace.workspaceId,
-          siteRoot: input.siteRoot,
-        }),
-    );
+    executeAppPreview: executePreviewForSite,
   });
 
   registerPluginIpcHandlers<
