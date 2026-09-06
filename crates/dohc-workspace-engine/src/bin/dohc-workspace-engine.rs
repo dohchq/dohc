@@ -1396,8 +1396,15 @@ mod tests {
             events_rx,
             || Ok(()),
         ));
-        // Let the forwarder consume the early notice against generation 0.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        // This test uses one executor thread. The forwarder reads generation
+        // 0 and drops the notice before yielding with an empty channel.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while events_tx.capacity() < events_tx.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("pre-handshake notice consumed");
         client_output
             .write_all(&hello_bytes())
             .await

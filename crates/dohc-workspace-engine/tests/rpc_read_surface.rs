@@ -3,55 +3,21 @@
 //! real write paths (RPC writes + autonomous capture) — never by seeding the
 //! DB directly, so the RPCs are proven against the daemon's own semantics.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 const WORKSPACE_ID: &str = "ws-rpc-read-surface";
 const WAIT: Duration = Duration::from_secs(20);
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
-}
-
-fn write_file(root: &Path, path: &str, bytes: &[u8]) {
-    let absolute = root.join(path);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    std::fs::write(absolute, bytes).expect("write file");
-}
 
 /// Flush until the given path's captured state satisfies `check`.
 async fn flush_until(

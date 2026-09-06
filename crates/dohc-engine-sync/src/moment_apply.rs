@@ -227,8 +227,8 @@ pub fn apply_moment_envelope_detailed(
     envelope.validate()?;
     let search_policy = search_policy_for_store(store);
     apply_envelope_with(store, envelope, faults, |tx, envelope| {
-        let payload: MomentAppendPayload = serde_json::from_value(envelope.payload.clone())
-            .map_err(|_| SyncError::InvalidInput {
+        let payload: MomentAppendPayload =
+            Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
                 reason: "moment.append payload is malformed",
             })?;
         validate_payload_bounds(&payload)?;
@@ -379,7 +379,7 @@ pub(crate) fn redelivered_conflicts_opened(
         return Ok(0);
     }
     let payload: MomentAppendPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "moment.append payload is malformed",
         })?;
     store.read_with(|conn| {
@@ -934,7 +934,7 @@ fn parse_tagged_shadow(
     missing_owner_reason: &'static str,
 ) -> Result<(MomentAppendPayload, ConflictEffectOwner), SyncError> {
     let payload: MomentAppendPayload =
-        serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(value).map_err(|_| SyncError::InvalidInput {
             reason: malformed_reason,
         })?;
     validate_payload_bounds(&payload)?;

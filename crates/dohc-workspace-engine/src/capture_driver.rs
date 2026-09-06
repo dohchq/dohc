@@ -304,7 +304,7 @@ impl CaptureApplyProbe {
         }
     }
 
-    fn observe_gate_wait_if_armed(&self) {
+    pub(crate) fn observe_gate_wait_if_armed(&self) {
         if self.inner.gate_wait_armed.swap(false, Ordering::AcqRel) {
             self.inner.gate_wait_entered.add_permits(1);
         }

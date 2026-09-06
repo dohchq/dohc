@@ -1,29 +1,19 @@
 //! Desktop workspace-search RPC: active-version scoping and bounded paging
 //! through the real in-process daemon transport.
 
+mod common;
+
+use common::*;
 use dohc_engine_domain::VersionedTextStore;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
@@ -48,23 +38,6 @@ async fn open_workspace(
         .await
         .expect("open");
     serde_json::from_value(opened.result["workspace"].clone()).expect("handle")
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
-        .result
 }
 
 async fn write(

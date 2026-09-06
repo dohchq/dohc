@@ -1,9 +1,12 @@
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_collab::Ydoc;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::ScratchDir;
@@ -19,17 +22,6 @@ async fn bounded<T>(what: &str, future: impl Future<Output = T>) -> T {
     tokio::time::timeout(TEST_TIMEOUT, future)
         .await
         .unwrap_or_else(|_| panic!("{what} timed out"))
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn wait_until_capture_ready(
@@ -646,6 +638,7 @@ async fn set_active_drains_an_apply_already_in_flight_before_switching() {
     });
     bounded("capture apply probe", probe.wait_until_paused()).await;
 
+    probe.observe_next_version_fence_wait();
     let switch_transport = Arc::clone(&transport);
     let switch_handle = handle.clone();
     let switch_workspace = workspace_id.clone();
@@ -660,7 +653,11 @@ async fn set_active_drains_an_apply_already_in_flight_before_switching() {
         )
         .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    bounded(
+        "setActive queued on the capture gate",
+        probe.wait_until_version_fence_waiting(),
+    )
+    .await;
     assert!(
         !switch.is_finished(),
         "setActive must wait for the already-prepared apply to drain"
@@ -1534,6 +1531,7 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
     )
     .await;
 
+    probe.observe_next_apply_gate_wait();
     let close_transport = Arc::clone(&transport);
     let close_handle = handle.clone();
     let mut closing = tokio::spawn(async move {
@@ -1544,7 +1542,11 @@ async fn workspace_close_and_set_active_share_capture_then_session_lock_order() 
             )
             .await
     });
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    bounded(
+        "close queued on the capture gate",
+        probe.wait_until_apply_gate_waiting(),
+    )
+    .await;
     assert!(
         !closing.is_finished(),
         "close must queue behind the capture-first switch barrier"

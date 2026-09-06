@@ -6,17 +6,9 @@
 use dohc_engine_collab::DocKey;
 use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
 
 fn ydoc_update_rows(db: &std::path::Path) -> i64 {
     let store = EngineStore::open(db, 9_000).expect("open store");

@@ -1,6 +1,9 @@
 //! Collection reads through the real in-process daemon request path.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_collab::{
     BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Ydoc, claim_base_at_relay,
 };
@@ -13,11 +16,11 @@ use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Envelope, Request, WorkspaceHandle, encode_control},
+    wire::{Envelope, WorkspaceHandle, encode_control},
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
+    AlwaysLive, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
     apply_ydoc_envelope,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -28,7 +31,6 @@ use dohc_workspace_engine::{
 use serde_json::{Value, json};
 use std::{fmt::Write as _, sync::Arc};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-collections";
 const RECORD_ID: &str = "rec_aaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -93,34 +95,6 @@ fn seed_schema(scratch: &ScratchDir, schema: &str) {
     let collection_dir = scratch.path().join("tasks");
     std::fs::create_dir_all(&collection_dir).expect("collection directory");
     std::fs::write(collection_dir.join("collection.yaml"), schema).expect("schema file");
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
 }
 
 async fn call_ydoc_with_blob(
@@ -841,15 +815,6 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
 async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() {
     const EDITED_ID: &str = "rec_bbbbbbbbbbbbbbbbbbbbbbbbbb";
     const REMOTE_ORIGIN: &str = "remote-collection-editor";
-
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
 
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let seed_doc = Ydoc::wire();
@@ -2426,15 +2391,6 @@ struct ParkedRecordUpdate {
 const PARKED_REMOTE_ORIGIN: &str = "remote-parked-editor";
 
 async fn park_remote_status_update() -> ParkedRecordUpdate {
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
-
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");

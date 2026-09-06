@@ -18,20 +18,10 @@ use dohc_engine_collab::{
     WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
+use dohc_engine_testkit::decode_hex;
 
 const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
 const OVERLAP_U2_HEX: &str = "01010c00040109706c61696e546578740561f09f988000";
-
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
-}
 
 fn setup_parity_store(tag: &str, regime: Regime) -> (TempStore, dohc_engine_collab::DocKey) {
     let mut ts = fresh_store(tag);

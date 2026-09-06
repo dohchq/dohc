@@ -12,7 +12,7 @@ use dohc_engine_domain::{
     rollback_compensating_moment_id,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
+    ActorHandle, CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
@@ -24,8 +24,6 @@ use rusqlite::params;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-
-struct NoRecorder;
 
 const ONE_PIXEL_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
@@ -63,11 +61,6 @@ fn portable_image_scene() -> String {
   }}
 }}"#
     )
-}
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
 }
 
 #[derive(Debug)]
@@ -1014,7 +1007,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 30,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1035,7 +1028,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 40,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1058,7 +1051,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 request_id: None,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1244,7 +1237,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 140,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1265,7 +1258,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 150,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1289,7 +1282,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 160,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1856,7 +1849,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         .versioned_text_rollback(
             rollback.clone(),
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1867,7 +1860,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         .versioned_text_rollback(
             rollback,
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2174,7 +2167,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2195,7 +2188,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
                 now_ms: 5,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2296,7 +2289,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         .versioned_text_rollback(
             rollback_input.clone(),
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2347,7 +2340,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         .versioned_text_rollback(
             rollback_input,
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2509,7 +2502,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2541,7 +2534,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2566,7 +2559,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2692,7 +2685,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 now_ms: 9,
             },
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2763,7 +2756,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 author_json: None,
             },
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2909,7 +2902,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2934,7 +2927,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2955,7 +2948,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 now_ms: 5,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),
         )
@@ -2993,7 +2986,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_delete(
             drawing_delete_input.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3018,7 +3011,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 now_ms: 7,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3044,7 +3037,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_delete(
             drawing_delete_input,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -3090,7 +3083,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_rollback(
             rollback.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3171,7 +3164,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3182,7 +3175,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_rollback(
             rollback,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

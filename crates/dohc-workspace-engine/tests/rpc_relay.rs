@@ -1,3 +1,6 @@
+mod common;
+
+use common::*;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,7 +15,7 @@ use dohc_engine_domain::{VersionedTextStore, WriteText, reconcile_collections_in
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -20,7 +23,6 @@ use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const BEARER: &str = "relay-test-token";
 const ETAG: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
@@ -388,17 +390,6 @@ fn write_response(stream: &mut TcpStream, response: TestResponse) -> std::io::Re
     )?;
     stream.write_all(&response.body)?;
     stream.flush()
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn open_workspace(

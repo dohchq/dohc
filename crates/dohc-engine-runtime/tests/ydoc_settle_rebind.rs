@@ -10,17 +10,10 @@ use dohc_engine_runtime::{
     WorkspaceSupervisor,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::{ScratchDir, engine_db_path, try_make_dir_alias};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 #[derive(Default)]
 struct CountingRecorder {
@@ -45,14 +38,6 @@ fn remove_dir_alias(path: &std::path::Path) {
     std::fs::remove_dir(path).expect("remove directory junction/symlink");
     #[cfg(not(any(unix, windows)))]
     let _ = path;
-}
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -167,7 +152,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             Some(lineage_claim_id),
             Some(expected_head_sha),
             "identity-refusal-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             6,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -264,7 +249,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-rebind".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -343,7 +328,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
             state.lineage_claim_id.clone(),
             None,
             "session-rebind".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             130,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -412,7 +397,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-prune".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -502,7 +487,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
             reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-prune-2".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             80,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -571,7 +556,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-retire".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -654,7 +639,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
             reopened.lineage_claim_id.clone(),
             reopened.head_blob_sha256.clone(),
             "session-retire-2".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -727,7 +712,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             30,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -771,7 +756,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             50,
             faults.clone(),
             CancellationToken::new(),
@@ -817,7 +802,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
             state.lineage_claim_id.clone(),
             state.head_blob_sha256.clone(),
             "session-portable".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             70,
             Arc::new(NoFaults),
             CancellationToken::new(),

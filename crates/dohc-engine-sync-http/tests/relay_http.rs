@@ -17,7 +17,7 @@ use dohc_engine_sync::{
     read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
-use dohc_engine_testkit::{ScratchDir, engine_db_path};
+use dohc_engine_testkit::open_store;
 use serde_json::{Value, json};
 
 #[derive(Debug)]
@@ -247,13 +247,6 @@ fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeRespon
     })
 }
 
-fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let scratch = ScratchDir::new().expect("scratch");
-    let path = engine_db_path(&scratch).expect("engine db path");
-    let store = EngineStore::open(&path, 1_000).expect("open engine store");
-    (scratch, path, store)
-}
-
 fn seed_identity(store: &mut EngineStore, payload: &Value) {
     seed_identity_with_kind(store, "probe.local", payload);
 }
@@ -302,7 +295,7 @@ struct PushBoundaryState {
 
 #[test]
 fn push_chunks_ops_and_blob_have_at_server_boundaries() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut snapshots = Vec::new();
     let mut blobs = Vec::new();
     for index in 0..2_001 {
@@ -411,7 +404,7 @@ fn push_chunks_ops_and_blob_have_at_server_boundaries() {
 
 #[test]
 fn push_rejects_relay_origin_ahead_of_local_max() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|request| match (request.method.as_str(), request.path()) {
         ("POST", "/sync/ws/log") => TestResponse::json(
@@ -438,7 +431,7 @@ fn push_rejects_relay_origin_ahead_of_local_max() {
 
 #[test]
 fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({"index": 0}));
     journal_local_replication_op(
         &mut engine,
@@ -517,7 +510,7 @@ fn push_conflict_probes_empty_ops_rewinds_and_retries_once() {
 
 #[test]
 fn push_rewind_is_durable_before_a_failed_retry() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({"index": 0}));
     journal_local_replication_op(
         &mut engine,
@@ -589,7 +582,7 @@ fn push_rewind_is_durable_before_a_failed_retry() {
 
 #[test]
 fn pull_aborts_when_has_more_cursor_does_not_advance() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
@@ -612,7 +605,7 @@ fn pull_aborts_when_has_more_cursor_does_not_advance() {
 
 #[test]
 fn pull_rejects_byte_different_coordinate_collision_before_apply() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     engine
         .write_with(&NoFaults, |transaction| {
@@ -650,7 +643,7 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
 
 #[test]
 fn pull_accepts_the_relays_integral_float_normalization() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     engine
         .write_with(&NoFaults, |transaction| {
@@ -867,7 +860,7 @@ fn direct_transport_rejects_an_oversized_outbound_payload_before_io() {
 
 #[test]
 fn pull_rejects_fetched_blob_with_wrong_sha() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let claimed = hex_sha256(b"expected bytes");
     let handler_claimed = claimed.clone();
@@ -906,7 +899,7 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
 
 #[test]
 fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(move |request| {
         let query = request
@@ -1518,7 +1511,7 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     // The production transport must carry the refusal ingest writes, not
     // replace it with an unreadable-response error that names no limit.
     //
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Text);
     let oversized = vec![b'a'; limit_bytes + 1];
@@ -1629,7 +1622,7 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
     // better. Reporting 10485760 here would send an agent to shrink its payload
     // to a size binary ingest still refuses.
     //
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine, &json!({}));
     let ingest_limit = dohc_engine_sync::MAX_INGEST_BLOB_BYTES;
     let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);

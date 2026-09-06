@@ -1251,6 +1251,13 @@ pub trait SelfWriteRecorder: Send + Sync {
     fn retract(&self, workspace_id: &str, path: &str, sha256: &str);
 }
 
+/// The recorder for callers with no capture layer to suppress: every write is
+/// forgotten.
+impl SelfWriteRecorder for () {
+    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
+}
+
 /// Capture-owned proof that a filesystem pathname still names the workspace
 /// root selected before an actor command entered the queue.
 pub trait WorkspaceRootGuard: Send + Sync {
@@ -15293,14 +15300,6 @@ mod collection_relation_cleanup_tests {
     const SOURCE_OBJECT_ID: &str = "relation-source-object";
     const SOURCE_PATH: &str = "tasks/source.md";
 
-    struct NoSelfWrites;
-
-    impl SelfWriteRecorder for NoSelfWrites {
-        fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-
-        fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    }
-
     fn write_text(
         store: &mut EngineStore,
         object_id: &str,
@@ -15433,7 +15432,7 @@ mod collection_relation_cleanup_tests {
             VERSION_ID,
             scratch.path(),
             &LeaseRegistry::default(),
-            &NoSelfWrites,
+            &(),
             5,
             &NoFaults,
             &CancellationToken::new(),

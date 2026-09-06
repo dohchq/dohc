@@ -14,13 +14,29 @@ use dohc_engine_domain::{
     WriteBinary, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
+use dohc_engine_testkit::{
+    ScratchDir, ScriptedFaults, decode_hex, engine_db_path, flip_byte, open_store,
+};
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::apply::apply_chat_tx;
 use crate::*;
+
+/// A relay-acked envelope for workspace `ws`, recorded at 2_000 ms, whose
+/// relay sequence equals its origin sequence.
+fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
+    ReplicationEnvelope {
+        workspace_id: "ws".to_owned(),
+        origin_id: origin.to_owned(),
+        origin_seq: seq,
+        op_kind: kind.to_owned(),
+        payload,
+        recorded_at_ms: 2_000,
+        relay_seq: Some(seq),
+    }
+}
 
 /// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
 /// Against `clock_collision_pair()`'s first `[0, 2)` update it passes checks
@@ -38,52 +54,6 @@ macro_rules! assert_invalid_refusal {
             }))
         ))
     };
-}
-
-fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let scratch = ScratchDir::new().expect("scratch");
-    let path = engine_db_path(&scratch).expect("db path");
-    let store = EngineStore::open(&path, 1_000).expect("open");
-    (scratch, path, store)
-}
-
-fn envelope(origin: &str, seq: i64, kind: &str, payload: serde_json::Value) -> ReplicationEnvelope {
-    ReplicationEnvelope {
-        workspace_id: "ws".to_owned(),
-        origin_id: origin.to_owned(),
-        origin_seq: seq,
-        op_kind: kind.to_owned(),
-        payload,
-        recorded_at_ms: 2_000,
-        relay_seq: Some(seq),
-    }
-}
-
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
-}
-
-fn flip_payload_byte(update: &[u8], from: u8, to: u8) -> Vec<u8> {
-    let positions: Vec<usize> = update
-        .iter()
-        .enumerate()
-        .filter_map(|(index, byte)| (*byte == from).then_some(index))
-        .collect();
-    assert_eq!(
-        positions.len(),
-        1,
-        "payload byte must be unambiguous in the wire bytes"
-    );
-    let mut hostile = update.to_vec();
-    hostile[positions[0]] = to;
-    hostile
 }
 
 fn clock_collision_pair() -> (Vec<u8>, Vec<u8>) {
@@ -193,7 +163,7 @@ fn decision_winner(engine: &EngineStore) -> (String, i64, String, i64) {
 
 #[test]
 fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-decision-time",
         0,
@@ -220,7 +190,7 @@ fn imported_decision_refuses_unsafe_at_ms_without_row_and_acks() {
 
 #[test]
 fn imported_decision_refuses_an_explicit_null_resolver() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut payload = decision_payload("resolved", 100, None);
     payload["resolvedByMessageId"] = serde_json::Value::Null;
     let operation = envelope("null-decision-resolver", 0, "chat.decision.set", payload);
@@ -271,7 +241,7 @@ fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
     ];
     let mut winners = Vec::new();
     for order in permutations {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         for index in order {
             apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
         }
@@ -287,7 +257,7 @@ fn decision_lww_is_permutation_convergent_and_resolved_wins_ties() {
 
 #[test]
 fn local_only_decision_resolver_producer_converges_through_apply() {
-    let (_source_scratch, _source_path, mut source) = store();
+    let (_source_scratch, _source_path, mut source) = open_store();
     LinkedChatStore::new(&mut source)
         .create_channel(
             "ws",
@@ -403,7 +373,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
             != Some("local-resolver")
     }));
 
-    let (_target_scratch, _target_path, mut target) = store();
+    let (_target_scratch, _target_path, mut target) = open_store();
     for operation in &outbound {
         assert_eq!(
             apply_chat_envelope(&mut target, operation, &NoFaults)
@@ -453,7 +423,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
 
 #[test]
 fn reaction_lww_remove_wins_equal_time_and_origin_breaks_remaining_ties() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let added = envelope(
         "omega",
         0,
@@ -536,7 +506,7 @@ fn reaction_lww_is_permutation_convergent() {
     ];
     let mut winners = Vec::new();
     for order in permutations {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         for index in order {
             apply_chat_envelope(&mut engine, &ops[index], &NoFaults).expect("apply");
         }
@@ -551,7 +521,7 @@ fn reaction_lww_is_permutation_convergent() {
 
 #[test]
 fn reaction_import_preserves_remote_time_verbatim() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let future = envelope(
         "peer",
         0,
@@ -568,7 +538,7 @@ fn reaction_import_preserves_remote_time_verbatim() {
 
 #[test]
 fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-reaction-time",
         0,
@@ -595,7 +565,7 @@ fn imported_reaction_refuses_unsafe_at_ms_without_row_and_acks() {
 
 #[test]
 fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let winner_payload = reaction_payload("added", "👍", -10, "Ada");
     let winner = envelope("peer", 0, "chat.reaction.set", winner_payload);
     apply_chat_envelope(&mut engine, &winner, &NoFaults).expect("negative-time reaction");
@@ -630,7 +600,7 @@ fn reaction_import_accepts_negative_time_and_preserves_lww_order() {
 #[test]
 fn reaction_import_rejects_non_emoji_graphemes() {
     for hostile in ["hello", "http://evil.invalid", "👍 nice", "✁"] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let invalid = envelope(
             "mallory",
             0,
@@ -640,7 +610,7 @@ fn reaction_import_rejects_non_emoji_graphemes() {
         let result = apply_chat_envelope(&mut engine, &invalid, &NoFaults);
         assert_invalid_refusal!(result);
     }
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let flag = envelope(
         "peer",
         0,
@@ -653,14 +623,6 @@ fn reaction_import_rejects_non_emoji_graphemes() {
     );
 }
 
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
-        true
-    }
-}
-
 struct FirstLeaseCheckLive(AtomicUsize);
 
 impl LeaseProbe for FirstLeaseCheckLive {
@@ -671,7 +633,7 @@ impl LeaseProbe for FirstLeaseCheckLive {
 
 #[test]
 fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // The defer path refuses non-replicated lineages (they can never drain),
     // so the test needs the replicated marker scaffolding first.
     engine
@@ -784,7 +746,7 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
 
 #[test]
 fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncDuringJournalTxn);
     let outcome = journal_local_replication_op(
         &mut engine,
@@ -823,7 +785,7 @@ fn fault_sync_during_journal_txn_rolls_back_domain_and_position() {
 
 #[test]
 fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     assert_eq!(
         adopt_join_identity(
             &mut engine,
@@ -871,7 +833,7 @@ fn join_identity_adoption_creates_only_an_absent_coordinate_and_is_idempotent() 
 
 #[test]
 fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cases = [
         ("ws-origin", " origin-joined", "epoch-relay", "stream-relay"),
         ("ws-epoch", "origin-joined", "epoch-relay ", "stream-relay"),
@@ -913,7 +875,7 @@ fn join_identity_adoption_rejects_non_relay_identity_text_without_writing() {
 
 #[test]
 fn join_identity_adoption_refuses_a_different_existing_identity() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -951,7 +913,7 @@ fn join_identity_adoption_refuses_a_different_existing_identity() {
 
 #[test]
 fn join_identity_adoption_refuses_any_existing_replication_state() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -1138,7 +1100,7 @@ fn join_identity_adoption_refuses_any_existing_replication_state() {
 
 #[test]
 fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let op = envelope("peer", 0, "probe.apply", json!({}));
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
     let outcome = apply_envelope_with(&mut engine, &op, faults.as_ref(), insert_probe)
@@ -1166,7 +1128,7 @@ fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
 
 #[test]
 fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let bytes = b"replicated bytes".to_vec();
     let blob = BlobHydration {
         sha256: dohc_engine_storage::hex_sha256(&bytes),
@@ -1197,7 +1159,7 @@ fn fault_sync_before_blob_hydrate_commit_leaves_no_blob_or_cursor() {
 ///
 #[test]
 fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
 
     let at_cap = "a".repeat(MAX_TEXT_BYTES);
     let accepted = BlobHydration {
@@ -1270,7 +1232,7 @@ fn text_blob_over_the_text_ceiling_is_refused_at_ingest() {
 ///
 #[test]
 fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -1400,7 +1362,7 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
 /// persist and return that terminal refusal before it removes the queue row.
 #[test]
 fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -1521,7 +1483,7 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
 ///
 #[test]
 fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let sha256 = dohc_engine_storage::hex_sha256(b"an honest sha the relay does not serve");
@@ -1569,7 +1531,7 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
 
 #[test]
 fn exact_duplicate_is_noop_and_gap_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let op = envelope("peer", 0, "probe.apply", json!({"v":1}));
     assert_eq!(
         apply_envelope_with(&mut engine, &op, &NoFaults, insert_probe).expect("apply"),
@@ -1592,7 +1554,7 @@ fn exact_duplicate_is_noop_and_gap_is_rejected() {
 
 #[test]
 fn imported_opening_message_uses_zero_based_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "opening-order",
         0,
@@ -1652,7 +1614,7 @@ fn imported_opening_message_uses_zero_based_order() {
 #[test]
 fn imported_channel_refuses_non_timestamp_created_at_ms_without_row_and_acks() {
     for (suffix, created_at_ms) in [("negative", -1), ("unsafe", i64::MAX)] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let origin = format!("{suffix}-channel-time");
         let operation = envelope(
             &origin,
@@ -1703,7 +1665,7 @@ fn imported_thread_rejects_linked_object_without_linked_timestamp() {
 }
 
 fn assert_imported_thread_rejected(payload: serde_json::Value) {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope("invalid-thread", 0, "chat.thread.create", payload);
     assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
     let thread_rows: i64 = engine
@@ -1865,7 +1827,7 @@ fn imported_thread_rejects_invalid_owner_shape_and_linked_path() {
 
 #[test]
 fn imported_slug_only_thread_binds_the_existing_channel() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "slug-only",
         0,
@@ -1923,7 +1885,7 @@ fn imported_slug_only_thread_binds_the_existing_channel() {
 
 #[test]
 fn imported_thread_with_forged_agent_slug_is_refused() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "forged-agent-slug",
         0,
@@ -2032,7 +1994,7 @@ fn seed_unowned_chat_thread(engine: &mut EngineStore, thread_id: &str) {
 
 #[test]
 fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_unowned_chat_thread(&mut engine, "thread");
     assert_eq!(chat_content_revision(&engine, "thread"), 0);
 
@@ -2133,7 +2095,7 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
 
 #[test]
 fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_unowned_chat_thread(&mut engine, "parent-thread");
     let child = envelope(
         "child-origin",
@@ -2183,7 +2145,7 @@ fn imported_parent_arrival_repairs_the_child_and_bumps_the_conversation() {
 
 #[test]
 fn ready_pending_replay_bumps_every_conversation_it_materializes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for (origin, thread_id, message_id) in [
         ("pending-a", "thread-a", "message-a"),
         ("pending-b", "thread-b", "message-b"),
@@ -2225,7 +2187,7 @@ fn ready_pending_replay_bumps_every_conversation_it_materializes() {
 
 #[test]
 fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let message = envelope(
         "early-message-peer",
         0,
@@ -2313,7 +2275,7 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
 
 #[test]
 fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_apply() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "pending-terminal-follow",
         0,
@@ -2389,7 +2351,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
 
 #[test]
 fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "late-follow",
         0,
@@ -2445,7 +2407,7 @@ fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
 
 #[test]
 fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "feed-thread-origin",
         0,
@@ -2523,7 +2485,7 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
 
 #[test]
 fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "attachment-thread-origin",
         0,
@@ -2590,7 +2552,7 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 
 #[test]
 fn imported_feed_read_waits_for_placeholder_channel_resolution() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "placeholder-feed-thread",
         0,
@@ -2680,7 +2642,7 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
 
 #[test]
 fn imported_person_follow_waits_for_a_non_dm_message() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for operation in [
         envelope(
             "dm-person-source",
@@ -2795,7 +2757,7 @@ fn incoming_placeholder_never_displaces_bootstrapped_general_regardless_of_clock
     let expected_newcomer_slug = collision_slug_for_test("general", newcomer_wire, 0);
 
     for (local_created_at_ms, label) in [(1_000, "local-earlier"), (9_000, "local-later")] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let local_channel_id = format!("general-{label}");
         LinkedChatStore::new(&mut engine)
             .ensure_general_channel("ws", &local_channel_id, local_created_at_ms, &NoFaults)
@@ -2863,7 +2825,7 @@ fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
     let mut newcomer_slugs = Vec::new();
 
     for (peer, incumbent_created_at_ms) in [("alpha", 10), ("omega", 90)] {
-        let (scratch, _path, mut engine) = store();
+        let (scratch, _path, mut engine) = open_store();
         LinkedChatStore::new(&mut engine)
             .create_channel(
                 "ws",
@@ -2909,7 +2871,7 @@ fn colliding_newcomer_hash_is_stable_across_local_occupancy_histories() {
 
 #[test]
 fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let occupied = envelope(
         "materialization-owner",
         0,
@@ -2980,7 +2942,7 @@ fn authoritative_channel_materialization_only_reallocates_its_own_placeholder() 
 
 #[test]
 fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let first = envelope(
         "no-op-slug-first",
         0,
@@ -3057,7 +3019,7 @@ fn noncolliding_channel_apply_does_not_rewrite_unchanged_slugs() {
 
 #[test]
 fn local_thread_write_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let follow = envelope(
         "local-wakeup-follow",
         0,
@@ -3106,7 +3068,7 @@ fn local_thread_write_replays_a_parked_remote_follow() {
 
 #[test]
 fn general_wire_backfill_replays_a_parked_remote_follow() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3155,7 +3117,7 @@ fn general_wire_backfill_replays_a_parked_remote_follow() {
 
 #[test]
 fn default_follow_seed_replays_a_parked_remote_feed_read() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3222,7 +3184,7 @@ fn default_follow_seed_replays_a_parked_remote_feed_read() {
 
 #[test]
 fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "local-follow-fixture");
     let feed_read = envelope(
         "local-follow-feed-read",
@@ -3270,7 +3232,7 @@ fn local_follow_write_replays_a_parked_remote_feed_read_at_the_domain_boundary()
 
 #[test]
 fn set_follow_returns_the_post_boundary_replay_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     LinkedChatStore::new(&mut engine)
         .create_channel(
             "ws",
@@ -3357,7 +3319,7 @@ fn collision_slug_for_test(requested: &str, allocation_identity: &str, attempt: 
 
 #[test]
 fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal() {
-    let (_scratch, _path, mut first_peer) = store();
+    let (_scratch, _path, mut first_peer) = open_store();
     let long_wire_id = "a".repeat(240);
     let seed = envelope(
         "long-wire-seed",
@@ -3444,7 +3406,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
         "the local thread must journal the bounded persisted slug"
     );
 
-    let (_second_scratch, _second_path, mut second_peer) = store();
+    let (_second_scratch, _second_path, mut second_peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
             .expect("second peer accepts bounded outbound channelSlug"),
@@ -3454,7 +3416,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
 
 #[test]
 fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let long_base = format!("{}-{}", "a".repeat(134), "b".repeat(20));
     assert!(long_base.len() > 135);
     for (origin, thread_id, wire_id, created_at_ms) in [
@@ -3512,7 +3474,7 @@ fn collision_slug_truncation_is_bounded_and_does_not_leave_a_dash_boundary() {
 
 #[test]
 fn replay_only_touches_coordinates_for_the_changed_dependency() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for (origin, target) in [
         ("targeted-follow-a", "targeted-thread-a"),
         ("targeted-follow-b", "targeted-thread-b"),
@@ -3586,7 +3548,7 @@ fn replay_only_touches_coordinates_for_the_changed_dependency() {
 
 #[test]
 fn imported_follow_refuses_a_resolved_dm_without_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let channel = envelope(
         "dm-target-origin",
         0,
@@ -3637,7 +3599,7 @@ fn imported_follow_refuses_a_resolved_dm_without_parking() {
 
 #[test]
 fn parked_chat_coordinate_survives_store_reopen() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     let follow = envelope(
         "reopen-follow-origin",
         0,
@@ -3690,7 +3652,7 @@ fn parked_chat_coordinate_survives_store_reopen() {
 
 #[test]
 fn imported_verbatim_chat_rows_remain_readable_and_locally_mutable() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "verbatim");
 
     let mut reaction = reaction_payload("added", "👍", -10, "Ada");
@@ -3931,7 +3893,7 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
         }),
     ];
     for payload in invalid_payloads {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         imported_chat_fixture(&mut engine, "invalid-message");
         let operation = envelope("invalid-message", 3, "chat.message.append", payload);
         assert_invalid_refusal!(apply_chat_envelope(&mut engine, &operation, &NoFaults));
@@ -3945,7 +3907,7 @@ fn imported_message_append_refuses_each_oracle_invalid_field() {
 
 #[test]
 fn refused_message_log_cannot_export_local_derived_state_or_parent() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "refused-message-collision");
     let refused = envelope(
         "refused-message-collision",
@@ -4105,7 +4067,7 @@ fn refused_message_log_cannot_export_local_derived_state_or_parent() {
 
 #[test]
 fn refused_thread_log_cannot_suppress_the_current_thread_export() {
-    let (_scratch, _path, mut first_peer) = store();
+    let (_scratch, _path, mut first_peer) = open_store();
     imported_chat_fixture(&mut first_peer, "refused-thread-collision");
     let refused = envelope(
         "refused-thread-collision",
@@ -4237,7 +4199,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         "the current origin must export one valid structure before its messages"
     );
 
-    let (_second_scratch, _second_path, mut second_peer) = store();
+    let (_second_scratch, _second_path, mut second_peer) = open_store();
     for operation in &outbound {
         assert_eq!(
             apply_chat_envelope(&mut second_peer, operation, &NoFaults)
@@ -4277,7 +4239,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
 
 #[test]
 fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "unsafe-message-time");
     let operation = envelope(
         "unsafe-message-time",
@@ -4313,7 +4275,7 @@ fn imported_message_refuses_unsafe_created_at_ms_without_row_and_acks() {
 
 #[test]
 fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "body-validation");
     let boundary = envelope(
         "body-validation",
@@ -4375,7 +4337,7 @@ fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
 
 #[test]
 fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_state() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "feed-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -4478,7 +4440,7 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
 
 #[test]
 fn imported_thread_header_message_id_cannot_replace_the_search_header() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "thread-header");
     engine
         .write_with(&NoFaults, |tx| {
@@ -4554,7 +4516,7 @@ fn imported_thread_header_message_id_cannot_replace_the_search_header() {
 
 #[test]
 fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "search-peer",
         0,
@@ -4623,7 +4585,7 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
 
 #[test]
 fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "fallback-peer",
         0,
@@ -4657,7 +4619,7 @@ fn replicated_untitled_thread_without_messages_matches_rebuild_fallback() {
 
 #[test]
 fn replicated_untitled_thread_indexes_its_first_message_snippet() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "snippet-peer",
         0,
@@ -4701,7 +4663,7 @@ fn replicated_untitled_thread_indexes_its_first_message_snippet() {
 
 #[test]
 fn refused_chat_mutation_rolls_back_all_fts_rows() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let thread = envelope(
         "refused-search-peer",
         0,
@@ -4748,7 +4710,7 @@ fn imported_channel_create_reuses_the_local_channel_id_rule() {
         ("long-channel-id", "x".repeat(257)),
         ("padded-channel-id", " padded-channel ".to_owned()),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -4781,7 +4743,7 @@ fn imported_channel_create_refuses_reserved_local_channel_ids() {
         ("reserved-general-id", GENERAL_CHANNEL_WIRE_ID),
         ("reserved-agent-id", AGENT_CHANNEL_WIRE_ID),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -4810,7 +4772,7 @@ fn imported_channel_create_refuses_reserved_local_channel_ids() {
 
 #[test]
 fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let decomposed = envelope(
         "channel-name",
         0,
@@ -4859,7 +4821,7 @@ fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
 
 #[test]
 fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let caller_slug = envelope(
         "derived-channel-slug",
         0,
@@ -4908,7 +4870,7 @@ fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
 
 #[test]
 fn imported_attachment_requires_its_workspace_thread_message_without_fabricating_a_row() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-owner");
     let fabricated = envelope(
         "attachment-owner",
@@ -4951,7 +4913,7 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
 
 #[test]
 fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-cross-thread-owner");
     let other_thread = envelope(
         "attachment-cross-thread-target",
@@ -5010,7 +4972,7 @@ fn imported_attachment_refuses_a_message_resolved_in_another_thread_without_park
 
 #[test]
 fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "follow-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -5120,7 +5082,7 @@ fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
         ),
         ("message-author-bound", "authorUserId", "x".repeat(201)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         imported_chat_fixture(&mut engine, origin);
         let mut payload = json!({
             "messageId": format!("message-{origin}"),
@@ -5148,7 +5110,7 @@ fn imported_authored_fields_reuse_local_display_and_author_id_bounds() {
         ),
         ("reaction-author-bound", "authorId", "x".repeat(201)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let mut payload = reaction_payload("added", "👍", 1, "user");
         payload[field] = json!(value);
         let operation = envelope(origin, 0, "chat.reaction.set", payload);
@@ -5168,7 +5130,7 @@ fn imported_follow_set_refuses_unbounded_or_empty_identities() {
         ("😀".repeat(129), "target".to_owned()),
         ("owner".to_owned(), "😀".repeat(129)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             "invalid-follow",
             0,
@@ -5187,7 +5149,7 @@ fn imported_follow_set_refuses_unbounded_or_empty_identities() {
 
 #[test]
 fn imported_follow_refuses_unsafe_at_ms_without_row_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope(
         "unsafe-follow-time",
         0,
@@ -5226,7 +5188,7 @@ fn imported_feed_read_set_refuses_unbounded_or_empty_identities() {
         ("😀".repeat(129), "message".to_owned()),
         ("owner".to_owned(), "😀".repeat(129)),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             "invalid-feed-read",
             0,
@@ -5248,7 +5210,7 @@ fn imported_feed_read_refuses_unsafe_timestamps_without_row_and_acks() {
         ("unsafe-feed-read-time", 1, i64::MAX),
         ("unsafe-feed-read-cursor", i64::MAX, 1),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope(
             origin,
             0,
@@ -5298,7 +5260,7 @@ fn live_bookmark(engine: &mut EngineStore) -> String {
 
 #[test]
 fn imported_message_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "message-bookmark");
     let bookmark_id = live_bookmark(&mut engine);
     engine
@@ -5345,7 +5307,7 @@ fn imported_message_requeues_active_live_bookmarks() {
 
 #[test]
 fn imported_message_indexes_mentions_only_when_inserted() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "mention-index");
     let first = envelope(
         "mention-index",
@@ -5392,7 +5354,7 @@ fn imported_message_indexes_mentions_only_when_inserted() {
 
 #[test]
 fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "attachment-bookmark");
     let bookmark_id = live_bookmark(&mut engine);
     let attachment = envelope(
@@ -5452,7 +5414,7 @@ fn imported_attachment_cross_origin_duplicate_requeues_active_live_bookmarks() {
 
 #[test]
 fn imported_attachment_recomputes_id_and_rejects_mismatch() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let invalid = envelope(
         "hostile-attachment",
         0,
@@ -5510,7 +5472,7 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
         ),
     ];
     for (case, fields) in cases {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let mut payload = json!({
             "attachmentId": "placeholder",
             "threadId": "thread",
@@ -5553,8 +5515,8 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
 
 #[test]
 fn chat_reaction_lww_converges_across_origin_arrival_order() {
-    let (_a, _path_a, mut first) = store();
-    let (_b, _path_b, mut second) = store();
+    let (_a, _path_a, mut first) = open_store();
+    let (_b, _path_b, mut second) = open_store();
     let low = envelope(
         "a",
         0,
@@ -5588,7 +5550,7 @@ fn chat_reaction_lww_converges_across_origin_arrival_order() {
 
 #[test]
 fn share_view_and_shared_channel_fail_closed_outside_boundary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let view = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -5629,7 +5591,7 @@ fn share_view_and_shared_channel_fail_closed_outside_boundary() {
 
 #[test]
 fn shared_channel_channel_create_without_wire_id_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-channel".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5656,7 +5618,7 @@ fn shared_channel_channel_create_without_wire_id_is_rejected() {
 
 #[test]
 fn shared_channel_cross_channel_thread_and_message_are_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let other = ShareBoundary {
         share_id: "share-other".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5738,7 +5700,7 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
 
 #[test]
 fn shared_channel_correctly_scoped_ops_apply() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-allowed".to_owned(),
         surface: ShareSurface::SharedChannel,
@@ -5819,7 +5781,7 @@ fn shared_channel_correctly_scoped_ops_apply() {
 
 #[test]
 fn share_view_secondary_path_out_of_boundary_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -5893,7 +5855,7 @@ fn share_view_moment(payload: serde_json::Value) -> ReplicationEnvelope {
 /// shape.
 #[test]
 fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let moment = |version: &str| {
         share_view_moment(json!({
             "versionId": version,
@@ -5940,7 +5902,7 @@ fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions()
 /// event it is rather than as a generic malformed payload.
 #[test]
 fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // Both selector shapes the relay can state: live-follow main, and a
     // named version share.
     for version_id in [None, Some("version-granted")] {
@@ -5981,7 +5943,7 @@ fn share_view_moment_without_a_version_identity_is_refused_as_malformed() {
 /// inventing a zero.
 #[test]
 fn an_unusable_version_id_names_the_limit_the_unit_and_the_observed_length() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = share_view_version_boundary(None);
     let astral = "\u{1f600}".repeat(MAX_SHARE_VERSION_ID_CHARS / 2 + 1);
     assert_eq!(astral.chars().count(), 65);
@@ -6258,7 +6220,7 @@ fn key_envelope_conflict_is_surfaced_without_rebasing_over_the_winner() {
 
 #[test]
 fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_exist() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let incoming = envelope("canonical-peer", 0, "probe", json!({"z": 1, "a": [2, 3]}));
     let _ = crate::relay::take_canonical_json_call_count();
     assert!(matches!(
@@ -6711,7 +6673,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
             (None, 1_i64, 0_i64),
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_identity(&mut engine);
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -6865,7 +6827,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
 
 #[test]
 fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -7010,7 +6972,7 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
 
 #[test]
 fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -7147,7 +7109,7 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
 
 #[test]
 fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -7516,7 +7478,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
 
 #[test]
 fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -7703,7 +7665,7 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
 
 #[test]
 fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -7798,7 +7760,7 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
 
 #[test]
 fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -8015,7 +7977,7 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
 
 #[test]
 fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -8171,7 +8133,7 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
 
 #[test]
 fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -8549,7 +8511,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
         ("local", RelayError::OriginDiverged),
         ("peer", RelayError::InvalidResponse),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_identity(&mut engine);
         if origin_id == "peer" {
             engine
@@ -8600,7 +8562,7 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
 
 #[test]
 fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_advance() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay::default());
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncAfterPushBeforeCursorPersist);
@@ -8628,7 +8590,7 @@ fn fault_sync_after_push_before_cursor_persist_repushes_without_local_double_adv
 
 #[test]
 fn journal_rejects_payloads_above_the_relay_contract() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let overhead = br#"{"data":""}"#.len();
     let exact = json!({"data": "x".repeat(MAX_PAYLOAD_JSON_BYTES - overhead)});
     assert_eq!(
@@ -8694,7 +8656,7 @@ fn canonical_json_matches_javascript_number_boundaries() {
 
 #[test]
 fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let remote = envelope(
         "peer",
@@ -8762,7 +8724,7 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
 
 #[test]
 fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "retained-scene";
@@ -8989,9 +8951,9 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
         ),
     ];
 
-    let (scratch_a, path_a, mut a) = store();
-    let (_scratch_b, _path_b, mut b) = store();
-    let (_scratch_c, _path_c, mut c) = store();
+    let (scratch_a, path_a, mut a) = open_store();
+    let (_scratch_b, _path_b, mut b) = open_store();
+    let (_scratch_c, _path_c, mut c) = open_store();
 
     // Seed 0xR10's deterministic schedule: reordered delivery, a dropped
     // packet, a partitioned peer, a duplicate, and a restart after a prefix.
@@ -9056,7 +9018,7 @@ fn seeded_relay_fault_model_converges_without_double_apply() {
 /// a divergent payload must fail closed (never silently skip, never mutate).
 #[test]
 fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let first = envelope(
         "peer",
         0,
@@ -9101,7 +9063,7 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
 /// must be rejected before apply, and the fetch cursor must not advance.
 #[test]
 fn pull_rejects_op_for_foreign_workspace() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let foreign = ReplicationEnvelope {
         workspace_id: "other".to_owned(),
@@ -9144,7 +9106,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cipher_a: &[u8] = b"ciphertext-A-payload";
     let cipher_b: &[u8] = b"ciphertext-B-different-payload";
     let sha_a = dohc_engine_storage::hex_sha256(cipher_a);
@@ -9236,7 +9198,7 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
 /// must not move the read cursor backwards.
 #[test]
 fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     imported_chat_fixture(&mut engine, "feed-rank-fixture");
     engine
         .write_with(&NoFaults, |tx| {
@@ -9299,7 +9261,7 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
 /// agent wire id is present; malformed shapes are rejected, a correct one applies.
 #[test]
 fn reserved_agent_channel_shapes_rejected() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // kind=agent but a non-agent wire id -> rejected.
     let rogue_agent = envelope(
         "rogue-agent-peer",
@@ -9337,7 +9299,7 @@ fn reserved_agent_channel_shapes_rejected() {
 
 #[test]
 fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     // The replicated lineage exists before envelopes arrive (base claim);
     // apply_remote_update refuses NoMarker rather than conjuring one. The
     // version row exists because the drain now projects drained content to
@@ -9465,7 +9427,7 @@ fn drained_parked_update_derives_its_record_facts() {
     const OBJECT_ID: &str = "history-redelivery-object";
     const PATH: &str = "tasks/history.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -9583,7 +9545,7 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
     const OBJECT_ID: &str = "history-redelivery-object";
     const PATH: &str = "tasks/history.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -9791,7 +9753,7 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
     const OBJECT_ID: &str = "projection-failure-object";
     const PATH: &str = "tasks/projection.md";
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -10162,8 +10124,8 @@ fn assert_remote_cache_matches_cold(
 
 #[test]
 fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-retire-identity";
     let path = "cache/remote-retire-identity.md";
@@ -10216,8 +10178,8 @@ fn remote_frontier_fold_retires_a_live_identity_covered_by_delete() {
 
 #[test]
 fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-split-run";
     let path = "cache/remote-split-run.md";
@@ -10265,8 +10227,8 @@ fn remote_frontier_fold_splits_a_string_run_around_a_mid_run_delete() {
 
 #[test]
 fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-retire-interior";
     let path = "cache/remote-retire-interior.md";
@@ -10319,8 +10281,8 @@ fn remote_frontier_fold_retires_a_deleted_scalar_interior() {
 
 #[test]
 fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-pending-delete";
     let path = "cache/remote-pending-delete.md";
@@ -10396,8 +10358,8 @@ fn remote_frontier_delete_endpoints_canonicalize_across_pending_integration() {
 
 #[test]
 fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-refusal";
     let path = "cache/remote-frontier-refusal.md";
@@ -10427,7 +10389,7 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
     );
     assert!(warm_cache.gate_scratch_is_resident_for_test(&key));
 
-    let hostile = flip_payload_byte(&base, b'z', b'y');
+    let hostile = flip_byte(&base, b'z', b'y');
     let operation = remote_delta_operation(
         &mut warm_store,
         target,
@@ -10465,8 +10427,8 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
 
 #[test]
 fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-check4-refusal";
     let path = "cache/remote-check4-refusal.md";
@@ -10556,8 +10518,8 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
 #[cfg(debug_assertions)]
 #[test]
 fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuilds_it() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-scratch-apply-error";
     let path = "cache/remote-scratch-apply-error.md";
@@ -10633,8 +10595,8 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
 #[test]
 #[should_panic(expected = "FR1-VALID")]
 fn remote_frontier_oracle_catches_a_poisoned_identity() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-poison";
     let path = "cache/remote-frontier-poison.md";
@@ -10680,8 +10642,8 @@ fn remote_frontier_oracle_catches_a_poisoned_identity() {
 #[test]
 #[should_panic(expected = "FR1-VALID")]
 fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-frontier-run-poison";
     let path = "cache/remote-frontier-run-poison.md";
@@ -10733,8 +10695,8 @@ fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
 #[test]
 #[should_panic(expected = "FR2-VALID")]
 fn remote_scratch_oracle_catches_a_poisoned_scratch() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-remote-scratch-poison";
     let path = "cache/remote-scratch-poison.md";
@@ -10778,8 +10740,8 @@ fn remote_scratch_oracle_catches_a_poisoned_scratch() {
 
 #[test]
 fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = "object-cache-refusal";
     let path = "notes/cache-refusal.md";
@@ -10951,8 +10913,8 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
 }
 
 fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
+    let (_warm_scratch, _warm_path, mut warm_store) = open_store();
+    let (_cold_scratch, _cold_path, mut cold_store) = open_store();
     let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
     let object_id = format!("object-cache-crash-{}", point.as_str().replace('.', "-"));
     let path = format!("notes/{object_id}.md");
@@ -11166,7 +11128,7 @@ fn storage_committed_crash_evicts_and_rebuilds_the_remote_cache() {
 
 #[test]
 fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
-    let (_scratch, _path, mut store) = store();
+    let (_scratch, _path, mut store) = open_store();
     seed_replication_version(&mut store, "main", "main");
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-replaced")
         .expect("replacement key");
@@ -11240,7 +11202,7 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
     // check: drop the `project_and_write_in_tx` calls in
     // `apply_ydoc_envelope`'s base/update arms — both head assertions below
     // fail while the ops still report applied.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11362,7 +11324,7 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
     // shaped sync conflict opens. Mutation check: restore the unconditional
     // `project_and_write_in_tx` call in the base branch — the head assertion
     // and the conflict-count assertion below both fail.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11574,7 +11536,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
     // disk. Same move as the resolve path, where `metadata_origin == "sync"`
     // was replaced by the head ids the payload already carried.
     //
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11702,7 +11664,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
 fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     // The convergent twin of the divergence test: a head whose bytes already
     // equal the base's projection fast-forwards silently.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11789,7 +11751,7 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
     // incoming anchor, so a crash-redelivery recount keyed on the conflict
     // row finds nothing. The count now lives in an immutable per-envelope
     // decision record.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11887,7 +11849,7 @@ fn resolution_fold_refuses_while_deferred_updates_are_parked() {
     // either reviewed side, and their drain runs after the review gate
     // closes. The fold — and with it the whole resolution transaction —
     // refuses until they drain.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -11942,7 +11904,7 @@ fn a_fold_that_cannot_reproduce_the_choice_refuses_instead_of_diverging() {
     // another, and the marker asserting they agree. That is the silent
     // reversal this PR exists to close, arriving through the fold itself.
     //
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12036,7 +11998,7 @@ fn recounting_a_malformed_redelivery_returns_zero_instead_of_wedging() {
     // The decision record is keyed by the ENVELOPE coordinate and needs no
     // payload, so absence reads as zero.
     //
-    let (_scratch, _path, engine) = store();
+    let (_scratch, _path, engine) = open_store();
     let malformed = envelope(
         "peer",
         0,
@@ -12073,7 +12035,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     // Two different records of "not whole yet", which is how consulting one
     // of them missed the other.
     //
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12249,7 +12211,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
 fn a_fold_the_parser_can_reproduce_still_commits() {
     // The guard must not refuse everything: a rich choice the parser does
     // model folds and journals as before.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12308,7 +12270,7 @@ fn a_fold_the_parser_can_reproduce_still_commits() {
 fn resolution_fold_names_the_cap_it_hits() {
     // The fold's size refusal must name the constraint, the
     // limit, and the observed bytes.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12366,7 +12328,7 @@ fn resolution_fold_names_the_cap_it_hits() {
 
 #[test]
 fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let install_abort_trigger = |engine: &mut EngineStore, trigger_name: &str, table_name: &str| {
         let sql = format!(
             "CREATE TRIGGER {trigger_name} BEFORE INSERT ON {table_name} \
@@ -12532,7 +12494,7 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
 
 #[test]
 fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -12637,7 +12599,7 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
 
 #[test]
 fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "closed-scene";
@@ -12742,7 +12704,7 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
 
 #[test]
 fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "replicated-scene";
@@ -12849,7 +12811,7 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
     const ASSET_BYTES: usize = 3 * 1024 * 1024;
     const ASSET_IDS: [&str; 4] = ["image-a", "image-b", "image-c", "image-d"];
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let object_id = "scene-over-projection-cap";
@@ -13030,7 +12992,7 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
 
 #[test]
 fn an_old_scene_asset_tombstone_cannot_authorize_a_reused_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -13310,7 +13272,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         (asset, scene, asset_ref, portable)
     };
 
-    let (scratch_a, path_a, mut asset_first) = store();
+    let (scratch_a, path_a, mut asset_first) = open_store();
     let (asset_a, scene_a, asset_ref_a, _) = make_ops(&mut asset_first);
     let asset_first_pull = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -13339,7 +13301,7 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         panic!("asset-first relay pull must complete");
     };
 
-    let (scratch_b, path_b, mut scene_first) = store();
+    let (scratch_b, path_b, mut scene_first) = open_store();
     let (asset_b, scene_b, asset_ref_b, portable) = make_ops(&mut scene_first);
     let scene_first_pull = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -13518,7 +13480,7 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
         ("cross-workspace", "image/png", cross_workspace_ref),
         ("cross-version", "image/png", cross_version_ref),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let portable = json!({
             "type": "excalidraw", "version": 2, "source": "https://excalidraw.com",
@@ -13597,7 +13559,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
         ("plaintext-base", "plaintext", "richdoc"),
         ("richdoc-base", "richdoc", "plaintext"),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         VersionedTextStore::new(&mut engine)
             .ensure_main_version("ws", "main", 1_300, &NoFaults)
             .expect("main version");
@@ -13788,7 +13750,7 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
 
 #[test]
 fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
@@ -13870,7 +13832,7 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 
 #[test]
 fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let head_sha = dohc_engine_storage::hex_sha256(b"existing");
     engine
@@ -14009,7 +13971,7 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
 
 #[test]
 fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let binary = b"device X binary";
     let binary_sha = engine.put_binary_blob(binary).expect("binary payload");
@@ -14189,7 +14151,7 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
 
 #[test]
 fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_create() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let update_bytes = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "orphan");
     let update_sha = engine
         .put_binary_blob(&update_bytes)
@@ -14281,7 +14243,7 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
 
 #[test]
 fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14378,7 +14340,7 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
 
 #[test]
 fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -14545,7 +14507,7 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
 
 #[test]
 fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let base_doc = dohc_engine_collab::Ydoc::wire();
     base_doc.plaintext_insert(0, "base");
@@ -14659,7 +14621,7 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
 
 #[test]
 fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -14781,7 +14743,7 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
 
 #[test]
 fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let source = dohc_engine_collab::Ydoc::wire();
@@ -14909,7 +14871,7 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
 
 #[test]
 fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first_doc = dohc_engine_collab::Ydoc::wire();
     first_doc.plaintext_insert(0, "first");
@@ -15040,7 +15002,7 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
 
 #[test]
 fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15120,7 +15082,7 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
     // A local-only lineage has no relay identity. The pulled base becomes the
     // active lineage, and the durable local content becomes an ordinary
     // recovery sibling. The two independent CRDT histories never merge.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     dohc_engine_domain::VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15251,7 +15213,7 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
 
 #[test]
 fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15395,7 +15357,7 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
 
 #[test]
 fn divergent_base_waits_for_the_existing_base_relay_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_300, &NoFaults)
         .expect("main version");
@@ -15509,7 +15471,7 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_secret_scratch, _secret_path, mut secret_engine) = store();
+    let (_secret_scratch, _secret_path, mut secret_engine) = open_store();
     let ciphertext = b"late secret";
     let sha = secret_engine
         .put_binary_blob(ciphertext)
@@ -15541,7 +15503,7 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         Ok(ApplyOutcome::Applied(()))
     ));
 
-    let (_version_scratch, _version_path, mut version_engine) = store();
+    let (_version_scratch, _version_path, mut version_engine) = open_store();
     seed_replication_version(&mut version_engine, "main", "main");
     let child = envelope(
         "late-version-child-peer",
@@ -15641,7 +15603,7 @@ fn assert_unacked_and_unjournaled(engine: &EngineStore, origin_id: &str) {
 
 #[test]
 fn workspace_init_router_apply_is_idempotent_on_replay() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(
@@ -15693,7 +15655,7 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
 
 #[test]
 fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     engine
         .write_with(&NoFaults, |tx| {
             tx.execute(
@@ -15737,7 +15699,7 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
 
 #[test]
 fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let local_sha = dohc_engine_storage::hex_sha256(b"local source state");
@@ -15983,7 +15945,7 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
 
 #[test]
 fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first_sha = dohc_engine_storage::hex_sha256(b"first chunk");
     let pending_sha = dohc_engine_storage::hex_sha256(b"origin pending");
@@ -16104,7 +16066,7 @@ fn version_create_with_shipped_snapshots(
 
 #[test]
 fn version_create_stamps_a_shipped_capture_head_as_replicated() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let sha = dohc_engine_storage::hex_sha256(b"captured fork state");
     engine
@@ -16161,7 +16123,7 @@ fn version_create_stamps_a_shipped_capture_head_as_replicated() {
 
 #[test]
 fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let missing_sha = dohc_engine_storage::hex_sha256(b"missing");
     let operation = version_create_with_shipped_snapshots(
@@ -16204,7 +16166,7 @@ fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
 #[test]
 fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
     for (index, content_kind) in [None, Some("text"), Some("binary")].into_iter().enumerate() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let text_sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -16256,7 +16218,7 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
 
 #[test]
 fn version_create_unknown_content_kind_is_refused_and_acked() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let text_sha = dohc_engine_storage::hex_sha256(b"content");
     engine
@@ -16352,7 +16314,7 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
 
 #[test]
 fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let sha = dohc_engine_storage::hex_sha256(b"content");
     engine
@@ -16392,7 +16354,7 @@ fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
 #[test]
 fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
     for (index, path) in ["../escape.md", "config/.env"].into_iter().enumerate() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -16438,7 +16400,7 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
 /// is not enough; this asserts the plaintext is not readable afterwards.
 #[test]
 fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
     let sha = dohc_engine_storage::hex_sha256(plaintext.as_bytes());
@@ -16539,7 +16501,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
         .into_iter()
         .enumerate()
     {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         let sha = dohc_engine_storage::hex_sha256(b"content");
         engine
@@ -16605,7 +16567,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
 
 #[test]
 fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version_in_workspace(&mut engine, "foreign-ws", "main", "main");
     let source_sha = dohc_engine_storage::hex_sha256(b"legacy source");
@@ -16787,7 +16749,7 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
 
 #[test]
 fn version_create_rejects_a_version_id_owned_by_another_workspace() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version_in_workspace(&mut engine, "foreign-ws", "foreign-version", "named");
     let operation = envelope(
@@ -16885,7 +16847,7 @@ fn map_secret_snapshot_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SecretSn
 
 #[test]
 fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotently() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
     let operation = envelope(
@@ -16997,7 +16959,7 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let origin_ciphertext = b"origin pending secret";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, origin_ciphertext);
     let chunk = |seq, chunk_index, path: &str| {
@@ -17090,7 +17052,7 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         ("skipped chunk", 2, 2, "config/prod.env"),
         ("changed total", 1, 3, "config/prod.env"),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let ciphertext = b"fork assembly bytes";
         let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
         let chunk = |seq, chunk_index, total_rows, path: &str| {
@@ -17149,7 +17111,7 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let fork_point_ciphertext = b"sealed source bytes";
     let (fork_point_sha, fork_point_iv, fork_point_tag) =
         seed_secret_fork_state(&mut engine, fork_point_ciphertext);
@@ -17249,7 +17211,7 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
 
 #[test]
 fn secret_version_fork_refuses_duplicate_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
     let row = json!({
@@ -17313,7 +17275,7 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
             "secret fork chunk claims more rows than its declared total",
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let ciphertext = b"sealed source bytes";
         let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
         let mut payload = json!({
@@ -17354,7 +17316,7 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
 /// destination from an empty source.
 #[test]
 fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let ciphertext = b"sealed source bytes";
     seed_secret_fork_state(&mut engine, ciphertext);
     seed_replication_version(&mut engine, "empty-source", "named");
@@ -17417,7 +17379,7 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "named");
     let ciphertext = b"sealed source bytes";
@@ -17513,7 +17475,7 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let oversized = vec![7_u8; MAX_SECRET_FILE_BYTES + 1];
     let sha = engine
@@ -17602,7 +17564,7 @@ fn secret_put_ciphertext_length_mismatch_is_refused_and_acked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"sealed";
     let sha = engine.put_binary_blob(ciphertext).expect("ciphertext blob");
@@ -17650,7 +17612,7 @@ fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let honest_ciphertext = b"honest";
     let corrupt_ciphertext = b"sealed";
@@ -17724,7 +17686,7 @@ fn secret_put_corrupt_local_ciphertext_length_is_hard_and_unacked() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"honest";
     let sha = dohc_engine_storage::hex_sha256(ciphertext);
@@ -17777,7 +17739,7 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"canonical-secret-ciphertext";
     let sha = engine
@@ -17892,7 +17854,7 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"collision-secret-ciphertext";
     let sha = engine
@@ -17985,7 +17947,7 @@ fn secret_put_refuses_and_acks_synthesized_moment_id_owned_by_plaintext_history(
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext_sha = dohc_engine_storage::hex_sha256(b"plaintext owner");
     engine
@@ -18082,7 +18044,7 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"redelivery-secret-ciphertext";
     let sha = engine
@@ -18144,7 +18106,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "branch");
     let ciphertext = b"protected relay bytes";
@@ -18223,7 +18185,7 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
 
 #[test]
 fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     seed_replication_version(&mut engine, "feature", "branch");
     let operation = envelope(
@@ -18294,7 +18256,7 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
 
 #[test]
 fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     let ciphertext = b"protected fork bytes";
     let (sha, iv, tag) = seed_secret_fork_state(&mut engine, ciphertext);
@@ -18490,7 +18452,7 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
 #[test]
 fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compatibly() {
     for kind in crate::router::owned_op_kinds() {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         let operation = envelope("router-peer", 0, kind, json!({}));
         assert!(
             !matches!(
@@ -18507,7 +18469,7 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
         );
     }
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let workspace = envelope("router-workspace", 0, "workspace.init", json!({}));
     assert!(matches!(
         apply_replication_envelope(
@@ -18569,7 +18531,7 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
 }
 #[test]
 fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let first_page = (0..crate::model::MAX_PULL_OPS_PER_PASS)
         .map(|seq| {
@@ -18670,7 +18632,7 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
 
 #[test]
 fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut pages = Vec::new();
     for cursor in 0..crate::model::MAX_PULL_PAGES_PER_PASS {
@@ -18739,7 +18701,7 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
 
 #[test]
 fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let pages = (0..=crate::model::MAX_PULL_PAGES_PER_PASS)
         .map(|cursor| {
@@ -18776,7 +18738,7 @@ fn recover_origin_continues_an_advancing_stream_past_the_pull_page_ceiling() {
 
 #[test]
 fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() {
-    let (source_scratch, source_path, mut source) = store();
+    let (source_scratch, source_path, mut source) = open_store();
     seed_identity(&mut source);
     VersionedTextStore::new(&mut source)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -18861,8 +18823,8 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
         original_op.payload["momentId"]
     );
 
-    let (_peer_a_scratch, _peer_a_path, mut peer_a) = store();
-    let (_peer_b_scratch, _peer_b_path, mut peer_b) = store();
+    let (_peer_a_scratch, _peer_a_path, mut peer_a) = open_store();
+    let (_peer_b_scratch, _peer_b_path, mut peer_b) = open_store();
     for engine in [&mut peer_a, &mut peer_b] {
         seed_replication_version(engine, "main", "main");
         engine
@@ -18923,7 +18885,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
 
 #[test]
 fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     seed_text_head(
@@ -19195,7 +19157,7 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
 
 #[test]
 fn recover_origin_rebases_each_current_lww_projection_coordinate() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let (reaction_seq, decision_seq, follow_seq, feed_seq) = journal_lww_ops(&mut engine);
     seed_lww_projections(
@@ -19247,7 +19209,7 @@ fn recover_origin_rebases_each_current_lww_projection_coordinate() {
 
 #[test]
 fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let peer_operation = seed_recovery_decision_conflict(&mut engine, "k-peer", true);
     assert_eq!(
         conflicted_decision_projection(&engine),
@@ -19262,7 +19224,7 @@ fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
     );
 
     let rebased_operation = rebased_decision_operation(&engine, "a-recovered");
-    let (_peer_scratch, _peer_path, mut peer) = store();
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
         ApplyOutcome::Applied(())
@@ -19277,7 +19239,7 @@ fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
 
 #[test]
 fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let peer_operation = seed_recovery_decision_conflict(&mut engine, "middle-peer", false);
     assert_eq!(
         conflicted_decision_projection(&engine),
@@ -19300,7 +19262,7 @@ fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
     );
 
     let rebased_operation = rebased_decision_operation(&engine, "z-recovered");
-    let (_peer_scratch, _peer_path, mut peer) = store();
+    let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
         ApplyOutcome::Applied(())
@@ -19315,7 +19277,7 @@ fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
 
 #[test]
 fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     assert!(matches!(
         journal_local_replication_op(
@@ -19381,7 +19343,7 @@ fn recover_origin_clears_shared_push_positions_before_rebased_ops_are_scanned() 
 
 #[test]
 fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [
             (
@@ -19437,7 +19399,7 @@ fn shared_channel_pull_stops_at_one_completed_page_and_resumes_from_its_cursor()
 
 #[test]
 fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let rejected = ShareReplicationEnvelope {
         origin_id: "shared-peer".to_owned(),
         origin_seq: 0,
@@ -19542,7 +19504,7 @@ fn shared_channel_boundary_rejection_commits_its_only_op_and_next_pull_proceeds(
 
 #[test]
 fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -19653,7 +19615,7 @@ fn shared_channel_push_resumes_from_durable_physical_and_dense_positions() {
 
 #[test]
 fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     assert_eq!(
         journal_local_replication_op(
@@ -19720,7 +19682,7 @@ fn shared_channel_push_bootstraps_legacy_state_without_a_dense_position() {
 
 #[test]
 fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
         [
@@ -19789,7 +19751,7 @@ fn share_view_pull_returns_one_page_as_a_pending_resumable_cursor() {
 
 #[test]
 fn share_view_pull_accepts_every_tracked_path_selected_by_the_relay() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let op = |seq, path: &str| ShareReplicationEnvelope {
         origin_id: "peer".to_owned(),
         origin_seq: seq,
@@ -19861,7 +19823,7 @@ fn share_view_write_op_on(
 /// is never requested.
 #[test]
 fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let versioned = b"versioned body".to_vec();
     let stripped = b"stripped body".to_vec();
@@ -19936,7 +19898,7 @@ fn share_view_pull_skips_a_moment_with_no_version_identity_before_requesting_its
 /// scoped by its own path, and there are none.
 #[test]
 fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = ShareBoundary {
         share_id: "share-view".to_owned(),
         surface: ShareSurface::ShareView,
@@ -20054,7 +20016,7 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
 /// changes" fires on every share the moment it is opened.
 #[test]
 fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20109,7 +20071,7 @@ fn share_view_pull_skips_the_relay_bootstrap_op_without_calling_it_a_refusal() {
 /// introduced the variant.
 #[test]
 fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20171,7 +20133,7 @@ fn share_view_pull_completes_past_an_unknown_op_kind_and_applies_its_neighbours(
 /// the same ops in the same order.
 #[test]
 fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let page = || {
         (
@@ -20238,7 +20200,7 @@ fn share_view_pull_files_a_coordinateless_skip_under_a_stable_page_position() {
 /// are outside what any file share covers.
 #[test]
 fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let boundary = share_view_version_boundary(None);
     let unknown = envelope(
         "granter",
@@ -20275,7 +20237,7 @@ fn share_view_separates_an_unknown_op_kind_from_one_a_share_does_not_carry() {
 /// choosing how this client fails.
 #[test]
 fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
@@ -20358,7 +20320,7 @@ fn share_view_pull_reports_an_unusable_op_kind_under_a_bounded_placeholder() {
 /// limit named.
 #[test]
 fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let oversized = "x".repeat(MAX_PAYLOAD_JSON_BYTES + 1);
     let oversized_payload = json!({ "versionId": "main", "path": oversized });
@@ -20444,7 +20406,7 @@ fn share_view_pull_reports_a_malformed_op_that_still_has_a_coordinate() {
 /// does not exist.
 #[test]
 fn a_refused_origin_id_names_the_clause_it_broke() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let malformed = |origin_id: String| ShareReplicationEnvelope {
         origin_id,
@@ -20518,7 +20480,7 @@ fn a_refused_origin_id_names_the_clause_it_broke() {
 /// off-by-one at the boundary, and a number a hundred times too large.
 #[test]
 fn a_refused_origin_seq_names_the_range_and_what_was_offered() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let out_of_range = |origin_seq: i64| ShareReplicationEnvelope {
         origin_id: "peer".to_owned(),
@@ -20596,7 +20558,7 @@ fn page_position_origins_cannot_alias_a_relay_origin() {
 /// then hide a later, different refusal that never spoke for itself.
 #[test]
 fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let client = RelaySyncClient::new(PagedShareRelay::new(
         [],
@@ -20659,7 +20621,7 @@ fn a_relay_origin_named_like_a_page_position_stays_a_separate_refusal() {
 /// version refusal the limit, the unit and the observed usage.
 #[test]
 fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"granted body".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -20731,7 +20693,7 @@ fn share_view_pull_reports_why_it_skipped_a_version_refused_op() {
 /// refusal; this proves the pull runs it.
 #[test]
 fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"granted lineage body".to_vec();
     let ungranted_body = b"ungranted lineage body".to_vec();
@@ -20807,7 +20769,7 @@ fn share_view_pull_refuses_a_moment_from_an_ungranted_version_before_requesting_
 /// secret plaintext lands.
 #[test]
 fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let tracked = b"tracked body".to_vec();
     let secret = b"AWS_SECRET_ACCESS_KEY=hunter2".to_vec();
@@ -20886,7 +20848,7 @@ fn share_view_pull_skips_a_secret_path_write_before_requesting_its_blob() {
 /// only gate — a relay-sent delete for a secret path must leave the file.
 #[test]
 fn share_view_pull_skips_a_secret_path_delete_that_nothing_downstream_would_stop() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let plaintext = "AWS_SECRET_ACCESS_KEY=hunter2";
     seed_text_head(&mut engine, "secret-object", "app/.env", plaintext);
@@ -20974,7 +20936,7 @@ fn share_view_pull_changed(outcome: &ShareViewPullOutcome) -> Vec<&str> {
 /// requested.
 #[test]
 fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_requesting_its_blob() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"the granted doc".to_vec();
     let ungranted_body = b"salary review: everyone".to_vec();
@@ -21055,7 +21017,7 @@ fn share_view_pull_skips_a_tracked_path_outside_the_recorded_grant_before_reques
 /// tracked path too.
 #[test]
 fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let first = b"first body".to_vec();
     let second = b"second body".to_vec();
@@ -21107,7 +21069,7 @@ fn share_view_pull_applies_every_tracked_path_under_a_whole_workspace_version_gr
 /// emptiest about into the widest grant the recipient holds.
 #[test]
 fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"pulled under a grant that selects nothing".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -21158,7 +21120,7 @@ fn share_view_pull_admits_nothing_under_a_grant_that_selects_nothing() {
 /// caller that builds the boundary directly.
 #[test]
 fn share_view_boundary_without_a_grant_admits_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let boundary = crate::ShareBoundary {
         share_id: "share".to_owned(),
@@ -21189,7 +21151,7 @@ fn share_view_boundary_without_a_grant_admits_nothing() {
 /// selects itself and its children independently.
 #[test]
 fn share_view_pull_enforces_every_path_of_a_multi_path_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let bodies = ["docs body", "projects body", "private body"];
     let shas = bodies
@@ -21265,7 +21227,7 @@ fn share_view_version_create_op(
 /// the recipient can check, and it must name the granted version.
 #[test]
 fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let granted_body = b"the granted version".to_vec();
     let other_body = b"a version nobody shared".to_vec();
@@ -21324,7 +21286,7 @@ fn share_view_pull_skips_a_version_create_from_a_version_the_share_did_not_grant
 /// granted paths, so only the version rule can refuse it.
 #[test]
 fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let body = b"forked into a path share".to_vec();
     let sha = dohc_engine_storage::hex_sha256(&body);
@@ -21371,7 +21333,7 @@ fn share_view_pull_refuses_a_version_create_to_a_share_that_granted_only_paths()
 
 #[test]
 fn workspace_push_excludes_origins_imported_from_share_views() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     engine
         .write_with(&NoFaults, |tx| {
@@ -21398,7 +21360,7 @@ fn workspace_push_excludes_origins_imported_from_share_views() {
 
 #[test]
 fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     VersionedTextStore::new(&mut engine)
@@ -21450,7 +21412,7 @@ fn enrollment_backfill_refreshes_the_origin_bound_before_the_next_push() {
 
 #[test]
 fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let incoming = b"pulled before enrollment";
@@ -21535,7 +21497,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
     use base64::Engine as _;
     use base64::engine::general_purpose::STANDARD;
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let ciphertext = b"local secret content";
@@ -21609,7 +21571,7 @@ fn a_second_relay_position_does_not_repeat_enrollment_backfill() {
 
 #[test]
 fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let blobs = [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()];
     let snapshots = blobs
@@ -21680,7 +21642,7 @@ fn share_view_actor_replay_does_not_redownload_completed_blob_prefixes() {
 
 #[test]
 fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let mut ordered = [
@@ -21780,7 +21742,7 @@ fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
 
 #[test]
 fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
-    let (_scratch, path, mut engine) = store();
+    let (_scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let blobs = [
@@ -21871,7 +21833,7 @@ fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
 
 #[test]
 fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let normal = envelope(
@@ -21929,7 +21891,7 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
 
 #[test]
 fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     // A canonical empty Yjs update is also valid UTF-8, so the same digest is
@@ -22012,7 +21974,7 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
 
 #[test]
 fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let text = "already local";
@@ -22073,7 +22035,7 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
 
 #[test]
 fn relay_multi_page_pull_reports_conflicts_opened() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let normal = envelope(
@@ -22152,7 +22114,7 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
 
 #[test]
 fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let local_sha = dohc_engine_storage::hex_sha256(b"local");
@@ -22256,7 +22218,7 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
 
 #[test]
 fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let relay = |cursor| RelayCursor {
         cursor,
         replication_epoch: "epoch".to_owned(),
@@ -22300,7 +22262,7 @@ fn persisted_relay_and_share_cursors_never_regress_within_the_same_stream() {
 }
 #[test]
 fn relay_retry_surfaces_refusal_acked_before_later_error() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     // A mutation-level invalid input: the channel timestamp guard runs inside
@@ -22424,7 +22386,7 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
 
 #[test]
 fn pull_keeps_a_genuine_origin_gap_hard() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let mut gap =
         version_create_with_shipped_snapshots("gapped-peer", "must-not-apply", Vec::new());
@@ -22463,7 +22425,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
         MetadataV1, PresentHeadV1, ResolutionV1, ResolveChoiceV1, build_conflict_resolve_v1,
     };
 
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let result_text = "resolved after retry";
@@ -22577,7 +22539,7 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
 
 #[test]
 fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (base_bytes, invalid_bytes) = clock_collision_pair();
@@ -22719,7 +22681,7 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
 
 #[test]
 fn committed_pull_cursor_clears_persisted_refusals() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -22784,7 +22746,7 @@ fn committed_pull_cursor_clears_persisted_refusals() {
 
 #[test]
 fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (base_bytes, invalid_bytes) = clock_collision_pair();
@@ -22995,7 +22957,7 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
 
 #[test]
 fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let direct = envelope("direct-conflict-peer", 0, "conflict.open", json!({}));
     assert!(matches!(
         apply_conflict_envelope(&mut engine, &direct, &NoFaults, &NoLiveLeases),
@@ -23030,7 +22992,7 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
 
 #[test]
 fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let cursor = RelayCursor {
         cursor: 42,
         replication_epoch: "epoch-1".to_owned(),
@@ -23077,7 +23039,7 @@ fn relay_cursor_serializes_numeric_position_into_the_shipped_text_column() {
 
 #[test]
 fn router_counts_only_newly_inserted_replicated_open_conflicts() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let side = |path: &str| {
         json!({
@@ -23142,7 +23104,7 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
 
 #[test]
 fn malformed_moment_append_router_refuses_and_acks() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
@@ -23159,7 +23121,7 @@ fn malformed_moment_append_router_refuses_and_acks() {
 
 #[test]
 fn refused_op_acks_and_the_next_same_origin_op_applies() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let refused = envelope(
         "progress-peer",
         0,
@@ -23200,7 +23162,7 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
 
 #[test]
 fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let malformed = envelope("ydoc-refusal-peer", 0, "ydoc.update", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &malformed, &NoFaults, &NoLiveLeases),
@@ -23231,7 +23193,7 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
 
 #[test]
 fn relay_pull_surfaces_refusal_reason_to_the_caller() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let client = RelaySyncClient::new(FakeRelay {
         pushes: Mutex::new(Vec::new()),
@@ -23297,7 +23259,7 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
 
 #[test]
 fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     let first = envelope(
         "divergent-refusal-peer",
@@ -23357,7 +23319,7 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
 
 #[test]
 fn structurally_invalid_envelope_remains_unrecorded_and_unacked() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let mut invalid = envelope("structural-peer", 0, "moment.append", json!({}));
     invalid.origin_seq = MAX_WIRE_INTEGER + 1;
 
@@ -23393,7 +23355,7 @@ fn structurally_invalid_envelope_remains_unrecorded_and_unacked() {
 
 #[test]
 fn redelivered_refusal_is_recorded_once_and_skipped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let refused = envelope(
         "refusal-replay-peer",
         0,
@@ -23446,7 +23408,7 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
 
 #[test]
 fn every_refusal_reason_round_trips_through_persist_and_read() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     for operation in [
         envelope("roundtrip-invalid-refusal", 0, "ydoc.update", json!({})),
         envelope(
@@ -23548,7 +23510,7 @@ fn share_view_binary_pull(
 ///
 #[test]
 fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -23607,7 +23569,7 @@ fn an_oversized_shared_binary_is_refused_before_it_reaches_the_store() {
 ///
 #[test]
 fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (ydoc_constraint, ydoc_limit) = blob_ceiling(BlobKind::Ydoc);
@@ -23694,7 +23656,7 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
 ///
 #[test]
 fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_identity(&mut engine);
     seed_replication_version(&mut engine, "main", "main");
     let (binary_constraint, binary_limit) = blob_ceiling(BlobKind::Binary);
@@ -23796,7 +23758,7 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
 ///
 #[test]
 fn the_local_blob_reader_measures_against_the_referenced_kind() {
-    let (_scratch, _path, engine) = store();
+    let (_scratch, _path, engine) = open_store();
     let (_, binary_limit) = blob_ceiling(BlobKind::Binary);
     let bytes = vec![4u8; binary_limit + 1];
     let sha256 = engine.put_binary_blob(&bytes).expect("store the blob");
@@ -23817,7 +23779,7 @@ fn the_local_blob_reader_measures_against_the_referenced_kind() {
 ///
 #[test]
 fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Ydoc);
     assert_eq!(
         (constraint, limit_bytes),
@@ -23872,7 +23834,7 @@ fn a_ydoc_blob_at_the_ydoc_ceiling_hydrates_and_one_byte_over_is_refused() {
 ///
 #[test]
 fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
     // Pinned, not derived. Every other expectation here reads the ceiling from
     // `blob_ceiling`, so without this a widened ceiling would carry the whole
@@ -23941,7 +23903,7 @@ fn binary_blob_over_the_binary_ceiling_is_refused_at_ingest() {
 ///
 #[test]
 fn a_refused_shared_blob_does_not_freeze_the_share() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24041,7 +24003,7 @@ fn a_refused_shared_blob_does_not_freeze_the_share() {
 ///
 #[test]
 fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let claimed = b"what the op says the blob is".to_vec();
@@ -24103,7 +24065,7 @@ fn a_repairable_blob_integrity_failure_stops_the_pull_instead_of_skipping() {
 ///
 #[test]
 fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let later = b"the update behind the unusable reference".to_vec();
@@ -24191,7 +24153,7 @@ fn a_share_op_naming_an_unusable_blob_reference_is_permanent_and_skipped() {
 ///
 #[test]
 fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24306,7 +24268,7 @@ fn one_refused_snapshot_does_not_drop_the_rest_of_a_shared_version() {
 ///
 #[test]
 fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24373,7 +24335,7 @@ fn a_rename_whose_replacement_is_refused_keeps_the_old_path() {
 ///
 #[test]
 fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24431,7 +24393,7 @@ fn an_oversized_body_that_is_not_the_named_blob_stops_the_pull() {
 ///
 #[test]
 fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24537,7 +24499,7 @@ fn two_refused_snapshots_are_recorded_as_one_op_naming_both() {
 ///
 #[test]
 fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
 
     let named = b"a perfectly small shared file".to_vec();
@@ -24597,7 +24559,7 @@ fn a_transport_overflow_stops_the_pull_rather_than_skipping_the_op() {
 ///
 #[test]
 fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24678,7 +24640,7 @@ fn a_refusal_keeps_its_measurements_when_the_path_exhausts_the_detail_bound() {
 ///
 #[test]
 fn a_long_path_does_not_cost_the_next_refusals_measurements() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24772,7 +24734,7 @@ fn a_long_path_does_not_cost_the_next_refusals_measurements() {
 ///
 #[test]
 fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24851,7 +24813,7 @@ fn an_op_refusing_two_classes_at_once_claims_neither_instruction() {
 ///
 #[test]
 fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -24975,7 +24937,7 @@ fn a_record_too_small_for_every_refusal_lists_whole_ones_and_counts_the_rest() {
 ///
 #[test]
 fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -25056,7 +25018,7 @@ fn one_refused_blob_is_fetched_once_however_many_rows_name_it() {
 ///
 #[test]
 fn two_refused_paths_that_differ_past_the_budget_are_still_told_apart() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_replication_version(&mut engine, "main", "main");
     let (_constraint, limit_bytes) = blob_ceiling(BlobKind::Binary);
 
@@ -25158,7 +25120,7 @@ fn a_permanently_invalid_share_path_is_skipped_instead_of_freezing_the_share() {
             "path is not eligible for plaintext storage",
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         seed_replication_version(&mut engine, "main", "main");
         assert_eq!(
             classify_share_path(bad_path),
@@ -25296,7 +25258,7 @@ fn a_domain_failure_that_is_not_the_path_still_stops_the_pull() {
 // The world each case builds: `shared/docs/in.md` is inside the grant and
 // `private/out.md` is not, both as real file objects with real path aliases.
 fn share_view_chat_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore, ShareBoundary) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25601,7 +25563,7 @@ fn a_chat_thread_create_naming_its_file_twice_is_refused_on_the_owner_lane() {
     // covers the other door: the granter's own lane, where a recipient's
     // pushed op arrives through the owner bucket. Reading either half of a
     // doubly-named link would let one op bind one thread to two files.
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25639,7 +25601,7 @@ fn a_chat_thread_create_naming_its_file_twice_is_refused_on_the_owner_lane() {
 /// threads, through the one apply rule both sides share.
 #[test]
 fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25684,7 +25646,7 @@ fn a_recipient_thread_create_binds_to_the_granters_own_object_on_the_owner_lane(
 /// channel.
 #[test]
 fn a_recipient_thread_create_for_an_untracked_path_is_refused_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -25739,7 +25701,7 @@ fn share_view_carries_no_chat_through_a_version_share() {
 /// proposed change names. `seed_identity` journals the origin's op 0, so the
 /// first moment below lands at origin_seq 1.
 fn proposal_fixture(texts: &[&str]) -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     seed_identity(&mut engine);
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -26941,7 +26903,7 @@ fn share_proposal_submit_never_offers_a_pulled_granter_change_back() {
 /// The granter's two moments for one file: `granter-m0` produced `v0`, and
 /// `granter-m1` produced `v1` and is the head.
 fn granter_fixture() -> (ScratchDir, std::path::PathBuf, EngineStore) {
-    let (scratch, path, mut engine) = store();
+    let (scratch, path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -27227,7 +27189,7 @@ fn share_view_chat_kinds_and_the_boundary_match_agree() {
 /// same one the granter's own creates take — with no share context needed.
 #[test]
 fn a_recipient_thread_create_arrives_object_bound_on_the_owner_lane() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     VersionedTextStore::new(&mut engine)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
         .expect("main version");
@@ -27382,7 +27344,7 @@ fn lane_answers(engine: &mut EngineStore) -> (bool, bool) {
 /// true here would not journal a moment, it would destroy the write.
 #[test]
 fn a_read_only_share_view_enrols_nothing_and_its_writes_stay_local() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_share_view_cursor(&mut engine, "share-view-only");
     assert_eq!(
         recorded_origin(&engine),
@@ -27398,7 +27360,7 @@ fn a_read_only_share_view_enrols_nothing_and_its_writes_stay_local() {
 
 #[test]
 fn enrolling_twice_keeps_the_first_identity() {
-    let (_scratch, _path, mut engine) = store();
+    let (_scratch, _path, mut engine) = open_store();
     seed_share_view_cursor(&mut engine, "share-comment");
     assert_eq!(
         record(&mut engine, "origin-first"),
@@ -27472,7 +27434,7 @@ fn only_the_file_moment_journal_reads_the_share_lane() {
             (false, false),
         ),
     ] {
-        let (_scratch, _path, mut engine) = store();
+        let (_scratch, _path, mut engine) = open_store();
         if recorded {
             assert_eq!(
                 record(&mut engine, "origin-lane"),

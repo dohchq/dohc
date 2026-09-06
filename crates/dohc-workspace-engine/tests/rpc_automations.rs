@@ -3,6 +3,9 @@
 //! reaper's requeue-or-exhaust transitions, all observed through the real
 //! in-process daemon request path over durable claims seeded in engine.db.
 
+mod common;
+
+use common::*;
 use dohc_engine_domain::{
     AUTOMATION_RECLAIM_EXHAUSTED, ChangeActorKind, ChangeAttribution, CollectionFieldChangeFact,
     CollectionRecordApplyFacts, NoFaults, claim_automation_triggers_in_tx,
@@ -11,7 +14,7 @@ use dohc_engine_domain::{
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -19,20 +22,8 @@ use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-rpc-automations";
 const AUTOMATION: &str = "plugin:triage";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn call(
     transport: &InProcessTransport<EngineService>,

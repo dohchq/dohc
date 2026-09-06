@@ -19,12 +19,11 @@ use dohc_engine_domain::{
     reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, SelfWriteRecorder,
-    WorkspaceSupervisor,
+    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_sync::{
-    LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
+    AlwaysLive, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
     apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
     drain_deferred_ydoc_for_key,
 };
@@ -33,13 +32,6 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use yrs::types::Attrs;
 use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 /// A locally-originated relay-visible op, shaped as a peer receives it.
 #[derive(Debug, Clone)]
@@ -893,15 +885,6 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
     );
 }
 
-#[derive(Debug, Clone, Copy)]
-struct AlwaysLiveLease;
-
-impl LeaseProbe for AlwaysLiveLease {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
-
 /// A deferred delta cannot enter an unclaimed local lineage. The relay must
 /// deliver and authenticate the immutable base claim before the drain retries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -978,7 +961,7 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope,
         &NoFaults,
-        &AlwaysLiveLease,
+        &AlwaysLive,
     )
     .expect("park predecessor behind the live lease");
     assert!(
@@ -1038,7 +1021,7 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
         &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope,
         &NoFaults,
-        &AlwaysLiveLease,
+        &AlwaysLive,
     )
     .expect("park remote edit behind the live lease");
     assert!(matches!(
@@ -1473,7 +1456,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
                 now_ms: 300,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1857,7 +1840,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
                 now_ms: 250,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1883,7 +1866,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
                 now_ms: 300,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2226,7 +2209,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             append.lineage_claim_id,
             opened.head_blob_sha256,
             "rollback-source-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             250,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -2262,7 +2245,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2329,7 +2312,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             reopened.lineage_claim_id,
             reopened.head_blob_sha256,
             "rollback-follow-up-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             450,
             Arc::new(NoFaults),
             CancellationToken::new(),

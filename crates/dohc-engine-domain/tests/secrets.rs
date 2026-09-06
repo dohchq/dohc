@@ -14,7 +14,7 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{EngineStore, FaultPoint};
 use dohc_engine_testkit::harness::open_readonly_keeper;
 use dohc_engine_testkit::{
-    EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain, engine_db_path,
+    EngineDbScan, ScratchDir, ScriptedFaults, bytes_contain, decode_hex, engine_db_path,
 };
 use rusqlite::params;
 use std::path::Path;
@@ -864,7 +864,8 @@ fn ts_written_ciphertext_decrypts_in_the_rust_store() {
     let tag_b64 = entry["authTagBase64"].as_str().unwrap();
     let ct_b64 = entry["ciphertextBase64"].as_str().unwrap();
     let byte_length = entry["byteLength"].as_u64().unwrap() as i64;
-    let key = SecretDataKey::from_bytes(&hex(entry["dataKeyHex"].as_str().unwrap())).unwrap();
+    let key =
+        SecretDataKey::from_bytes(&decode_hex(entry["dataKeyHex"].as_str().unwrap())).unwrap();
 
     let scratch = ScratchDir::new().unwrap();
     let db = engine_db_path(&scratch).unwrap();
@@ -1475,13 +1476,6 @@ fn secret_compare_reencrypted_same_content_is_unmodified() {
 }
 
 // --- helpers ----------------------------------------------------------------
-
-fn hex(s: &str) -> Vec<u8> {
-    (0..s.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
-        .collect()
-}
 
 #[test]
 fn capture_secret_derives_ids_marks_complete_and_retires_keylessly() {

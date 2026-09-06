@@ -10,7 +10,7 @@ use dohc_engine_runtime::search::{ensure_search_index_for_version, search_worksp
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
+    AlwaysLive, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
     apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -19,14 +19,6 @@ use serde_json::json;
 
 const WS: &str = "ws";
 const VERSION: &str = "main";
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
-        true
-    }
-}
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");

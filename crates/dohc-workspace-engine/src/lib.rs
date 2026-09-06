@@ -2567,7 +2567,13 @@ impl EngineService {
         // owns the gate can still read the driver and finish. Cancellation is
         // idempotent when the detached task takes the driver below.
         removed.request_capture_shutdown();
+        #[cfg(feature = "harness")]
+        let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
+            #[cfg(feature = "harness")]
+            if let Some(probe) = &probe {
+                probe.observe_gate_wait_if_armed();
+            }
             let _capture = capture_gate.lock_owned().await;
             let capture_drain = removed.begin_capture_shutdown();
             let _session = session_gate.lock_owned().await;

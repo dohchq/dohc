@@ -1,10 +1,13 @@
 //! RPC-B acceptance: the complete R09 chat read/write surface through the
 //! in-process protocol transport, backed only by real domain writes.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
@@ -12,19 +15,6 @@ use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,

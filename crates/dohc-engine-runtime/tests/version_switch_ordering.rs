@@ -5,7 +5,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, CaptureIngestBinary, NoFaults, RuntimeError,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, StorageError, TxnOutcome,
@@ -17,13 +17,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const WORKSPACE: &str = "ws-switch-ordering";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn write(version_id: &str, text: &str, moment_id: &str, now_ms: i64) -> WriteText {
     write_for(WORKSPACE, version_id, "ordered.md", text, moment_id, now_ms)
@@ -312,7 +305,7 @@ async fn destination_is_active_when_switch_materialization_fails() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -427,7 +420,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -528,7 +521,7 @@ async fn secret_switch_delete_preserves_an_edit_between_planning_and_phase_two()
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 5,
             },
             faults.clone(),
@@ -625,7 +618,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
                     workspace_id: workspace_id.to_owned(),
                     version_id: "feature".to_owned(),
                     root_dir: root.to_path_buf(),
-                    self_writes: Arc::new(NoRecorder),
+                    self_writes: Arc::new(()),
                     now_ms: 1_700_000_000_000,
                 },
                 Arc::new(NoFaults),
@@ -717,7 +710,7 @@ async fn switch_projection_generation_does_not_advance_moment_order() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "watermark-feature".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 4,
             },
             Arc::new(NoFaults),
@@ -880,7 +873,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
                     workspace_id: WORKSPACE.to_owned(),
                     version_id: version_id.to_owned(),
                     root_dir: scratch.path().to_path_buf(),
-                    self_writes: Arc::new(NoRecorder),
+                    self_writes: Arc::new(()),
                     now_ms,
                 },
                 Arc::new(NoFaults),

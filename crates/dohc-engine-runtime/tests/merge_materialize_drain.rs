@@ -1,20 +1,13 @@
 use dohc_engine_domain::{CreateNamedVersion, MergeTextFileFromVersion, WriteBinary, WriteText};
 use dohc_engine_runtime::{
     CancellationToken, MergeTextFileResult, NoFaults, PostCommitMaterializeOutcome,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
 
 const WORKSPACE: &str = "ws-merge-materialize-drain";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn write(version_id: &str, text: &str, moment_id: &str, object_id: &str) -> WriteText {
     WriteText {
@@ -93,7 +86,7 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -118,7 +111,7 @@ async fn a_binary_fast_forward_drains_its_materialization_before_rpc_return() {
                 now_ms: 30,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -215,7 +208,7 @@ async fn active_merge_drains_materialization_before_rpc_return_even_when_complet
         .versioned_text_merge(
             merge.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -242,7 +235,7 @@ async fn active_merge_drains_materialization_before_rpc_return_even_when_complet
         .versioned_text_merge(
             merge,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

@@ -13,10 +13,13 @@
 //! writes to disk), while this daemon enforces capture ownership. RPC-vs-disk
 //! interleavings are covered by Rust-only acceptance tests instead.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
@@ -71,17 +74,6 @@ struct Projection {
     byte_length: Option<u64>,
     #[serde(rename = "everTracked")]
     ever_tracked: bool,
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn open_workspace(

@@ -2,21 +2,12 @@ use std::sync::Arc;
 
 use dohc_engine_collab::{ContentKind, Regime};
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, WriteBinary};
-use dohc_engine_runtime::{
-    CancellationToken, NoFaults, SearchResult, SelfWriteRecorder, WorkspaceSupervisor,
-};
+use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use serde_json::json;
 
 const VERSION: &str = "main";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn capture_text(workspace_id: &str, path: &str, text: &str, now_ms: i64) -> CaptureIngest {
     CaptureIngest {
@@ -372,7 +363,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             open.lineage_claim_id,
             open.head_blob_sha256,
             "fts-settle-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             50,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -485,7 +476,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

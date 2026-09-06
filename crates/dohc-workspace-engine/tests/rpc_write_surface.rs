@@ -1,7 +1,10 @@
 //! RPC-D sequencing steps 1-3: mutation guards exercised through the real
 //! in-process transport and actor-owned store.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_protocol::{
     ErrorCode,
     frame::{Frame, FrameDecoder, blob_chunks, encode_blob_chunk_frame},
@@ -9,25 +12,12 @@ use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{BlobStart, Envelope, Request, WorkspaceHandle, decode_control, encode_control},
+    wire::{BlobStart, Envelope, WorkspaceHandle, decode_control, encode_control},
 };
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn fixture(
     name: &str,
@@ -87,23 +77,6 @@ async fn fixture_with_service(
         .expect("open");
     let handle = serde_json::from_value(opened.result["workspace"].clone()).expect("handle");
     (scratch, service, transport, handle)
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method}: {error:?}"))
-        .result
 }
 
 /// The first `search.queryPage` page for the active version.
@@ -415,8 +388,9 @@ async fn binary_self_write_suppression_prevents_a_spurious_capture_moment() {
         json!({ "versionId": "main", "path": "one.bin", "bytes": [9, 8, 7], "origin": "api" }),
     )
     .await;
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-    call(&transport, &handle, 3, "capture.flush", json!({})).await;
+    // A forced full scan observes the daemon's own write on disk; suppression
+    // must keep it from becoming a second capture moment.
+    reconcile_until_settled(&transport, &handle, 3).await;
     assert_eq!(moments(&transport, &handle, 4).await.len(), 1);
 }
 

@@ -13,20 +13,11 @@
 
 use dohc_engine_collab::{ContentKind, DocKey};
 use dohc_engine_domain::{ResolveConflictKind, ResolveTextConflict, VersionedTextStore, WriteText};
-use dohc_engine_runtime::{
-    CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
-};
+use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 const WS: &str = "ws-base-conflict";
 const PATH: &str = "notes/plan.md";
@@ -140,7 +131,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
             Some(lineage_claim_id),
             None,
             "freeze-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             6,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -400,7 +391,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
             state.lineage_claim_id,
             None,
             "replay-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             12,
             Arc::new(NoFaults),
             CancellationToken::new(),

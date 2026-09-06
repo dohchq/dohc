@@ -116,6 +116,17 @@ impl LeaseProbe for NoLiveLeases {
     }
 }
 
+/// Probe that reports every document live, so a pull defers instead of
+/// applying. Tests use it to reach the deferred-drain path directly.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &DocKey) -> bool {
+        true
+    }
+}
+
 impl LeaseProbe for dohc_engine_collab::LeaseRegistry {
     fn is_live(&self, key: &DocKey) -> bool {
         self.is_held(key)
@@ -2104,7 +2115,7 @@ pub fn apply_ydoc_envelope(
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let payload: YdocUpdatePayload = match serde_json::from_value(envelope.payload.clone()) {
+    let payload: YdocUpdatePayload = match Deserialize::deserialize(&envelope.payload) {
         Ok(payload) => payload,
         Err(_) => {
             return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
