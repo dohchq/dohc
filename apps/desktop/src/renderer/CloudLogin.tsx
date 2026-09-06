@@ -8,6 +8,22 @@ import { openLinkExternally } from "./linkActivation";
 import { PrimaryButton, SecondaryButton } from "./ui/controls";
 
 type WorkspaceSecretState = "none" | "protected-key-present" | "protected-key-missing";
+type WorkspaceSyncState = {
+  workspaceSynced: boolean;
+  workspaceSyncConnected: boolean;
+  workspaceSecretState: WorkspaceSecretState;
+};
+
+function normalizeWorkspaceSyncState(
+  status: Partial<WorkspaceSyncState>,
+): WorkspaceSyncState {
+  return {
+    workspaceSynced: status.workspaceSynced ?? false,
+    workspaceSyncConnected: status.workspaceSyncConnected ?? false,
+    workspaceSecretState: status.workspaceSecretState ?? "none",
+  };
+}
+
 type PassphrasePurpose = "enable" | "protect" | "unlock";
 type ManagedCloudStatus = "unknown" | "ready" | "unconfigured" | "invalid";
 type ConnectionMode = "managed" | "self-host";
@@ -40,15 +56,16 @@ export function CloudLogin(props: {
 }) {
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [codeCopied, setCodeCopied] = useState(false);
-  const [workspaceSynced, setWorkspaceSynced] = useState(false);
-  const [workspaceSyncConnected, setWorkspaceSyncConnected] = useState(false);
+  const [workspaceSyncState, setWorkspaceSyncState] = useState(() =>
+    normalizeWorkspaceSyncState({}),
+  );
+  const { workspaceSynced, workspaceSyncConnected, workspaceSecretState } =
+    workspaceSyncState;
   const [syncBusy, setSyncBusy] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const [needsPassphrase, setNeedsPassphrase] = useState(false);
   const [passphrasePurpose, setPassphrasePurpose] = useState<PassphrasePurpose>("enable");
   const [passphrase, setPassphrase] = useState("");
-  const [workspaceSecretState, setWorkspaceSecretState] =
-    useState<WorkspaceSecretState>("none");
   const [managedCloudStatus, setManagedCloudStatus] =
     useState<ManagedCloudStatus>("unknown");
   const [statusAttempt, setStatusAttempt] = useState(0);
@@ -76,14 +93,12 @@ export function CloudLogin(props: {
     const session = sessionRef.next();
     clearPollTimer();
     setPhase({ kind: "loading" });
-    setWorkspaceSynced(false);
-    setWorkspaceSyncConnected(false);
+    setWorkspaceSyncState(normalizeWorkspaceSyncState({}));
     setSyncBusy(false);
     setSyncError(null);
     setNeedsPassphrase(false);
     setPassphrasePurpose("enable");
     setPassphrase("");
-    setWorkspaceSecretState("none");
     setManagedCloudStatus("unknown");
     setConnectionMode("self-host");
     setConnectionError(null);
@@ -93,9 +108,7 @@ export function CloudLogin(props: {
       .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
       .then((status) => {
         if (!sessionRef.isCurrent(session)) return;
-        setWorkspaceSynced(status.workspaceSynced ?? false);
-        setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
-        setWorkspaceSecretState(status.workspaceSecretState ?? "none");
+        setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
         const configuredStatus = status.managedCloudStatus;
         setManagedCloudStatus(configuredStatus);
         setConnectionMode(configuredStatus === "ready" ? "managed" : "self-host");
@@ -127,11 +140,14 @@ export function CloudLogin(props: {
         ...(needsPassphrase ? { passphrase } : {}),
       });
       if (sessionRef.isCurrent(session)) {
-        setWorkspaceSynced(true);
-        setWorkspaceSyncConnected(true);
-        if (passphrasePurpose === "unlock") {
-          setWorkspaceSecretState("protected-key-present");
-        }
+        setWorkspaceSyncState((current) => ({
+          workspaceSynced: true,
+          workspaceSyncConnected: true,
+          workspaceSecretState:
+            passphrasePurpose === "unlock"
+              ? "protected-key-present"
+              : current.workspaceSecretState,
+        }));
         setNeedsPassphrase(false);
         setPassphrase("");
       }
@@ -178,9 +194,7 @@ export function CloudLogin(props: {
               .cloudStatus(props.workspaceId ? { workspaceId: props.workspaceId } : {})
               .then((status) => {
                 if (!sessionRef.isCurrent(session)) return;
-                setWorkspaceSynced(status.workspaceSynced ?? false);
-                setWorkspaceSyncConnected(status.workspaceSyncConnected ?? false);
-                setWorkspaceSecretState(status.workspaceSecretState ?? "none");
+                setWorkspaceSyncState(normalizeWorkspaceSyncState(status));
                 if (status.serverUrl) setServerUrl(status.serverUrl);
                 if (status.relayUrl) setRelayUrl(status.relayUrl);
                 setPhase({ kind: "connected", email: result.email ?? status.email ?? "" });
@@ -188,7 +202,10 @@ export function CloudLogin(props: {
               })
               .catch(() => {
                 if (!sessionRef.isCurrent(session)) return;
-                setWorkspaceSyncConnected(false);
+                setWorkspaceSyncState((current) => ({
+                  ...current,
+                  workspaceSyncConnected: false,
+                }));
                 setPhase({ kind: "connected", email: result.email ?? "" });
                 props.onConnected?.();
               });

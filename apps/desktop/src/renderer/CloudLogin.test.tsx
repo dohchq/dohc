@@ -488,6 +488,99 @@ describe("CloudLogin", () => {
     expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
   });
 
+  it("retains workspace and key status when the post-login status refresh fails", async () => {
+    vi.useFakeTimers();
+    const onConnected = vi.fn();
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({
+        connected: false,
+        managedCloudStatus: "ready",
+        workspaceSynced: true,
+        workspaceSyncConnected: true,
+        workspaceSecretState: "protected-key-missing",
+        relayUrl: "http://localhost:1788",
+      })
+      .mockRejectedValueOnce(new Error("offline"));
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
+      status: "complete",
+      email: "ice@dohc.dev",
+    });
+
+    render(<CloudLogin workspaceId="ws-1" onConnected={onConnected} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(screen.getByTestId("cloud-connected-email").textContent).toBe("ice@dohc.dev");
+    expect(screen.getByTestId("cloud-workspace-relink")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+    expect(screen.queryByTestId("cloud-sync-code-block")).toBeNull();
+    expect(onConnected).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByTestId("cloud-relink-workspace"));
+    await act(async () => {});
+
+    expect(screen.getByTestId("cloud-unlock-secrets")).toBeTruthy();
+    expect(screen.getByTestId("cloud-sync-code").textContent).toBe(
+      "dohc-sync:ws-1:http://localhost:1788",
+    );
+  });
+
+  it("ignores a stale post-login status refresh after switching workspaces", async () => {
+    vi.useFakeTimers();
+    const oldStatus = deferred<{
+      connected: boolean;
+      email: string;
+      workspaceSynced: boolean;
+      workspaceSyncConnected: boolean;
+    }>();
+    const onConnected = vi.fn();
+    bridgeMock.cloudStatus
+      .mockResolvedValueOnce({
+        connected: false,
+        managedCloudStatus: "ready",
+        workspaceSynced: true,
+      })
+      .mockImplementationOnce(() => oldStatus.promise)
+      .mockResolvedValueOnce({
+        connected: true,
+        email: "new@dohc.dev",
+        workspaceSynced: false,
+      });
+    bridgeMock.cloudLoginPoll.mockResolvedValueOnce({
+      status: "complete",
+      email: "old@dohc.dev",
+    });
+
+    const { rerender } = render(<CloudLogin workspaceId="old" onConnected={onConnected} />);
+    await act(async () => {});
+    fireEvent.click(screen.getByTestId("cloud-connect-start"));
+    await act(async () => {});
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+    expect(bridgeMock.cloudStatus).toHaveBeenCalledTimes(2);
+
+    rerender(<CloudLogin workspaceId="new" onConnected={onConnected} />);
+    await act(async () => {});
+    await act(async () => {
+      oldStatus.resolve({
+        connected: true,
+        email: "old@dohc.dev",
+        workspaceSynced: true,
+        workspaceSyncConnected: true,
+      });
+    });
+
+    expect(screen.getByTestId("cloud-connected-email").textContent).toBe("new@dohc.dev");
+    expect(screen.getByTestId("cloud-enable-sync")).toBeTruthy();
+    expect(screen.queryByTestId("cloud-workspace-synced")).toBeNull();
+    expect(onConnected).not.toHaveBeenCalled();
+  });
+
   it("omits the sync code when the session has no relay (nothing to join through)", async () => {
     bridgeMock.cloudStatus.mockResolvedValue({
       connected: true,
