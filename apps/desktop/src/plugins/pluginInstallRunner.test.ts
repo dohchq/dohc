@@ -323,6 +323,28 @@ describe("installPluginDependencies", () => {
     expect(failed.error.message).toContain("declared dependencies: 1");
   });
 
+  it("counts a peer-only manifest as declaring a dependency", async () => {
+    const fixture = await createInstallFixture({ pluginId: "peer-only-plugin" });
+    await writeFile(
+      join(fixture.snapshotRoot, "package.json"),
+      `${JSON.stringify({ name: "peer-only", peerDependencies: { zod: "4.4.3" } })}
+`,
+    );
+    const child = new FakeInstallProcess();
+    const forkProcess = vi.fn<PluginInstallFork>(() => {
+      queueMicrotask(() => child.exit(0));
+      return child;
+    });
+
+    const failed = requireFailure(await installPluginDependencies({
+      ...fixture.input,
+      forkProcess,
+    }));
+
+    expect(failed.error.code).toBe("install-not-materialized");
+    expect(failed.error.message).toContain("declared dependencies: 1");
+  });
+
   it("accepts a completed install of a snapshot that declares no dependencies", async () => {
     const fixture = await createInstallFixture({ pluginId: "no-deps-plugin" });
     // Measured pnpm@11.20.0 behavior: a frozen install with nothing to
