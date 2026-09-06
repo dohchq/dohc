@@ -1,65 +1,43 @@
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { type SyncRelayStorage } from "./storage";
-
+import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import {
+  appendLog,
+  claimWorkspace,
   closeTestStorages,
+  countStorageCalls,
   createShare as mint,
+  denialBytes,
+  interceptStorage,
   json,
   jsonBody,
+  moment,
+  nextOpSeq,
+  putBlob as upload,
   request,
+  resetOpSeq,
   sha256,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 afterEach(closeTestStorages);
 
-// Mirrors the relay's test-auth seam: user identity from the bearer token,
-// emails resolvable as "<userId>@dohc.test".
 function handler(
   storage: SyncRelayStorage,
-  lookupUserEmail: (
-    userId: string,
-  ) => Promise<string | null> | string | null = (userId) => `${userId}@dohc.test`,
+  lookupUserEmail?: (userId: string) => Promise<string | null> | string | null,
 ): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  let nextShare = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    nowMs: () => 5555,
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail,
-    newShareId: () => `share-${nextShare++}`,
-  });
+  return testHandler(storage, { nowMs: () => 5555, ...(lookupUserEmail ? { lookupUserEmail } : {}) });
 }
 
 function countActiveRecipientGrantScans(storage: SyncRelayStorage): {
   storage: SyncRelayStorage;
   scansForShare: (shareId: string) => number;
 } {
-  const scans = new Map<string, number>();
-  const counted = new Proxy(storage, {
-    get(target, property) {
-      if (property === "listActiveShareGrantsForRecipient") {
-        return (shareId: string, recipientUserId: string) => {
-          scans.set(shareId, (scans.get(shareId) ?? 0) + 1);
-          return target.listActiveShareGrantsForRecipient(shareId, recipientUserId);
-        };
-      }
-      const value = Reflect.get(target, property);
-      return typeof value === "function" ? value.bind(target) : value;
-    },
-  });
+  const counted = countStorageCalls(storage, "listActiveShareGrantsForRecipient");
   return {
-    storage: counted,
-    scansForShare: (shareId) => scans.get(shareId) ?? 0,
+    storage: counted.storage,
+    scansForShare: (shareId) => counted.calls.filter(([id]) => id === shareId).length,
   };
 }
 
@@ -76,61 +54,19 @@ async function createShare(
 }
 
 async function createWorkspace(h: SyncRelayHandler): Promise<void> {
-  const response = await h(request(GRANTER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })));
-  expect(response.status).toBe(200);
+  await claimWorkspace(h, GRANTER, WORKSPACE);
 }
 
-let opSeq = 0;
-
-function momentOp(
-  path: string,
-  content: string,
-  overrides: Record<string, unknown> = {},
-): { originSeq: number; opKind: string; payload: Record<string, unknown>; recordedAtMs: number } {
-  const originSeq = opSeq++;
-  return {
-    originSeq,
-    opKind: "moment.append",
-    payload: {
-      momentId: `moment-${originSeq}`,
-      versionId: "main",
-      objectId: `object-${path}`,
-      path,
-      recordedAtMs: 1000 + originSeq,
-      operation: "write",
-      payloadBeforeBlobSha256: null,
-      payloadBeforePath: null,
-      payloadAfterBlobSha256: sha256(content),
-      payloadAfterPath: path,
-      metadata: { origin: "user" },
-      beforePresent: "null",
-      ...overrides,
-    },
-    recordedAtMs: 1000 + originSeq,
-  };
+function momentOp(path: string, content: string, payload: Record<string, unknown> = {}) {
+  return moment(path, content, { objectId: `object-${path}`, payload });
 }
 
 async function appendOps(h: SyncRelayHandler, ops: unknown[]): Promise<void> {
-  const response = await h(
-    request(GRANTER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-a", ops })),
-  );
-  expect(response.status).toBe(200);
+  await appendLog(h, GRANTER, WORKSPACE, ops);
 }
 
 async function putBlob(h: SyncRelayHandler, content: string): Promise<string> {
-  const sha = sha256(content);
-  const response = await h(
-    request(GRANTER, `/sync/${WORKSPACE}/blobs/${sha}`, { method: "PUT", body: content }),
-  );
-  expect(response.status).toBe(200);
-  return sha;
-}
-
-// Captures a denial as comparable bytes: unauthorized probes of every kind
-// must be indistinguishable from a share that never existed.
-async function denialBytes(response: Response): Promise<string> {
-  expect(response.status).toBe(404);
-  return `${response.status}:${await response.text()}`;
+  return upload(h, GRANTER, WORKSPACE, content);
 }
 
 function directShareInput(
@@ -232,7 +168,7 @@ describe("createShare storage boundary", () => {
 
 describe("share grants", () => {
   beforeEach(() => {
-    opSeq = 0;
+    resetOpSeq();
   });
 
   it("scans active recipient grants once for one received-list row", async () => {
@@ -728,20 +664,7 @@ describe("share grants", () => {
     // first authenticated request claims the invite — but RECIPIENT's does not.
     const LATE = "late-user";
     const LATE_EMAIL = "late@corp.example";
-    let nextShare = 0;
-    const h = createSyncRelayHandler({
-      storage,
-      resolveActor: (request, workspaceId) => {
-        const auth = request.headers.get("authorization") ?? "";
-        if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-        return { userId: auth.slice("Bearer user:".length), workspaceId };
-      },
-      nowMs: () => 5555,
-      resolveUserIdByEmail: (email) =>
-        email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-      lookupUserEmail: (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`),
-      newShareId: () => `share-${nextShare++}`,
-    });
+    const h = handler(storage, (userId) => (userId === LATE ? LATE_EMAIL : `${userId}@dohc.test`));
     await createWorkspace(h);
     await putBlob(h, "shared body");
     await appendOps(h, [momentOp("docs/shared.md", "shared body")]);
@@ -793,12 +716,12 @@ describe("share grants", () => {
     await putBlob(h, "deep body");
     await putBlob(h, "ciphertext");
     await appendOps(h, [
-      { originSeq: opSeq++, opKind: "workspace.init", payload: { note: "init" }, recordedAtMs: 999 },
+      { originSeq: nextOpSeq(), opKind: "workspace.init", payload: { note: "init" }, recordedAtMs: 999 },
       momentOp("docs/shared.md", "shared body"),
       momentOp("private/hidden.md", "hidden body"),
       momentOp("docs/nested/deep.md", "deep body"),
       {
-        originSeq: opSeq++,
+        originSeq: nextOpSeq(),
         opKind: "secret.file.put",
         payload: {
           versionId: "main",
@@ -812,7 +735,7 @@ describe("share grants", () => {
         recordedAtMs: 1100,
       },
       {
-        originSeq: opSeq++,
+        originSeq: nextOpSeq(),
         opKind: "chat.message.append",
         payload: {
           messageId: "m1",
@@ -866,7 +789,7 @@ describe("share grants", () => {
       momentOp("docs/shared.md", "shared body"),
       momentOp("private/hidden.md", "hidden body"),
       {
-        originSeq: opSeq++,
+        originSeq: nextOpSeq(),
         opKind: "secret.file.put",
         payload: {
           versionId: "main",
@@ -998,7 +921,7 @@ describe("share grants", () => {
     const dropSha = await putBlob(h, "dropped snapshot");
     await appendOps(h, [
       {
-        originSeq: opSeq++,
+        originSeq: nextOpSeq(),
         opKind: "version.create",
         payload: {
           versionId: "version-1",
@@ -1061,17 +984,11 @@ describe("share grants", () => {
     // Wrap the storage so fetchLogPage revokes the share as a side effect:
     // this lands after the route's entry check but before the body is
     // returned, exactly the race the immediate re-check must catch.
-    const racing = new Proxy(storage, {
-      get(target, prop, receiver) {
-        if (prop === "fetchLogPage") {
-          return (input: Parameters<SyncRelayStorage["fetchLogPage"]>[0]) => {
-            const page = target.fetchLogPage(input);
-            target.revokeShare("share-0", 6000);
-            return page;
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+    const racing = interceptStorage(storage, {
+      fetchLogPage: (target, input) => {
+        const page = target.fetchLogPage(input);
+        target.revokeShare("share-0", 6000);
+        return page;
       },
     });
     const h = handler(racing);
@@ -1089,17 +1006,11 @@ describe("share grants", () => {
 
   it("aborts an in-flight shared-blob read when the share is revoked mid-request (revocation race)", async () => {
     const storage = await testStorage();
-    const racing = new Proxy(storage, {
-      get(target, prop, receiver) {
-        if (prop === "getBlob") {
-          return (workspaceId: string, sha256: string) => {
-            const blob = target.getBlob(workspaceId, sha256);
-            target.revokeShare("share-0", 6000);
-            return blob;
-          };
-        }
-        const value = Reflect.get(target, prop, receiver);
-        return typeof value === "function" ? value.bind(target) : value;
+    const racing = interceptStorage(storage, {
+      getBlob: (target, workspaceId, sha256) => {
+        const blob = target.getBlob(workspaceId, sha256);
+        target.revokeShare("share-0", 6000);
+        return blob;
       },
     });
     const h = handler(racing);

@@ -1,7 +1,7 @@
+import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
-import * as Struct from "effect/Struct";
 import type { JsonValue } from "../protocol";
 
 export const CHATS_METHOD = {
@@ -71,7 +71,7 @@ export const CHATS_METHOD = {
 
 export type ChatsMethod = (typeof CHATS_METHOD)[keyof typeof CHATS_METHOD];
 export type ChatsJsonObject = { [key: string]: JsonValue | undefined };
-export type ChatPageParams = ChatsJsonObject & {
+type ChatPageParams = ChatsJsonObject & {
   pageLimit?: number;
   cursor?: string;
 };
@@ -80,7 +80,7 @@ export type ChatActor = ChatsJsonObject & {
   kind: "human" | "agent";
   displayName: string;
 };
-export type ChatLinkedFile = ChatsJsonObject & {
+type ChatLinkedFile = ChatsJsonObject & {
   objectId: string;
   pathHint?: string;
   linkedAtMs: number;
@@ -268,7 +268,7 @@ export type ChatFileMention = ChatsJsonObject & {
   thread: ChatThread;
   channel?: ChatChannel;
 };
-export type ChatChannelOpeningMessage = ChatsJsonObject & {
+type ChatChannelOpeningMessage = ChatsJsonObject & {
   id: string;
   author: ChatActor;
   createdAtMs: number;
@@ -299,7 +299,7 @@ export type ChatFeedReadState = ChatsJsonObject & {
   lastSeenMessageId: string;
   updatedAtMs: number;
 };
-export type ChatFeedChannel = Omit<ChatChannel, "channelId"> & { id: string };
+type ChatFeedChannel = Omit<ChatChannel, "channelId"> & { id: string };
 export type ChatFeedItem = ChatsJsonObject & {
   message: ChatMessage;
   thread: ChatThread;
@@ -310,20 +310,20 @@ export type ChatFeedItem = ChatsJsonObject & {
   openingMessage?: ChatMessage;
 };
 
-export type ChatChannelGetWireIdParams = ChatsJsonObject & { channelId: string };
-export type ChatChannelCreateParams = ChatsJsonObject & {
+type ChatChannelGetWireIdParams = ChatsJsonObject & { channelId: string };
+type ChatChannelCreateParams = ChatsJsonObject & {
   channelId: string;
   name: string;
   kind: "channel" | "dm" | "agent";
   nowMs?: number;
 };
-export type ChatChannelEnsureParams = ChatsJsonObject & {
+type ChatChannelEnsureParams = ChatsJsonObject & {
   channelId: string;
   nowMs?: number;
 };
-export type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
-export type ChatEmptyParams = ChatsJsonObject;
-export type ChatThreadStartParams = ChatsJsonObject & {
+type ChatChannelFindBySlugParams = ChatsJsonObject & { slug: string };
+
+type ChatThreadStartParams = ChatsJsonObject & {
   channelId: string;
   threadId: string;
   messageId: string;
@@ -337,19 +337,19 @@ export type ChatThreadStartParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
-export type ChatThreadCreateParams = ChatsJsonObject & {
+type ChatThreadCreateParams = ChatsJsonObject & {
   threadId: string;
   title: string;
   linkedFile: ChatsJsonObject & { objectId: string; pathHint?: string };
   nowMs?: number;
 };
-export type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
-export type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
-export type ChatThreadParams = ChatsJsonObject & { threadId: string };
-export type ChatThreadProjectionParams = ChatThreadParams & {
+type ChatThreadsListForFileParams = ChatPageParams & { objectId: string };
+type ChatThreadsListForChannelParams = ChatPageParams & { channelId: string };
+type ChatThreadParams = ChatsJsonObject & { threadId: string };
+type ChatThreadProjectionParams = ChatThreadParams & {
   linkedFileAccess?: ChatProjectionFileAccess;
 };
-export type ChatMessageSendParams = ChatsJsonObject & {
+type ChatMessageSendParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   authorKind: "human" | "agent";
@@ -362,28 +362,28 @@ export type ChatMessageSendParams = ChatsJsonObject & {
   attachments?: ChatLocalAttachmentParams[];
   nowMs?: number;
 };
-export type ChatMessagesListParams = ChatsJsonObject & {
+type ChatMessagesListParams = ChatsJsonObject & {
   threadId: string;
   limit?: number;
   afterMessageOrder?: number;
 };
-export type ChatReadStateMarkParams = ChatsJsonObject & {
+type ChatReadStateMarkParams = ChatsJsonObject & {
   threadId: string;
   upToSequence: number;
   expectedRevision?: number;
   nowMs?: number;
 };
-export type ChatUnreadFileThreadsParams = ChatsJsonObject & {
+type ChatUnreadFileThreadsParams = ChatsJsonObject & {
   pageLimit?: number;
   afterThreadId?: string;
 };
-export type ChatDecisionResolveParams = ChatsJsonObject & {
+type ChatDecisionResolveParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   resolvedByMessageId: string;
   nowMs?: number;
 };
-export type ChatReactionSetParams = ChatsJsonObject & {
+type ChatReactionSetParams = ChatsJsonObject & {
   threadId: string;
   messageId: string;
   emoji: string;
@@ -392,22 +392,22 @@ export type ChatReactionSetParams = ChatsJsonObject & {
   state: "added" | "removed";
   nowMs?: number;
 };
-export type ChatThreadPageParams = ChatPageParams & { threadId: string };
-export type ChatFileMentionsParams = ChatPageParams & {
+type ChatThreadPageParams = ChatPageParams & { threadId: string };
+type ChatFileMentionsParams = ChatPageParams & {
   objectId?: string;
   pathHint?: string;
 };
-export type ChatMentionsParams = ChatPageParams & {
+type ChatMentionsParams = ChatPageParams & {
   handle: string;
   unreadByAgentOnly?: boolean;
 };
-export type ChatAgentReadMarkParams = ChatsJsonObject & {
+type ChatAgentReadMarkParams = ChatsJsonObject & {
   threadId: string;
   upTo: ChatsJsonObject & { createdAtMs: number; messageId: string };
   expectedRevision?: number;
 };
-export type ChatOwnerParams = ChatsJsonObject & { ownerUserId: string };
-export type ChatFollowSetParams = ChatsJsonObject & {
+type ChatOwnerParams = ChatsJsonObject & { ownerUserId: string };
+type ChatFollowSetParams = ChatsJsonObject & {
   ownerUserId: string;
   replicationOwnerUserId?: string;
   targetKind: "person" | "agent" | "channel" | "thread";
@@ -415,167 +415,167 @@ export type ChatFollowSetParams = ChatsJsonObject & {
   state: "following" | "unfollowed";
   nowMs?: number;
 };
-export type ChatFollowListParams = ChatOwnerParams & ChatPageParams & {
+type ChatFollowListParams = ChatOwnerParams & ChatPageParams & {
   state?: "following" | "unfollowed";
 };
-export type ChatFeedMarkSeenParams = ChatOwnerParams & {
+type ChatFeedMarkSeenParams = ChatOwnerParams & {
   replicationOwnerUserId?: string;
   headCursor: string;
   nowMs?: number;
 };
-export type ChatFeedListParams = ChatsJsonObject & {
+type ChatFeedListParams = ChatsJsonObject & {
   ownerUserId: string;
   limit?: number;
   cursor?: string;
 };
-export type ChatBookmarkFindParams = ChatsJsonObject & {
+type ChatBookmarkFindParams = ChatsJsonObject & {
   ownerUserId: string;
   bookmarkId: string;
 };
-export type ChatBookmarkSaveParams = ChatOwnerParams & {
+type ChatBookmarkSaveParams = ChatOwnerParams & {
   targetKind: "message" | "thread";
   targetId: string;
   mode: "live" | "snapshot";
   destinationPath: string;
   nowMs?: number;
 };
-export type ChatBookmarksListParams = ChatOwnerParams & ChatPageParams & {
+type ChatBookmarksListParams = ChatOwnerParams & ChatPageParams & {
   state?: "active" | "archived";
 };
-export type ChatBookmarkListPendingParams = ChatPageParams & {
+type ChatBookmarkListPendingParams = ChatPageParams & {
   ownerUserId: string;
   limit?: number;
 };
-export type ChatBookmarkGenerationParams = ChatBookmarkFindParams & { generation: number };
-export type ChatBookmarkMarkReadyParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkGenerationParams = ChatBookmarkFindParams & { generation: number };
+type ChatBookmarkMarkReadyParams = ChatBookmarkGenerationParams & {
   projectedAtMs?: number;
   projectionObjectId?: string;
   projectionPath?: string;
 };
-export type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkMarkFailedParams = ChatBookmarkGenerationParams & {
   failureReason: string;
 };
-export type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
+type ChatBookmarkMarkStaleParams = ChatBookmarkGenerationParams & {
   failureReason?: string;
 };
-export type ChatDispatchRecordEligibleParams = ChatsJsonObject & { verifiedUserId?: string };
-export type ChatDispatchEnqueueParams = ChatsJsonObject & {
+type ChatDispatchRecordEligibleParams = ChatsJsonObject & { verifiedUserId?: string };
+type ChatDispatchEnqueueParams = ChatsJsonObject & {
   triggerMessageId: string;
   threadId: string;
   nowMs?: number;
 };
-export type ChatDispatchClaimParams = ChatsJsonObject & {
+type ChatDispatchClaimParams = ChatsJsonObject & {
   runId: string;
   command?: string;
   logPath?: string;
   nowMs?: number;
 };
-export type ChatDispatchRunPageParams = ChatPageParams & { runId: string };
-export type ChatDispatchMessageParams = ChatsJsonObject & { messageId: string };
-export type ChatDispatchThreadRunsParams = ChatPageParams & {
+type ChatDispatchRunPageParams = ChatPageParams & { runId: string };
+type ChatDispatchMessageParams = ChatsJsonObject & { messageId: string };
+type ChatDispatchThreadRunsParams = ChatPageParams & {
   threadId: string;
   limit?: number;
 };
-export type ChatDispatchRunParams = ChatsJsonObject & { runId: string };
-export type ChatDispatchRecentCountParams = ChatsJsonObject & {
+type ChatDispatchRunParams = ChatsJsonObject & { runId: string };
+type ChatDispatchRecentCountParams = ChatsJsonObject & {
   threadId: string;
   sinceMs: number;
 };
-export type ChatDispatchFailPendingParams = ChatsJsonObject & {
+type ChatDispatchFailPendingParams = ChatsJsonObject & {
   threadId: string;
   reason: string;
 };
-export type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
+type ChatDispatchRecordRunMessageParams = ChatsJsonObject & {
   messageId: string;
   runId: string;
 };
-export type ChatDispatchSetPausedParams = ChatsJsonObject & {
+type ChatDispatchSetPausedParams = ChatsJsonObject & {
   threadId: string;
   paused: boolean;
   reason?: string;
 };
-export type ChatDispatchRequeueParams = ChatsJsonObject & {
+type ChatDispatchRequeueParams = ChatsJsonObject & {
   triggerMessageId: string;
   runId: string;
 };
-export type ChatDispatchCompleteParams = ChatsJsonObject & {
+type ChatDispatchCompleteParams = ChatsJsonObject & {
   runId: string;
   exitCode: number;
   nowMs?: number;
 };
-export type ChatDispatchFailParams = ChatsJsonObject & {
+type ChatDispatchFailParams = ChatsJsonObject & {
   runId: string;
   reason: string;
   exitCode?: number;
   nowMs?: number;
 };
 
-export type ChatThreadStartResult = ChatsJsonObject & {
+type ChatThreadStartResult = ChatsJsonObject & {
   thread: ChatThread;
   message: ChatMessage;
 };
-export type ChatThreadRevisionResult = ChatsJsonObject & { revision: number };
-export type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
-export type ChatChannelsListResult = ChatsJsonObject & {
+type ChatThreadRevisionResult = ChatsJsonObject & { revision: number };
+type ChatWireIdResult = ChatsJsonObject & { wireId: string | null };
+type ChatChannelsListResult = ChatsJsonObject & {
   channels: ChatChannelSummary[];
   nextCursor: string | null;
 };
-export type ChatThreadsListResult = ChatsJsonObject & {
+type ChatThreadsListResult = ChatsJsonObject & {
   threads: ChatThreadWireRecord[];
   nextCursor: string | null;
 };
-export type ChatMessagesListResult = ChatsJsonObject & {
+type ChatMessagesListResult = ChatsJsonObject & {
   messages: ChatMessage[];
   nextAfterMessageOrder: number | null;
 };
-export type ChatFollowsListResult = ChatsJsonObject & {
+type ChatFollowsListResult = ChatsJsonObject & {
   follows: ChatFollow[];
   nextCursor: string | null;
 };
-export type ChatBookmarksListResult = ChatsJsonObject & {
+type ChatBookmarksListResult = ChatsJsonObject & {
   bookmarks: ChatBookmark[];
   nextCursor: string | null;
 };
-export type ChatEnqueueResult = ChatsJsonObject & { enqueued: boolean };
-export type ChatCompleteResult = ChatsJsonObject & { completed: true };
-export type ChatFailResult = ChatsJsonObject & { failed: true };
-export type ChatThreadsPage = ChatsJsonObject & {
+type ChatEnqueueResult = ChatsJsonObject & { enqueued: boolean };
+type ChatCompleteResult = ChatsJsonObject & { completed: true };
+type ChatFailResult = ChatsJsonObject & { failed: true };
+type ChatThreadsPage = ChatsJsonObject & {
   threads: ChatThread[];
   nextCursor: string | null;
 };
-export type ChatChannelThreadsPage = ChatsJsonObject & {
+type ChatChannelThreadsPage = ChatsJsonObject & {
   threads: ChatChannelThreadSummary[];
   nextCursor: string | null;
 };
-export type ChatDecisionsPage = ChatsJsonObject & {
+type ChatDecisionsPage = ChatsJsonObject & {
   decisions: ChatDecision[];
   nextCursor: string | null;
 };
-export type ChatReactionsPage = ChatsJsonObject & {
+type ChatReactionsPage = ChatsJsonObject & {
   reactions: ChatReaction[];
   nextCursor: string | null;
 };
-export type ChatAttachmentsPage = ChatsJsonObject & {
+type ChatAttachmentsPage = ChatsJsonObject & {
   attachments: ChatAttachment[];
   nextCursor: string | null;
 };
-export type ChatFileMentionsPage = ChatsJsonObject & {
+type ChatFileMentionsPage = ChatsJsonObject & {
   mentions: ChatFileMention[];
   nextCursor: string | null;
 };
-export type ChatMentionsPage = ChatsJsonObject & {
+type ChatMentionsPage = ChatsJsonObject & {
   mentions: ChatMention[];
   nextCursor: string | null;
 };
-export type ChatBookmarksPage = ChatsJsonObject & {
+type ChatBookmarksPage = ChatsJsonObject & {
   bookmarks: ChatBookmark[];
   nextCursor: string | null;
 };
-export type ChatDispatchesPage = ChatsJsonObject & {
+type ChatDispatchesPage = ChatsJsonObject & {
   dispatches: ChatDispatch[];
   nextCursor: string | null;
 };
-export type ChatClaimsPage = ChatsJsonObject & {
+type ChatClaimsPage = ChatsJsonObject & {
   claims: ChatDispatchClaim[];
   nextCursor: string | null;
 };
@@ -583,7 +583,7 @@ export type ChatRunMessagesPage = ChatsJsonObject & {
   messageIds: string[];
   nextCursor: string | null;
 };
-export type ChatThreadRunsPage = ChatsJsonObject & {
+type ChatThreadRunsPage = ChatsJsonObject & {
   runs: Record<string, ChatRun>;
   nextCursor: string | null;
 };
@@ -728,17 +728,6 @@ export type ChatsMethodResultMap = {
   [CHATS_METHOD.dispatchFail]: ChatFailResult;
 };
 
-export class ChatsProtocolShapeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "ChatsProtocolShapeError";
-  }
-}
-
-function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
-  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
-}
-
 function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
   value: JsonValue,
@@ -754,7 +743,7 @@ function decodeChatsSchema<S extends Schema.ConstraintDecoder<unknown>>(
     const path = issue?.path?.map((part) =>
       typeof part === "number" ? `[${part}]` : `.${String(part)}`,
     ).join("") ?? "";
-    throw new ChatsProtocolShapeError(
+    throw new ProtocolShapeError(
       `${label}${path}: ${issue?.message ?? decoded.failure.message}`,
     );
   }
@@ -1106,10 +1095,6 @@ const RunRecordsPageSchema = mutableStruct({
   ...NextCursorFields,
 });
 
-export function decodeChatActor(value: JsonValue, label = "chat actor"): ChatActor {
-  return decodeChatsSchema(ChatActorSchema, value, label) as ChatActor;
-}
-
 export function decodeChatThread(value: JsonValue, label = "chat thread"): ChatThread {
   return decodeChatsSchema(ChatThreadSchema, value, label) as ChatThread;
 }
@@ -1131,18 +1116,6 @@ export function decodeChatDecision(value: JsonValue, label = "chat decision"): C
 
 export function decodeChatReaction(value: JsonValue, label = "chat reaction"): ChatReaction {
   return decodeChatsSchema(ChatReactionSchema, value, label) as ChatReaction;
-}
-
-export function decodeChatBookmark(value: JsonValue, label = "chat bookmark"): ChatBookmark {
-  return decodeChatsSchema(ChatBookmarkSchema, value, label) as ChatBookmark;
-}
-
-export function decodeChatDispatch(value: JsonValue, label = "chat dispatch"): ChatDispatch {
-  return decodeChatsSchema(ChatDispatchSchema, value, label) as ChatDispatch;
-}
-
-export function decodeChatRun(value: JsonValue, label = "chat run"): ChatRun {
-  return decodeChatsSchema(ChatRunSchema, value, label) as ChatRun;
 }
 
 export function decodeUnreadFileThreads(
@@ -1284,7 +1257,7 @@ export function decodeChatsResult<M extends ChatsMethod>(
       result = decodeChatsSchema(ChatsResultSchemas.fail, value, label); break;
     default: {
       const exhaustive: never = method;
-      throw new ChatsProtocolShapeError(`Unsupported chats method: ${exhaustive}`);
+      throw new ProtocolShapeError(`Unsupported chats method: ${exhaustive}`);
     }
   }
   return result as ChatsMethodResultMap[M];

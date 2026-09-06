@@ -1,8 +1,8 @@
+import { ProtocolShapeError, mutableStruct } from "../wireSchema";
 import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import * as SchemaGetter from "effect/SchemaGetter";
-import * as Struct from "effect/Struct";
 import {
   COLLECTION_SCHEMA_REASON_CODES,
   FIELD_VALUE_REASON_CODES,
@@ -51,7 +51,7 @@ export const AUTOMATION_CLAIMED_EVENT = "automation.claimed";
 
 export type WorkspaceMethod =
   (typeof WORKSPACE_METHOD)[keyof typeof WORKSPACE_METHOD];
-export type WorkspaceJsonObject = {
+type WorkspaceJsonObject = {
   [key: string]: JsonValue | undefined;
 };
 
@@ -69,7 +69,7 @@ export type WorkspaceOpenParams = WorkspaceJsonObject & {
   captureMode?: "none";
   recoverRunningDispatches?: boolean;
 };
-export type WorkspaceEmptyParams = WorkspaceJsonObject;
+type WorkspaceEmptyParams = WorkspaceJsonObject;
 export type CollectionGetParams =
   WorkspaceJsonObject & CollectionGetContractParams;
 export type CollectionQueryParams = CollectionQueryContractParams;
@@ -93,21 +93,21 @@ export type SearchQueryPageParams = WorkspaceJsonObject & {
   cursor?: string;
   nowMs?: number;
 };
-export type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
+type SearchQueryChatMessagesGranularParams = WorkspaceJsonObject & {
   query: string;
   limit: number;
 };
 
 export const MAX_GRANULAR_CHAT_QUERY_CHARS = 4096;
 
-export type WorkspaceOpenResult = WorkspaceJsonObject & {
+type WorkspaceOpenResult = WorkspaceJsonObject & {
   workspace: string;
 };
-export type WorkspaceCloseResult = WorkspaceJsonObject & {
+type WorkspaceCloseResult = WorkspaceJsonObject & {
   closed: boolean;
 };
 
-export type ConflictSnapshot = WorkspaceJsonObject & {
+type ConflictSnapshot = WorkspaceJsonObject & {
   workspaceId: string;
   versionId: string;
   objectId: string;
@@ -169,12 +169,12 @@ export type ConflictRecord = WorkspaceJsonObject & {
   incoming: ConflictFileState;
 };
 
-export type ConflictListPage = WorkspaceJsonObject & {
+type ConflictListPage = WorkspaceJsonObject & {
   conflicts: ConflictRecord[];
   nextAfterConflictId: string | null;
 };
 
-export type ReplicatedConflictResult =
+type ReplicatedConflictResult =
   | (WorkspaceJsonObject & {
       replicated: true;
       status: "applied";
@@ -204,7 +204,7 @@ export type ConflictResolveResult =
   | ReplicatedConflictResult;
 
 export type CollectionListResult = CollectionListContractResult;
-export type CollectionListParams = WorkspaceJsonObject & {
+type CollectionListParams = WorkspaceJsonObject & {
   limit?: number;
   cursor?: string;
 };
@@ -212,7 +212,7 @@ export type CollectionListPage = WorkspaceJsonObject & {
   collections: CollectionListResult["collections"];
   nextCursor: string | null;
 };
-export type CollectionPendingAdoption = WorkspaceJsonObject & {
+type CollectionPendingAdoption = WorkspaceJsonObject & {
   versionId: string;
   recordId: string;
   collectionPath: string;
@@ -268,7 +268,7 @@ export type WatcherStatusResult = WorkspaceJsonObject & {
   terminal: boolean;
   phase: CapturePhase;
 };
-export type CapturePhase = "starting" | "importing" | "ready" | "degraded";
+type CapturePhase = "starting" | "importing" | "ready" | "degraded";
 export type CaptureFlushResult = WorkspaceJsonObject & {
   settled: boolean;
   running: boolean;
@@ -298,7 +298,7 @@ export type AutomationSettleParams = WorkspaceJsonObject & {
  * coordinate or — on a never-synced lineage — by the device-local history
  * row id. Exactly one of the two shapes.
  */
-export type AutomationClaimTrigger =
+type AutomationClaimTrigger =
   | (WorkspaceJsonObject & { originId: string; originSeq: number })
   | (WorkspaceJsonObject & { historyId: number });
 
@@ -334,7 +334,7 @@ export type AutomationClaimNextResult = AutomationClaim | null;
  * (failed rows are never deleted), so an acknowledgment at generation N
  * hides the owner's notice exactly until a newer failure passes N.
  */
-export type AutomationFailure = WorkspaceJsonObject & {
+type AutomationFailure = WorkspaceJsonObject & {
   automationId: string;
   error: string;
   updatedAtMs: number;
@@ -345,7 +345,7 @@ export type AutomationFailuresResult = WorkspaceJsonObject & {
   failures: AutomationFailure[];
 };
 
-export type CaptureSetAuthorParams = WorkspaceJsonObject & {
+type CaptureSetAuthorParams = WorkspaceJsonObject & {
   author:
     | (WorkspaceJsonObject & {
         kind: "agent";
@@ -355,7 +355,7 @@ export type CaptureSetAuthorParams = WorkspaceJsonObject & {
       })
     | null;
 };
-export type CaptureSetAuthorResult = WorkspaceJsonObject & {
+type CaptureSetAuthorResult = WorkspaceJsonObject & {
   updated: true;
 };
 
@@ -407,13 +407,6 @@ export type WorkspaceMethodResultMap = {
   [WORKSPACE_METHOD.automationsSettle]: AutomationClaim;
 };
 
-export class WorkspaceProtocolShapeError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "WorkspaceProtocolShapeError";
-  }
-}
-
 const COLLECTION_INTEGER_MARKER = "$dohcInt64";
 const COLLECTION_FLOAT_MARKER = "$dohcFloat64";
 const MAX_SAFE_COLLECTION_INTEGER = BigInt(Number.MAX_SAFE_INTEGER);
@@ -454,13 +447,13 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
   }
   const decimal = entry[1];
   if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       "A collection integer marker must contain a canonical decimal string.",
     );
   }
   const integer = BigInt(decimal);
   if (integer < MIN_COLLECTION_INTEGER || integer > MAX_COLLECTION_INTEGER) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       "A collection integer marker must fit in the engine's 64-bit integer range.",
     );
   }
@@ -468,7 +461,7 @@ function collectionIntegerMarker(value: JsonValue): bigint | null {
     (integer >= -MAX_SAFE_COLLECTION_INTEGER &&
       integer <= MAX_SAFE_COLLECTION_INTEGER)
   ) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       "A collection integer marker must contain an out-of-safe-range engine integer.",
     );
   }
@@ -482,7 +475,7 @@ function collectionFloatMarker(value: JsonValue): number | null {
   }
   const decimal = entry[1];
   if (typeof decimal !== "string" || !/^-?(?:0|[1-9]\d*)$/.test(decimal)) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       "A collection float marker must contain a canonical decimal string.",
     );
   }
@@ -493,7 +486,7 @@ function collectionFloatMarker(value: JsonValue): number | null {
     Number.isSafeInteger(number) ||
     BigInt(number).toString() !== decimal
   ) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       "A collection float marker must contain an out-of-safe-range integral float.",
     );
   }
@@ -533,7 +526,7 @@ export function encodeCollectionValue(value: CollectionValue): JsonValue {
   }
   if (typeof value === "bigint") {
     if (value < MIN_COLLECTION_INTEGER || value > MAX_COLLECTION_INTEGER) {
-      throw new WorkspaceProtocolShapeError(
+      throw new ProtocolShapeError(
         "A collection integer must fit in the engine's 64-bit integer range.",
       );
     }
@@ -603,10 +596,6 @@ export function collectionResultExpectsBlob(value: JsonValue): boolean {
     !Array.isArray(value) &&
     value.collectionJson === null
   );
-}
-
-function mutableStruct<const Fields extends Schema.Struct.Fields>(fields: Fields) {
-  return Schema.Struct(fields).mapFields(Struct.map(Schema.mutableKey));
 }
 
 const NullableString = Schema.NullOr(Schema.String);
@@ -1034,13 +1023,13 @@ function decodeWorkspaceSchema<S extends Schema.ConstraintDecoder<unknown>>(
     expectObject &&
     (value === null || typeof value !== "object" || Array.isArray(value))
   ) {
-    throw new WorkspaceProtocolShapeError(`${label} must be a JSON object.`);
+    throw new ProtocolShapeError(`${label} must be a JSON object.`);
   }
   const decoded = Schema.decodeUnknownResult(schema, {
     onExcessProperty: "error",
   })(value);
   if (Result.isFailure(decoded)) {
-    throw new WorkspaceProtocolShapeError(`${label}: ${decoded.failure.message}`);
+    throw new ProtocolShapeError(`${label}: ${decoded.failure.message}`);
   }
   return decoded.success;
 }
@@ -1153,7 +1142,7 @@ export function decodeWorkspaceResult<M extends WorkspaceMethod>(
 ): WorkspaceMethodResultMap[M] {
   const schema = WorkspaceResultSchemas[method];
   if (schema === undefined) {
-    throw new WorkspaceProtocolShapeError(
+    throw new ProtocolShapeError(
       `Unsupported workspace method: ${method}`,
     );
   }

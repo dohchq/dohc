@@ -1,14 +1,16 @@
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it } from "vitest";
 import { PresenceHub } from "./presence";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
-import { type SyncRelayStorage } from "./storage";
+import type { SyncRelayHandler } from "./server";
+import type { SyncRelayStorage } from "./storage";
 import {
   claimWorkspace,
   closeTestStorages,
   json,
+  jsonBody,
+  request as req,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 // Server-level tests for the ephemeral awareness transport: authenticated,
 // scoped, server-derived identity, and — the load-bearing invariant — never
@@ -16,39 +18,12 @@ import {
 
 afterEach(closeTestStorages);
 
-function makeHandler(
-  storage: SyncRelayStorage,
-  presence: PresenceHub,
-): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    presence,
-    // Email <-> id seam so share-by-email E2E works without a user DB.
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@t") ? email.slice(0, -"@t".length) : null,
-    lookupUserEmail: (userId) => `${userId}@t`,
-    nowMs: () => Date.now(),
-  });
-}
-
-function req(userId: string | null, path: string, init: RequestInit = {}): Request {
-  const headers = new Headers(init.headers);
-  if (userId) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
+function makeHandler(storage: SyncRelayStorage, presence: PresenceHub): SyncRelayHandler {
+  return testHandler(storage, { presence, nowMs: () => Date.now() });
 }
 
 function post(userId: string, path: string, body: unknown): Request {
-  return req(userId, path, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  return req(userId, path, jsonBody(body));
 }
 
 // Deterministically wait for a long-poll to park (the request promise offers

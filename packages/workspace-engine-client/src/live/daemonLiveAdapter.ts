@@ -1,4 +1,12 @@
-import type { ErrorCode, Request, Response, Retryability, WireError, WorkspaceHandle } from "../protocol";
+import { isRecord } from "@dohc/workspace-core/records";
+import type {
+  ErrorCode,
+  Request,
+  Response,
+  Retryability,
+  WireError,
+  WorkspaceHandle,
+} from "../protocol";
 
 export type DaemonErrorCode =
   | ErrorCode
@@ -277,10 +285,6 @@ export function isYdocOpenOperationCrashedRefusal(error: unknown): boolean {
     "INTERNAL",
     "ydoc-open-operation-crashed",
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 const ERROR_CODES: readonly DaemonErrorCode[] = [
