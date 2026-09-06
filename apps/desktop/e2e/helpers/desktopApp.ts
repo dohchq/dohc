@@ -104,11 +104,11 @@ export async function launchDesktopApp(input: {
     try { appendFileSync(logPath, JSON.stringify(entry) + "\n"); }
     catch (error) { logFailure ??= error; }
   };
-  const onStdoutData = (chunk: Buffer) => {
-    record({ source: "main", level: "stdout", text: chunk.toString() });
+  const onStdoutData = (chunk: string) => {
+    record({ source: "main", level: "stdout", text: chunk });
   };
-  const onStderrData = (chunk: Buffer) => {
-    record({ source: "main", level: "stderr", text: chunk.toString() });
+  const onStderrData = (chunk: string) => {
+    record({ source: "main", level: "stderr", text: chunk });
   };
 
   let app: ElectronApplication | null = null;
@@ -123,8 +123,8 @@ export async function launchDesktopApp(input: {
     });
 
     processHandle = app.process();
-    processHandle.stdout?.on("data", onStdoutData);
-    processHandle.stderr?.on("data", onStderrData);
+    processHandle.stdout?.setEncoding("utf8").on("data", onStdoutData);
+    processHandle.stderr?.setEncoding("utf8").on("data", onStderrData);
 
     const page = await app.firstWindow({ timeout: 10_000 });
     page.on("console", (message) => {

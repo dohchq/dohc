@@ -6,6 +6,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { withBuildBudget } from "../../../scripts/verification/build.mjs";
 import { run as runProcess } from "../../../scripts/verification/process.mjs";
+import { cancellationScope } from "../../../scripts/verification/cancellation.mjs";
 
 const require = createRequire(import.meta.url);
 const repoRoot = resolve(import.meta.dirname, "../../..");
@@ -155,7 +156,11 @@ export async function buildThenStartDesktop({
     electronViteSpawnOptions(process.env),
   ),
 } = {}) {
-  await withBuildBudget((environment) => buildWorkspaceEngine(environment, runCargo));
+  const cancellation = cancellationScope("Desktop build");
+  let interrupted;
+  try { await withBuildBudget((environment) => buildWorkspaceEngine(environment, runCargo)); }
+  finally { interrupted = await cancellation.dispose(); }
+  if (interrupted) throw interrupted;
   return startDev();
 }
 

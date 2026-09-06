@@ -150,3 +150,54 @@ for (const flow of ["dev", "release"]) {
     });
   }
 }
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`desktop dev ${signal} after Cargo closes prevents server startup (${process.platform === "win32" ? "synthetic Windows event" : "real POSIX signal"})`, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-desktop-handoff-"));
+    try {
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import assert from 'node:assert/strict';
+        import {execFileSync} from 'node:child_process';
+        import {existsSync,writeFileSync} from 'node:fs';
+        import {join} from 'node:path';
+        import {buildThenStartDesktop} from ${JSON.stringify(new URL("../apps/desktop/scripts/dev.mjs", import.meta.url).href)};
+        import {run} from ${JSON.stringify(new URL("verification/process.mjs", import.meta.url).href)};
+        const root=process.argv[1];
+        const slot=join(root,'slots/build-slot-1');
+        let child;
+        let childClosedAtSignal=false;
+        let slotHeldAtSignal=false;
+        let interrupted=false;
+        let devStarted=false;
+        try {
+          await buildThenStartDesktop({
+            runCargo:async(command,args,options)=>{
+              assert.equal(command,'cargo');
+              // Only the external compiler is replaced. The actual run() owns
+              // and closes a real subprocess before the native boundary signal.
+              const artifact={reason:'compiler-artifact',target:{name:'dohc-workspace-engine',kind:['bin']},
+                executable:join(args[args.indexOf('--target-dir')+1],'debug','dohc-workspace-engine'+(process.platform==='win32'?'.exe':''))};
+              const built=await run(process.execPath,['-e','console.log('+JSON.stringify(JSON.stringify(artifact))+')'],{
+                ...options,onSpawn:owned=>{child=owned;},
+              });
+              childClosedAtSignal=child.exitCode!==null||child.signalCode!==null;
+              slotHeldAtSignal=existsSync(slot);
+              if(process.platform==='win32')process.emit('${signal}');
+              else execFileSync(process.execPath,['-e',"process.kill("+process.pid+",'${signal}')"]);
+              return built;
+            },
+            startDev:()=>{devStarted=true;return {status:0,signal:null};},
+          });
+        }catch(error){assert.match(error.message,/interrupted/);interrupted=true;}
+        writeFileSync(join(root,'result.json'),JSON.stringify({interrupted,devStarted,childClosedAtSignal,slotHeldAtSignal,
+          slotExists:existsSync(slot),listeners:[process.listenerCount('SIGINT'),process.listenerCount('SIGTERM')]}));
+      `, root], { encoding: "utf8", timeout: 10_000, windowsHide: true,
+        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: join(root, "slots"), DOHC_GATE_DISK_FLOOR_GB: "0" } });
+      assert.equal(result.error, undefined, result.stderr);
+      const outcome = JSON.parse(readFileSync(join(root, "result.json"), "utf8"));
+      assert.deepEqual(outcome, { interrupted: true, devStarted: false, childClosedAtSignal: true, slotHeldAtSignal: true,
+        slotExists: false, listeners: [0, 0] }, JSON.stringify({ status: result.status, signal: result.signal, outcome }));
+      assert.equal(result.status, signal === "SIGINT" ? 130 : 143, result.stderr);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}

@@ -105,12 +105,15 @@ function artifactFingerprint(kind) {
 
 export function preparedStatus(kind, receipt = readJson(receiptPath)) {
   try {
+    if (kind === "desktop" && process.platform !== "win32") {
+      for (const name of ["dohc", "dohc-mcp"]) accessSync(join(repoRoot, "apps/desktop/resources/cli-bin", name), constants.X_OK);
+    }
     return receipt?.[kind]?.source === sourceFingerprint(kind)
       && (kind === "engine" ? engineArtifactMatches(enginePath, receipt[kind].artifact)
         : receipt[kind].artifact === artifactFingerprint(kind)
           && stagedEsbuildExecutable(join(repoRoot, "apps/desktop/resources/plugin-tools")));
   } catch (error) {
-    if (error.code === "ENOENT") return false;
+    if (["ENOENT", "EACCES", "EPERM"].includes(error.code)) return false;
     throw error;
   }
 }

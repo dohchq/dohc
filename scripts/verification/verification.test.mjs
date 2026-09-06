@@ -166,6 +166,8 @@ test("standalone preparation installs frozen dependencies before building, seali
   const root = mkdtempSync(join(tmpdir(), "dohc-prepare-install-"));
   try {
     const invoke = createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    mkdirSync(join(root, "apps/desktop/resources/cli-bin"), { recursive: true });
+    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(root, "apps/desktop/resources/cli-bin", name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
     const output = join(root, ".dohc-dev/verification");
     mkdirSync(output, { recursive: true });
     writeFileSync(join(output, "install.log"), "verifier install output");
@@ -192,6 +194,58 @@ test("standalone preparation installs frozen dependencies before building, seali
     assert.equal(calls().length, 5);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json")), false);
     assert.equal(existsSync(join(root, ".dohc-dev/verification/build.json.lock")), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("POSIX prepared desktop rejects CLI execute drift and restages unchanged launcher bytes", { skip: process.platform === "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-cli-mode-"));
+  try {
+    createPrepareFixture(root, new URL("./build.mjs", import.meta.url));
+    const directory = join(root, "apps/desktop/resources/cli-bin");
+    mkdirSync(directory, { recursive: true });
+    for (const name of ["dohc", "dohc-mcp"]) writeFileSync(join(directory, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    // The adapter models build-cli-bin.mjs's explicit chmod on both generated launchers.
+    const adapter = join(root, "scripts/verification/process.mjs");
+    const source = readFileSync(adapter, "utf8");
+    assert.ok(source.includes("export async function run("));
+    writeFileSync(adapter, source.replace("export async function run(", "async function fixtureRun(") + `
+      export async function run(command,args,options) {
+        const result=await fixtureRun(command,args,options);
+        if(command==='pnpm' && args[0]==='--filter')
+          for(const name of ['dohc','dohc-mcp']) chmodSync(join(repoRoot,'apps/desktop/resources/cli-bin',name),0o755);
+        return result;
+      }
+    `);
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import cp from 'node:child_process';
+      import {chmodSync,readFileSync} from 'node:fs';
+      import {join} from 'node:path';
+      import {syncBuiltinESMExports} from 'node:module';
+      const exec=cp.execFileSync;
+      cp.execFileSync=(command,...args)=>command==='rustc'?Buffer.from('fixture rustc'):exec(command,...args);
+      syncBuiltinESMExports();
+      const {prepare,preparedStatus,hashFile,receiptPath}=await import('./scripts/verification/build.mjs');
+      await prepare();
+      assert.equal(preparedStatus('desktop'),true);
+      for(const name of ['dohc','dohc-mcp']) {
+        const launcher=join(process.cwd(),'apps/desktop/resources/cli-bin',name);
+        const bytes=hashFile(launcher);
+        const receipt=JSON.parse(readFileSync(receiptPath,'utf8'));
+        assert.equal(cp.spawnSync(launcher).status,0);
+        chmodSync(launcher,0o644);
+        assert.equal(hashFile(launcher),bytes);
+        assert.equal(cp.spawnSync(launcher).error?.code,'EACCES');
+        assert.equal(preparedStatus('desktop',receipt),false,name+' must not be reusable');
+        await prepare();
+        assert.equal(cp.spawnSync(launcher).status,0);
+        assert.equal(hashFile(launcher),bytes);
+        assert.equal(preparedStatus('desktop'),true);
+        assert.equal(JSON.parse(readFileSync(receiptPath,'utf8')).desktop.artifact,receipt.desktop.artifact);
+      }
+    `], { cwd: root, encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
