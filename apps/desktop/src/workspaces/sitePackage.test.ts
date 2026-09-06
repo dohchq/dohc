@@ -4113,7 +4113,7 @@ describe("requireExactSiteRoot", () => {
     expect(detected?.root).toBe("ancestor");
 
     expect(() => requireExactSiteRoot(detected, requestedRoot)).toThrow(
-      `Not a detected site: ${requestedRoot}`,
+      `Not a detected app: ${requestedRoot}`,
     );
 
     const exact = await getSitePackage(root, "ancestor", sites);
@@ -4122,7 +4122,7 @@ describe("requireExactSiteRoot", () => {
 
   it("uses the requested root in the missing-site error", () => {
     expect(() => requireExactSiteRoot(null, "gone")).toThrow(
-      "Not a detected site: gone",
+      "Not a detected app: gone",
     );
   });
 });

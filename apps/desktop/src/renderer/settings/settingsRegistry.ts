@@ -40,7 +40,7 @@ export const SETTINGS_SECTIONS = [
     id: "workbench",
     label: "Workbench",
     scope: "Workspace",
-    keywords: ["layout", "tabs", "history", "sidebar", "recent", "sites", "preview"],
+    keywords: ["layout", "tabs", "history", "sidebar", "recent", "apps", "preview"],
     Icon: SlidersHorizontal,
   },
   {
