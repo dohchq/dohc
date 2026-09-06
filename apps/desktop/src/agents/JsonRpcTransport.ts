@@ -36,7 +36,7 @@ interface JsonRpcResponse {
 
 type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
-export interface JsonRpcTransportOptions {
+interface JsonRpcTransportOptions {
   command: string;
   args: string[];
   cwd: string;

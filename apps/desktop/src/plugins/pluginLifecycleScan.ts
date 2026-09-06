@@ -48,15 +48,15 @@ const DEPENDENCY_HOOKS = ROOT_HOOKS;
 // small fixture's zod manifest was 3,796 bytes. The repository install's
 // @babel/runtime and drizzle-orm manifests were 41,106 and 177,277 bytes.
 // A 256 KiB bound stays above the largest measured healthy manifest.
-export const PLUGIN_PACKAGE_MANIFEST_MAX_BYTES = 262_144;
+const PLUGIN_PACKAGE_MANIFEST_MAX_BYTES = 262_144;
 
 const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
-export type PluginLifecycleHook =
+type PluginLifecycleHook =
   | typeof ROOT_HOOKS[number]
   | typeof DEPENDENCY_HOOKS[number];
 
-export interface PluginLifecycleDiagnostic {
+interface PluginLifecycleDiagnostic {
   name: string;
   version: string;
   hook: PluginLifecycleHook;
@@ -107,7 +107,7 @@ export type PluginLifecycleScanResult =
     warningLines: string[];
   };
 
-export interface ScanPluginLifecycleInput {
+interface ScanPluginLifecycleInput {
   snapshotRoot: string;
   manifest: DohcPluginManifest;
 }

@@ -17,21 +17,21 @@ import type {
   PluginHostRecordToken,
 } from "./PluginHost";
 
-export interface PluginSurfaceIdentity {
+interface PluginSurfaceIdentity {
   workspaceId: string;
   pluginId: string;
 }
 
-export interface PluginPanelIdentity extends PluginSurfaceIdentity {
+interface PluginPanelIdentity extends PluginSurfaceIdentity {
   panelId: string;
 }
 
-export interface PluginWebAppIdentity extends PluginSurfaceIdentity {
+interface PluginWebAppIdentity extends PluginSurfaceIdentity {
   webAppId: string;
   instanceKey: string | null;
 }
 
-export interface PluginSurfaceOwner {
+interface PluginSurfaceOwner {
   senderId: number;
   generation: number;
 }
@@ -90,7 +90,7 @@ export interface PluginWebAppContainer<V extends PluginWebAppViewLike> {
   detach(view: V): void;
 }
 
-export interface PluginWebAppStartRequest<V extends PluginWebAppViewLike>
+interface PluginWebAppStartRequest<V extends PluginWebAppViewLike>
   extends PluginWebAppIdentity,
     PluginSurfaceOwner {
   workspaceRoot: string;
@@ -103,7 +103,7 @@ export interface PluginWebAppStartAdmission {
   acquireHostLease(): Promise<PluginWebAppHostLease>;
 }
 
-export interface PluginPanelSdkAuthorizationRequest
+interface PluginPanelSdkAuthorizationRequest
   extends PluginPanelIdentity {
   senderId: number;
   currentGeneration(): number;
@@ -121,7 +121,7 @@ interface PluginPanelSdkGrantSuspension {
   restore(): Promise<void>;
 }
 
-export interface PluginWebAppBoundsRequest
+interface PluginWebAppBoundsRequest
   extends PluginWebAppIdentity,
     PluginSurfaceOwner {
   bounds: GuestBounds;
@@ -149,7 +149,7 @@ export interface PluginSurfaceHostReady extends PluginSurfaceIdentity {
   declaredPanels: readonly PluginHostPanelDeclaration[];
 }
 
-export interface PluginSurfacesDependencies<V extends PluginWebAppViewLike> {
+interface PluginSurfacesDependencies<V extends PluginWebAppViewLike> {
   ViewClass: new (options: { webPreferences: GuestWebPreferences }) => V;
   bindWebAppZoom(webContents: V["webContents"]): void;
   allowPanelOrigin(url: string): () => void;

@@ -110,7 +110,7 @@ interface RegisteredAutomation {
 }
 
 /** The engine subscription id an automation registers and writes under. */
-export function engineAutomationId(
+function engineAutomationId(
   pluginId: string,
   automationId: string,
 ): string {

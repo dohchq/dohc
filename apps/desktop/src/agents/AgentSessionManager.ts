@@ -22,7 +22,7 @@ export type AgentSessionStatus =
   | "failed"
   | "stopped";
 
-export interface AgentDriverProbeSummary {
+interface AgentDriverProbeSummary {
   id: AgentDriverId;
   displayName: string;
   installed: boolean;
@@ -32,13 +32,13 @@ export interface AgentDriverProbeSummary {
   errorMessage?: string;
 }
 
-export interface AgentSessionMessage {
+interface AgentSessionMessage {
   id: string;
   role: "assistant" | "reasoning";
   text: string;
 }
 
-export interface AgentSessionItem {
+interface AgentSessionItem {
   id: string;
   type: "tool_call" | "command" | "file_change" | "mcp_tool_call" | "web_search" | "plan" | "other";
   title: string;
@@ -47,7 +47,7 @@ export interface AgentSessionItem {
   locations: string[];
 }
 
-export interface AgentPermissionRequestSnapshot {
+interface AgentPermissionRequestSnapshot {
   requestId: string;
   requestType: "command" | "file-change" | "file-read" | "tool" | "other";
   title: string;
@@ -56,7 +56,7 @@ export interface AgentPermissionRequestSnapshot {
   options: PermissionOption[];
 }
 
-export interface AgentSessionSnapshot {
+interface AgentSessionSnapshot {
   driverId: AgentDriverId;
   driverName: string;
   status: AgentSessionStatus;
@@ -93,7 +93,7 @@ export interface AgentWorkspaceDefaults {
   defaultModel: string | null;
 }
 
-export interface AgentSessionManagerOptions {
+interface AgentSessionManagerOptions {
   /** The drivers this workspace's plugins contribute. */
   pluginDriversFor: (workspaceId: string) => AgentDriver[];
   agentDefaultsFor?: (

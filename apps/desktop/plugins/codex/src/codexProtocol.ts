@@ -16,7 +16,7 @@ export function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export function asStringArray(value: unknown): string[] {
+function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
@@ -27,13 +27,13 @@ export function textFromContent(value: unknown): string {
   return "";
 }
 
-export type CodexMode = "approval-required" | "auto-accept-edits" | "full-access";
+type CodexMode = "approval-required" | "auto-accept-edits" | "full-access";
 
 /** `SandboxMode` in the app-server protocol: `codex --sandbox`'s own values. */
-export type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
+type CodexSandboxMode = "read-only" | "workspace-write" | "danger-full-access";
 
 /** `SandboxPolicy` in the app-server protocol, which a turn may override. */
-export type CodexSandboxPolicy =
+type CodexSandboxPolicy =
   | { type: "readOnly"; networkAccess: boolean }
   | {
       type: "workspaceWrite";
@@ -44,7 +44,7 @@ export type CodexSandboxPolicy =
     }
   | { type: "dangerFullAccess" };
 
-export interface CodexRuntimePolicy {
+interface CodexRuntimePolicy {
   approvalPolicy: "untrusted" | "on-request" | "never";
   threadSandbox: CodexSandboxMode;
   turnSandbox: CodexSandboxPolicy;
@@ -117,7 +117,7 @@ export function turnStatus(status: unknown): "completed" | "failed" | "cancelled
 }
 
 /** The approval requests this driver answers. Anything else is refused. */
-export const CODEX_APPROVAL_METHODS = [
+const CODEX_APPROVAL_METHODS = [
   "item/commandExecution/requestApproval",
   "item/fileChange/requestApproval",
   "applyPatchApproval",

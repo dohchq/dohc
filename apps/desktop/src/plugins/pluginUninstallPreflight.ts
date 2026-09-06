@@ -51,11 +51,11 @@ const PluginBaselineManifestSchema = z.object({
   }
 });
 
-export type PluginBaselineManifest = z.infer<
+type PluginBaselineManifest = z.infer<
   typeof PluginBaselineManifestSchema
 >;
 
-export type PluginUninstallFileStatus =
+type PluginUninstallFileStatus =
   | "unchanged"
   | "modified"
   | "added-since-baseline"
@@ -77,12 +77,12 @@ const UNVERIFIED_DELETE_STATUSES = new Set<PluginUninstallFileStatus>([
   "unknown-without-baseline",
 ]);
 
-export interface PluginUninstallFileInventory {
+interface PluginUninstallFileInventory {
   relPath: string;
   status: PluginUninstallFileStatus;
 }
 
-export interface PluginUninstallPreflightCounts {
+interface PluginUninstallPreflightCounts {
   unchanged: number;
   modified: number;
   addedSinceBaseline: number;
@@ -107,7 +107,7 @@ export interface PluginUninstallWarning {
  * irreversible and the warning must say so (decision 7 of the t3 brief) — and
  * the details rail, about that same state root and the installed tree.
  */
-export interface PluginDirectorySize {
+interface PluginDirectorySize {
   /** One real directory's own path — never a join of several. When this
    * measurement folds in other state directories too (combineDirectorySizes),
    * this is the first of them; additionalLocations names the rest by count,
@@ -179,7 +179,7 @@ export function summarizeUninstallPreflight(
   };
 }
 
-export interface WritePluginBaselineManifestInput {
+interface WritePluginBaselineManifestInput {
   /** The app's userData-resident plugin-data root (PluginPipeline's
    * dohcDir), never a workspace-relative path. */
   dohcDir: string;
@@ -188,7 +188,7 @@ export interface WritePluginBaselineManifestInput {
   installedBaselineHash: string;
 }
 
-export interface PluginUninstallPreflightInput {
+interface PluginUninstallPreflightInput {
   /** See WritePluginBaselineManifestInput.dohcDir. */
   dohcDir: string;
   pluginId: string;

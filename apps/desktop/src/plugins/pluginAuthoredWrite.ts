@@ -45,7 +45,7 @@ export interface PluginDoorWritePipeline {
   ): void;
 }
 
-export interface PluginAuthoredTextWriterInput {
+interface PluginAuthoredTextWriterInput {
   platform?: NodeJS.Platform;
   /**
    * Aborts when the calling panel authority goes stale or the plugin's spawn

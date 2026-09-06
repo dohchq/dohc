@@ -14,7 +14,7 @@ import { errorMessage } from "./pluginShared";
 // off the row.
 export const MAX_PLUGIN_ICON_BYTES = 512 * 1024;
 
-export type PluginIconCheck =
+type PluginIconCheck =
   | { icon: string; diagnostic: null }
   | { icon: null; diagnostic: string };
 

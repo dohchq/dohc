@@ -21,7 +21,7 @@ export class JsonRpcError extends Error {
   }
 }
 
-export interface CommandJsonRpcOptions {
+interface CommandJsonRpcOptions {
   /** Names the harness in the error a closed transport rejects with. */
   label: string;
   onNotification?(method: string, params: unknown): void;

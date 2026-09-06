@@ -354,7 +354,7 @@ function normalizeProbe(value: unknown): AgentProbe {
 }
 
 /** What this module needs from PluginHost, and nothing more. */
-export interface PluginDriverRequestHost {
+interface PluginDriverRequestHost {
   requestDriver<T = unknown>(
     pluginId: string,
     spawnId: string,
@@ -364,7 +364,7 @@ export interface PluginDriverRequestHost {
   stopDriverSpawn(pluginId: string, spawnId: string): Promise<void>;
 }
 
-export interface PluginAgentDriversOptions {
+interface PluginAgentDriversOptions {
   host: PluginDriverRequestHost;
   /** Where a boundary refusal is reported. Defaults to the main-process log. */
   onWarning?: (message: string) => void;

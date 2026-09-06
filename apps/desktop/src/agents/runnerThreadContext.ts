@@ -12,7 +12,7 @@ type RunnerThreadStore = Pick<
   "listChannels" | "listMessages" | "listThreadDecisions" | "listThreads"
 >;
 
-export interface RunnerThreadContextInput {
+interface RunnerThreadContextInput {
   store: RunnerThreadStore;
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
