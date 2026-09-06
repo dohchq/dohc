@@ -1,3 +1,5 @@
+import { registerShareProposalsIpcHandlers } from "./ipc/shareProposalsIpc";
+import { registerSharedViewsIpcHandlers } from "./ipc/sharedViewsIpc";
 import { registerCloudIpcHandlers } from "./ipc/cloudIpc";
 import { registerSharedChannelsIpcHandlers } from "./ipc/sharedChannelsIpc";
 import { registerShareHandoffIpcHandlers } from "./ipc/shareHandoffIpc";
@@ -57,27 +59,9 @@ import {
   ApplyDatabaseEditPayload,
   ListJoinedSharedChannelsPayload,
   ListJoinedSharedChannelsResult,
-  OpenSharedViewPayload,
-  OpenSharedViewResult,
-  RefreshSharedViewPayload,
   ListAutomationFailuresPayload,
   DismissAutomationFailurePayload,
   ListAutomationFailuresResult,
-  ListShareProposalsPayload,
-  ListShareProposalsResult,
-  ReadShareProposalChangesPayload,
-  ReadShareProposalChangesResult,
-  ReadShareProposalFileContentPayload,
-  ReadShareProposalFileContentResult,
-  SettleShareProposalPayload,
-  SettleShareProposalResult,
-  SubmitShareChangesPayload,
-  resolveSubmitShareChangesResult,
-  ListMyShareChangesPayload,
-  ListMyShareChangesResult,
-  WithdrawShareChangesPayload,
-  WithdrawShareChangesResult,
-  RefreshSharedViewResult,
   OpenExternalUrlPayload,
   DatabaseSnapshotResult,
   ImportToDatabasePayload,
@@ -331,19 +315,10 @@ import {
   shareViewGranterEmail,
   shareViewIsPresent,
 } from "./workspaces/shareViewMarker";
-import { WORKSPACE_TEXT_EDITOR_MAX_BYTES } from "./workspaces/workspaceTextLimits";
 import {
   shareViewTakesLocalWrites,
   workspaceWriteRefusal,
 } from "./workspaces/shareWriteGate";
-import {
-  assertShareProposalGranter,
-  requireShareViewMembership,
-  requireShareViewProposalScope,
-  sameShareViewProposalScope,
-  shareProposalOpPath,
-  type ShareViewProposalScope,
-} from "./workspaces/shareProposals";
 import {
   workspaceSummariesFrom,
   workspaceSummaryFor,
@@ -419,16 +394,9 @@ import {
 import { mcpCloudEnvironment } from "./agents/mcpCloudEnvironment";
 import {
   buildShareCode,
-  parseShareCode,
   relayUrlsMatch,
 } from "./workspaces/syncCode";
 import {
-  assertShareChangesJournalable,
-  SharePinInvalidError,
-  shareViewIdentitySelector,
-} from "./workspaces/shareViewRecords";
-import {
-  assertMountableSelector,
   assertRealMountRoot,
   mountStoreWorkspaceIdFor,
   overlayCanonicalShareMountFiles,
@@ -445,8 +413,6 @@ import {
   ShareUnavailableError,
   SharedChannelReadOnlyError,
   SharedFileReadOnlyError,
-  type ShareProposal,
-  type ShareProposalOp,
   type ShareViewRefusal,
   type SyncRelayConnection,
 } from "@dohc/workspace-contracts/relay";
@@ -464,10 +430,8 @@ import type {
   VersionedTextMomentSummary,
 } from "@dohc/workspace-contracts/engine";
 import {
-  ShareSelectorInvalidError,
   fetchShareViewInfo,
 } from "./workspaces/shareViewInfo";
-import type { ShareViewSelector } from "./workspaces/shareViewInfo";
 import { installWorkspaceDataKey } from "./workspaces/workspaceDataKey";
 import { enrollWorkspaceKeyEnvelope } from "./workspaces/workspaceKeyEnvelopeEnrollment";
 import { bootstrapJoinedWorkspace } from "./workspaces/workspaceJoinEnrollment";
@@ -488,7 +452,6 @@ import {
 import type { WorkspaceEngineCapture } from "./workspaces/workspaceEngineCapture";
 import { probeEngineStoreRefusal } from "./workspaces/workspaceEngineCapture";
 import { createReceivedShareEngineAccess } from "./workspaces/receivedShareEngineAccess";
-import { waitForReceivedShareCaptureReady } from "./workspaces/receivedShareCaptureReady";
 import { createCaptureLiveStores } from "./workspaces/workspaceEngineCaptureLiveStore";
 import type { ActiveAgentRun } from "./workspaces/workspaceWatcher";
 import {
@@ -6285,762 +6248,26 @@ function registerIpcHandlers(
     );
   });
 
-  // ---- Share changes ----
-  //
-  // Two lanes, and a workspace is only ever in one of them. The GRANTER lane
-  // reads and settles the changes a recipient sent for a workspace this
-  // machine owns; the RECIPIENT lane sends, lists, and takes back this
-  // machine's own changes from inside an edit-level share view. Each refuses
-  // the other's workspace before it reaches the relay, so a renderer that
-  // names the wrong workspace gets a refusal here rather than a generic 404
-  // from a route it should never have addressed.
-  //
-  // Neither lane trusts a client-supplied share id. The renderer names a
-  // workspace; the registry answers which share that workspace is, and at
-  // what level.
-
-  interface ShareProposalGranterScope {
-    readonly workspaceId: string;
-    readonly attachmentId: symbol;
-    readonly rootPath: string;
-    relay: SyncRelayConnection;
-    credentialGeneration: number;
-  }
-
-  function sameShareProposalGranterScope(
-    left: ShareProposalGranterScope,
-    right: ShareProposalGranterScope,
-  ): boolean {
-    return (
-      left.workspaceId === right.workspaceId &&
-      left.attachmentId === right.attachmentId &&
-      left.rootPath === right.rootPath &&
-      left.relay.baseUrl === right.relay.baseUrl &&
-      left.relay.token === right.relay.token &&
-      left.credentialGeneration === right.credentialGeneration
-    );
-  }
-
-  function withShareProposalGranterOperation<Result>(
-    sender: WebContents,
-    workspaceId: string,
-    work: (scope: {
-      resolve(): ShareProposalGranterScope;
-      assert(scope: ShareProposalGranterScope): void;
-      readText(path: string): ReturnType<typeof readOwnedWorkspaceTextFor>;
-      queueCloudSync(): void;
-    }) => Promise<Result>,
-  ): Promise<Result> {
-    return withRendererWorkspaceOperation(
-      sender,
-      workspaceId,
-      "Share changes stopped because this window changed workspaces.",
-      async (operation) => {
-        await warmCredentialCache();
-        operation.assertCurrent();
-        const resolve = (): ShareProposalGranterScope => {
-          operation.assertCurrent();
-          const workspace = operation.workspace;
-          assertShareProposalGranter(workspace.shareView);
-          const remote = workspace.remote;
-          if (!remote) throw new Error("Sync this workspace before sharing.");
-          const credentials = requireCredentials(cachedCredentials);
-          if (!workspaceRemoteMatchesCredentials(remote, credentials)) {
-            if (
-              normalizeServerUrl(credentials.serverUrl) !==
-              normalizeServerUrl(remote.serverUrl)
-            ) {
-              throw new Error("Sign in to the cloud server this workspace uses.");
-            }
-            throw new Error("Sign in to the account that synced this workspace.");
-          }
-          if (!credentials.relayUrl) {
-            throw new Error(
-              "Reconnect dohc Cloud with a sync relay URL, then try again.",
-            );
-          }
-          return {
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            rootPath: workspace.rootPath,
-            relay: {
-              baseUrl: normalizeServerUrl(credentials.relayUrl),
-              token: credentials.token,
-              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-            },
-            credentialGeneration: credentialCacheGeneration,
-          };
-        };
-        return await work({
-          resolve,
-          assert(scope) {
-            if (!sameShareProposalGranterScope(scope, resolve())) {
-              throw new Error(
-                "Share changes stopped because this workspace's cloud binding changed.",
-              );
-            }
-          },
-          readText: (path) => readOwnedWorkspaceTextFor(operation.workspace, path),
-          queueCloudSync: () => {
-            operation.assertCurrent();
-            activity.queueCloudSync(operation.workspace.workspaceId);
-          },
-        });
-      },
-    );
-  }
-
-  // The RECIPIENT lane's scope. The pinned grant and the share id come from
-  // `shareProposals.ts`, and the caller states which rule applies: sending
-  // needs the edit level, while listing and withdrawing what was already sent
-  // need only membership — a reverse path a downgrade removes is not one.
-  //
-  // What is left here is the session, which must be signed in and on the
-  // share's ORIGIN relay. The refresh skips a session on another relay because
-  // it runs on a cadence; this refuses, because a person pressed a button and
-  // is owed an answer.
-  interface ShareProposalRecipientScope {
-    workspaceId: string;
-    attachmentId: symbol;
-    rootPath: string;
-    shareId: string;
-    grant: ShareViewSelector;
-    relay: SyncRelayConnection;
-    credentialGeneration: number;
-  }
-
-  function withShareProposalRecipientOperation<Result>(
-    sender: WebContents,
-    workspaceId: string,
-    resolveScope: (shareView: unknown) => ShareViewProposalScope,
-    work: (scope: {
-      resolve(): ShareProposalRecipientScope;
-      assert(scope: ShareProposalRecipientScope): void;
-    }) => Promise<Result>,
-  ): Promise<Result> {
-    const sameScope = (
-      left: ShareProposalRecipientScope,
-      right: ShareProposalRecipientScope,
-    ): boolean =>
-      left.workspaceId === right.workspaceId &&
-      left.attachmentId === right.attachmentId &&
-      left.rootPath === right.rootPath &&
-      left.shareId === right.shareId &&
-      sameShareViewProposalScope(left, right) &&
-      left.relay.baseUrl === right.relay.baseUrl &&
-      left.relay.token === right.relay.token &&
-      left.credentialGeneration === right.credentialGeneration;
-    return withRendererWorkspaceOperation(
-      sender,
-      workspaceId,
-      "Share changes stopped because this window changed workspaces.",
-      async (operation) => {
-        await warmCredentialCache();
-        operation.assertCurrent();
-        const resolve = (): ShareProposalRecipientScope => {
-          operation.assertCurrent();
-          const workspace = operation.workspace;
-          const proposalScope = resolveScope(workspace.shareView);
-          const credentials = cachedCredentials;
-          if (!credentials?.relayUrl) {
-            throw new Error("Sign in to dohc Cloud first.");
-          }
-          const shareRelayUrl = isRecordValue(workspace.shareView)
-            ? workspace.shareView.relayUrl
-            : undefined;
-          if (
-            typeof shareRelayUrl === "string" &&
-            !relayUrlsMatch(credentials.relayUrl, shareRelayUrl)
-          ) {
-            throw new Error("Sign in to the cloud server this share came from.");
-          }
-          return {
-            workspaceId: workspace.workspaceId,
-            attachmentId: workspace.attachmentId,
-            rootPath: workspace.rootPath,
-            ...proposalScope,
-            relay: {
-              baseUrl: normalizeServerUrl(credentials.relayUrl),
-              token: credentials.token,
-              fetch: relayFetchWithTimeout(SHARED_CHANNEL_SYNC_FETCH_TIMEOUT_MS),
-            },
-            credentialGeneration: credentialCacheGeneration,
-          };
-        };
-        return await work({
-          resolve,
-          assert(scope) {
-            if (!sameScope(scope, resolve())) {
-              throw new Error("Share changes stopped because this shared view changed.");
-            }
-          },
-        });
-      },
-    );
-  }
-
-  // The after content of one proposed change. Owner-scoped: the blob was
-  // uploaded into this workspace's storage, so the granter reads it back
-  // through the blob route its own sync already uses.
-  //
-  // Tolerant, exactly as the current side is. A change this surface cannot
-  // PREVIEW is still a change the granter has to answer, and failing the read
-  // would take the Decline button with it — leaving the granter unable to say
-  // no to something they cannot see.
-  async function shareProposalIncomingText(
-    relay: SyncRelayConnection,
-    workspaceId: string,
-    op: ShareProposalOp,
-  ): Promise<string | null> {
-    // A delete has no after side, and binary content is not something a text
-    // diff can show. Both are "no incoming text", which the review states.
-    if (op.operation === "delete" || !op.afterBlobSha256) return null;
-    if (op.afterContentKind !== "text") return null;
-    try {
-      const response = await (relay.fetch ?? fetch)(
-        `${relay.baseUrl}/sync/${encodeURIComponent(workspaceId)}/blobs/` +
-          encodeURIComponent(op.afterBlobSha256),
-        { headers: { authorization: `Bearer ${relay.token}` } },
-      );
-      if (!response.ok) return null;
-      const bytes = await response.arrayBuffer();
-      // The bound the CONTRACT enforces on this very field, not a larger one
-      // from somewhere else. `incomingText` is validated by
-      // `WORKSPACE_EDITOR_TEXT`, so text over that bound would make the whole
-      // response fail to parse — and one unreadable file would take every
-      // other file in the review down with it. This is also the bound the
-      // current side already answers with (`readWorkspaceText` truncates at
-      // it and reads as no preview), so the two sides agree.
-      if (bytes.byteLength > WORKSPACE_TEXT_EDITOR_MAX_BYTES) return null;
-      return new TextDecoder().decode(bytes);
-    } catch {
-      return null;
-    }
-  }
-
-  // The opened proposal's file rows, from ops that name a path. An op naming
-  // none describes no file this surface can show, and is left out rather than
-  // rendered as a blank row. Only the review builds these; the polled listing
-  // carries counts.
-  function shareProposalFileRows(
-    proposal: ShareProposal,
-  ): Array<{ op: ShareProposalOp; path: string }> {
-    return proposal.ops.flatMap((op) => {
-      const path = shareProposalOpPath(op);
-      return path ? [{ op, path }] : [];
-    });
-  }
-
-  ipcMain.handle(CHANNELS.listShareProposals, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListShareProposalsPayload.parse(payload);
-    return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
-      async (operation) => {
-        const scope = operation.resolve();
-        const proposals = await listShareProposals({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-        });
-        operation.assert(scope);
-        return ListShareProposalsResult.parse({
-          proposals: proposals.map((proposal) => ({
-            proposalId: proposal.proposalId,
-            shareId: proposal.shareId,
-            proposedByEmail: proposal.proposedByEmail,
-            createdAtMs: proposal.createdAtMs,
-            ops: proposal.ops,
-          })),
-        });
-      },
-    );
+  registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, warmCredentialCache,
+    currentCredentials: () => cachedCredentials,
+    currentCredentialGeneration: () => credentialCacheGeneration,
+    normalizeServerUrl, isRecordValue, readOwnedWorkspaceTextFor, activity,
+    listShareProposals, readShareProposal, readShareProposalOp, settleShareProposal,
+    listMyShareProposals, withdrawShareProposal, withStaleSensitiveWorkspaceOperation,
+    shareViewFiles, receivedShareEngine,
   });
 
-  ipcMain.handle(CHANNELS.readShareProposalChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadShareProposalChangesPayload.parse(payload);
-    return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
-      async (operation) => {
-        const scope = operation.resolve();
-        const proposal = await readShareProposal({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-        });
-        operation.assert(scope);
-        return ReadShareProposalChangesResult.parse({
-          proposedByEmail: proposal.proposedByEmail,
-          files: shareProposalFileRows(proposal).map(({ op, path }) => ({
-            opIndex: op.opIndex,
-            path,
-            operation: op.operation,
-            drifted: op.drifted,
-            afterByteLength: op.afterByteLength,
-          })),
-        });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.readShareProposalFileContent, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadShareProposalFileContentPayload.parse(payload);
-    return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
-      async (operation) => {
-        const scope = operation.resolve();
-        const op = await readShareProposalOp({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-          opIndex: input.opIndex,
-        });
-        operation.assert(scope);
-        const currentText =
-          op.currentPath === null
-            ? null
-            : await operation.readText(op.currentPath).then(
-                (read) => (read.truncated ? null : read.text),
-                () => null,
-              );
-        operation.assert(scope);
-        const incomingText = await shareProposalIncomingText(
-          scope.relay,
-          scope.workspaceId,
-          op,
-        );
-        operation.assert(scope);
-        return ReadShareProposalFileContentResult.parse({
-          currentText,
-          incomingText,
-        });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.settleShareProposal, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SettleShareProposalPayload.parse(payload);
-    return withShareProposalGranterOperation(
-      event.sender,
-      input.workspaceId,
-      async (operation) => {
-        const scope = operation.resolve();
-        const settled = await settleShareProposal({
-          relay: scope.relay,
-          workspaceId: scope.workspaceId,
-          proposalId: input.proposalId,
-          decision: input.decision,
-        });
-        operation.assert(scope);
-        if (settled.state !== "accepted" && settled.state !== "declined") {
-          throw new Error("Those changes are no longer open. Refresh, then try again.");
-        }
-        if (settled.state === "accepted") operation.queueCloudSync();
-        return SettleShareProposalResult.parse({ state: settled.state });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.submitShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SubmitShareChangesPayload.parse(payload);
-    // Sending needs the edit level.
-    return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
-      requireShareViewProposalScope,
-      async (operation) => {
-        const beforeReconcile = operation.resolve();
-        const reconciled = await withStaleSensitiveWorkspaceOperation(
-          beforeReconcile.rootPath,
-          (lease) =>
-            shareViewFiles.reconcile(
-              lease,
-              {
-                kind: "standalone",
-                workspaceId: beforeReconcile.workspaceId,
-              },
-              "settle",
-            ),
-        );
-        operation.assert(beforeReconcile);
-        const scope = operation.resolve();
-        if (reconciled.kind !== "settle") {
-          throw new Error("Shared file settlement returned an invalid result.");
-        }
-        if (reconciled.collisionRecordQuarantined) {
-          throw new Error(
-            "dohc found a damaged shared file recovery record. Refresh shared files. Then send your changes again.",
-          );
-        }
-        assertShareChangesJournalable(reconciled.unjournalablePaths);
-        // The engine owns the submit: it reads this replica's own journal, so it
-        // has to be the process holding the store.
-        const result = await resolveSubmitShareChangesResult(
-          reconciled.capturedPaths + reconciled.repairedPaths,
-          () =>
-            receivedShareEngine.relayFor({
-              engineWorkspaceId: scope.workspaceId,
-              rootPath: scope.rootPath,
-              attachmentId: scope.attachmentId,
-              relay: scope.relay,
-            }).submitShareProposal({
-              shareId: scope.shareId,
-              grantedSelector: scope.grant,
-              // PR3a mints a fresh key per submit. It makes the relay's idempotency
-              // hold for a retry inside one submit (blobs, then the POST), not for
-              // a second press: a second press sends whatever is pending then,
-              // which is a second set of changes and a second proposal.
-              submitId: randomUUID(),
-            }),
-        );
-        operation.assert(scope);
-        return result;
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.listMyShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListMyShareChangesPayload.parse(payload);
-    // SEEING what was already sent needs membership only: a downgrade must
-    // not hide the changes it can no longer add to.
-    return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
-      requireShareViewMembership,
-      async (operation) => {
-        const scope = operation.resolve();
-        const proposals = await listMyShareProposals({
-          relay: scope.relay,
-          shareId: scope.shareId,
-        });
-        operation.assert(scope);
-        return ListMyShareChangesResult.parse({
-          proposals: proposals.map((proposal) => ({
-            proposalId: proposal.proposalId,
-            state: proposal.state,
-            createdAtMs: proposal.createdAtMs,
-            files: proposal.ops,
-          })),
-        });
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.withdrawShareChanges, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WithdrawShareChangesPayload.parse(payload);
-    // Taking back needs membership only, for the same reason.
-    return withShareProposalRecipientOperation(
-      event.sender,
-      input.workspaceId,
-      requireShareViewMembership,
-      async (operation) => {
-        const scope = operation.resolve();
-        const settled = await withdrawShareProposal({
-          relay: scope.relay,
-          shareId: scope.shareId,
-          proposalId: input.proposalId,
-        });
-        operation.assert(scope);
-        if (settled.state !== "withdrawn") {
-          // The granter settled it first. Saying "withdrawn" here would tell the
-          // recipient their changes are back when the granter already has them.
-          throw new Error(
-            "Those changes were already answered. Refresh to see the result.",
-          );
-        }
-        return WithdrawShareChangesResult.parse({ state: settled.state });
-      },
-    );
-  });
-
-  // Receive side: open a pasted share code as a READ-ONLY shared view.
-  // Mirrors the join flow's ordering guarantees: everything is validated
-  // before local state exists, the token only ever goes to the signed-in
-  // relay, and a failed first pull rolls the whole thing back.
-  ipcMain.handle(CHANNELS.openSharedView, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = OpenSharedViewPayload.parse(payload);
-    const parsed = parseShareCode(input.shareCode);
-    if (!parsed) {
-      throw new Error(
-        "That doesn't look like a share code. Copy it again and retry.",
-      );
-    }
-    const credentials = requireCredentials(
-      await loadAndCacheCurrentCredentials(),
-    );
-    if (
-      !credentials.relayUrl ||
-      !relayUrlsMatch(credentials.relayUrl, parsed.relayUrl)
-    ) {
-      // Security gate, not cosmetics: the session token is only ever sent to
-      // the relay this machine signed in with — never to a URL that arrived
-      // inside a pasted code.
-      throw new Error(
-        "This share lives on a different server than the one you're signed in to. " +
-          `Reconnect dohc Cloud with the sync relay URL ${parsed.relayUrl}, then try again.`,
-      );
-    }
-    const relay = { baseUrl: credentials.relayUrl, token: credentials.token };
-    // Pre-flight against the relay before creating anything locally; also
-    // learns who shared it for the honest read-only copy.
-    let info: Awaited<ReturnType<typeof fetchShareViewInfo>>;
-    try {
-      info = await fetchShareViewInfo({ relay, shareId: parsed.shareId });
-    } catch (error) {
-      if (error instanceof ShareUnavailableError) {
-        throw new Error(
-          "No share matches that code for your account. Check the code and that you're signed in with the account it was shared with.",
-        );
-      }
-      if (error instanceof RelayUnauthorizedError) {
-        throw new Error(
-          "Your dohc Cloud session expired. Sign in again, then retry.",
-        );
-      }
-      if (error instanceof ShareSelectorInvalidError) {
-        throw new Error(
-          "This share can't be opened: the server didn't say what it shares. Try again later.",
-        );
-      }
-      throw error;
-    }
-    // A chat-channel code has no file selector, so there is no scope to
-    // enforce and nothing to project. Refuse it here rather than record a
-    // grant of "everything" (the mount path says the same through
-    // assertMountableSelector).
-    assertMountableSelector(info.selector);
-    const grantedSelector = info.selector;
-    const rootPath = usableRoot(input.rootPath);
-    const existingEntries = await readdir(rootPath).catch((error: unknown) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    });
-    if (existingEntries.length > 0) {
-      throw new Error(
-        "Choose an empty folder — the shared files will be placed inside it.",
-      );
-    }
-    // Identity/metadata only (the join bootstrap): the shared content
-    // arrives with the first pull below, and a shared view must never seed
-    // starter files of its own.
-    await mkdir(rootPath, { recursive: true });
-    const created = await createJoinedWorkspace({
-      workspaceId: randomUUID(),
-      rootPath,
-      populate: async (created, authorityBinding) => {
-        setWorkspaceShareView(created.workspaceId, {
-          shareId: parsed.shareId,
-          granterEmail: info.granterEmail,
-          genericChatWritable: info.genericChatWritable,
-          // Pin the selector the relay just stated, so later pulls enforce it
-          // instead of trusting the relay's selection each time.
-          grantedSelector,
-          // Persist the origin relay so a later refresh signed into a different
-          // relay is skipped instead of misreading a 404 as "share ended".
-          relayUrl: credentials.relayUrl,
-        });
-        refreshNativeWorkspaceSurfaces();
-        // Before the first pull: a share view that writes back needs its own
-        // sync identity, and the pull is what gives it the share cursor that
-        // makes local writes journal.
-        //
-        // Soft, like the refresh site. Opening a share is a read, and a failure
-        // here costs the recipient the ability to send changes, not the ability
-        // to open what they were given. The next refresh records it.
-        await workspaceAuthorities
-          .withBinding(authorityBinding, (lease) =>
-            recordShareViewIdentity(canonicalWorkspaceFor(lease)),
-          )
-          .catch((error) => {
-            console.error("[desktop] share view identity:", error);
-          });
-        const reconciled = await withStaleSensitiveWorkspaceOperation(
-          created.rootPath,
-          (lease) =>
-            shareViewFiles.reconcile(
-              lease,
-              { kind: "standalone", workspaceId: created.workspaceId },
-              "refresh",
-            ),
-        );
-        if (reconciled.kind !== "refresh") {
-          throw new Error("Shared view refresh returned an invalid result.");
-        }
-        const outcome = reconciled.outcome;
-        if ("ok" in outcome && !outcome.ok) {
-          throw new Error(outcome.errorMessage);
-        }
-        if (outcome.status === "ended") {
-          throw new ShareUnavailableError();
-        }
-      },
-      rollbackLabel: "open-share",
-      cleanupFailureMessage:
-        "Couldn't safely roll back the shared view. Its folder was left in place; restart dohc before retrying.",
-      failure: (error) => {
-        if (error instanceof ShareUnavailableError) {
-          return new Error(
-            "This share was ended before it could be opened. Nothing was added on this machine.",
-          );
-        }
-        return new Error(
-          "Couldn't open the share. Nothing was added on this machine — check your connection and try again.",
-        );
-      },
-    });
-    // A share view is opened here, not wherever a status read happens to land
-    // first. It needs the activity entry: that entry is what states
-    // `historyShareView` to the status bar and the notice center, so the null
-    // capture below is explained by a decision this open made.
-    //
-    // It deliberately gets NO recorder and no cloud engine. Its files are
-    // written straight to its engine store by the write path, so a watcher
-    // here would only observe writes this process already journaled, and it
-    // replicates through its share rather than through a workspace remote.
-    //
-    // After the refresh, because a failed refresh rolls the whole open back.
-    await openWorkspaceActivity(requireWorkspace(created.workspaceId));
-    // Scope-free: the open added a registry entry no window has active yet.
-    notifyRenderer();
-    // Through the PROJECTION, not a raw parse: the level lives under the
-    // record's pinned grant, and a raw parse would strip it and hand the
-    // renderer a fresh share view with no level to state.
-    const summary = workspaceSummaryFor(requireWorkspace(created.workspaceId));
-    return OpenSharedViewResult.parse({ workspace: summary });
-  });
-
-  ipcMain.handle(CHANNELS.refreshSharedView, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RefreshSharedViewPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Shared view refresh stopped because this window changed workspaces.",
-      async (operation) => {
-        // The shell's on-open auto-refresh can run during the daemon handshake
-        // now that the window loads during it; the reconcile needs sessions. The
-        // physical operation is already held before this wait begins.
-        await engineDaemonStartup;
-        operation.assertCurrent();
-        const currentShareViewWorkspace = () => {
-          operation.assertCurrent();
-          const current = operation.workspace;
-          const shareView = current.shareView;
-          if (!shareViewIsPresent(shareView)) {
-            throw new Error("This workspace is not a shared view.");
-          }
-          if (!shareView) {
-            throw new Error(
-              "This shared view's record is damaged, so it can't refresh safely. Remove it, then open the share code again.",
-            );
-          }
-          return { ...current, shareView };
-        };
-        let workspace = currentShareViewWorkspace();
-        // A proven large fresh import can publish its workspace handle before
-        // initial capture finishes. Every share.* RPC stays fenced until the
-        // phase reaches ready or degraded, including the Edit identity call
-        // below. Wait before relay work and before taking the workspace file
-        // scheduler so the shell remains usable and a workspace switch stops
-        // the background refresh promptly.
-        const shareStore = receivedShareEngine.storeFor({
-          engineWorkspaceId: workspace.workspaceId,
-          rootPath: workspace.rootPath,
-          attachmentId: workspace.attachmentId,
-        });
-        await waitForReceivedShareCaptureReady({
-          readStatus: shareStore.watcherStatus?.bind(shareStore),
-          assertCurrent: () => operation.assertCurrent(),
-        });
-        workspace = currentShareViewWorkspace();
-        // Refresh the relay-derived chat fact for the banner's next step. It
-        // does not grant desktop generic-chat writes. Keep the share identity
-        // current for the separate Edit proposal lane.
-        if (!workspace.shareView.ended) {
-          let refreshedWorkspace = workspace;
-          await warmCredentialCache().catch(() => undefined);
-          const credentials = cachedCredentials;
-          if (
-            credentials?.relayUrl &&
-            (!workspace.shareView.relayUrl ||
-              relayUrlsMatch(credentials.relayUrl, workspace.shareView.relayUrl))
-          ) {
-            try {
-              const info = await fetchShareViewInfo({
-                relay: {
-                  baseUrl: credentials.relayUrl,
-                  token: credentials.token,
-                },
-                shareId: workspace.shareView.shareId,
-              });
-              operation.assertCurrent();
-              const nextShareView = {
-                ...workspace.shareView,
-                genericChatWritable: info.genericChatWritable,
-              };
-              setWorkspaceShareView(workspace.workspaceId, nextShareView);
-              refreshedWorkspace = { ...workspace, shareView: nextShareView };
-            } catch (error) {
-              if (!(error instanceof ShareUnavailableError)) {
-                throw error;
-              }
-            }
-          }
-          await recordShareViewIdentity(refreshedWorkspace).catch((error) => {
-            console.error("[desktop] share view enrolment:", error);
-          });
-        }
-        let outcome;
-        try {
-          const reconciled = await withStaleSensitiveWorkspaceOperation(
-            workspace.rootPath,
-            (lease) =>
-              shareViewFiles.reconcile(
-                lease,
-                { kind: "standalone", workspaceId: workspace.workspaceId },
-                "refresh",
-              ),
-          );
-          if (reconciled.kind !== "refresh") {
-            throw new Error("Shared view refresh returned an invalid result.");
-          }
-          outcome = reconciled.outcome;
-        } catch (error) {
-          operation.assertCurrent();
-          // A pull that failed on a later page still persisted the refusals its
-          // earlier pages recorded, so the renderer is told once here too.
-          notifyRenderer({ workspaceId: workspace.workspaceId });
-          // A damaged pin does not heal on the next try, and re-asking the relay
-          // for one would let it restate a wider scope. Say so instead of
-          // reporting "refreshed, nothing new" forever.
-          if (error instanceof SharePinInvalidError) {
-            throw new Error(
-              "This shared view's record is damaged, so it can't refresh safely. " +
-                "Remove it, then open the share code again.",
-            );
-          }
-          throw error;
-        }
-        if ("ok" in outcome && !outcome.ok) {
-          operation.assertCurrent();
-          notifyRenderer({ workspaceId: workspace.workspaceId });
-          return RefreshSharedViewResult.parse(outcome);
-        }
-        operation.assertCurrent();
-        if (outcome.status === "ended") refreshNativeWorkspaceSurfaces();
-        notifyRenderer({ workspaceId: workspace.workspaceId });
-        return RefreshSharedViewResult.parse(outcome);
-      },
-    );
+  registerSharedViewsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation, DesktopWorkspaceAuthorityLease>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, loadAndCacheCurrentCredentials,
+    warmCredentialCache, currentCredentials: () => cachedCredentials,
+    engineDaemonStartup: () => engineDaemonStartup,
+    fetchShareViewInfo, usableRoot, readdir, mkdir, createJoinedWorkspace,
+    setWorkspaceShareView, refreshNativeWorkspaceSurfaces, workspaceAuthorities,
+    canonicalWorkspaceFor, withStaleSensitiveWorkspaceOperation, shareViewFiles,
+    receivedShareEngine, openWorkspaceActivity, requireWorkspace, notifyRenderer,
   });
 
   // ---- Share mounts ----
@@ -7350,28 +6577,6 @@ function registerIpcHandlers(
         ended: workspace.shareView?.ended === true,
       };
     });
-  }
-
-  // Give a received share the sync identity used by its Edit proposal lane.
-  // Run at open and on refresh so an older received share gains the identity
-  // before it submits document changes.
-  async function recordShareViewIdentity(
-    workspace: RegistryEntry & { attachmentId: symbol },
-  ): Promise<void> {
-    await warmCredentialCache();
-    const credentials = cachedCredentials;
-    const grantedSelector = shareViewIdentitySelector({
-      shareView: workspace.shareView,
-      relayUrl: credentials?.relayUrl,
-      relayUrlsMatch,
-    });
-    if (!grantedSelector || !credentials?.relayUrl) return;
-    await receivedShareEngine.relayFor({
-      engineWorkspaceId: workspace.workspaceId,
-      rootPath: workspace.rootPath,
-      attachmentId: workspace.attachmentId,
-      relay: { baseUrl: credentials.relayUrl, token: credentials.token },
-    }).recordShareViewIdentity({ grantedSelector });
   }
 
   // Only a workspace this machine owns can reach this after a successful
