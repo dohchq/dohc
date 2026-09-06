@@ -13,7 +13,11 @@ export const receiptPath = join(repoRoot, ".dohc-dev/verification/build.json");
 export const enginePath = join(repoRoot, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
 const configFiles = {
   engine: [".cargo/config", ".cargo/config.toml"],
-  desktop: [".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs"],
+  desktop: [
+    ".npmrc", ".pnpmfile.cjs", ".pnpmfile.mjs",
+    // electron-vite builds all three targets in production mode from the desktop package.
+    ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => `apps/desktop/${name}`),
+  ],
 };
 const inputPaths = {
   engine: ["crates", "fuzz", "fixtures", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
@@ -76,12 +80,6 @@ export function sourceFingerprint(kind, root = repoRoot) {
     for (const name of ["config", "config.toml"]) {
       const path = join(cargoHome, name);
       if (existsSync(path)) hash.update(readFileSync(path));
-    }
-  }
-  for (const directory of [root, join(root, "apps/desktop")]) {
-    if (!existsSync(directory)) continue;
-    for (const name of readdirSync(directory).filter((name) => /^\.env(?:\.|$)/.test(name)).sort()) {
-      hash.update(name + "\0"); hash.update(readFileSync(join(directory, name)));
     }
   }
   for (const path of [...new Set(paths)].sort()) {

@@ -296,10 +296,10 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     writeFileSync(added, "new import"); assert.notEqual(sourceFingerprint("desktop", root), original);
     rmSync(added); rmSync(source); assert.notEqual(sourceFingerprint("desktop", root), original);
     writeFileSync(source, "original");
-    writeFileSync(join(root, ".env.local"), "VITE_FIXTURE=one");
-    git(["check-ignore", ".env.local"]);
+    writeFileSync(join(root, "apps/desktop/.env.local"), "VITE_FIXTURE=one");
+    git(["check-ignore", "apps/desktop/.env.local"]);
     const configured = sourceFingerprint("desktop", root);
-    writeFileSync(join(root, ".env.local"), "VITE_FIXTURE=two");
+    writeFileSync(join(root, "apps/desktop/.env.local"), "VITE_FIXTURE=two");
     assert.notEqual(sourceFingerprint("desktop", root), configured);
     const previousDebug = process.env.CARGO_PROFILE_DEV_DEBUG;
     try {
@@ -319,6 +319,9 @@ for (const [kind, configurations] of Object.entries({
     [".npmrc", "shared-workspace-lockfile=true\n", "shared-workspace-lockfile=false\n"],
     [".pnpmfile.cjs", "module.exports = {};\n", "module.exports = { hooks: {} };\n"],
     [".pnpmfile.mjs", "export default {};\n", "export default { hooks: {} };\n"],
+    ...[".env", ".env.local", ".env.production", ".env.production.local"].map((name) => [
+      `apps/desktop/${name}`, "VITE_FIXTURE=one\n", "VITE_FIXTURE=two\n",
+    ]),
   ],
   engine: [
     [".cargo/config", "[build]\njobs = 1\n", "[build]\njobs = 2\n"],
@@ -331,6 +334,7 @@ for (const [kind, configurations] of Object.entries({
     try {
       git(["init"]);
       mkdirSync(join(root, ".cargo"));
+      mkdirSync(join(root, "apps/desktop"), { recursive: true });
       const excludes = join(root, ".git/info/exclude");
       writeFileSync(excludes, ignored ? configurations.map(([name]) => name).join("\n") + "\n" : "");
       git(["config", "core.excludesFile", excludes]);
@@ -363,6 +367,36 @@ for (const [kind, configurations] of Object.entries({
       }
     } finally { rmSync(root, { recursive: true, force: true }); }
   }
+});
+
+test("source identity excludes unused environment files from preparation", () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-env-scope-"));
+  const git = (args) => execFileSync("git", args, { cwd: root, stdio: "ignore" });
+  const unused = [
+    ".env", ".env.local", ".env.production", ".env.production.local",
+    ".env.self-host", ".env.self-host.example",
+    "apps/desktop/.env.self-host", "apps/desktop/.env.development", "apps/desktop/.env.development.local",
+  ];
+  try {
+    git(["init"]);
+    mkdirSync(join(root, "apps/desktop"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), ".env\n.env.*\n");
+    git(["add", ".gitignore"]);
+    const baseline = Object.fromEntries(["engine", "desktop"].map((kind) => [kind, sourceFingerprint(kind, root)]));
+    for (const name of unused) writeFileSync(join(root, name), "VITE_FIXTURE=one\n");
+    // The repository's self-host example is tracked; local deployment files are ignored.
+    git(["add", "--force", ".env.self-host.example"]);
+    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env creation`);
+    for (const name of unused) writeFileSync(join(root, name), "VITE_FIXTURE=two\n");
+    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env edit`);
+    for (const name of unused) rmSync(join(root, name));
+    for (const kind of ["engine", "desktop"]) assert.equal(sourceFingerprint(kind, root), baseline[kind], `${kind} unused env removal`);
+    for (const name of [".env", ".env.local", ".env.production", ".env.production.local"]) {
+      writeFileSync(join(root, "apps/desktop", name), "VITE_FIXTURE=three\n");
+    }
+    assert.equal(sourceFingerprint("engine", root), baseline.engine, "Cargo does not load desktop env files");
+    assert.notEqual(sourceFingerprint("desktop", root), baseline.desktop, "desktop production env remains an input");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("engine source identity tracks ancestor and Cargo home configuration outside Git", () => {

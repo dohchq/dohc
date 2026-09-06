@@ -66,8 +66,8 @@ try {
     if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
-  app.process().stdout?.on("data", (text) => record("main.stdout", text));
-  app.process().stderr?.on("data", (text) => record("main.stderr", text));
+  app.process().stdout?.setEncoding("utf8").on("data", (text) => record("main.stdout", text));
+  app.process().stderr?.setEncoding("utf8").on("data", (text) => record("main.stderr", text));
   const page = await app.firstWindow();
   page.on("console", (entry) => record(`renderer.${entry.type()}`, entry.text()));
   page.on("pageerror", (error) => record("renderer.error", error.message));

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { PassThrough } from "node:stream";
 import test from "node:test";
 
 if (process.argv[2] === "fixture") {
@@ -43,8 +44,23 @@ if (process.argv[2] === "fixture") {
   const app = new EventEmitter();
   const page = new EventEmitter();
   page.screenshot = async () => hold("cleanup");
+  if (probe === "utf8") Object.assign(child, { stdout: new PassThrough(), stderr: new PassThrough() });
   app.process = () => child;
-  app.firstWindow = async () => page;
+  app.firstWindow = async () => {
+    if (probe === "utf8") {
+      const ended = Promise.all([once(child.stdout, "end"), once(child.stderr, "end")]);
+      const stdout = Buffer.from("stdout café 😀");
+      const stderr = Buffer.from("stderr 東京 🧪");
+      for (let index = 0; index < Math.max(stdout.length, stderr.length); index++) {
+        if (index < stdout.length) child.stdout.write(stdout.subarray(index, index + 1));
+        if (index < stderr.length) child.stderr.write(stderr.subarray(index, index + 1));
+      }
+      child.stdout.end(Buffer.from([0xe2, 0x82]));
+      child.stderr.end();
+      await ended;
+    }
+    return page;
+  };
   app.windows = () => [page];
   app.context = () => ({ tracing: { start: async () => {}, stop: async () => {} } });
   app.evaluate = async (fn) => String(fn).includes("debugPort") ? 1234 : child.pid;
@@ -132,6 +148,12 @@ if (process.argv[2] === "fixture") {
       const instance = JSON.parse(readFileSync(join(directory, "instance.json"), "utf8"));
       assert.equal(instance.commit, "current-checkout-head", "launch provenance must not reuse the build commit");
       assert.equal(instance.build.desktop.commit, "earlier-build-head");
+      if (probe === "utf8") {
+        const logs = readFileSync(join(directory, "desktop.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
+        const text = (source) => logs.filter((entry) => entry.source === source).map((entry) => entry.text).join("");
+        assert.equal(text("main.stdout"), "stdout café 😀�");
+        assert.equal(text("main.stderr"), "stderr 東京 🧪");
+      }
     } finally {
       clearTimeout(deadline);
       if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; }
@@ -144,4 +166,5 @@ if (process.argv[2] === "fixture") {
   for (const probe of ["pass", "fail"]) {
     test(`debug probe ${probe} retains cleanup and separate launch provenance`, { timeout: 10_000 }, async (t) => fixture(t, { probe }));
   }
+  test("debug evidence preserves split UTF8 in independent streams and flushes an incomplete final character", { timeout: 10_000 }, async (t) => fixture(t, { probe: "utf8" }));
 }
