@@ -241,15 +241,18 @@ describe("workspace engine IPC registrations", () => {
     const release = deferred<{ collections: [] }>();
     h.adapter.listCollections.mockImplementation(async () => { reached.resolve(); return release.promise; });
     const result = h.invoke(CHANNELS.listCollections);
-    await reached.promise;
-    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-2");
-    release.resolve({ collections: [] });
+    try {
+      await reached.promise;
+      await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
+    } finally {
+      release.resolve({ collections: [] });
+    }
     await expect(result).rejects.toThrow("window changed workspaces");
   });
 
   it("keeps history admission independent of renderer admission and omits absent paging fields", async () => {
     const h = await harness();
-    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-2");
+    await h.renderers.open(h.sender, { workspaceId: "other", attachmentId: Symbol("other") }, "document-1");
     await h.invoke(CHANNELS.listEngineMoments);
     expect(h.requireEngineCapture).toHaveBeenCalledWith("workspace", "Engine history");
     expect(h.capture.listMoments).toHaveBeenLastCalledWith({});
