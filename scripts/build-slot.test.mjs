@@ -80,6 +80,124 @@ test("the budget is an even share of the cores across four slots", () => {
   );
 });
 
+test("Windows CI is uncapped unless an explicit slot root requests the workstation budget", () => {
+  const host = { platform: "win32", cores: 32 };
+  for (const CI of ["true", "1"]) {
+    assert.equal(resolveBuildBudget({ CI }, host), null);
+    assert.equal(resolveBuildBudget({ CI, DOHC_BUILD_SLOT_ROOT: "" }, host), null);
+    assert.deepEqual(resolveBuildBudget({ CI, DOHC_BUILD_SLOT_ROOT: "D:\\ci-locks" }, host), {
+      root: "D:\\ci-locks", slots: 4, jobs: 8, diskFloorGb: 40,
+    });
+  }
+  for (const env of [{}, { CI: "false" }, { CI: "0" }]) {
+    assert.deepEqual(resolveBuildBudget(env, host), {
+      root: "C:\\w\\_locks", slots: 4, jobs: 8, diskFloorGb: 40,
+    });
+  }
+});
+
+test("released slots remove only their listeners and allow later interrupt cleanup", () => {
+  const root = slotRoot();
+  try {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from "node:assert/strict";
+      import { acquireBuildSlot } from ${JSON.stringify(new URL("../tools/rust-engine-program/build-slot.mjs", import.meta.url).href)};
+      const unrelated = () => {};
+      const events = ["exit", "SIGINT", "SIGTERM"];
+      for (const event of events) process.on(event, unrelated);
+      const before = events.map(event => process.listeners(event));
+      const slot = await acquireBuildSlot({ root: process.argv[1], slots: 1, waitMs: 0 });
+      slot.release();
+      slot.release();
+      assert.deepEqual(events.map(event => process.listeners(event)), before);
+      let cleaned = false;
+      process.once("SIGINT", () => { cleaned = true; });
+      process.emit("SIGINT");
+      assert.equal(cleaned, true);
+      console.log("later-phase cleanup completed");
+    `, root], { encoding: "utf8", timeout: 5000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /later-phase cleanup completed/);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("cooperative budget cancellation stops its child before releasing the slot and running caller finally", () => {
+  for (const [signal, status] of [["SIGINT", 130], ["SIGTERM", 143]]) {
+    const root = slotRoot();
+    const childRecord = join(root, "child.json");
+    let childStopped = false;
+    try {
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import assert from "node:assert/strict";
+        import { existsSync, writeFileSync } from "node:fs";
+        import { join } from "node:path";
+        import { withBuildBudget } from ${JSON.stringify(new URL("verification/build.mjs", import.meta.url).href)};
+        import { run } from ${JSON.stringify(new URL("verification/process.mjs", import.meta.url).href)};
+        const root = process.argv[1];
+        const signal = process.argv[2];
+        const slot = join(root, "build-slot-1");
+        let child;
+        let heldAfterSignal = false;
+        let rejected = false;
+        try {
+          await withBuildBudget(env => run(process.execPath, ["-e", "setInterval(() => {}, 1000); console.log('child-ready');"], {
+            env,
+            onSpawn: spawned => {
+              child = spawned;
+              writeFileSync(join(root, "child.json"), JSON.stringify({ pid: child.pid }));
+              let output = "";
+              child.stdout.on("data", function ready(chunk) {
+                output += String(chunk);
+                if (!output.includes("child-ready")) return;
+                child.stdout.off("data", ready);
+                assert.equal(existsSync(slot), true);
+                process.emit(signal);
+                heldAfterSignal = existsSync(slot);
+              });
+            },
+          }));
+        } catch (error) {
+          assert.match(error.message, /interrupted/);
+          rejected = true;
+        } finally {
+          writeFileSync(join(root, "finally.json"), JSON.stringify({
+            rejected, heldAfterSignal, slotExists: existsSync(slot),
+            childStopped: Boolean(child && (child.exitCode !== null || child.signalCode !== null)),
+          }));
+        }
+      `, root, signal], {
+        encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL",
+        env: { ...process.env, DOHC_BUILD_SLOT_ROOT: root, DOHC_GATE_DISK_FLOOR_GB: "0" },
+      });
+      const finallyPath = join(root, "finally.json");
+      const cleanup = existsSync(finallyPath) ? JSON.parse(readFileSync(finallyPath, "utf8")) : null;
+      childStopped = cleanup?.childStopped === true;
+      assert.equal(result.error, undefined);
+      assert.equal(result.status, status, result.stderr);
+      assert.deepEqual(cleanup, { rejected: true, heldAfterSignal: true, slotExists: false, childStopped: true });
+      assert.equal(existsSync(join(root, "build-slot-1")), false);
+    } finally {
+      if (!childStopped && existsSync(childRecord)) {
+        const { pid } = JSON.parse(readFileSync(childRecord, "utf8"));
+        if (Number.isInteger(pid) && pid > 0) {
+          if (process.platform === "win32") {
+            const stopped = spawnSync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
+            if (stopped.status !== 0) {
+              try { process.kill(pid, "SIGKILL"); }
+              catch (error) { if (error.code !== "ESRCH") throw error; }
+            }
+          } else {
+            try { process.kill(-pid, "SIGKILL"); }
+            catch (error) { if (error.code !== "ESRCH") throw error; }
+          }
+        }
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("acquire takes a free slot, writes its owner, and release frees it", async () => {
   const root = slotRoot();
   try {
@@ -98,6 +216,8 @@ test("acquire takes a free slot, writes its owner, and release frees it", async 
 
 test("release removes nothing when the slot no longer holds this claim", async () => {
   const root = slotRoot();
+  const events = ["exit", "SIGINT", "SIGTERM"];
+  const listenersBefore = events.map((event) => process.listeners(event));
   try {
     const slot = await acquireBuildSlot({ root, slots: 1, waitMs: 0 });
     // The slot was reclaimed out from under a suspended holder and
@@ -107,6 +227,7 @@ test("release removes nothing when the slot no longer holds this claim", async (
       JSON.stringify({ pid: 99999, start: "someone else" }),
     );
     slot.release();
+    assert.deepEqual(events.map((event) => process.listeners(event)), listenersBefore);
     assert.equal(
       existsSync(slot.dir),
       true,

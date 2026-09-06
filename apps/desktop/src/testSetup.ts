@@ -2,10 +2,10 @@ import { afterAll, afterEach } from "vitest";
 import {
   cleanupSuiteTestScratch,
   cleanupTestScratch,
-  sweepOldTestScratch,
+  prepareTestScratch,
 } from "./workspaces/testTemp";
 
-await sweepOldTestScratch();
+await prepareTestScratch();
 
 afterEach(async () => {
   await cleanupTestScratch();

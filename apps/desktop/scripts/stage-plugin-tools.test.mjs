@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import {
+  chmod,
   copyFile,
   mkdir,
   mkdtemp,
@@ -23,6 +24,7 @@ import {
   parseStagingTarget,
   stagePluginTools,
   stagePluginToolsFromArgv,
+  stagedEsbuildExecutable,
 } from "./stage-plugin-tools.mjs";
 
 const roots = [];
@@ -311,6 +313,32 @@ test("a staged tree that already matches the source is left in place", async () 
   assert.equal(second.pnpm.sha512, first.pnpm.sha512);
   assert.equal(second.esbuild.sha512, first.esbuild.sha512);
   assert.deepEqual(await siblingScratchDirectories(root), []);
+});
+
+test("POSIX esbuild permission loss restages identical bytes without changing the manifest digest", { skip: process.platform === "win32" }, async () => {
+  const root = await scratch();
+  const source = await createSources(root, { platformKeys: ["darwin-arm64"] });
+  for (const target of [{}, { platform: "darwin", arch: "arm64" }]) {
+    const platformPackage = esbuildPlatformPackageName(target.platform, target.arch);
+    const platformKey = platformPackage.slice("@esbuild/".length);
+    const destinationRoot = join(root, `staged-${platformKey}`);
+    const options = { desktopRoot: root, nodeModulesRoot: source.nodeModulesRoot, destinationRoot, ...target };
+    const first = await stagePluginTools(options);
+    const binary = join(destinationRoot, "esbuild", platformKey, "node_modules", platformPackage, "bin/esbuild");
+    assert.equal(stagedEsbuildExecutable(destinationRoot, platformPackage), true);
+    const before = await aggregateTreeSha512(destinationRoot);
+    await chmod(binary, 0o644);
+    assert.equal(await aggregateTreeSha512(destinationRoot), before);
+    assert.equal(stagedEsbuildExecutable(destinationRoot, platformPackage), false);
+
+    const second = await stagePluginTools(options);
+    assert.equal(second.swapped, true);
+    assert.equal(stagedEsbuildExecutable(destinationRoot, platformPackage), true);
+    assert.equal(await aggregateTreeSha512(destinationRoot), before);
+    assert.equal(second.esbuild.sha512, first.esbuild.sha512);
+    assert.equal(second.pnpm.sha512, first.pnpm.sha512);
+    assert.equal((await stat(join(source.nodeModulesRoot, platformPackage, "bin/esbuild"))).mode & 0o111, 0);
+  }
 });
 
 test("a tree an earlier run could not delete is deleted by the next run", async () => {
