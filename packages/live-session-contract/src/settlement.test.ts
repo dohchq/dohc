@@ -89,6 +89,33 @@ function proveExplicitFlushReasons(
 
 void proveExplicitFlushReasons;
 
+it.each([
+  [4_999, 800, "quiet"],
+  [400, 400, "hard-limit"],
+] as const)("settles after a backward clock jump with hard trigger %i", async (hardTriggerMs, dueAtMs, reason) => {
+  vi.useFakeTimers();
+  vi.setSystemTime(0);
+  try {
+    const settle = vi.fn();
+    const scheduler = createSettlementScheduler({
+      hardTriggerMs,
+      onEvent: () => undefined,
+      settle,
+    });
+    scheduler.markDirty(0);
+    vi.setSystemTime(-10_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(settle).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(5_000 + dueAtMs - 1);
+    expect(settle).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settle).toHaveBeenCalledExactlyOnceWith(reason);
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 it("resets only quiet time and serializes every dirty window", async () => {
   vi.useFakeTimers();
   vi.setSystemTime(0);

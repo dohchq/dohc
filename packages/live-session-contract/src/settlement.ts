@@ -157,7 +157,11 @@ export function createSettlementScheduler(
   function triggerElapsedWindow(window: DirtyWindow): void {
     if (window.status !== "open") return;
     const deadline = nextTimerDeadline(window);
-    if (deadline.dueAtMs > now()) return;
+    if (deadline.dueAtMs > now()) {
+      if (window.quietTimer === null) armQuietTimer(window);
+      if (window.hardTimer === null) armHardTimer(window);
+      return;
+    }
     triggerWindow(window, deadline.reason);
   }
 
