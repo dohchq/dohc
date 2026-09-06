@@ -1,8 +1,17 @@
 import * as THREE from "three";
+import { HDRLoader } from "three/addons/loaders/HDRLoader.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { createInlineSixEngine } from "./inline-six-model";
 
-export function mountEngine(host: HTMLElement) {
+export async function mountEngine(host: HTMLElement) {
+  let cancelled = false;
+  if (import.meta.hot) import.meta.hot.dispose(() => { cancelled = true; });
+  // Poly Haven Studio Small 09, CC0: https://polyhaven.com/a/studio_small_09
+  const studioTexture = await new HDRLoader().loadAsync("/engine-studio.hdr");
+  if (cancelled || !host.isConnected) {
+    studioTexture.dispose();
+    return;
+  }
   let renderer: THREE.WebGLRenderer;
   try {
     renderer = new THREE.WebGLRenderer({
@@ -11,6 +20,7 @@ export function mountEngine(host: HTMLElement) {
       powerPreference: "low-power",
     });
   } catch {
+    studioTexture.dispose();
     return;
   }
   const lifetime = new AbortController();
@@ -19,9 +29,9 @@ export function mountEngine(host: HTMLElement) {
   renderer.setClearColor(0, 0);
   renderer.outputColorSpace = THREE.SRGBColorSpace;
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.3;
+  renderer.toneMappingExposure = 1.0;
   renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.type = THREE.VSMShadowMap;
   host.append(renderer.domElement);
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(33, 1, 0.1, 60);
@@ -39,56 +49,29 @@ export function mountEngine(host: HTMLElement) {
   const box = new THREE.Box3().setFromObject(engine);
   const center = box.getCenter(new THREE.Vector3());
   const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+  const groundGeometry = new THREE.PlaneGeometry(30, 30);
+  const groundMaterial = new THREE.ShadowMaterial({ opacity: 0.12, depthWrite: false });
+  const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = box.min.y - 0.015;
+  ground.receiveShadow = true;
+  scene.add(ground);
   controls.target.copy(center);
-  const cameraDirection = new THREE.Vector3(9, 6.5, 8).normalize();
+  const cameraDirection = new THREE.Vector3(9, 5.1, 8).normalize();
   camera.position.copy(center).addScaledVector(cameraDirection, 14);
   controls.update();
-  // Softboxes create long metal reflections without a downloaded environment map.
-  const studio = new THREE.Scene();
-  const enclosure = new THREE.Mesh(
-    new THREE.BoxGeometry(30, 30, 30),
-    new THREE.MeshBasicMaterial({ color: 0x30343a, side: THREE.BackSide }),
-  );
-  studio.add(enclosure);
-  function softbox(
-    position: number[],
-    size: number[],
-    brightness: number,
-    color = 0xffffff,
-  ) {
-    const material = new THREE.MeshBasicMaterial({
-      color: new THREE.Color(color).multiplyScalar(brightness),
-      side: THREE.DoubleSide,
-    });
-    const panel = new THREE.Mesh(
-      new THREE.PlaneGeometry(size[0], size[1]),
-      material,
-    );
-    panel.position.set(position[0], position[1], position[2]);
-    panel.lookAt(0, 0, 0);
-    studio.add(panel);
-  }
-  softbox([-4, 7, 5], [5, 9], 4);
-  softbox([6, 4, -2], [2, 8], 3.5, 0xd6e5ff);
-  softbox([-5, 1, -6], [3, 7], 2.5);
-  softbox([2, 7, 1], [6, 2], 3);
-  softbox([1, -2, 7], [7, 2], 1.2, 0xffecd5);
   const pmrem = new THREE.PMREMGenerator(renderer);
-  const environment = pmrem.fromScene(studio, 0.04);
+  const environment = pmrem.fromEquirectangular(studioTexture);
+  studioTexture.dispose();
   scene.environment = environment.texture;
-  scene.environmentIntensity = 1.1;
+  scene.environmentIntensity = 0.7;
+  scene.environmentRotation.y = 0.75;
   pmrem.dispose();
-  studio.traverse((object) => {
-    if (object instanceof THREE.Mesh) {
-      object.geometry.dispose();
-      (object.material as THREE.Material).dispose();
-    }
-  });
-  scene.add(new THREE.HemisphereLight(0xe9efff, 0x8c8274, 0.85));
-  const key = new THREE.DirectionalLight(0xfff5e9, 3.2);
-  key.position.set(-3, 7, 5);
+  scene.add(new THREE.HemisphereLight(0xe9efff, 0x8c8274, 0.3));
+  const key = new THREE.DirectionalLight(0xfff5e9, 1.6);
+  key.position.set(-2, 10, 3);
   key.castShadow = true;
-  key.shadow.mapSize.set(2048, 2048);
+  key.shadow.mapSize.set(1024, 1024);
   Object.assign(key.shadow.camera, {
     left: -5,
     right: 5,
@@ -100,8 +83,10 @@ export function mountEngine(host: HTMLElement) {
   key.shadow.camera.updateProjectionMatrix();
   key.shadow.normalBias = 0.025;
   key.shadow.bias = -0.0001;
+  key.shadow.radius = 8;
+  key.shadow.blurSamples = 12;
   scene.add(key);
-  const fill = new THREE.DirectionalLight(0xdbe6ff, 1.3);
+  const fill = new THREE.DirectionalLight(0xdbe6ff, 0.65);
   fill.position.set(5, 2, -3);
   scene.add(fill);
   renderer.shadowMap.autoUpdate = false;
@@ -238,6 +223,8 @@ export function mountEngine(host: HTMLElement) {
     intersection.disconnect();
     controls.dispose();
     disposeModel();
+    groundGeometry.dispose();
+    groundMaterial.dispose();
     environment.dispose();
     renderer.dispose();
     renderer.domElement.remove();

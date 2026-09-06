@@ -29,9 +29,9 @@ export function createInlineSixEngine() {
     bumpScale: 0.013,
   });
   const cast = new THREE.MeshStandardMaterial({
-    color: 0x3c4246,
-    metalness: 0.78,
-    roughness: 0.48,
+    color: 0x252a28,
+    metalness: 0.18,
+    roughness: 0.46,
     bumpMap: grain,
     bumpScale: 0.024,
   });
@@ -96,11 +96,11 @@ export function createInlineSixEngine() {
   brushed.repeat.set(1, 3);
   textures.push(brushed);
   const polishedAlloy = new THREE.MeshStandardMaterial({
-    color: 0xcbd0d2, metalness: 0.96, roughness: 0.34,
+    color: 0xcbd0d2, metalness: 0.96, roughness: 0.28,
     roughnessMap: brushed, bumpMap: brushed, bumpScale: 0.0015,
   });
   const castAlloy = new THREE.MeshStandardMaterial({
-    color: 0x90928f, metalness: 0.72, roughness: 0.54,
+    color: 0xa9aaa5, metalness: 0.86, roughness: 0.46,
     bumpMap: grain, bumpScale: 0.018,
   });
   const porcelain = new THREE.MeshStandardMaterial({
@@ -257,37 +257,12 @@ export function createInlineSixEngine() {
     }
   }
 
-  // Open cam troughs, direct-acting tappets, bearing caps and six lobes per shaft.
   for (const side of [-1, 1]) {
-    const x = side * 0.51;
-    box([0.63, 0.065, 5.25], [x, 0.94, 0], graphite);
-    for (const edge of [-1, 1]) {
-      box([0.055, 0.22, 5.28], [x + edge * 0.315, 1.045, 0], metal, engine, 0.018);
-      box([0.07, 0.025, 5.32], [x + edge * 0.315, 1.16, 0], chrome, engine, 0.009);
-    }
-    for (const z of [-2.65, 2.65]) box([0.67, 0.22, 0.055], [x, 1.045, z], metal);
-    cylinder(0.066, 5.3, [x, 1.28, 0], steel);
-    stations.forEach((z, i) => {
-      cylinder(0.125, 0.1, [x, 1.035, z], chrome, engine, 'y', 24);
-      const lobeShape = new THREE.Shape();
-      lobeShape.moveTo(-0.105, 0);
-      lobeShape.bezierCurveTo(-0.115, -0.145, 0.115, -0.145, 0.105, 0);
-      lobeShape.bezierCurveTo(0.1, 0.09, 0.052, 0.2, 0, 0.2);
-      lobeShape.bezierCurveTo(-0.052, 0.2, -0.1, 0.09, -0.105, 0);
-      const lobe = part(new THREE.ExtrudeGeometry(lobeShape, {
-        depth: 0.13, bevelEnabled: true, bevelSize: 0.009,
-        bevelThickness: 0.009, bevelSegments: 2, curveSegments: 12,
-      }), chrome, engine, [x, 1.28, z - 0.065]);
-      lobe.rotation.z = [0, 2.1, 4.2, 4.2, 2.1, 0][i] + side * 0.7;
-    });
-    for (const z of [-2.48, -0.84, 0.84, 2.48]) {
-      box([0.4, 0.13, 0.17], [x, 1.35, z], metal, engine, 0.035);
-      for (const dx of [-0.15, 0.15]) fastener([x + dx, 1.425, z], engine, 'y', 0.028);
-    }
+    box([0.73, 0.15, 5.4], [side * 0.51, 0.945, 0], castAlloy, engine, 0.045);
+    box([0.75, 0.024, 5.44], [side * 0.51, 1.025, 0], seal, engine, 0.015);
   }
-
-  // Domed, hollow aluminum shells. One floats above its shaft; the other is cut away at the front.
-  function camCover(x: number, y: number, length: number, z: number, cutaway = false) {
+  // Sealed cam housings sit on machined gasket rails above the DOHC head.
+  function camCover(x: number, y: number, length: number, z: number) {
     const shell = new THREE.Shape();
     shell.moveTo(-0.35, 0);
     shell.lineTo(-0.35, 0.12);
@@ -323,8 +298,7 @@ export function createInlineSixEngine() {
     endProfile.bezierCurveTo(-0.35, 0.44, 0.35, 0.44, 0.35, 0.12);
     endProfile.lineTo(0.35, 0);
     endProfile.closePath();
-    // Keep the seated cover's cut face open so its wall thickness remains visible.
-    for (const end of cutaway ? [-1] : [-1, 1]) {
+    for (const end of [-1, 1]) {
       part(new THREE.ExtrudeGeometry(endProfile, {
         depth: 0.035, bevelEnabled: true, bevelSize: 0.012,
         bevelThickness: 0.012, bevelSegments: 3, curveSegments: 24,
@@ -340,12 +314,12 @@ export function createInlineSixEngine() {
       box([0.018, 0.018, length - 0.12], [dx, 0.343, 0], metal, cover, 0.006);
     return cover;
   }
-  const liftedCover = camCover(0.51, 2.02, 5.27, 0);
-  camCover(-0.51, 1.18, 3.22, -1.025, true);
-  cylinder(0.17, 0.07, [0, 0.42, -1.95], chrome, liftedCover, 'y');
-  box([0.23, 0.045, 0.06], [0, 0.48, -1.95], steel, liftedCover, 0.012);
+  const intakeCover = camCover(0.51, 1.02, 5.38, 0);
+  camCover(-0.51, 1.02, 5.38, 0);
+  cylinder(0.17, 0.07, [0, 0.42, -1.95], chrome, intakeCover, 'y');
+  box([0.23, 0.045, 0.06], [0, 0.48, -1.95], steel, intakeCover, 0.012);
   // Fine red enamel inset, shared with the small ignition details.
-  box([0.23, 0.012, 0.72], [0, 0.362, 0.1], red, liftedCover, 0.025);
+  box([0.23, 0.012, 0.72], [0, 0.362, 0.1], red, intakeCover, 0.025);
   const badgeCanvas = document.createElement('canvas');
   badgeCanvas.width = 512; badgeCanvas.height = 128;
   const badgeContext = badgeCanvas.getContext('2d')!;
@@ -359,7 +333,7 @@ export function createInlineSixEngine() {
   const badgeMaterial = new THREE.MeshStandardMaterial({
     map: badgeTexture, transparent: true, depthWrite: false, metalness: 0.45, roughness: 0.3,
   });
-  const badge = part(new THREE.PlaneGeometry(0.61, 0.155), badgeMaterial, liftedCover, [0, 0.371, 0.1]);
+  const badge = part(new THREE.PlaneGeometry(0.61, 0.155), badgeMaterial, intakeCover, [0, 0.371, 0.1]);
   badge.rotation.set(-Math.PI / 2, 0, Math.PI / 2);
 
   // Central spark plugs and six leads follow the valley between the cam housings.
@@ -437,41 +411,30 @@ export function createInlineSixEngine() {
     cylinder(0.205, 0.01, [-1.64, -1.6, z], black, engine, 'y');
   }
 
-  // Front timing chest. A small open upper section shows both cam sprockets and the chain.
+  // A sealed timing chest connects the crankcase to both cam housings.
   plate([[-0.74, -1.04], [0.74, -1.04], [0.73, 0.94], [0.54, 1.07],
     [-0.54, 1.07], [-0.73, 0.94]], 0.16, [0, 0, 2.69], castAlloy);
   for (const x of [-0.66, 0.66])
     for (const y of [-0.85, -0.3, 0.3, 0.85]) fastener([x, y, 2.89], engine, 'z', 0.044);
-  function sprocket(x: number, y: number, r: number) {
-    cylinder(r, 0.065, [x, y, 2.72], steel);
-    ring(r - 0.045, 0.016, [x, y, 2.76], chrome);
-    fastener([x, y, 2.77], engine, 'z', 0.06);
-    for (let i = 0; i < 24; i++) {
-      const a = i * Math.PI / 12;
-      const tooth = box([0.034, 0.036, 0.07], [x + Math.cos(a) * r, y + Math.sin(a) * r, 2.72], metal, engine, 0.005);
-      tooth.rotation.z = a;
-    }
-    for (let i = 0; i < 6; i++) {
-      const a = i * Math.PI / 3;
-      cylinder(r * 0.14, 0.003, [x + Math.cos(a) * r * 0.58, y + Math.sin(a) * r * 0.58, 2.757], black);
-    }
+  const timingOutline = new THREE.Shape();
+  timingOutline.moveTo(-0.74, 0.18);
+  timingOutline.lineTo(-0.86, 1.12);
+  timingOutline.bezierCurveTo(-0.89, 1.5, -0.2, 1.54, -0.15, 1.22);
+  timingOutline.lineTo(0.15, 1.22);
+  timingOutline.bezierCurveTo(0.2, 1.54, 0.89, 1.5, 0.86, 1.12);
+  timingOutline.lineTo(0.74, 0.18);
+  timingOutline.closePath();
+  part(new THREE.ExtrudeGeometry(timingOutline, {
+    depth: 0.16, bevelEnabled: true, bevelSize: 0.035,
+    bevelThickness: 0.035, bevelSegments: 3, curveSegments: 24,
+  }), castAlloy, engine, [0, 0, 2.69]);
+  for (const side of [-1, 1]) {
+    cylinder(0.21, 0.032, [side * 0.51, 1.14, 2.895], metal);
+    ring(0.185, 0.009, [side * 0.51, 1.14, 2.916], steel);
+    for (const dy of [-0.12, 0.12])
+      fastener([side * 0.51, 1.14 + dy, 2.924], engine, 'z', 0.03);
+    for (const y of [0.56, 0.94]) fastener([side * 0.77, y, 2.895], engine, 'z', 0.035);
   }
-  sprocket(-0.51, 1.28, 0.265);
-  sprocket(0.51, 1.28, 0.265);
-  const chain = new THREE.CatmullRomCurve3([
-    new THREE.Vector3(-0.76, 1.26, 2.72), new THREE.Vector3(-0.66, 1.51, 2.72),
-    new THREE.Vector3(0, 1.55, 2.72), new THREE.Vector3(0.66, 1.51, 2.72),
-    new THREE.Vector3(0.76, 1.26, 2.72), new THREE.Vector3(0.22, 0.53, 2.72),
-    new THREE.Vector3(0, 0.4, 2.72), new THREE.Vector3(-0.22, 0.53, 2.72),
-  ], true, 'centripetal');
-  for (let i = 0; i < 82; i++) {
-    const p = chain.getPointAt(i / 82);
-    const tangent = chain.getTangentAt(i / 82);
-    const link = box([0.045, 0.071, 0.075], p.toArray(), i % 2 ? steel : chrome, engine, 0.012);
-    link.rotation.z = -Math.atan2(tangent.x, tangent.y);
-    cylinder(0.015, 0.09, p.toArray(), steel, engine, 'z', 12);
-  }
-
   // Water pump, crank pulley and period generator with a single accessory belt.
   function pulley(x: number, y: number, radius: number) {
     cylinder(radius, 0.16, [x, y, 3.06], graphite);
@@ -496,17 +459,35 @@ export function createInlineSixEngine() {
     }
   }
   box([0.72, 0.12, 0.15], [0.84, -0.83, 2.65], steel);
-  const beltPath = new THREE.Shape();
-  beltPath.moveTo(-0.44, -0.73);
-  beltPath.lineTo(-0.34, 0.25);
-  beltPath.quadraticCurveTo(-0.27, 0.72, 0.2, 0.52);
-  beltPath.lineTo(1.28, -0.29);
-  beltPath.quadraticCurveTo(1.5, -0.61, 1.16, -0.72);
-  beltPath.lineTo(0.12, -1.15);
-  beltPath.quadraticCurveTo(-0.4, -1.32, -0.44, -0.73);
-  const beltPoints = beltPath.getPoints(110);
-  for (const z of [3.035, 3.07, 3.105])
-    tube(beltPoints.map(p => [p.x, p.y, z]), 0.024, rubber, engine, 150);
+  // External tangents and pulley arcs form a continuous belt seated on all three pulleys.
+  const pulleys = [
+    { x: 0, y: -0.73, radius: 0.44 },
+    { x: 1.13, y: -0.48, radius: 0.24 },
+    { x: 0, y: 0.25, radius: 0.34 },
+  ];
+  const tangentAngles = pulleys.map((pulley, i) => {
+    const next = pulleys[(i + 1) % pulleys.length];
+    const dx = next.x - pulley.x, dy = next.y - pulley.y;
+    const distance = Math.hypot(dx, dy);
+    return Math.atan2(dy, dx) - Math.acos((pulley.radius - next.radius) / distance);
+  });
+  function beltOutline(thickness: number) {
+    const path = new THREE.Shape();
+    pulleys.forEach((pulley, i) => {
+      const start = tangentAngles[(i + pulleys.length - 1) % pulleys.length];
+      let end = tangentAngles[i];
+      while (end < start) end += Math.PI * 2;
+      path.absarc(pulley.x, pulley.y, pulley.radius + thickness, start, end, false);
+    });
+    path.closePath();
+    return path;
+  }
+  const beltShape = beltOutline(0.036);
+  beltShape.holes.push(beltOutline(0));
+  part(new THREE.ExtrudeGeometry(beltShape, {
+    depth: 0.095, bevelEnabled: true, bevelSize: 0.003,
+    bevelThickness: 0.003, bevelSegments: 1, curveSegments: 20,
+  }), rubber, engine, [0, 0, 3.0125]);
   tube([[0, 0.49, 2.89], [0.2, 0.78, 3.02], [0.63, 0.9, 2.95]], 0.1, metal);
   ring(0.112, 0.02, [0.63, 0.9, 2.95], steel, engine, 'x');
 
@@ -659,7 +640,7 @@ export function createInlineSixEngine() {
   tube([[1.03, 0.13, 1.3], [1.18, 0.35, 1.53], [1.18, 0.53, 2.06], [0.98, 0.48, 2.4]], 0.027, rubber, engine, 30);
   for (const z of [-1.65, 0.03, 1.71]) {
     box([0.27, 0.037, 0.065], [0, 1.46, z], graphite, engine, 0.012);
-    for (const x of [-0.12, 0.12]) cylinder(0.018, 0.11, [x, 1.42, z], metal, engine, 'y', 12);
+    for (const x of [-0.12, 0.12]) cylinder(0.018, 0.56, [x, 1.18, z], metal, engine, 'y', 12);
   }
 
   // Machined joints, weld seams and cast ribs around the accessory and rear housings.
