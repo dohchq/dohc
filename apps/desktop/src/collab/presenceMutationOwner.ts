@@ -22,13 +22,13 @@ interface RetiredPresenceLeave {
   draining: Promise<void> | undefined;
 }
 
-export interface PresenceMutationOwnerOptions {
+interface PresenceMutationOwnerOptions {
   tombstoneTtlMs?: number;
   scheduleExpiry?: (callback: () => void, delayMs: number) => unknown;
   cancelExpiry?: (handle: unknown) => void;
 }
 
-export interface PresencePublishOperations<Snapshot> {
+interface PresencePublishOperations<Snapshot> {
   resolve(): Promise<{
     publish(): Promise<Snapshot>;
     leave(): Promise<void>;

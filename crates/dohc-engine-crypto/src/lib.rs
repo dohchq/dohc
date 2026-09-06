@@ -1,10 +1,10 @@
 //! dohc engine crypto: secret-file crypto for the workspace engine.
 //!
 //! The security-critical core for secret-backed files: AES-256-GCM AEAD with
-//! byte-exact parity with the frozen TypeScript oracle recorded before the
-//! legacy engine package was deleted, the scrypt-wrapped workspace data-key envelope, and
-//! the redaction-safe [`SecretPlaintext`] / [`SecretDataKey`] types that make
-//! cleartext impossible to log or serialize by accident.
+//! byte-exact parity with the TypeScript oracle, and the redaction-safe
+//! [`SecretPlaintext`] / [`SecretDataKey`] types that make cleartext impossible
+//! to log or serialize by accident. The passphrase-wrapped data-key envelope is
+//! TypeScript-only (`secretKeyEnvelope.ts`); the engine transports it opaquely.
 //!
 //! Invariants this crate upholds (`plan §Product invariants`):
 //! - **Plaintext never leaks.** The only cleartext carrier is
@@ -27,7 +27,6 @@
 
 pub mod aead;
 pub mod base64;
-pub mod envelope;
 pub mod error;
 pub mod key;
 pub mod secret;

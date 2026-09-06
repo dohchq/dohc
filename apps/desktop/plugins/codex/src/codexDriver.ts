@@ -27,7 +27,7 @@ export const PROBE_TIMEOUT_MS = 3000;
 /** What a failed probe reports back, cut to what the driver list shows. */
 const MAX_PROBE_ERROR_CHARS = 300;
 
-export interface CodexCommandSpec {
+interface CodexCommandSpec {
   command: string;
   args: string[];
 }

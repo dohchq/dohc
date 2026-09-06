@@ -28,7 +28,7 @@ export class LineReader {
   }
 }
 
-export interface ClaudeStreamOptions {
+interface ClaudeStreamOptions {
   onMessage(message: unknown): void;
   onStderr?(line: string): void;
   onExit?(): void;

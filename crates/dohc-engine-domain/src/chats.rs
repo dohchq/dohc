@@ -38,6 +38,7 @@
 //! outbox, and the single-writer dispatch ledger.
 
 use crate::error::DomainError;
+use crate::store::hash_fields;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
@@ -9147,23 +9148,6 @@ fn record_request(
         .map_err(DomainError::sql_persist)?;
     }
     Ok(())
-}
-
-/// Deterministic fingerprint over NUL-separated fields (idempotency payloads),
-/// matching the versioning domain's `hash_fields`.
-fn hash_fields(fields: &[&[u8]]) -> String {
-    let mut hasher = Sha256::new();
-    for field in fields {
-        hasher.update(field);
-        hasher.update([0u8]);
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
 }
 
 fn mention_backfill_marker_id(workspace_id: &str) -> String {

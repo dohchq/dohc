@@ -26,7 +26,6 @@ import {
   EngineRelayClient,
   INSECURE_LOOPBACK_RELAY_TEST_ENV,
   MixedRelayTransportError,
-  probeWorkspaceRelay,
   RelayConfiguredDaemonClientSource,
   RelayTransportRouteGuard,
 } from "./engineRelayClient";
@@ -1364,7 +1363,7 @@ describe("EngineRelayClient", () => {
       refusedDetail: null,
     });
 
-    expect(routes.modeFor(target.workspaceId)).toBe("daemon");
+    expect(routes.isBound(target.workspaceId)).toBe(true);
     const ownerOpenIndex = daemon.requests.findIndex(
       (request) =>
         request.method === "workspace.open" &&
@@ -1480,10 +1479,7 @@ describe("EngineRelayClient", () => {
   it("binds a marker-less rooted workspace to the daemon before session preparation", async () => {
     const { daemon, routes, sessions } = await harness();
 
-    expect(
-      routes.modeFor("workspace-a"),
-      "a rooted workspace must never bind the legacy TypeScript relay",
-    ).toBe("daemon");
+    expect(routes.isBound("workspace-a")).toBe(true);
     expect(
       daemon.requests,
       "bind must not require workspace preparation or workspace.open",
@@ -1519,10 +1515,10 @@ describe("EngineRelayClient", () => {
 
     await client.bootstrapJoinIdentity(null);
 
-    expect(routes.modeFor("workspace-a")).toBe("daemon");
+    expect(routes.isBound("workspace-a")).toBe(true);
     await expect(client.push()).resolves.toMatchObject({ pushed: 3 });
     await live.closeAll();
-    expect(routes.modeFor("workspace-a")).toBeNull();
+    expect(routes.isBound("workspace-a")).toBe(false);
   });
 
   it("orders bootstrap retirement after requests already queued by initialization", async () => {
@@ -1583,7 +1579,7 @@ describe("EngineRelayClient", () => {
     await exact.push();
     await live.closeWorkspace(workspace);
 
-    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    expect(routes.isBound(workspace.workspaceId)).toBe(false);
     closeWorkspace.mockClear();
     await live.closeAll();
     expect(closeWorkspace).not.toHaveBeenCalled();
@@ -1608,7 +1604,7 @@ describe("EngineRelayClient", () => {
 
     await expect(exact.push()).rejects.toThrow("injected push failure");
     await live.closeWorkspace(workspace);
-    expect(routes.modeFor(workspace.workspaceId)).toBeNull();
+    expect(routes.isBound(workspace.workspaceId)).toBe(false);
   });
 
   it("rebinds the attachment-keyed session before and after a transport restart", async () => {
@@ -1695,7 +1691,7 @@ describe("EngineRelayClient", () => {
     // A delayed predecessor cleanup must not release the successor's route or
     // close its attachment-keyed session.
     await live.closeWorkspace(firstWorkspace);
-    expect(routes.modeFor(firstWorkspace.workspaceId)).toBe("daemon");
+    expect(routes.isBound(firstWorkspace.workspaceId)).toBe(true);
     await second.push();
     expect(opens).toBe(2);
     expect(
@@ -1705,7 +1701,7 @@ describe("EngineRelayClient", () => {
     ).toEqual(["ws-1"]);
 
     await live.closeWorkspace(secondWorkspace);
-    expect(routes.modeFor(firstWorkspace.workspaceId)).toBeNull();
+    expect(routes.isBound(firstWorkspace.workspaceId)).toBe(false);
     expect(
       daemon.requests
         .filter((request) => request.method === "workspace.close")
@@ -1844,8 +1840,8 @@ describe("EngineRelayClient", () => {
         .map((request) => request.workspace)
         .sort(),
     ).toEqual(["ws-close-all-1", "ws-close-all-2"]);
-    expect(routes.modeFor(firstWorkspaceId)).toBeNull();
-    expect(routes.modeFor(secondWorkspaceId)).toBeNull();
+    expect(routes.isBound(firstWorkspaceId)).toBe(false);
+    expect(routes.isBound(secondWorkspaceId)).toBe(false);
     await sessions.closeAll();
   });
 
@@ -1876,64 +1872,6 @@ describe("EngineRelayClient", () => {
       bearerToken: relay.token,
     });
     await live.closeWorkspace(successor);
-    await sessions.closeAll();
-  });
-
-  it("allows a rooted daemon bind after a rootless probe route is released", async () => {
-    const rootPath = await createTestScratch("dohc-relay-probe-route-");
-    roots.push(rootPath);
-    const routes = new RelayTransportRouteGuard();
-    let finishProbe!: (response: globalThis.Response) => void;
-    const pendingProbe = new Promise<globalThis.Response>((resolve) => {
-      finishProbe = resolve;
-    });
-    const relay = {
-      baseUrl: "https://relay.test",
-      token: "secret-token",
-      fetch: async () => await pendingProbe,
-    };
-    const probe = probeWorkspaceRelay(routes, {
-      workspaceId: "workspace-probed",
-      relay,
-    });
-
-    expect(routes.modeFor("workspace-probed")).toBe("typescript");
-    routes.releaseWorkspace("workspace-probed", "typescript");
-
-    const daemon = new MockDaemon();
-    const sessions = new EngineWorkspaceSessions(
-      new RelayConfiguredDaemonClientSource(
-        { currentClient: () => daemon },
-        routes,
-      ),
-      { transportRebindAttempts: 1 },
-    );
-    const live = new EngineRelayClient({ sessions, routes });
-    live.bind({
-      workspaceId: "workspace-probed",
-      rootPath,
-      relay,
-    });
-    expect(routes.modeFor("workspace-probed")).toBe("daemon");
-    finishProbe(
-      globalThis.Response.json({
-        ok: true,
-        hasContent: true,
-        replicationEpoch: "epoch-probed",
-        streamIdentity: "stream-probed",
-      }),
-    );
-    await expect(probe).resolves.toEqual({
-      hasContent: true,
-      identity: {
-        replicationEpoch: "epoch-probed",
-        streamIdentity: "stream-probed",
-      },
-    });
-    expect(
-      routes.modeFor("workspace-probed"),
-      "a late probe cleanup must not release a newer daemon route",
-    ).toBe("daemon");
     await sessions.closeAll();
   });
 
@@ -2166,7 +2104,7 @@ describe("EngineRelayClient", () => {
     ).toThrow(MixedRelayTransportError);
 
     await live.closeWorkspace("workspace-switch");
-    expect(routes.modeFor("workspace-switch")).toBeNull();
+    expect(routes.isBound("workspace-switch")).toBe(false);
     const switched = live.bind({
       workspaceId: "workspace-switch",
       rootPath,
@@ -2201,28 +2139,18 @@ describe("EngineRelayClient", () => {
       workspaceId: "workspace-locked",
       rootPath,
       relay,
-      mode: "daemon",
     });
 
     // Mutating the caller-owned object cannot mutate the copied route.
     relay.baseUrl = "https://relay-b.test";
     relay.token = "token-b";
-    expect(routes.modeFor("workspace-locked")).toBe("daemon");
+    expect(routes.isBound("workspace-locked")).toBe(true);
     expect(() =>
       routes.bind({
         workspaceId: "workspace-locked",
         rootPath,
         relay,
-        mode: "typescript",
-      }),
-    ).toThrow(MixedRelayTransportError);
-    expect(() =>
-      routes.bind({
-        workspaceId: "workspace-locked",
-        rootPath,
-        relay,
-        mode: "daemon",
-      }),
+        }),
     ).toThrow("different relay origin");
   });
 });

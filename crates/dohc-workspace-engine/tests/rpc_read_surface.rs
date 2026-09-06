@@ -234,7 +234,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             "path": "rpc/written.md",
             "text": "written via rpc",
             "momentId": "rpc-moment-1",
-            "metadataOrigin": "api",
+            "origin": "api",
             "nowMs": 5
         }),
     )
@@ -632,7 +632,7 @@ async fn the_read_surface_reflects_rpc_writes_and_autonomous_capture() {
             "path": "fresh.md",
             "text": "fresh",
             "momentId": "fresh-moment",
-            "metadataOrigin": "api",
+            "origin": "api",
             "nowMs": 7
         }),
     )

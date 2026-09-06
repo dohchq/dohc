@@ -2,8 +2,8 @@
 //!
 //! Every message is a constant string — it never embeds plaintext, key
 //! material, IVs, tags, or ciphertext. The `code()` accessor returns the exact
-//! kebab-case strings the TS engine surfaces (`decrypt-failed`, `key-corrupt`,
-//! `unwrap-failed`) so the ported store keeps error-code parity.
+//! kebab-case strings the TS engine surfaces (`decrypt-failed`, `key-corrupt`)
+//! so the ported store keeps error-code parity.
 
 use thiserror::Error;
 
@@ -50,12 +50,6 @@ pub enum CryptoError {
     /// path where TS applies the same strict guard.
     #[error("a base64 field is invalid")]
     InvalidBase64,
-
-    /// The key envelope JSON was malformed or carried unexpected parameters.
-    /// Normalized so nothing distinguishable about *why* it failed escapes —
-    /// the TS envelope collapses every failure to one shape. Code `unwrap-failed`.
-    #[error("workspace secret key envelope could not be unwrapped")]
-    EnvelopeUnwrapFailed,
 }
 
 impl CryptoError {
@@ -69,7 +63,6 @@ impl CryptoError {
             CryptoError::InvalidTagLength => "invalid-tag",
             CryptoError::PlaintextTooLarge | CryptoError::PlaintextNotUtf8 => "invalid-text",
             CryptoError::InvalidBase64 => "invalid-input",
-            CryptoError::EnvelopeUnwrapFailed => "unwrap-failed",
         }
     }
 }

@@ -65,9 +65,7 @@ export type AgentAuthor = JsonObject & {
 type MutationMetadata = JsonObject & {
   workspaceId?: string;
   origin?: VersionedOrigin;
-  metadataOrigin?: VersionedOrigin | "agent";
   author?: AgentAuthor;
-  authorJson?: string;
   requestId?: string;
   nowMs?: number;
   summary?: string;

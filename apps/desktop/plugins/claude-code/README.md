@@ -92,14 +92,6 @@ Two environment variables, read once when the plugin activates:
   dohc's handshake before the session gives up. The default is 20000, against
   a measured answer of about one second.
 
-## The ACP driver dohc still ships
-
-Core's `claude-acp` driver spawns `claude-code-acp`, the ACP **adapter** — a
-separate package, and one that is absent on machines where Claude Code itself
-works. This plugin drives the `claude` CLI directly and takes an id of its own,
-so the two stand side by side. Whether the adapter path stays in core is a
-separate decision.
-
 ## Its own chat
 
 The plugin also serves a singleton web app (`chat`): a dedicated Claude Code

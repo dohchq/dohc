@@ -5240,7 +5240,7 @@ const AgentSessionSnapshotSchema = z.object({
 });
 
 export const AgentPanelSnapshotResult = z.object({
-  // dohc's own drivers plus this workspace's plugin drivers. The registry
+  // This workspace's plugin drivers. The registry
   // refuses a plugin driver past MAX_WORKSPACE_PLUGIN_DRIVERS, which keeps the
   // merged list inside this bound instead of failing the whole list here.
   drivers: z.array(AgentDriverProbeSchema).max(20),

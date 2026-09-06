@@ -19,12 +19,12 @@ use crate::conflicts::{
 };
 use crate::error::DomainError;
 use crate::records::{
-    BinaryBlobRead, BinaryHead, BinaryHeadMeta, BinaryWriteResult, CaptureIngest,
-    CaptureIngestBinary, CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult,
-    CreateNamedVersion, DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandText,
-    ListMomentsQuery, MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile,
-    RollbackTextFileMutation, SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView,
-    TextBlobRead, TextSnapshot, VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
+    BinaryBlobRead, BinaryHead, BinaryWriteResult, CaptureIngest, CaptureIngestBinary,
+    CaptureIngestBinaryResult, CaptureRetire, CaptureRetireResult, CreateNamedVersion,
+    DeleteResult, DeleteTextFile, FileObjectRecord, InbandBinary, InbandText, ListMomentsQuery,
+    MomentOp, MomentPage, MomentRecord, RenameResult, RenameTextFile, RollbackTextFileMutation,
+    SnapshotContent, SnapshotMetadata, SnapshotRecord, SnapshotView, TextBlobRead, TextSnapshot,
+    VersionKind, VersionRecord, WriteBinary, WriteResult, WriteText,
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, MaterializationJobSpec, Preimage,
@@ -1180,70 +1180,6 @@ impl<'a> VersionedTextStore<'a> {
             Ok(Some(TextBlobRead {
                 byte_length,
                 text: Some(text),
-            }))
-        })
-    }
-
-    /// The binary head's METADATA — object id, sha, and the blob's byte
-    /// length sized in SQL — without materializing a single content byte.
-    /// The over-cap in-band answer needs exactly this, and loading a large
-    /// blob just to discard it is a needless copy per request.
-    ///
-    /// DELIBERATELY NOT RE-HASHED: the sha IS the content address the blob
-    /// was stored and verified under at write; re-hashing here would load
-    /// the bytes and resurrect the hydration cost this read exists to
-    /// avoid. Metadata reads report the recorded content address; every
-    /// byte-SERVING path re-verifies before handing bytes out.
-    pub fn read_binary_meta(
-        &self,
-        workspace_id: &str,
-        version_id: &str,
-        path: &str,
-    ) -> Result<Option<BinaryHeadMeta>, DomainError> {
-        let path = validate_addressable_plaintext_path(path)?;
-        self.store.read_with(|conn| {
-            if !version_exists(conn, workspace_id, version_id)? {
-                return Err(DomainError::VersionNotFound);
-            }
-            let Some(object_id) = alias_object_id(conn, workspace_id, version_id, &path)? else {
-                return Ok(None);
-            };
-            let Some(snapshot) = get_snapshot(conn, workspace_id, version_id, &object_id)? else {
-                return Ok(None);
-            };
-            if snapshot.content_kind != "binary" {
-                return Err(DomainError::TextHeadNotBinary);
-            }
-            let sha256 = snapshot.binary_sha256.ok_or(DomainError::StateCorrupt {
-                reason: "binary head without a binary sha",
-            })?;
-            // Fail closed like get_binary_blob does: the recorded length
-            // must match the stored bytes, and the row must exist — for an
-            // over-cap read this is the only storage access that runs, so
-            // it carries the integrity check itself.
-            let lengths: Option<(i64, i64)> = conn
-                .query_row(
-                    "SELECT byte_length, LENGTH(bytes) FROM binary_blobs WHERE sha256 = ?1",
-                    [&sha256],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-                .map_err(DomainError::sql_corrupt)?;
-            let Some((recorded, actual)) = lengths else {
-                return Err(DomainError::StateCorrupt {
-                    reason: "binary head references a missing blob",
-                });
-            };
-            if recorded != actual {
-                return Err(DomainError::StateCorrupt {
-                    reason: "binary blob length does not match its bytes",
-                });
-            }
-            let byte_length = recorded;
-            Ok(Some(BinaryHeadMeta {
-                object_id,
-                sha256,
-                byte_length,
             }))
         })
     }
@@ -3183,20 +3119,7 @@ pub fn capture_manifest_seed(
                          AND (substr(j.job_id, 1, length(?3)) = ?3 \
                               OR substr(j.job_id, \
                                     length('binary-rename-0-write-mat_') + 1, \
-                                    length(?3)) = ?3 \
-                              OR ((j.job_id GLOB 'rollback-restore_*' \
-                                   OR j.job_id GLOB \
-                                      'binary-rename-0-write-mat_rollback-restore_*') \
-                                  AND instr(j.job_id, char(31)) = 0 \
-                                  AND NOT EXISTS ( \
-                                      SELECT 1 FROM moments rollback_spoof \
-                                      WHERE rollback_spoof.moment_id = CASE \
-                                            WHEN j.job_id GLOB \
-                                                'binary-rename-0-write-mat_*' \
-                                            THEN substr(j.job_id, \
-                                                length( \
-                                                    'binary-rename-0-write-mat_') + 1) \
-                                            ELSE j.job_id END)))) \
+                                    length(?3)) = ?3)) \
                  UNION ALL \
                  SELECT j.target_path, 'binary', NULL, NULL, \
                         j.content_sha256, bb.byte_length \
@@ -3207,33 +3130,7 @@ pub fn capture_manifest_seed(
                      AND (substr(j.job_id, 1, length(?3)) = ?3 \
                          OR substr(j.job_id, \
                                length('binary-rename-1-delete-mat_') + 1, \
-                               length(?3)) = ?3 \
-                         OR (j.job_id GLOB \
-                                'binary-rename-1-delete-mat_rollback-restore_*' \
-                             AND instr(j.job_id, char(31)) = 0 \
-                             AND EXISTS ( \
-                                 SELECT 1 \
-                                 FROM materialization_jobs restore \
-                                 JOIN path_aliases restore_alias \
-                                   ON restore_alias.workspace_id = ?1 \
-                                  AND restore_alias.version_id = ?2 \
-                                  AND restore_alias.path = restore.target_path \
-                                 JOIN snapshots restore_snapshot \
-                                   ON restore_snapshot.workspace_id = restore_alias.workspace_id \
-                                  AND restore_snapshot.version_id = restore_alias.version_id \
-                                  AND restore_snapshot.object_id = restore_alias.object_id \
-                                  WHERE restore.job_id = \
-                                      'binary-rename-0-write-mat_' || \
-                                     substr(j.job_id, \
-                                         length('binary-rename-1-delete-mat_') + 1) \
-                                    AND restore.operation = 'write' \
-                                    AND (restore.workspace_id = ?1 \
-                                         OR restore.workspace_id = '') \
-                                    AND restore.content_sha256 = j.content_sha256 \
-                                   AND CASE COALESCE(restore_snapshot.content_kind, 'text') \
-                                       WHEN 'binary' THEN restore_snapshot.binary_sha256 \
-                                       ELSE restore_snapshot.blob_sha256 END = \
-                                       restore.content_sha256))) \
+                               length(?3)) = ?3) \
                     AND NOT EXISTS ( \
                         SELECT 1 FROM path_aliases a \
                         WHERE a.workspace_id = ?1 AND a.version_id = ?2 \
@@ -5068,7 +4965,7 @@ pub fn rollback_compensating_moment_id(
 }
 
 /// Recover the workspace, version, and mutation moment bound into a rollback
-/// materialization identity. Legacy identities intentionally return `None`.
+/// materialization identity.
 #[doc(hidden)]
 pub fn decode_binary_rollback_job_identity(job_id: &str) -> Option<(&str, &str, &str)> {
     let encoded = job_id.strip_prefix("rollback-restore_\u{1f}")?;

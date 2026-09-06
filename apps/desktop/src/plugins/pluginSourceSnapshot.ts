@@ -54,7 +54,7 @@ export const BUILD_STAGING_SUFFIX = ".staging-";
 export const BUILD_PREVIOUS_SUFFIX = ".previous-";
 /** Every family of sibling directory this pipeline creates beside a live
  * plugin root. Each one is `<liveRoot><suffix><randomUUID()>`. */
-export const PLUGIN_ROOT_ARTIFACT_SUFFIXES = [
+const PLUGIN_ROOT_ARTIFACT_SUFFIXES = [
   SNAPSHOT_STAGING_SUFFIX,
   BUILD_STAGING_SUFFIX,
   BUILD_PREVIOUS_SUFFIX,
@@ -78,7 +78,7 @@ export const PINNED_PLUGIN_PACKAGE_MANAGER =
 export const PLUGIN_INSTALL_TIMEOUT_MS = 30_000;
 export const PLUGIN_BUNDLE_TIMEOUT_MS = 3_000;
 
-const DEPENDENCY_FIELDS = [
+export const DEPENDENCY_FIELDS = [
   "dependencies",
   "devDependencies",
   "optionalDependencies",
@@ -134,7 +134,7 @@ export function isExcludedSourceName(name: string): boolean {
  * `npmrc` and `pnpmfile.cjs` are absent because pnpm 11 does not read them
  * from this directory: rejecting them would be policy about nothing.
  */
-export const REJECTED_PACKAGE_MANAGER_CONFIG_NAMES = new Set([
+const REJECTED_PACKAGE_MANAGER_CONFIG_NAMES = new Set([
   ".npmrc",
   ".pnpmfile.cjs",
   ".pnpmfile.mjs",
@@ -144,7 +144,7 @@ const READ_NO_FOLLOW = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0);
 
 type LocalDependencyProtocol = "file:" | "link:" | "workspace:";
 
-export type PluginSourceSnapshotFailureCode =
+type PluginSourceSnapshotFailureCode =
   | "invalid-plugin-id"
   | "invalid-plugin-root"
   | "invalid-output-path"
@@ -157,7 +157,7 @@ export type PluginSourceSnapshotFailureCode =
   | "snapshot-locked"
   | "snapshot-io";
 
-export interface PluginSourceSnapshotError {
+interface PluginSourceSnapshotError {
   code: PluginSourceSnapshotFailureCode;
   message: string;
   path: string | null;
@@ -174,7 +174,7 @@ export interface PluginPnpmPaths {
   homeDir: string;
 }
 
-export interface SnapshotPluginSourceInput {
+interface SnapshotPluginSourceInput {
   workspaceRoot: string;
   /** The app's own userData directory (WorkspaceRegistry.stateDir()), never
    * a workspace-relative path. dohcDir below must resolve inside it. */
@@ -772,7 +772,7 @@ export function assertSafeSnapshotEntryName(name: string, path: string): void {
  * tree root only, but one rule for the whole tree needs no depth bookkeeping
  * and leaves no dead config for a later pnpm to start reading.
  */
-export function assertNoPackageManagerConfig(name: string, path: string): void {
+function assertNoPackageManagerConfig(name: string, path: string): void {
   // Case-folded on every platform: Windows and default macOS serve `.NPMRC`
   // when pnpm opens `.npmrc`, so an exact-case rule rejects nothing there.
   if (!REJECTED_PACKAGE_MANAGER_CONFIG_NAMES.has(name.toLowerCase())) return;

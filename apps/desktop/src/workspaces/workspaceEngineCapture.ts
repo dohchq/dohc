@@ -331,7 +331,6 @@ export type WorkspaceEngineYDocProviderSession = Omit<
   | "head"
   | "lineage"
   | "applyLocalUpdate"
-  | "applyExternalMarkdownEdit"
   | "close"
   // Deliberately not handed out. An evict takes a daemon session away without
   // settling it, which is right for an orphan nobody holds and wrong for a
@@ -367,7 +366,6 @@ export type WorkspaceEngineYDocProviderSession = Omit<
       idempotencyKey?: string;
     },
   ): void;
-  applyExternalMarkdownEdit(markdown: string): Promise<{ supported: boolean }>;
   close(options?: WorkspaceEngineYDocCloseOptions): Promise<void>;
 };
 
@@ -2291,14 +2289,6 @@ export function createWorkspaceEngineCapture(
           return await executeWithReconnect(async (session) =>
             await session.settleNow(settleOptions),
           );
-        });
-      },
-      applyExternalMarkdownEdit(markdown) {
-        return append(async () => {
-          const result = await executeWithReconnect(async (session) =>
-            await session.applyExternalMarkdownEdit(markdown),
-          );
-          return { supported: result.kind === "merged" };
         });
       },
       evict() {
@@ -4378,10 +4368,6 @@ export function createWorkspaceEngineCapture(
             return session.applyLocalUpdate(update, onArmed, applyOptions);
           },
           settleNow: (opts) => session.settleNow(opts),
-          applyExternalMarkdownEdit: (markdown) => {
-            noteUpdate();
-            return session.applyExternalMarkdownEdit(markdown);
-          },
           close: closeEntry,
         };
       }

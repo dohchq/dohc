@@ -1658,44 +1658,6 @@ describe("YdocLiveAdapter", () => {
     await provider.close({ settle: false });
   });
 
-  it("sends the missing state before an external edit merges against durable state", async () => {
-    // `applyExternalMarkdownEdit` flushes the adapter's record
-    // chain first, so the engine merges the external body against fully
-    // recorded state. That flush cannot see what a transient refusal left
-    // unsent: the chain is neutralized after one, so awaiting it succeeds
-    // while the engine is still missing this session's text — and the merge
-    // then runs against a document without it.
-    //
-    const { provider, methods, journaled } = await openAgainstABusyJournal(
-      "typed before the merge ",
-      2,
-    );
-    // Settle the refusal before clearing the log: the journal write is still
-    // in flight otherwise, and its own recovery attempt would land in the
-    // window this test measures.
-    await expect(journaled).rejects.toThrow("engine-store-busy");
-    methods.length = 0;
-
-    // The external editor's full body, which the engine merges against
-    // whatever the lineage holds.
-    const merged = await provider.applyExternalMarkdownEdit(
-      "written outside dohc",
-    );
-    expect(merged.kind).toBe("merged");
-
-    // The assertion, and it has to be about ORDER at the transport: a settle
-    // afterwards would resend the missing state itself and hide the defect.
-    // The engine must have received the local text before it was asked to
-    // merge anything against the lineage.
-    const resendAt = methods.indexOf(YDOC_METHOD.recordUpdate);
-    const mergeAt = methods.indexOf(YDOC_METHOD.applyExternalMarkdownEdit);
-    expect(mergeAt).toBeGreaterThanOrEqual(0);
-    expect(resendAt).toBeGreaterThanOrEqual(0);
-    expect(resendAt).toBeLessThan(mergeAt);
-
-    await provider.close({ settle: false });
-  });
-
   it("refuses to release a session still holding text the engine never got", async () => {
     // The pre-close settle is the last chance to hand the
     // engine text a transient refusal left unsent, and the doc holding that
@@ -2202,7 +2164,12 @@ describe("YdocLiveAdapter", () => {
     });
 
     expect(scheduler.armed).toHaveLength(0);
-    await provider.applyExternalMarkdownEdit("external edit");
+    engine.applyRemoteUpdate(
+      engine.activeSessionIds()[0]!,
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "remote: ");
+      }),
+    );
 
     expect(remoteUpdates).toHaveLength(1);
     expect(scheduler.armed.map((entry) => entry.ms)).toEqual([100]);
@@ -3060,8 +3027,13 @@ describe("YdocLiveAdapter", () => {
 
     provider.applyLocalUpdate(update);
     const settled = await provider.settleNow({ summary: "manual settle" });
-    const external = await provider.applyExternalMarkdownEdit("external edit");
-    // `settle: true` (not `false`): the external edit left the projection
+    engine.applyRemoteUpdate(
+      engine.activeSessionIds()[0]!,
+      plaintextUpdate(provider.initialUpdate, (text) => {
+        text.insert(0, "remote: ");
+      }),
+    );
+    // `settle: true` (not `false`): the remote update left the projection
     // past the manual settle's `last_settled_sha`, and a local-only close
     // refuses a prune the artifact does not already cover (durable.rs
     // close_session). `settle: true` runs the ladder's normal pre-close
@@ -3074,8 +3046,7 @@ describe("YdocLiveAdapter", () => {
       sourceStateVectorSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       destructive: false,
     });
-    expect(external).toEqual({ kind: "merged", markdown: "external edit" });
-    expect(provider.doc.getText("plainText").toString()).toBe("external edit");
+    expect(provider.doc.getText("plainText").toString()).toBe("remote: seed local");
     expect(remoteUpdates).toHaveLength(1);
     expect(engine.activeSessionIds()).toHaveLength(0);
 
@@ -3088,7 +3059,6 @@ describe("YdocLiveAdapter", () => {
       YDOC_METHOD.recordUpdate,
       YDOC_METHOD.recordUpdate,
       YDOC_METHOD.settle,
-      YDOC_METHOD.applyExternalMarkdownEdit,
       YDOC_METHOD.settle,
       YDOC_METHOD.close,
     ]);
@@ -3121,13 +3091,9 @@ describe("YdocLiveAdapter", () => {
     });
     expect(engine.requests[4]?.params).toEqual({
       sessionId: "session-1",
-      markdown: "external edit",
-    });
-    expect(engine.requests[5]?.params).toEqual({
-      sessionId: "session-1",
       summary: "session close",
     });
-    expect(engine.requests[6]?.params).toEqual({
+    expect(engine.requests[5]?.params).toEqual({
       sessionId: "session-1",
       settle: false,
     });
@@ -3140,27 +3106,6 @@ describe("YdocLiveAdapter", () => {
         updateBase64: expect.stringMatching(/^[A-Za-z0-9+/]+={0,2}$/),
       },
     });
-  });
-
-  it("rejects ill-formed external markdown before sending it to the engine", async () => {
-    const engine = seedPlaintextEngine("seed");
-    const adapter = new YdocLiveAdapter(engine);
-    const session = await adapter.openSession({
-      workspace: WORKSPACE,
-      versionId: VERSION,
-      path: PATH,
-      contentKind: "plaintext",
-    });
-
-    await expect(
-      session.applyExternalMarkdownEdit("bad \ud800 markdown"),
-    ).rejects.toBeInstanceOf(IllFormedUtf16EditError);
-    expect(engine.requests.map((request) => request.method)).not.toContain(
-      YDOC_METHOD.applyExternalMarkdownEdit,
-    );
-
-    await session.close({ settle: false });
-    adapter.dispose();
   });
 
   it("keeps request ids unique across sessions sharing one adapter", async () => {
@@ -3492,36 +3437,6 @@ describe("the ydoc.open deadline", () => {
     expect(reopened.lineage).toBe("existing");
     expect(reopened.doc.getText("plainText").toString()).toBe(
       "remote: on disk",
-    );
-    await reopened.close({ settle: false });
-  });
-
-  it("resurrects an external markdown edit after eviction", async () => {
-    const engine = seedPlaintextEngine("on disk");
-    const transport: EngineTransport = {
-      ...forwardYdocBlobEgress(engine),
-      onEvent: (handler) => engine.onEvent(handler),
-      sendRequest: (request) => engine.sendRequest(request),
-    };
-    const open = async () =>
-      await openEngineYdocProviderSession({
-        transport,
-        workspace: WORKSPACE,
-        versionId: VERSION,
-        path: PATH,
-        contentKind: "plaintext",
-        onRemoteUpdate: () => undefined,
-        scheduleSettle: () => () => undefined,
-      });
-
-    const first = await open();
-    await first.applyExternalMarkdownEdit("edited from outside: on disk");
-    await first.evict();
-
-    const reopened = await open();
-    expect(reopened.lineage).toBe("existing");
-    expect(reopened.doc.getText("plainText").toString()).toBe(
-      "edited from outside: on disk",
     );
     await reopened.close({ settle: false });
   });

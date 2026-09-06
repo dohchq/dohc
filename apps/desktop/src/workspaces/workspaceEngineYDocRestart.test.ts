@@ -122,9 +122,6 @@ async function reconnectFailureCapture(prefix: string) {
           },
         };
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close(closeOptions) {
         state.releaseCalls.push({
           generation: openedGeneration,
@@ -321,11 +318,6 @@ it("rebinds a live Y.Doc and replays renderer state after the daemon restarts", 
         await options.onSettled?.(result, 1);
         return result;
       },
-      async applyExternalMarkdownEdit(markdown) {
-        doc.getText("plainText").delete(0, doc.getText("plainText").length);
-        doc.getText("plainText").insert(0, markdown);
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         return;
       },
@@ -451,9 +443,6 @@ it("replaces rather than merges an independently rooted lineage after restart", 
           },
         };
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         return;
       },
@@ -562,9 +551,6 @@ it("keeps an unclaimed lineage when its full state is the claimed base", async (
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close() {
         return;
@@ -680,9 +666,6 @@ it("keeps a locally promoted lineage after later updates change its full state",
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close() {
         return;
@@ -802,9 +785,6 @@ it("replaces a fork that claims a base descended from the same Y.Doc history", a
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close() {
         return;
@@ -1019,9 +999,6 @@ it("recovers a non-reconnect local refusal by releasing, rebinding, and replayin
           },
         };
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         lifecycle.push(`close-${openedGeneration}`);
       },
@@ -1125,9 +1102,6 @@ it("releases a close-latched failed generation with settle true before the next 
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close(closeOptions) {
         providerClosed = true;
@@ -1239,9 +1213,6 @@ it("defers a version switch behind a dead generation until release converges", a
       },
       async settleNow() {
         throw new Error("dead generation must not settle");
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close(closeOptions) {
         closeAttempts.push(closeOptions?.settle);
@@ -1393,9 +1364,6 @@ it("an over-cap settle (content omitted from the response) leaves the engine's f
         await options.onSettled?.(result, 1);
         return result;
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         return;
       },
@@ -1497,9 +1465,6 @@ it("a settle whose materialization was blocked reports an error, never Saved", a
         await options.onSettled?.(result, 1);
         return result;
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         return;
       },
@@ -1582,9 +1547,6 @@ it("surfaces an unrecoverable local refusal and releases every opened lease", as
       },
       async settleNow() {
         throw new Error("settle must not run after failed recovery");
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close() {
         closedGenerations.push(openedGeneration);
@@ -1806,9 +1768,6 @@ async function daemonDeathCapture(
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close(closeOptions) {
         if (!state.daemonAlive) throw transportDeath();
@@ -2618,9 +2577,6 @@ it("counts an edit recovered from a synchronous provider refusal", async () => {
           },
         };
       },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
-      },
       async close() {
         return;
       },
@@ -2745,9 +2701,6 @@ it("announces a recovered edit exactly once when both arm points run", async () 
             destructive: false,
           },
         };
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close() {
         return;
@@ -2979,9 +2932,6 @@ async function lockedRebindCapture(
           deliverPeerEdit("peer edit");
         }
         return result;
-      },
-      async applyExternalMarkdownEdit(markdown) {
-        return { kind: "merged", markdown } as const;
       },
       async close(closeOptions) {
         state.closeCalls.push(gen);

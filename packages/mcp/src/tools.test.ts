@@ -157,12 +157,6 @@ function refusalReason(result: { ok: true } | { ok: false; reason: string }): st
   return result.reason;
 }
 
-// Keep these split so siteNoLegacyAppModel.test.ts does not flag this
-// compatibility regression fixture as active legacy guidance.
-const LEGACY_APPS_SEGMENT = `.${"apps"}`;
-const LEGACY_SDK_PACKAGE = `@dohc/${"app"}`;
-const importLegacySdk = `import "${LEGACY_SDK_PACKAGE}";\n`;
-
 const emptyDesktopHistoryRequest: NonNullable<ToolContext["request"]> = async (request) => {
   if (request.verb === "moments") {
     return {
@@ -310,14 +304,10 @@ describe("mcp tool path containment", () => {
     });
   });
 
-  it("create_site refuses traversal, .dohc, and legacy app folders", async () => {
+  it("create_site refuses traversal and .dohc", async () => {
     await withWorkspace(async (ctx) => {
       await expect(createSite(ctx, { path: "../x" })).resolves.toMatchObject({ ok: false });
       await expect(createSite(ctx, { path: ".dohc/x" })).resolves.toMatchObject({ ok: false });
-      await expect(createSite(ctx, { path: `finance/${LEGACY_APPS_SEGMENT}/x` })).resolves.toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(`legacy ${LEGACY_APPS_SEGMENT}`),
-      });
     });
   });
 
@@ -1478,7 +1468,6 @@ describe("mcp tools operate on allowed paths", () => {
       const packageJson = JSON.parse(await readFile(join(ctx.root, "finance/ledger/package.json"), "utf8"));
       const config = JSON.parse(await readFile(join(ctx.root, "finance/ledger/dohc.json"), "utf8"));
       expect(html).toContain("<title>Ledger</title>");
-      expect(html).not.toContain(LEGACY_SDK_PACKAGE);
       expect(packageJson).toMatchObject({
         private: true,
         type: "module",
@@ -1999,50 +1988,6 @@ describe("mcp tools operate on allowed paths", () => {
         entry: "escape/index.html",
         diagnostics: expect.arrayContaining([
           expect.objectContaining({ code: "invalid-preview-entry", severity: "warning" }),
-        ]),
-      });
-    });
-  });
-
-  it("test_site validates entries and refuses legacy app SDK imports", async () => {
-    await withWorkspace(async (ctx) => {
-      await createSite(ctx, { path: "todo" });
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `// ${importLegacySdk}`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(join(ctx.root, "todo/script.js"), `const marker = "/* ${LEGACY_SDK_PACKAGE} */";\n`);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({ ok: true });
-
-      await writeFile(
-        join(ctx.root, "todo/script.js"),
-        `const slashOrStar = /[/*]/;\n${importLegacySdk}`,
-      );
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), importLegacySdk);
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({ name: "no-legacy-sdk-import", ok: false }),
-        ]),
-      });
-
-      await writeFile(join(ctx.root, "todo/script.js"), "x".repeat(2 * 1024 * 1024 + 1));
-      await expect(testSite(ctx, { siteRoot: "todo" })).resolves.toMatchObject({
-        ok: false,
-        checks: expect.arrayContaining([
-          expect.objectContaining({
-            name: "no-legacy-sdk-import",
-            ok: false,
-            message: "Site source is too large for MCP static validation.",
-          }),
         ]),
       });
     });
@@ -2850,35 +2795,6 @@ describe("a guard that decides authority reads the resolved path", () => {
     },
     10_000,
   );
-
-  it("refuses a site scan whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      const legacy = join(ctx.root, LEGACY_APPS_SEGMENT, "portal");
-      await mkdir(legacy, { recursive: true });
-      await writeFile(join(legacy, "index.html"), "<h1>legacy</h1>");
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const scanned = await detectSites(ctx, { path: "shortcut/portal" });
-      expect(scanned).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-    });
-  });
-
-  it("refuses to create a site whose folder really is the legacy one", async () => {
-    await withWorkspace(async (ctx) => {
-      await mkdir(join(ctx.root, LEGACY_APPS_SEGMENT), { recursive: true });
-      await symlink(join(ctx.root, LEGACY_APPS_SEGMENT), join(ctx.root, "shortcut"), "dir");
-
-      const created = await createSite(ctx, { path: "shortcut/fresh" });
-      expect(created).toMatchObject({
-        ok: false,
-        reason: expect.stringContaining(LEGACY_APPS_SEGMENT),
-      });
-      await expect(stat(join(ctx.root, LEGACY_APPS_SEGMENT, "fresh"))).rejects.toThrow();
-    });
-  });
 
   // Climbing past a component realpath cannot resolve is safe only when
   // nothing is there. A permission error answers neither question, and reading

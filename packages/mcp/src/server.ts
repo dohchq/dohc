@@ -285,7 +285,7 @@ export function createDohcMcpServer(ctx: ToolContext): McpServer {
     "dohc_test_site",
     {
       description:
-        "Run bounded static validation for a normal website folder: detector diagnostics, entry presence, and no legacy app SDK import.",
+        "Run bounded static validation for a normal website folder: detector diagnostics and entry presence.",
       inputSchema: {
         siteRoot: z.string().min(1).max(4096),
       },

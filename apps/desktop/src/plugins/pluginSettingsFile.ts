@@ -35,7 +35,7 @@ export const PLUGIN_SETTINGS_FILE = "plugin-settings.local.json";
 export const MAX_PLUGIN_SETTINGS_FILE_BYTES = 256 * 1024;
 
 /** Every plugin's stored answers, exactly as the file holds them. */
-export type StoredPluginSettings = Record<
+type StoredPluginSettings = Record<
   string,
   Record<string, PluginSettingValue>
 >;

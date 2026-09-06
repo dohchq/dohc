@@ -1,5 +1,4 @@
 import {
-  ChatsAdapterCapabilityError,
   ChatsLiveAdapter,
   type ChatChannel as LiveChatChannel,
   type ChatChannelSummary as LiveChatChannelSummary,
@@ -289,11 +288,6 @@ export function createLiveLinkedChatStore(
       ),
     markBookmarkStale: async (input) =>
       await invoke(async (adapter) => await adapter.markBookmarkStale(input)),
-    applyReplicationOp: async () => {
-      throw new ChatsAdapterCapabilityError(
-        "Chat replication is owned outside the desktop live chat store.",
-      );
-    },
     getThreadProjection: async (input) =>
       await invokeRead(
         async (adapter) => await adapter.getThreadProjection(input),

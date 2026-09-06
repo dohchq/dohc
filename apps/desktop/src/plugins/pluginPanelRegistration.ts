@@ -6,13 +6,13 @@ import { readPluginManifestFile } from "./pluginManifest";
 import type { DohcPluginManifest } from "./pluginManifestSchema";
 import type { PluginPipelineStatusEvent } from "./PluginPipeline";
 
-export interface PluginPanelRegistration {
+interface PluginPanelRegistration {
   pluginRoot: string;
   manifest: DohcPluginManifest;
   panel: NonNullable<DohcPluginManifest["panels"]>[number];
 }
 
-export interface PluginWebAppRegistration {
+interface PluginWebAppRegistration {
   pluginRoot: string;
   manifest: DohcPluginManifest;
   webApp: NonNullable<DohcPluginManifest["webApps"]>[number];
@@ -34,7 +34,7 @@ export interface RegisteredPlugin {
   directoryName: string;
 }
 
-export interface PluginRegistrationSource {
+interface PluginRegistrationSource {
   pluginRegistration(pluginId: string): RegisteredPlugin | null;
   hasUnrecoverableFailedReplacement(pluginId: string): boolean;
 }

@@ -12,7 +12,7 @@ async function expectDisposeToExit(detached?: true): Promise<void> {
   let exited = false;
   const transport = JsonRpcTransport.spawn({
     command: process.execPath,
-    args: [fakeAgent, "acp"],
+    args: [fakeAgent],
     cwd: await createTestScratch("dohc-json-rpc-transport-"),
     ...(detached ? { detached } : {}),
     onExit: () => {

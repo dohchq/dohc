@@ -68,7 +68,7 @@ export const DEFAULT_PLUGIN_LOCAL_STATE: PluginLocalState = {
   plugins: {},
 };
 
-export type PluginLocalStateResult =
+type PluginLocalStateResult =
   | { ok: true; state: PluginLocalState }
   | { ok: false; warning: string };
 

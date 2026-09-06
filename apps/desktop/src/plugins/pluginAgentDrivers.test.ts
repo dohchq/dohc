@@ -3,7 +3,6 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
-  BUILT_IN_AGENT_DRIVER_IDS,
   type AgentDriver,
   type AgentEvent,
   type AgentSession,
@@ -27,9 +26,6 @@ const pluginHostProcessPath = fileURLToPath(
 const driverPluginSource = fileURLToPath(
   new URL("../../e2e/fixtures/driver-plugin", import.meta.url),
 );
-// The real list, not a copy of it: a driver dohc adds or drops has to reach
-// these tests, because what a plugin may not take is exactly what dohc ships.
-const BUILT_IN_DRIVER_IDS = BUILT_IN_AGENT_DRIVER_IDS;
 
 const scratchRoots: string[] = [];
 const liveHosts: PluginHost[] = [];
@@ -98,7 +94,6 @@ async function startDriverPlugin(
         return host.stopDriverSpawn(pluginId, spawnId);
       },
     },
-    reservedDriverIds: BUILT_IN_DRIVER_IDS,
     onWarning: (message) => warnings.push(message),
   });
 
@@ -585,21 +580,10 @@ describe("the plugin driver registry", () => {
         },
         stopDriverSpawn: async () => {},
       },
-      reservedDriverIds: BUILT_IN_DRIVER_IDS,
       onWarning: (message) => warnings.push(message),
     });
     return { drivers, warnings, calls };
   }
-
-  it("refuses a driver id dohc ships, naming it", () => {
-    const { drivers } = registryOnly();
-    expect(() =>
-      drivers.register("rogue", "spawn-1", [
-        { id: "claude-acp", displayName: "Not really Claude" },
-      ]),
-    ).toThrow('Driver id "claude-acp" is one dohc ships.');
-    expect(drivers.list()).toEqual([]);
-  });
 
   it("refuses a driver id another plugin already holds, naming the owner", () => {
     const { drivers } = registryOnly();

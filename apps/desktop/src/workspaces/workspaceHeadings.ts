@@ -93,10 +93,9 @@ export function allocateWorkspaceHeadingAnchors(
   });
 }
 
-/** Resolve both current canonical targets and targets stored before anchor
- * allocation became globally unique. Literal-base occurrences take priority
- * over interpreting a trailing `-${occurrence}` as the old generated suffix,
- * so a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
+/** Resolve a heading anchor to its heading. A literal-base occurrence takes
+ * priority over reading a trailing `-${occurrence}` as an allocated suffix, so
+ * a real repeated `foo-1` heading is never remapped to a repeated `foo`. */
 export function resolveWorkspaceHeadingAnchorTarget<
   Heading extends WorkspaceHeadingAnchorCandidate,
 >(
@@ -126,14 +125,19 @@ export function resolveWorkspaceHeadingAnchorTarget<
   );
   if (literalBase) return literalBase;
 
+  // Anchors are allocated globally unique: the Nth repeat of a heading gets
+  // `<base>-N` unless a literal heading already holds that anchor, in which
+  // case the repeat is pushed to the next free suffix. A link minted from the
+  // repeat's own occurrence therefore still names `<base>-<occurrence>`, and
+  // resolves to the heading whose text base matches at that occurrence.
   if (occurrence <= 0) return null;
-  const legacySuffix = `-${occurrence}`;
-  if (!anchor.endsWith(legacySuffix)) return null;
-  const legacyBase = anchor.slice(0, -legacySuffix.length);
-  if (!legacyBase) return null;
+  const allocatedSuffix = `-${occurrence}`;
+  if (!anchor.endsWith(allocatedSuffix)) return null;
+  const allocatedBase = anchor.slice(0, -allocatedSuffix.length);
+  if (!allocatedBase) return null;
   return headings.find(
     (heading) =>
-      headingAnchorBase(heading.text) === legacyBase &&
+      headingAnchorBase(heading.text) === allocatedBase &&
       heading.occurrence === occurrence,
   ) ?? null;
 }

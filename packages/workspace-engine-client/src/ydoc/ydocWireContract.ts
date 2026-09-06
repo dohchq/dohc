@@ -8,7 +8,6 @@ export const YDOC_METHOD = {
   open: "ydoc.open",
   recordUpdate: "ydoc.recordUpdate",
   settle: "ydoc.settle",
-  applyExternalMarkdownEdit: "ydoc.applyExternalMarkdownEdit",
   close: "ydoc.close",
   // Ends a session without settling and without pruning: the daemon drops the
   // session and its lease and leaves the durable lineage alone. The only exit
@@ -127,15 +126,6 @@ export type YdocSettleResult = JsonObject & {
   projection: YdocProjectionProvenance;
 };
 
-export type YdocApplyExternalMarkdownEditParams = JsonObject & {
-  sessionId: string;
-  markdown: string;
-};
-
-export type YdocApplyExternalMarkdownEditResult =
-  | (JsonObject & { kind: "merged"; markdown: string })
-  | (JsonObject & { kind: "conflict"; conflictPath: string });
-
 export type YdocCloseParams = JsonObject & {
   sessionId: string;
   settle?: boolean;
@@ -233,13 +223,6 @@ const SettleResultSchema = mutableStruct({
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
-const ExternalEditResultSchema = Schema.Union([
-  mutableStruct({ kind: Schema.Literal("merged"), markdown: Schema.String }),
-  mutableStruct({
-    kind: Schema.Literal("conflict"),
-    conflictPath: Schema.String,
-  }),
-]);
 const CloseResultSchema = mutableStruct({ closed: Schema.Literal(true) });
 const EvictResultSchema = mutableStruct({ evicted: Schema.Literal(true) });
 const RemoteUpdatePayloadSchema = mutableStruct({
@@ -330,16 +313,6 @@ export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
     value,
     "ydoc.settle result",
   ) as YdocSettleResult;
-}
-
-export function decodeYdocExternalEditResult(
-  value: JsonValue,
-): YdocApplyExternalMarkdownEditResult {
-  return decodeYdocSchema(
-    ExternalEditResultSchema,
-    value,
-    "ydoc.applyExternalMarkdownEdit result",
-  ) as YdocApplyExternalMarkdownEditResult;
 }
 
 export function decodeYdocCloseResult(value: JsonValue): YdocCloseResult {

@@ -26,8 +26,6 @@ import {
 // perf measure include agent-process startup, which the budget excludes.
 const NO_AGENT_TOOLS_ENV = {
   DOHC_AGENT_CODEX_COMMAND: "/nonexistent/dohc-e2e-no-agent",
-  DOHC_AGENT_CLAUDE_ACP_COMMAND: "/nonexistent/dohc-e2e-no-agent",
-  DOHC_AGENT_GENERIC_ACP_COMMAND: "/nonexistent/dohc-e2e-no-agent",
 };
 
 const requireModule = createRequire(import.meta.url);

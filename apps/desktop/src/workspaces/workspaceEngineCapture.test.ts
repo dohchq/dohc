@@ -1054,7 +1054,6 @@ describe("workspaceEngineCapture batch capture", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
-          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => undefined,
         };
       },
@@ -1102,7 +1101,6 @@ describe("workspaceEngineCapture batch capture", () => {
           lineage: "existing" as const,
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
-          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           settleNow: async () => {
             order.push(`settle:${options.path}`);
             return { sha256: "a".repeat(64), content: "# Edited\n" } as never;
@@ -2702,10 +2700,6 @@ describe("workspaceEngineCapture Y.Doc session ordering against version operatio
           },
           evict: async () => undefined,
           applyLocalUpdate: async () => undefined,
-          applyExternalMarkdownEdit: async (markdown: string) => ({
-            kind: "merged" as const,
-            markdown,
-          }),
           settleNow: async () => ({
             sha256: "c".repeat(64),
             content: "",
@@ -3138,8 +3132,6 @@ describe("workspaceEngineCapture absent-head refusal against replication", () =>
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "f".repeat(64), content: "" }) as never,
-          applyExternalMarkdownEdit: async (markdown: string) =>
-            ({ kind: "merged", markdown }) as const,
           close: async () => {
             throw unsettled;
           },

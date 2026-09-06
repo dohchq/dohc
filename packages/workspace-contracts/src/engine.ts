@@ -1,41 +1,9 @@
-/**
- * Engine contract rename mapping
- *
- * Type-only extraction for this slice; runtime schema mirrors are a follow-up
- * if/when contracts need runtime validation here.
- *
- * | Plan / matrix symbol | Shipped engine contract symbol | Status | Notes |
- * | --- | --- | --- | --- |
- * | WorkspaceObject | FileObjectRecord | adopted | Shape differs from the plan matrix; this is the engine's real shipped record. |
- * | WorkspaceVersion | VersionRecord + VersionKind | adopted | Version kind remains a separate union. |
- * | HistoryMoment | VersionedTextMoment + VersionedTextMomentSummary | adopted | Full moment payload and summary/list row are separate shapes. |
- * | ConflictRecord | VersionedTextConflictRecord | adopted | Uses the engine's shipped text-conflict record. |
- * | ChatThread | ChatThread | adopted | Name unchanged. |
- * | ThreadMessage | ChatMessage | renamed | Engine ships messages under the chat-specific name. |
- * | WorkspaceLinkRef | LinkedChatFileRef | partial | Only the chat-file link case is implemented; a general link-ref vocabulary is not implemented. |
- * | VersionRef | Not implemented | not implemented | The engine currently uses plain version ids (VersionId) plus ad hoc fork-related fields where needed. |
- * | Phase0EffectivePolicyInput / Phase0EffectivePolicyResult | resolveEffectivePolicy + EffectivePolicyResult (from @dohc/security-contract) | partial | Covers path/file policy plus search/capture ownership only; actor permissions, sharing, chat-export, and object-family inputs are not implemented yet. |
- * | WorkspaceEvent / DurabilityEvent | Not implemented | not implemented | The engine coalesces writes directly into moments (VersionedTextMoment) instead of emitting a separate durability/event log. |
- *
- * Ownership notes:
- * - ChangeAuthor and NonEmptyLocalAuthorLabel are canonically owned here;
- *   @dohc/workspace-core re-exports them (it depends on this package), which
- *   keeps the branded local-author label one nominal type everywhere.
- * - The Engine*-prefixed private history and provenance types at the bottom are
- *   structural copies of @dohc/workspace-core shapes that this package cannot
- *   import without a dependency cycle. Exact-identity compile checks in
- *   packages/workspace-core/src/engineContracts.compile.ts pin their core-owned
- *   fields to the corresponding core types, so drift fails the workspace-core
- *   typecheck.
- */
-
 export type WorkspaceObjectId = string;
 export type VersionId = string;
 export type WorkspaceId = string;
 export type VersionedTextMomentId = string;
 export type VersionedTextConflictId = string;
 
-export const VERSIONED_TEXT_STORE_RELATIVE_PATH = ".dohc/engine/engine.db";
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
 /**
@@ -71,7 +39,6 @@ export type VersionedTextStoreErrorCode =
   | "file-too-large"
   | "file-not-found"
   | "fork-base-not-found"
-  | "invalid-generated-id"
   | "invalid-input"
   | "invalid-metadata"
   | "invalid-object"
@@ -93,8 +60,7 @@ export type VersionedTextStoreErrorCode =
   | "target-path-exists"
   | "version-name-conflict"
   | "version-not-found"
-  | "workspace-mismatch"
-  | "write-lane-reentry";
+  | "workspace-mismatch";
 
 export class VersionedTextStoreError extends Error {
   readonly code: VersionedTextStoreErrorCode;
@@ -264,35 +230,8 @@ export interface VersionedTextConflictPage {
 export type SyncReplicationOpKind =
   | "workspace.init"
   | "moment.append"
-  | "version.create"
-  // No version rename API exists yet; included so 0P-B/0P-C typings stay stable.
-  | "version.rename"
-  | "conflict.open"
-  | "conflict.resolve"
-  | "secret.file.put"
-  | "secret.file.delete"
-  | "secret.version.fork"
-  | "chat.channel.create"
   | "chat.thread.create"
-  // No chat thread update API exists yet; included so 0P-B/0P-C typings stay stable.
-  | "chat.thread.update"
-  | "chat.message.append"
-  | "chat.decision.set"
-  | "chat.attachment.add"
-  // WS-MU-C2: an emoji reaction on a chat message. A set-membership CRDT keyed
-  // by (messageId, emoji, authorId) — add/remove COMMUTE and re-apply is a
-  // no-op. It rides the same 0P chat replication transport as the other chat
-  // kinds (blob-free). See ChatReactionSetPayload.
-  | "chat.reaction.set"
-  // Receiver-owned personal Feed state. These ops ride the owner's ordinary
-  // workspace-sync lane and are deliberately excluded from chat-channel
-  // shares; the shared-channel allowlist must never serve them.
-  | "chat.follow.set"
-  | "chat.feed.read.set"
-  // WS-G2-C1: a Yjs CRDT update for a rich-doc object. Unlike moment.append it
-  // is a commutative delta — apply carries NO head-check and opens NO P0D
-  // conflict (Yjs guarantees convergence). See YDocUpdatePayload.
-  | "ydoc.update";
+  | "chat.message.append";
 
 // Wire encoding of "did the origin see a prior state for this object": absent
 // (no before at all), null (origin recorded an explicit no-file preimage), or
@@ -333,160 +272,6 @@ export interface MomentAppendPayload {
   beforeMetadata?: ActorNeutralWriteMetadata;
 }
 
-// One snapshot row of the origin's source version AS OF the fork moment. The
-// version.create payload ships these so importers materialize the fork from
-// the ORIGIN's fork-point state instead of their own current snapshots (which
-// may contain unrelated local edits the origin never saw).
-export interface VersionCreateForkSnapshot {
-  objectId: WorkspaceObjectId;
-  objectCreatedAtMs?: number;
-  path: string;
-  contentKind?: VersionedFileContentKind;
-  blobSha256: string;
-  byteLength?: number;
-  updatedAtMs: number;
-  latestMomentId: VersionedTextMomentId;
-  metadata: ActorNeutralWriteMetadata;
-}
-
-export interface VersionCreatePayload {
-  versionId: VersionId;
-  name: string;
-  kind: VersionKind;
-  forkVersionId?: VersionId;
-  forkMomentId?: VersionedTextMomentId;
-  createdAtMs: number;
-  forkSnapshots: VersionCreateForkSnapshot[];
-}
-
-export interface ConflictResolveAbsentSide {
-  present: false;
-  pathRef: number;
-}
-
-export interface ConflictResolvePresentSide {
-  present: true;
-  pathRef: number;
-  objectId: WorkspaceObjectId;
-  latestMomentId: VersionedTextMomentId;
-  contentKind: VersionedFileContentKind;
-  blobSha256: string;
-  byteLength: number;
-  updatedAtMs: number;
-}
-
-export type ConflictResolveSide =
-  | ConflictResolveAbsentSide
-  | ConflictResolvePresentSide;
-
-export interface ConflictResolveEffect {
-  kind: "delete" | "write";
-  momentId: VersionedTextMomentId;
-  payloadSha256: string;
-}
-
-export interface ConflictResolveSuccessor {
-  lineageClaimId: string;
-  epochTag: string;
-  contentKind: "plaintext" | "richdoc";
-  resultSha256: string;
-  updateBlobSha256: string;
-  stateVectorBlobSha256: string;
-}
-
-export interface ConflictResolvePayload {
-  formatVersion: 1;
-  workspaceId: WorkspaceId;
-  conflictId: VersionedTextConflictId;
-  status: "resolved";
-  chosenFrom: VersionedTextConflictChoice;
-  resolution: VersionedTextConflictResolution;
-  targetVersionId: VersionId;
-  sourceVersionId: VersionId;
-  paths: [string] | [string, string];
-  transition: {
-    current: ConflictResolveSide;
-    incoming: ConflictResolveSide;
-    result: ConflictResolveSide;
-  };
-  effectContext: {
-    recordedAtMs: number;
-    metadata: {
-      origin: ActorNeutralWriteOrigin;
-      summary: string | null;
-      correlationId: string | null;
-    };
-    author: {
-      kind: "agent";
-      agentId: string;
-      onBehalfOf: string;
-      agentRunId: string | null;
-    } | null;
-    currentObjectCreatedAtMs: number | null;
-    resultObjectCreatedAtMs: number | null;
-  };
-  effects:
-    | []
-    | [ConflictResolveEffect]
-    | [ConflictResolveEffect, ConflictResolveEffect];
-  lineageTransition: {
-    predecessorClaimId: string;
-    predecessorStateVectorSha256: string;
-    artifactPreimageSha256: string;
-    successor: ConflictResolveSuccessor | null;
-  } | null;
-}
-
-export interface SecretFilePutPayload {
-  versionId: VersionId;
-  path: string;
-  metadata: ActorNeutralWriteMetadata;
-  ivBase64: string;
-  authTagBase64: string;
-  // sha256 of the raw ciphertext bytes. Plaintext and workspace data keys
-  // must never ride replication payloads.
-  ciphertextSha256: string;
-  byteLength: number;
-}
-
-export interface SecretFileDeletePayload {
-  versionId: VersionId;
-  path: string;
-  metadata: ActorNeutralWriteMetadata;
-}
-
-export interface SecretVersionForkPayload {
-  toVersionId: VersionId;
-  fromVersionId: VersionId;
-  chunkIndex: number;
-  totalRows: number;
-  rows: Array<{
-    path: string;
-    ivBase64: string;
-    authTagBase64: string;
-    ciphertextSha256: string;
-    byteLength: number;
-    updatedAtMs: number;
-  }>;
-}
-
-export interface ChatChannelCreatePayload {
-  // Origin-local channel id; not a cross-machine identity (peers mint their
-  // own local ids). Cross-machine identity is wireId below.
-  channelId: string;
-  name: string;
-  slug: string;
-  kind: ChatChannelKind;
-  createdAtMs: number;
-  // Stable cross-machine channel identity (0P-A gate fix). Same wireId means
-  // same channel; same slug with a different wireId stays a distinct channel
-  // (the importer suffixes its local slug). The auto-created "general"
-  // channel uses a well-known constant wireId so independently-created
-  // generals converge. Absent only in payloads journaled before wire ids
-  // shipped; importers then fall back to slug identity.
-  wireId?: string;
-}
-
 export interface ChatThreadCreatePayload {
   threadId: ChatThreadId;
   title: string;
@@ -522,216 +307,8 @@ export interface ChatMessageAppendPayload {
   createdAtMs: number;
 }
 
-export interface ChatDecisionSetPayload {
-  threadId: ChatThreadId;
-  messageId: ChatMessageId;
-  state: ChatDecisionState;
-  resolvedByMessageId?: ChatMessageId;
-  atMs: number;
-}
-
-export interface ChatAttachmentAddPayload {
-  attachmentId: string;
-  threadId: ChatThreadId;
-  messageId: ChatMessageId;
-  targetKind: "file";
-  // Shared-channel relays omit local file identity and paths. Local producers
-  // still require objectId through sendMessage/startChannelThread inputs.
-  objectId?: WorkspaceObjectId;
-  pathHint?: string;
-  headingText?: string;
-  headingAnchor?: string;
-  headingOccurrence?: number;
-  createdAtMs: number;
-}
-
-/**
- * WS-MU-C2 — one emoji reaction membership change. A reaction is the relation
- * "author A reacted with emoji E to message M": a member of a set. State is an
- * observed register per `(messageId, emoji, authorId)` CELL.
- *
- * CRDT semantics — LWW-per-cell (last-writer-wins register per cell). Each cell
- * holds the winning op by a total order on `(atMs, then remove-wins on tie)`.
- * Apply keeps the op maximizing that order, so:
- * - Commutative: max over a total order is arrival-order independent — applying
- *   the same set of ops in any interleaving (across incremental sync passes,
- *   not just within one merged pass) yields the same winner.
- * - Idempotent: re-applying an op is never strictly newer than the value it
- *   already produced, so it is a no-op.
- * Different authors never share a cell (distinct rows), so cross-user
- * add/remove never conflict. This is the same "convergence by op semantics, not
- * by head check" property `ydoc.update` relies on — no conflict row, no before
- * guard. Chosen over the plan's op-order 2P-set because LWW converges under
- * arbitrary arrival order, which the two-store fuzz gate exercises.
- *
- * Forward-compat (MU-C0 verified authorship): `authorId` is the field the relay
- * later stamps/verifies as `actor.userId`. Solo it is the local user identity
- * chat messages already attribute by; `authorKind`/`authorDisplayName` ride
- * along so replicated reactions render "<User>" / "<User>'s agent" without a
- * separate lookup.
- */
-export interface ChatReactionSetPayload {
-  // Stable cross-machine identity: a deterministic function of
-  // (messageId, emoji, authorId). Same cell => same reactionId on every machine,
-  // which is what makes an add and its later remove address the same register.
-  reactionId: string;
-  messageId: ChatMessageId;
-  threadId: ChatThreadId;
-  // Normalized unicode emoji (NFC). Callers pass a short allowlist member.
-  emoji: string;
-  // The reactor's stable identity: relay user id in multi-user, local user id
-  // solo. The relay verifies `authorId === actor.userId` on shared channels.
-  authorId: string;
-  authorKind: ChatActor["kind"];
-  authorDisplayName: string;
-  // The cell's observed membership after this op.
-  state: ChatReactionState;
-  // LWW clock for this cell (the op's wall time). Ties break remove-wins.
-  atMs: number;
-}
-
 export type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
 export type ChatFollowState = "following" | "unfollowed";
-
-/** Receiver-owned LWW register for one Feed subscription. */
-export interface ChatFollowSetPayload {
-  ownerUserId: string;
-  targetKind: ChatFollowTargetKind;
-  targetId: string;
-  state: ChatFollowState;
-  atMs: number;
-}
-
-/** Receiver-owned LWW register for the Feed's caught-up boundary. */
-export interface ChatFeedReadSetPayload {
-  ownerUserId: string;
-  lastSeenCreatedAtMs: number;
-  lastSeenMessageId: ChatMessageId;
-  atMs: number;
-}
-
-// WS-G2-C1 / G2-C-2 HANDOFF CONTRACT — the reserved transaction origin for a
-// REMOTE replicated ydoc.update apply.
-//
-// When applyReplicationOp routes a remote update into a live in-memory Y.Doc, it
-// applies it with this origin (`Y.applyUpdate(liveDoc, update, origin)`). Today
-// the engine driver has no doc.on("update") observer, so nothing double-journals.
-// But the G2-C-2 editor provider will observe doc.on("update", (u, origin) => …)
-// to journal LOCAL edits — and it must ignore any update whose
-// `origin === REMOTE_YDOC_APPLY_ORIGIN`. That update is a remote op the store
-// already persisted, journaled, and acked via applyReplicationOp; re-journaling
-// it under the local origin would push it back to every peer (an echo storm).
-// Local/editor edits carry a null or editor origin and are journaled; remote
-// applies carry this reserved symbol and are NOT.
-export const REMOTE_YDOC_APPLY_ORIGIN: unique symbol = Symbol(
-  "dohc.remoteYDocApplyOrigin",
-);
-
-export type YDocEngineDriverErrorCode =
-  | "state-corrupt"
-  | "not-found"
-  | "already-live"
-  | "session-closed"
-  | "invalid-input";
-
-export class YDocEngineDriverError extends Error {
-  readonly code: YDocEngineDriverErrorCode;
-  constructor(code: YDocEngineDriverErrorCode, message: string) {
-    super(message);
-    this.name = "YDocEngineDriverError";
-    this.code = code;
-  }
-}
-
-// The driver dimension for a replicated rich doc: does its projection read the
-// XmlFragment body (richdoc) or the plain Y.Text (plaintext). Mirrors the
-// engine's ydoc_docs.content_kind column.
-export type YDocReplicationContentKind = "richdoc" | "plaintext" | "scene";
-
-/**
- * WS-G2-C1 — one Yjs CRDT update for a rich-doc object, riding the multi-origin
- * op log as a commutative op (0P sync design "ydoc.update"). The `updateBlob`
- * is a `Y.encodeStateAsUpdate`/incremental-`update` byte string, content-
- * addressed into `binary_blobs` and shipped over the identical blob-have/
- * blob-put transport moment.append's binary blobs use — no new route.
- *
- * Apply semantics differ FUNDAMENTALLY from moment.append: there is no
- * before-head, no divergence check, no conflict row. `Y.applyUpdate` is
- * commutative (any order converges) and idempotent (re-apply is a no-op via
- * Yjs state vectors), so the log's per-origin `acked_seq` dedup is the only
- * ordering machinery and the CRDT is the convergence backstop.
- */
-export interface YDocUpdatePayload {
-  versionId: VersionId;
-  objectId: WorkspaceObjectId;
-  // The projection target path: where the peer materializes the settled
-  // markdown, and the SECRET-floor gate (a secret-classified path is never
-  // opened as a replicated Y.Doc).
-  path: string;
-  contentKind: YDocReplicationContentKind;
-  // The Yjs update bytes, content-addressed into binary_blobs(sha256).
-  updateBlobSha256: string;
-  // The human or agent that authored the edit. When absent, the receiver
-  // attributes the update to the replication envelope's device origin.
-  actorOriginId?: string;
-  // True for the full-state BASE op the driver emits when a live session's
-  // replication baseline is established (`Y.encodeStateAsUpdate(seed)`). It is
-  // still just a Yjs update — applied identically — but marks the op that lets
-  // a from-scratch peer (no file, no prior state) reconstruct the doc, and
-  // bounds replay (a fresh base supersedes older deltas). Deltas omit it.
-  isBaseState?: boolean;
-}
-
-export interface SyncReplicationEnvelopeOf<
-  Kind extends SyncReplicationOpKind,
-  Payload,
-> {
-  workspaceId: WorkspaceId;
-  originId: string;
-  originSeq: number;
-  opKind: Kind;
-  payload: Payload;
-  recordedAtMs: number;
-}
-
-/**
- * One replicated op, discriminated on opKind so the payload shape is checked
- * at compile time (a typo/mismatch between opKind and payload cannot build).
- * The reserved kinds (version.rename, chat.thread.update) keep an unknown
- * payload until their APIs exist; stores must reject them on apply.
- */
-export type SyncReplicationEnvelope =
-  | SyncReplicationEnvelopeOf<"workspace.init", Record<string, never>>
-  | SyncReplicationEnvelopeOf<"moment.append", MomentAppendPayload>
-  | SyncReplicationEnvelopeOf<"version.create", VersionCreatePayload>
-  | SyncReplicationEnvelopeOf<"version.rename", unknown>
-  | SyncReplicationEnvelopeOf<"conflict.open", VersionedTextConflictRecord>
-  | SyncReplicationEnvelopeOf<"conflict.resolve", ConflictResolvePayload>
-  | SyncReplicationEnvelopeOf<"secret.file.put", SecretFilePutPayload>
-  | SyncReplicationEnvelopeOf<"secret.file.delete", SecretFileDeletePayload>
-  | SyncReplicationEnvelopeOf<"secret.version.fork", SecretVersionForkPayload>
-  | SyncReplicationEnvelopeOf<"chat.channel.create", ChatChannelCreatePayload>
-  | SyncReplicationEnvelopeOf<"chat.thread.create", ChatThreadCreatePayload>
-  | SyncReplicationEnvelopeOf<"chat.thread.update", unknown>
-  | SyncReplicationEnvelopeOf<"chat.message.append", ChatMessageAppendPayload>
-  | SyncReplicationEnvelopeOf<"chat.decision.set", ChatDecisionSetPayload>
-  | SyncReplicationEnvelopeOf<"chat.attachment.add", ChatAttachmentAddPayload>
-  | SyncReplicationEnvelopeOf<"chat.reaction.set", ChatReactionSetPayload>
-  | SyncReplicationEnvelopeOf<"chat.follow.set", ChatFollowSetPayload>
-  | SyncReplicationEnvelopeOf<"chat.feed.read.set", ChatFeedReadSetPayload>
-  | SyncReplicationEnvelopeOf<"ydoc.update", YDocUpdatePayload>;
-
-/**
- * Outcome of applying one replicated op. A single status discriminant keeps
- * illegal states unrepresentable: a skipped op can never report opened
- * conflicts, and callers branch on one field instead of two booleans.
- */
-export type SyncApplyResult =
-  | {
-      status: "applied";
-      conflictsOpened: number;
-    }
-  | { status: "skipped"; conflictsOpened: 0 };
 
 export interface VersionedTextMoment {
   id: VersionedTextMomentId;
@@ -818,22 +395,6 @@ export interface VersionedTextDeleteResult {
   moment: VersionedTextMoment;
 }
 
-// Minimal SQL-execution seam the engine write lane hands to a co-tenant of
-// engine.db (currently the WS-G2-B Y.Doc driver). Intentionally structural (no
-// node:sqlite dependency in contracts): a prepared-statement runner plus raw
-// exec, matching the DatabaseSync surface the store already uses. The task runs
-// inside the store's single BEGIN IMMEDIATE transaction, so it must not issue
-// its own BEGIN/COMMIT/ROLLBACK — throwing rolls the whole lane transaction back.
-export interface EngineWriteLaneStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes: number };
-}
-export interface EngineWriteLaneConnection {
-  exec(sql: string): void;
-  prepare(sql: string): EngineWriteLaneStatement;
-}
-
 /**
  * Internal server-side storage primitive.
  *
@@ -842,40 +403,6 @@ export interface EngineWriteLaneConnection {
  * authorization boundary.
  */
 export interface VersionedTextStore {
-  // WS-G2-B single-writer safety: run `task` on the store's same SQLite
-  // connection, serialized through the store's write queue and wrapped in one
-  // BEGIN IMMEDIATE transaction. The Y.Doc engine driver routes all its
-  // engine.db writes through here so a settle (writeTextFile) and a Y.Doc
-  // update-append can never hold two concurrent in-process write transactions —
-  // node:sqlite busy-waits block the JS thread, so two same-process writers on
-  // separate connections would deadlock until busy_timeout. Optional on the
-  // interface (like ensureSearchIndex) so partial mock stores still typecheck;
-  // the real createVersionedTextStore always provides it.
-  runInEngineWriteLane?<T>(task: (connection: EngineWriteLaneConnection) => T): Promise<T>;
-  // Internal indexed-search seam (lazy additive in engine.db). Implementations
-  // that do not have an engine search index may omit these and callers must
-  // fall back to linear search.
-  ensureSearchIndex?(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-  }): Promise<void>;
-  querySearchIndex?(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    query: string;
-    limit: number;
-  }): Promise<
-    | Array<
-        | {
-            surface: "file";
-            path: string;
-            objectId: WorkspaceObjectId;
-            text: string;
-          }
-        | { surface: "chat"; threadId: ChatThreadId }
-      >
-    | null
-  >;
   ensureMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord>;
   getMainVersion(input: { workspaceId: WorkspaceId }): Promise<VersionRecord | null>;
   // Engine-owned "which version does the workspace folder show right now".
@@ -896,24 +423,6 @@ export interface VersionedTextStore {
   }): Promise<VersionRecord>;
   listVersions(input: { workspaceId: WorkspaceId }): Promise<VersionRecord[]>;
   writeTextFile(input: {
-    workspaceId: WorkspaceId;
-    versionId: VersionId;
-    path: string;
-    text: string;
-    metadata: ActorNeutralWriteMetadata;
-    author?: MomentAuthor;
-    momentId?: VersionedTextMomentId;
-  }): Promise<VersionedTextWriteResult>;
-  // WS-G2-C1 non-journaling projection write. Materializes a rich doc's settled
-  // markdown (a local moment + searchable snapshot) without journaling a
-  // moment.append replication op. A Y.Doc-driven object replicates solely
-  // through the commutative ydoc.update op stream; if its projection also
-  // journaled moment.append, two peers' independent settles would collide into
-  // a P0D conflict on markdown the CRDT already reconciled. Optional (like
-  // runInEngineWriteLane) so partial mocks typecheck; the Y.Doc driver requires
-  // it. Behaves exactly like writeTextFile otherwise (origin metadata, moment,
-  // snapshot, search index) minus the journal.
-  writeProjectedTextFile?(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
     path: string;
@@ -1030,160 +539,10 @@ export interface VersionedTextStore {
     workspaceId: WorkspaceId;
     momentId: VersionedTextMomentId;
   }): Promise<VersionedTextMoment | null>;
-  // The peer-op entry point (0P-A). Behavior both stores must agree on:
-  // - Idempotent on duplicates: originSeq at or below the origin's acked
-  //   high-water mark, or already present in replication_log, applies nothing
-  //   and returns status "skipped".
-  // - Fails closed (state-corrupt) on per-origin sequence gaps: originSeq must
-  //   be exactly ackedSeq + 1; nothing is applied or acked on a gap.
-  // - Divergence never clobbers: a moment whose before-head does not match the
-  //   local materialized head lands as a record-only history row plus an open
-  //   sync conflict (counted in conflictsOpened); the local live file is
-  //   untouched.
-  // - The op journals into replication_log and advances the origin's acked
-  //   seq in the same transaction as its state mutation.
-  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   // Releases the underlying database handle after in-flight writes drain.
   // Callers that own a store (workspace teardown, app quit) must close it so
   // SQLite handles/WAL locks never outlive the workspace session.
   close(): Promise<void>;
-}
-
-export interface VersionedTextStoreOptions {
-  nowMs?: () => number;
-  createId?: (kind: "conflict" | "moment" | "object" | "version") => string;
-  // "quick" (default) runs pragma quick_check on open; "full" runs the
-  // O(entire-database) pragma integrity_check for diagnostics.
-  integrityCheck?: "quick" | "full";
-}
-
-export type FileWorkspacePlatformMode = "linux-anchored" | "portable";
-
-export interface FileWorkspaceCapabilityReport {
-  // process.platform values as a plain literal union: this package stays
-  // dependency-light, so the contract must not require @types/node ambient
-  // types (NodeJS.Platform) to resolve for non-Node consumers.
-  platform:
-    | "aix"
-    | "android"
-    | "darwin"
-    | "freebsd"
-    | "haiku"
-    | "linux"
-    | "openbsd"
-    | "sunos"
-    | "win32"
-    | "cygwin"
-    | "netbsd";
-  mode: FileWorkspacePlatformMode;
-  atomicReplace: boolean;
-  symlinkDefense: "descriptor-relative" | "o-nofollow-lstat" | "lstat-only";
-  descriptorPinning: boolean;
-  containmentCheck: "realpath-root-containment";
-  fileFsync: boolean;
-  parentDirectoryFsync: "supported" | "best-effort-noop";
-  notes: readonly string[];
-}
-
-export type VersionedFileWorkspaceErrorCode =
-  | "file-too-large"
-  | "file-not-found"
-  | "history-record-failed"
-  | "invalid-input"
-  | "invalid-path"
-  | "invalid-restore-direction"
-  | "not-text"
-  | "recovery-failed"
-  | "restore-file-not-found"
-  | "restore-snapshot-unavailable"
-  | "restore-stale-live-file"
-  | "stale-live-file"
-  | "unsupported-filesystem";
-
-export interface VersionedFileStat {
-  path: string;
-  mediaType: string;
-  sizeBytes: number;
-  sha256: string;
-}
-
-export type VersionedFileReadResult = string | null;
-export type VersionedFileListResult = VersionedFileStat[];
-
-export interface VersionedFileWriteResult {
-  path: string;
-  versionId: VersionId;
-  snapshot: TextFileSnapshot;
-  history: EngineHistoryRecord;
-}
-
-export interface VersionedFileDeleteResult {
-  path: string;
-  versionId: VersionId;
-  deleted: TextFileSnapshot | null;
-  history: EngineHistoryRecord;
-}
-
-export type VersionedFileRestoreResult = (VersionedFileWriteResult | VersionedFileDeleteResult) & {
-  restoredFrom: {
-    changeSetId: string;
-    path: string;
-    direction: "before" | "after";
-  };
-};
-
-export interface VersionedFileWorkspace {
-  capabilities(): FileWorkspaceCapabilityReport;
-  ensureMainVersion(): Promise<VersionRecord>;
-  createNamedVersion(input: { name: string; fromVersionId: VersionId }): Promise<VersionRecord>;
-  writeTextFile(input: {
-    path: string;
-    text: string;
-    versionId?: VersionId;
-    metadata?: ActorNeutralWriteMetadata;
-    summary?: string;
-    provenance?: EngineChangeProvenance;
-  }): Promise<VersionedFileWriteResult>;
-  deleteTextFile(input: {
-    path: string;
-    versionId?: VersionId;
-    metadata?: ActorNeutralWriteMetadata;
-    summary?: string;
-    provenance?: EngineChangeProvenance;
-  }): Promise<VersionedFileDeleteResult>;
-  readTextFile(input: { path: string }): Promise<VersionedFileReadResult>;
-  listTextFiles(): Promise<VersionedFileListResult>;
-  statTextFile(input: { path: string }): Promise<VersionedFileStat | null>;
-  restoreTextFile(input: {
-    changeSetId: string;
-    path: string;
-    direction?: "before" | "after";
-    versionId?: VersionId;
-  }): Promise<VersionedFileRestoreResult>;
-  history: VersionedFileHistoryReader;
-  versions: VersionedFileVersionReader;
-}
-
-export type VersionedFileHistoryReader = Pick<
-  EngineChangeSetStore,
-  "get" | "list" | "listIndexed" | "listSince"
->;
-
-export interface VersionedFileVersionReader {
-  getMainVersion(): Promise<VersionRecord | null>;
-  getObject(input: { objectId: WorkspaceObjectId }): Promise<FileObjectRecord | null>;
-  listTextFiles(input: { versionId: VersionId }): Promise<TextFileSnapshot[]>;
-  listVersions(): Promise<VersionRecord[]>;
-  readTextFile(input: {
-    versionId: VersionId;
-    path: string;
-  }): Promise<TextFileSnapshot | null>;
-}
-
-export interface VersionedFileWorkspaceOptions extends VersionedTextStoreOptions {
-  rootDir: string;
-  workspaceId: WorkspaceId;
-  author?: ChangeAuthor;
 }
 
 export type ChatThreadId = string;
@@ -1193,29 +552,6 @@ export type ChatChannelId = string;
 // A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
-
-export type LinkedChatStoreErrorCode =
-  | "channel-exists"
-  | "channel-not-found"
-  | "decision-not-found"
-  | "invalid-channel-kind"
-  | "invalid-channel-name"
-  | "invalid-bookmark-target"
-  | "invalid-follow-target"
-  | "invalid-message-body"
-  | "message-not-found"
-  | "invalid-path"
-  | "invalid-read-cursor"
-  | "invalid-sender"
-  | "invalid-thread-owner"
-  | "invalid-thread-title"
-  | "invalid-workspace"
-  | "read-state-revision-mismatch"
-  | "state-corrupt"
-  | "thread-not-found"
-  | "workspace-mismatch";
-
-export const LINKED_CHAT_STORE_RELATIVE_PATH = VERSIONED_TEXT_STORE_RELATIVE_PATH;
 
 export type ChatActor =
   | { kind: "human"; displayName: string }
@@ -1749,12 +1085,6 @@ export interface LinkedChatStore {
     generation: number;
     failureReason?: string;
   }): Promise<ChatBookmarkTransitionResult>;
-  // Same replication contract as VersionedTextStore.applyReplicationOp:
-  // idempotent skip on duplicate originSeq, fail-closed on per-origin gaps,
-  // journal + ack in the same transaction as the mutation. Chat ops never
-  // open conflicts: channel identity converges by wire id (slug is only a
-  // lookup alias), threads/messages are create-only by stable id.
-  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   getThreadProjection(input: {
     workspaceId: WorkspaceId;
     threadId: ChatThreadId;
@@ -1764,11 +1094,6 @@ export interface LinkedChatStore {
   // Callers that own a store (workspace teardown, app quit) must close it so
   // SQLite handles/WAL locks never outlive the workspace session.
   close(): Promise<void>;
-}
-
-export interface LinkedChatStoreOptions {
-  nowMs?: () => number;
-  createId?: (kind: "channel" | "message" | "thread") => string;
 }
 
 export type AgentDispatchState = "pending" | "running" | "done" | "failed";
@@ -1867,38 +1192,9 @@ export interface AgentDispatchStore {
   ): ThreadDispatchPauseState | null;
 }
 
-export type SearchSurface = "chat" | "file";
-
 export type SearchVisibility =
   | { searchable: true; projectionFileAccess?: LinkedChatProjectionFileAccess }
   | { searchable: false; reason: "ignored" | "permission-denied" | "secret" };
-
-export type WorkspaceSearchPolicy = {
-  fileVisibility?: (file: TextFileSnapshot) => SearchVisibility;
-  chatVisibility?: (thread: ChatThread) => SearchVisibility;
-};
-
-export interface WorkspaceEngineSearchResult {
-  surface: SearchSurface;
-  path: string;
-  title: string;
-  line: number;
-  preview: string;
-  matchStart: number;
-  matchEnd: number;
-  threadId?: string;
-  objectId?: string;
-}
-
-export interface WorkspaceEngineSearchOptions {
-  workspaceId: WorkspaceId;
-  versionId: VersionId;
-  query: string;
-  versions: VersionedTextStore;
-  chats: LinkedChatStore;
-  policy?: WorkspaceSearchPolicy;
-  limit?: number;
-}
 
 export type EngineFilePathClassification =
   | { kind: "tracked" }
@@ -2036,7 +1332,6 @@ export type SecretFileMaterialization =
  * materializeSecretFile.
  */
 export interface SecretFileStore {
-  applyReplicationOp(input: SyncReplicationEnvelope): Promise<SyncApplyResult>;
   writeSecretFile(input: {
     workspaceId: WorkspaceId;
     versionId: VersionId;
@@ -2106,28 +1401,6 @@ export interface SecretFileStore {
   close(): Promise<void>;
 }
 
-export interface SecretFileStoreOptions {
-  nowMs?: () => number;
-  createId?: (kind: "moment") => string;
-}
-
-type EngineChangeSetKind =
-  | "user-edit"
-  | "agent-run"
-  | "import"
-  | "sync"
-  | "site-build"
-  | "history-restore";
-
-type EngineBoundaryCrossing =
-  | "public-share"
-  | "external-export"
-  | "permission-change"
-  | "bulk-delete"
-  | "site-publish"
-  | "private-to-shared"
-  | "unmergeable-overwrite";
-
 // Canonical home of the change-author vocabulary. `@dohc/workspace-core`
 // re-exports these (it already depends on this package), so the branded
 // local-author label stays a single nominal type everywhere instead of a
@@ -2153,65 +1426,3 @@ export type ChangeAuthor =
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };
 
-interface EngineFileChange {
-  path: string;
-  operation: "write" | "delete" | "rename";
-  mediaType?: string;
-  before?: EngineFileChangeSnapshot | null;
-  after?: EngineFileChangeSnapshot | null;
-}
-
-interface EngineFileChangeSnapshot {
-  sha256?: string;
-  sizeBytes?: number;
-  text?: string;
-  truncated?: boolean;
-  unavailableReason?: "missing" | "binary" | "too-large" | "unreadable";
-}
-
-interface EngineChangeProvenance {
-  source: EngineChangeSetKind;
-  prompt?: string;
-  agentRunId?: string;
-  importPath?: string;
-  restoreOfChangeSetId?: string;
-  restoreOfPath?: string;
-  restoreDirection?: "restore" | "undo" | "redo";
-}
-
-interface EngineChangeSet {
-  kind: EngineChangeSetKind;
-  author: ChangeAuthor;
-  summary: string;
-  files: EngineFileChange[];
-  boundaryCrossings: EngineBoundaryCrossing[];
-  provenance?: EngineChangeProvenance;
-}
-
-interface EngineHistoryRecord {
-  id: string;
-  recordedAtMs: number;
-  kind: EngineChangeSetKind;
-  author: ChangeAuthor;
-  summary: string;
-  files: EngineFileChange[];
-  provenance?: EngineChangeProvenance;
-  boundaryCrossings: EngineBoundaryCrossing[];
-}
-
-interface EngineIndexedHistoryRecord {
-  index: number;
-  record: EngineHistoryRecord;
-}
-
-interface EngineChangeSetStore {
-  record(
-    set: EngineChangeSet,
-    opts: { id: string; recordedAtMs: number },
-  ): Promise<EngineHistoryRecord>;
-  list(): Promise<EngineHistoryRecord[]>;
-  listIndexed(): Promise<EngineIndexedHistoryRecord[]>;
-  listSince(afterMs: number): Promise<EngineHistoryRecord[]>;
-  maxRecordedAtMs(): Promise<number>;
-  get(id: string): Promise<EngineHistoryRecord | null>;
-}
