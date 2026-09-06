@@ -4,6 +4,7 @@ import { extname, join } from "node:path";
 import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
+import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -70,6 +71,8 @@ export interface CreateShareWebHandlerOptions {
   maxSessions?: number;
   viewerAssetsDir?: string;
   handoffRelayTimeoutMs?: number;
+  accountAuth?: AccountAuthConfig;
+  fetchAuth?: RelayFetch;
 }
 
 class ShareWebSessionStore {
@@ -740,7 +743,16 @@ export function createShareWebHandler({
   maxSessions = DEFAULT_MAX_SESSIONS,
   viewerAssetsDir,
   handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+  accountAuth,
+  fetchAuth,
 }: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
+  const accountHandler = accountAuth ? createAccountAuthHandler({
+    ...accountAuth,
+    fetchAuth,
+    maxRequestBytes: MAX_EXCHANGE_BODY_BYTES,
+    maxResponseBytes: MAX_RELAY_RESPONSE_BYTES,
+    timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
+  }) : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
   const exchangeRateLimiter = new TokenBucketLimiter(
     EXCHANGE_BUCKET_CAPACITY,
@@ -891,6 +903,15 @@ export function createShareWebHandler({
   return async (request: Request): Promise<Response> => {
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
+
+    if (pathname.startsWith("/api/account/")) {
+      if (!accountHandler) return refused();
+      const accountResponse = await accountHandler(request);
+      return response(accountResponse.body, {
+        status: accountResponse.status,
+        headers: accountResponse.headers,
+      });
+    }
 
     if (request.method === "GET" && (pathname === "/s" || pathname.startsWith("/s/"))) {
       return serveViewer(pathname);
@@ -1172,11 +1193,17 @@ export function createShareWebHandler({
       const authenticated = await readSession(request);
       if (!authenticated) return refused();
       let relayPath: string | null = null;
+      let logHoldMs = 0;
       if (request.method === "GET" && pathname === "/api/view/meta") {
         relayPath = "/sync/link/share";
       } else if (request.method === "GET" && pathname === "/api/view/current") {
         relayPath = "/sync/link/current";
       } else if (request.method === "GET" && pathname === "/api/view/log") {
+        const hold = new URL(request.url).searchParams.get("hold") ?? "0";
+        if (!DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+          return refused();
+        }
+        logHoldMs = Number(hold);
         relayPath = `/sync/link/log${search}`;
       } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {
         const sha = pathname.slice("/api/view/blob/".length);
@@ -1191,6 +1218,7 @@ export function createShareWebHandler({
         : {};
 
       const isBlob = pathname.startsWith("/api/view/blob/");
+      const isLog = pathname === "/api/view/log";
       const releaseBlobProxy = isBlob
         ? blobProxyLimiter.acquire(
             sessionKey(authenticated.discriminator, authenticated.token),
@@ -1198,17 +1226,39 @@ export function createShareWebHandler({
           )
         : null;
       if (isBlob && !releaseBlobProxy) return refused(429, refreshedCookieHeaders);
+      const releaseActivityHold = isLog
+        ? activityHoldLimiter.acquire(
+            sessionKey(authenticated.discriminator, authenticated.token),
+            authenticated.session.grantId,
+          )
+        : null;
+      if (isLog && !releaseActivityHold) return refused(429, refreshedCookieHeaders);
 
+      const readCapabilityToken = authenticated.session.capabilityToken;
+      const relayInit: RequestInit = {
+        headers: { authorization: `LinkCapability ${readCapabilityToken}` },
+        signal: request.signal,
+      };
+      const boundedLog = isLog ? boundedRelayRequest(
+        request.signal, relayUrl, relayPath, relayInit,
+        DEFAULT_RELAY_REQUEST_TIMEOUT_MS + logHoldMs,
+      ) : null;
       try {
-        const readCapabilityToken = authenticated.session.capabilityToken;
         const relayResponse = await fetchRelay(
-          relayRequest(relayUrl, relayPath, {
-            headers: {
-              authorization: `LinkCapability ${readCapabilityToken}`,
-            },
-            signal: request.signal,
-          }),
+          boundedLog?.request ?? relayRequest(relayUrl, relayPath, relayInit),
         );
+        if (
+          isLog &&
+          !sessions.isCurrent(
+            authenticated.discriminator,
+            authenticated.token,
+            readCapabilityToken,
+            nowMs(),
+          )
+        ) {
+          await relayResponse.body?.cancel().catch(() => undefined);
+          return refused(409, refreshedCookieHeaders);
+        }
         if (relayResponse.status !== 200) {
           releaseBlobProxy?.();
           if (relayResponse.status === 429) {
@@ -1243,6 +1293,9 @@ export function createShareWebHandler({
       } catch {
         releaseBlobProxy?.();
         return refused(503, refreshedCookieHeaders);
+      } finally {
+        boundedLog?.dispose();
+        releaseActivityHold?.();
       }
     }
 

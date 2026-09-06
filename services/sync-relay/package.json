@@ -15,6 +15,7 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",

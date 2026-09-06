@@ -2426,13 +2426,111 @@ export function createSyncRelayHandler({
           const requestedSince = parseCursor(url.searchParams.get("since"));
           const since = Math.max(requestedSince, epochLogFloor);
           const limit = parseLimit(url.searchParams.get("limit"));
-          const page = filteredLogPage(
+          const hold = parseLinkLogHold(url.searchParams.get("hold"));
+          let page = filteredLogPage(
             share.workspaceId,
             capability.effectiveSelector,
             since,
             limit,
             "accountless",
           );
+          if (
+            hold > 0 &&
+            page.ops.length === 0 &&
+            page.hasMore === false &&
+            page.nextCursor === since
+          ) {
+            const deadlineAtMs = Date.now() + hold;
+            let scanSince = since;
+            for (;;) {
+              requireFreshLinkRead(capabilityToken, capability);
+              const remainingHoldMs = Math.max(0, deadlineAtMs - Date.now());
+              if (remainingHoldMs === 0) break;
+              try {
+                await discussionActivity.wait(
+                  `log:${share.workspaceId}`,
+                  `link:${capability.session.capabilityHash}`,
+                  {
+                    holdMs: remainingHoldMs,
+                    signal: request.signal,
+                    shouldPark: () => {
+                      try {
+                        const fresh = requireFreshLinkRead(
+                          capabilityToken,
+                          capability,
+                        );
+                        const currentEpochLogFloor = storage.getEpochLogFloor(
+                          share.workspaceId,
+                        );
+                        if (currentEpochLogFloor !== epochLogFloor) return false;
+                        const checked = filteredLogPage(
+                          share.workspaceId,
+                          fresh.effectiveSelector,
+                          scanSince,
+                          limit,
+                          "accountless",
+                        );
+                        if (checked.ops.length > 0 || checked.hasMore) return false;
+                        scanSince = checked.nextCursor;
+                        return true;
+                      } catch {
+                        return false;
+                      }
+                    },
+                  },
+                );
+              } catch (error) {
+                if (error instanceof DiscussionActivityCapacityError) {
+                  throw linkReadRateLimited();
+                }
+                throw error;
+              }
+
+              const fresh = requireFreshLinkRead(capabilityToken, capability);
+              const currentEpochLogFloor = storage.getEpochLogFloor(
+                share.workspaceId,
+              );
+              page = filteredLogPage(
+                share.workspaceId,
+                fresh.effectiveSelector,
+                Math.max(scanSince, currentEpochLogFloor),
+                limit,
+                "accountless",
+              );
+              scanSince = page.nextCursor;
+              if (
+                page.ops.length > 0 ||
+                page.hasMore ||
+                currentEpochLogFloor !== epochLogFloor ||
+                Date.now() >= deadlineAtMs ||
+                request.signal.aborted
+              ) {
+                requireFreshLinkRead(capabilityToken, capability);
+                return linkJsonResponse(capability.shareId, capability.grantId, {
+                  ok: true,
+                  ...page,
+                  epochLogFloor: currentEpochLogFloor,
+                });
+              }
+            }
+            const fresh = requireFreshLinkRead(capabilityToken, capability);
+            const currentEpochLogFloor = storage.getEpochLogFloor(
+              share.workspaceId,
+            );
+            page = filteredLogPage(
+              share.workspaceId,
+              fresh.effectiveSelector,
+              Math.max(scanSince, currentEpochLogFloor),
+              limit,
+              "accountless",
+            );
+            requireFreshLinkRead(capabilityToken, capability);
+            return linkJsonResponse(capability.shareId, capability.grantId, {
+              ok: true,
+              ...page,
+              epochLogFloor: currentEpochLogFloor,
+            });
+          }
           requireFreshLinkRead(capabilityToken, capability);
           return linkJsonResponse(capability.shareId, capability.grantId, {
             ok: true,
@@ -2664,6 +2762,7 @@ export function createSyncRelayHandler({
         if (!secret) throw notFound();
         terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -2727,6 +2826,7 @@ export function createSyncRelayHandler({
         }
         if (widening) terminateLinkStreamsForGrant(result.grant.grantId);
         discussionActivity.wake(share.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...linkGrantBody(result.grant),
@@ -2766,6 +2866,7 @@ export function createSyncRelayHandler({
         });
         if (!result.ok) throw notFound();
         discussionActivity.wake(route.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
@@ -2802,6 +2903,7 @@ export function createSyncRelayHandler({
         });
         if (!result.ok) throw notFound();
         discussionActivity.wake(route.shareId);
+        discussionActivity.wake(`log:${share.workspaceId}`);
         return jsonResponse({
           ok: true,
           ...namedGrantTransitionBody(result.grant),
@@ -2851,11 +2953,13 @@ export function createSyncRelayHandler({
           }
           terminateLinkStreamsForGrant(result.grant.grantId);
           discussionActivity.wake(share.shareId);
+          discussionActivity.wake(`log:${share.workspaceId}`);
           return jsonResponse({ ok: true, ...linkGrantBody(result.grant) });
         }
         if (storage.revokeShare(route.shareId, nowMs())) {
           terminateLinkStreamsForShare(route.shareId);
           discussionActivity.wake(route.shareId);
+          discussionActivity.wake(`log:${share.workspaceId}`);
         }
         return jsonResponse({ ok: true, shareId: route.shareId });
       }
@@ -3051,6 +3155,9 @@ export function createSyncRelayHandler({
             share.workspaceId,
           ),
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${share.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           accepted: ops.length,
@@ -3505,6 +3612,9 @@ export function createSyncRelayHandler({
             }
           },
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${route.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           proposalId: route.proposalId,
@@ -4032,6 +4142,9 @@ export function createSyncRelayHandler({
             );
           },
         });
+        if (result.inserted > 0) {
+          discussionActivity.wake(`log:${route.workspaceId}`);
+        }
         return jsonResponse({
           ok: true,
           accepted: ops.length,
@@ -4930,6 +5043,24 @@ function parseLimit(value: string | null): number {
   const limit = Number(value);
   if (!Number.isInteger(limit) || limit < 1) throw badRequest("limit must be a positive integer");
   return Math.min(limit, MAX_LOG_PAGE_SIZE);
+}
+
+function parseLinkLogHold(value: string | null): number {
+  if (value === null) return 0;
+  if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw badRequest("hold must be a non-negative integer");
+  }
+  const hold = Number(value);
+  if (
+    !Number.isSafeInteger(hold) ||
+    hold < 0 ||
+    hold > MAX_DISCUSSION_ACTIVITY_HOLD_MS
+  ) {
+    throw badRequest(
+      `hold must be a non-negative integer no greater than ${String(MAX_DISCUSSION_ACTIVITY_HOLD_MS)}`,
+    );
+  }
+  return hold;
 }
 
 function parsePresenceTopic(value: string | null): string {

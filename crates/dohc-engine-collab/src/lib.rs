@@ -26,6 +26,8 @@ pub mod durable;
 pub mod error;
 pub mod lease;
 pub mod limits;
+pub mod live_object_binding;
+pub mod owner_outbox;
 pub mod replay_parity;
 pub mod replication;
 pub mod scene;
@@ -50,6 +52,16 @@ pub use durable::{
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
+pub use live_object_binding::LiveObjectBinding;
+pub use owner_outbox::{
+    acknowledge as acknowledge_owner_outbox, append as append_owner_outbox,
+    quarantine as quarantine_owner_outbox, read_pending as read_pending_owner_outbox,
+    read_pending_page as read_pending_owner_outbox_page, OwnerDeliveryReceipt,
+    OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput, OwnerOutboxAppendResult,
+    OwnerOutboxEntry, OwnerOutboxError, OwnerOutboxLimits, OwnerOutboxPageResult,
+    OwnerOutboxPending, OwnerOutboxQuarantineInput, OwnerOutboxReadCursor, OwnerOutboxReadPage,
+    OwnerOutboxReadPart, OwnerOutboxState,
+};
 pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,

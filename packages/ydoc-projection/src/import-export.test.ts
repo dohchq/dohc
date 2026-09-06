@@ -105,6 +105,77 @@ function expectStableMarkdownRoundTrip(
 }
 
 describe('Y.Doc markdown import/export', () => {
+  it.each(['array', 'map', 'array-map', 'map-array'] as const)(
+    'round-trips depth-128 canonical %s frontmatter',
+    (shape) => {
+      for (const leaf of ['leaf', 'true', 'line one\nline two\n', [], {}]) {
+        let value: unknown = leaf
+        for (let depth = 127; depth >= 0; depth -= 1) {
+          const array = shape === 'array'
+            || (shape === 'array-map' && depth % 2 === 0)
+            || (shape === 'map-array' && depth % 2 === 1)
+          value = array ? [value] : { key: value }
+        }
+        const original = markdownToYDoc('Body remains.\n')
+        original.getMap('frontmatter').set('value', value)
+        const markdown = yDocToMarkdown(original)
+        const restored = markdownToYDoc(markdown)
+        try {
+          expect(getDohcYDocFrontmatter(restored)).toEqual({ value })
+          expect(yDocToMarkdown(restored)).toBe(markdown)
+        } finally {
+          original.destroy()
+          restored.destroy()
+        }
+      }
+    },
+  )
+
+  it('keeps malformed and over-parser-limit frontmatter visible as body text', () => {
+    const overLimit = `---\nvalue: ${'['.repeat(130)}"depth-limit-leaf"${']'.repeat(130)}\n---\nBody remains.\n`
+    const cases: { markdown: string; heading: JSONContent[] }[] = [
+      {
+        markdown: overLimit,
+        heading: [
+          { type: 'text', text: 'value: ' },
+          {
+            type: 'wikilink',
+            attrs: { target: `${'['.repeat(128)}"depth-limit-leaf"`, label: null },
+          },
+          { type: 'text', text: ']'.repeat(128) },
+        ],
+      },
+      {
+        markdown: '---\nvalue: [unterminated\n---\nBody remains.\n',
+        heading: [{ type: 'text', text: 'value: [unterminated' }],
+      },
+    ]
+    for (const { markdown, heading } of cases) {
+      const expectedBody: JSONContent = {
+        type: 'doc',
+        content: [
+          { type: 'horizontalRule' },
+          { type: 'heading', attrs: { level: 2 }, content: heading },
+          { type: 'paragraph', content: [{ type: 'text', text: 'Body remains.' }] },
+        ],
+      }
+      const restored = markdownToYDoc(markdown)
+      try {
+        expect(getDohcYDocFrontmatter(restored)).toEqual({})
+        expect(yDocBodyJSON(restored)).toEqual(expectedBody)
+        const reimported = markdownToYDoc(yDocToMarkdown(restored))
+        try {
+          expect(getDohcYDocFrontmatter(reimported)).toEqual({})
+          expect(yDocBodyJSON(reimported)).toEqual(expectedBody)
+        } finally {
+          reimported.destroy()
+        }
+      } finally {
+        restored.destroy()
+      }
+    }
+  })
+
   it.each(frontmatterVectors)('matches the shared frontmatter vector $name', ({ markdown, expected }) => {
     const doc = markdownToYDoc(markdown)
     expect(getDohcYDocFrontmatter(doc))

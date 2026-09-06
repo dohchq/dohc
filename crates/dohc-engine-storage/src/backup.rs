@@ -74,6 +74,8 @@ const COMPARED_TABLES: &[&str] = &[
     "ydoc_inactive_lineages",
     "ydoc_base_relay_candidates",
     "ydoc_recovery_decisions",
+    "owner_ydoc_outboxes",
+    "owner_ydoc_outbox_entries",
     "replication_pending_conflict_bundles",
     "replication_pending_conflict_ops",
     "replication_pending_conflict_moments",
@@ -483,6 +485,16 @@ mod tests {
     #[test]
     fn backup_compares_ydoc_arbitration_tables() {
         for table in ["ydoc_base_relay_candidates", "ydoc_recovery_decisions"] {
+            assert!(
+                COMPARED_TABLES.contains(&table),
+                "backup restore verification must compare {table}"
+            );
+        }
+    }
+
+    #[test]
+    fn backup_compares_owner_ydoc_outbox_tables() {
+        for table in ["owner_ydoc_outboxes", "owner_ydoc_outbox_entries"] {
             assert!(
                 COMPARED_TABLES.contains(&table),
                 "backup restore verification must compare {table}"
