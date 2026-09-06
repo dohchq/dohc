@@ -425,7 +425,6 @@ describe("CLI socket server", () => {
     };
     try {
       server = await startCliServer(serverOptions);
-      await server.ready;
       token = (await readFile(server.tokenPath, "utf8")).trim();
     } catch (error) {
       const code = typeof error === "object" && error !== null && "code" in error
@@ -1207,6 +1206,14 @@ describe("CLI socket server", () => {
     const queries: Array<Parameters<CliCollectionsPort["query"]>[0]> = [];
     const recordReads: Array<Parameters<CliCollectionsPort["getRecord"]>[0]> = [];
     context.collections = {
+      writes: {
+        async setFields() {
+          throw new Error("unexpected collection write");
+        },
+        async createRecord() {
+          throw new Error("unexpected collection write");
+        },
+      },
       async query(params) {
         queries.push(params);
         return {
@@ -1399,7 +1406,7 @@ describe("CLI socket server", () => {
     ]);
   });
 
-  it("answers collection verbs honestly when the port or the write seam is absent", async () => {
+  it("answers collection verbs honestly when the port is absent", async () => {
     context.collections = undefined;
     await expect(invoke("collectionQuery", {
       cwd: workspaceRoot,
@@ -1410,14 +1417,6 @@ describe("CLI socket server", () => {
       reason: "collections are not available in this workspace",
     });
 
-    context.collections = {
-      async query() {
-        throw new Error("reads are not under test");
-      },
-      async getRecord() {
-        throw new Error("reads are not under test");
-      },
-    };
     await expect(invoke("collectionSetFields", {
       cwd: workspaceRoot,
       actor: "agent",
@@ -1425,7 +1424,7 @@ describe("CLI socket server", () => {
       fields: { status: "done" },
     })).resolves.toEqual({
       ok: false,
-      reason: "collection writes are not available in this dohc build",
+      reason: "collections are not available in this workspace",
     });
     await expect(invoke("collectionCreateRecord", {
       cwd: workspaceRoot,
@@ -1435,7 +1434,7 @@ describe("CLI socket server", () => {
       fields: {},
     })).resolves.toEqual({
       ok: false,
-      reason: "collection writes are not available in this dohc build",
+      reason: "collections are not available in this workspace",
     });
   });
 

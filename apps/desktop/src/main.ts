@@ -2435,10 +2435,14 @@ const activity = {
         options,
       ),
     ),
-  reconcileCloud: (engineFor: typeof engineForWorkspace): void => {
+  reconcileCloud: (): void => {
     for (const workspaceId of workspaceAuthorities.workspaceIds()) {
       withWorkspaceActivityState(workspaceId, (lease) =>
-        workspaceActivity.reconcileCloud(lease.state.activity, engineFor, false),
+        workspaceActivity.reconcileCloud(
+          lease.state.activity,
+          engineForWorkspace,
+          false,
+        ),
       );
     }
     notifyRenderer();
@@ -4290,7 +4294,7 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       ),
     ),
   );
-  const server = await startCliServer({
+  return startCliServer({
     stateDir: stateDir(),
     listWorkspaces: () =>
       listWorkspaces()
@@ -4359,14 +4363,6 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       console.debug(`[desktop] CLI server: ${message}`);
     },
   });
-  return {
-    socketPath: server.socketPath,
-    tokenPath: server.tokenPath,
-    ready: server.ready,
-    async close() {
-      await server.close();
-    },
-  };
 }
 
 const engineYDocSessionIpc = createEngineYDocSessionIpc({
@@ -5363,7 +5359,7 @@ const appLifecycle = createAppLifecycle<BrowserWindow, WorkspaceSummary, Desktop
     refreshTray: refreshDispatchTray,
     reportTrayFailure: (error) => console.error("[desktop] dispatch tray:", error),
     warmCredentials: warmCredentialCache,
-    reconcileCloud: () => { activity.reconcileCloud(engineForWorkspace); },
+    reconcileCloud: () => { activity.reconcileCloud(); },
     startUpdates: () => {
       // Auto-updates: packaged builds use electron-builder's baked app-update.yml
       // feed by default; DOHC_UPDATE_URL is only an explicit mock/dev override.
@@ -5609,10 +5605,7 @@ const recoveryChecker = createRecoveryChecker({
   },
 });
 
-function registerIpcHandlers(
-  deps: { now?: () => number; createId?: () => string } = {},
-): void {
-  const now = deps.now ?? (() => Date.now());
+function registerIpcHandlers(): void {
   const windowIpc = createWindowIpc<WebContents, IpcMainInvokeEvent, IpcMainEvent>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     registerEvent: (channel, handler) => ipcMain.on(channel, handler),
@@ -5734,7 +5727,7 @@ function registerIpcHandlers(
     assertTrustedSender, cloudLogin, clearCachedCredentials, refreshCredentialCache,
     warmCredentialCache, currentCredentials: () => cachedCredentials,
     loadAndCacheCurrentCredentials, closeAllRelayTransportWorkspaces, activity,
-    reconcileCloud: () => activity.reconcileCloud(engineForWorkspace),
+    reconcileCloud: () => activity.reconcileCloud(),
     notifyCloudSessionChanged, notifyCloudSessionChangedWithKey,
     notifyRenderer, findWorkspace, managedCloudConfiguration,
     engineDaemonStartup: () => engineDaemonStartup,
@@ -5944,8 +5937,8 @@ function registerIpcHandlers(
         operationId: input.operationId,
         signal: operation.signal,
       }),
-    now,
-    createId: deps.createId ?? randomUUID,
+    now: () => Date.now(),
+    createId: randomUUID,
   });
 
   ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
