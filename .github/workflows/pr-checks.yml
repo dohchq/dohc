@@ -109,6 +109,7 @@ jobs:
               # The live fixture oracles and dependency setup are Rust inputs.
               - 'packages/security-contract/**'
               - 'packages/workspace-contracts/**'
+              - 'packages/workspace-core/**'
               - '**/package.json'
               - '**/tsconfig*.json'
               - 'pnpm-workspace.yaml'

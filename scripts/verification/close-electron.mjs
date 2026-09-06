@@ -31,12 +31,10 @@ async function terminateOwnedProcess(child) {
         });
     });
   } else {
-    // Playwright launches Electron as the leader of its own POSIX process group.
-    for (const signal of ["SIGTERM", "SIGKILL"]) {
-      try { process.kill(-child.pid, signal); }
-      catch (error) { if (error.code !== "ESRCH") throw error; }
-      if (await waitForExit(child, 1000)) return;
-    }
+    // Graceful close already had its bounded attempt. Kill the group while its recorded leader
+    // is live; a second grace period could outlive the leader and lose ownership.
+    try { process.kill(-child.pid, "SIGKILL"); }
+    catch (error) { if (error.code !== "ESRCH") throw error; }
   }
   if (!(await waitForExit(child, 1000))) {
     throw new Error(`Electron process ${child.pid} did not exit after forced cleanup.`);

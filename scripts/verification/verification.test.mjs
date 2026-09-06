@@ -365,6 +365,40 @@ for (const [kind, configurations] of Object.entries({
   }
 });
 
+test("engine source identity tracks ancestor and Cargo home configuration outside Git", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "dohc-cargo-ancestors-"));
+  const parent = join(fixture, "parent");
+  const root = join(parent, "checkout");
+  const cargoHome = join(fixture, "cargo-home");
+  const previousCargoHome = process.env.CARGO_HOME;
+  try {
+    mkdirSync(root, { recursive: true });
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    process.env.CARGO_HOME = cargoHome;
+    for (const directory of [join(parent, ".cargo"), join(fixture, ".cargo"), cargoHome]) {
+      mkdirSync(directory, { recursive: true });
+      for (const name of ["config", "config.toml"]) {
+        const path = join(directory, name);
+        const fingerprint = () => sourceFingerprint("engine", root);
+        const absent = fingerprint();
+        writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_one"]\n');
+        const created = fingerprint();
+        assert.match(created, /^[a-f0-9]{64}$/);
+        assert.notEqual(created, absent, `${path} creation`);
+        writeFileSync(path, '[build]\nrustflags = ["--cfg", "fixture_two"]\n');
+        assert.notEqual(fingerprint(), created, `${path} edit`);
+        rmSync(path);
+        assert.equal(fingerprint(), absent, `${path} removal`);
+        assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
+      }
+    }
+  } finally {
+    if (previousCargoHome === undefined) delete process.env.CARGO_HOME;
+    else process.env.CARGO_HOME = previousCargoHome;
+    rmSync(fixture, { recursive: true, force: true });
+  }
+});
+
 test("artifact identity includes nested file bytes and names", () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-artifact-"));
   try {
@@ -381,7 +415,7 @@ test("gate selection follows workflow inputs, including shared and gate implemen
   const workflow = readFileSync(join(repoRoot, ".github/workflows/pr-checks.yml"), "utf8");
   assert.deepEqual(selectedGates(["docs/guide.md"], workflow), { rust: false, js: false });
   assert.deepEqual(selectedGates(["apps/desktop/src/main.ts"], workflow), { rust: false, js: true });
-  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
+  for (const file of ["crates/example/src/lib.rs", "pnpm-lock.yaml", ".github/workflows/pr-checks.yml", ".gitignore", "tools/rust-engine-program/build-slot.mjs", ".cargo/config.toml", "package.json", "pnpm-workspace.yaml", ".npmrc", "packages/security-contract/src/effectivePolicy.ts", "packages/workspace-contracts/src/collections.ts", "packages/workspace-core/src/paths.ts", "apps/desktop/package.json", "tsconfig.base.json"]) {
     assert.deepEqual(selectedGates([file], workflow), { rust: true, js: true }, file);
   }
 });

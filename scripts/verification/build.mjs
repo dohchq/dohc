@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, unlinkSync, renameSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { acquireBuildSlot, freeDiskGb, resolveBuildBudget } from "../../tools/rust-engine-program/build-slot.mjs";
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { stagedEsbuildExecutable } from "../../apps/desktop/scripts/stage-plugin-tools.mjs";
@@ -62,6 +62,16 @@ export function sourceFingerprint(kind, root = repoRoot) {
   hash.update(JSON.stringify(environment));
   if (kind === "engine") {
     hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
+    // Cargo discovers configuration from its working directory through the filesystem root.
+    for (let directory = resolve(root); dirname(directory) !== directory;) {
+      directory = dirname(directory);
+      for (const name of ["config", "config.toml"]) {
+        const path = join(directory, ".cargo", name);
+        hash.update(path + "\0");
+        hash.update(existsSync(path) ? readFileSync(path) : "<deleted>");
+        hash.update("\0");
+      }
+    }
     const cargoHome = process.env.CARGO_HOME ?? join(homedir(), ".cargo");
     for (const name of ["config", "config.toml"]) {
       const path = join(cargoHome, name);
