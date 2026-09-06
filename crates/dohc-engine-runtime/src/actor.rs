@@ -94,9 +94,9 @@ use dohc_engine_storage::{
     hex_sha256, put_binary_blob, upsert_projection_job,
 };
 use dohc_engine_sync::{
-    ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse, BlobDownloadResponse,
-    BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest, ClaimResponse,
-    ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
+    ApplyDisposition, ApplyOutcome, BlobDownloadBatchRequest, BlobDownloadBatchResponse,
+    BlobDownloadResponse, BlobHaveRequest, BlobHaveResponse, BlobUploadRequest, ClaimRequest,
+    ClaimResponse, ConflictApplyResult, EpochRequest, EpochResponse, KeyEnvelopeDownloadRequest,
     KeyEnvelopeDownloadResponse, KeyEnvelopeRequest, KeyEnvelopeResponse, LogCoordinateRequest,
     LogCoordinateResponse, MAX_BLOB_DOWNLOAD_BATCH, ProbeRequest, ProbeResponse, PullRequest,
     PullResponse, PushRequest, PushResponse, RecoverResponse, RelayCursor, RelayError,
@@ -8955,14 +8955,26 @@ fn worker_main(
                     Err(RuntimeError::Cancelled)
                 } else {
                     match apply_conflict_envelope(&mut store, &envelope, faults.as_ref(), &leases) {
-                        Ok(outcome @ ApplyOutcome::Refused(_)) => {
+                        Ok(
+                            outcome @ ApplyOutcome {
+                                primary: ApplyDisposition::Refused(_),
+                                ..
+                            },
+                        ) => {
                             retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
                                 .map(|()| outcome)
                                 .map_err(RuntimeError::from)
                         }
-                        Ok(ApplyOutcome::Skipped) => read_replayed_refusal(&store, &envelope)
+                        Ok(
+                            mut outcome @ ApplyOutcome {
+                                primary: ApplyDisposition::Skipped,
+                                ..
+                            },
+                        ) => read_replayed_refusal(&store, &envelope)
                             .map(|refusal| {
-                                refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused)
+                                outcome.primary = refusal
+                                    .map_or(ApplyDisposition::Skipped, ApplyDisposition::Refused);
+                                outcome
                             })
                             .map_err(RuntimeError::from),
                         outcome => outcome.map_err(RuntimeError::from),

@@ -43,10 +43,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, FaultInjector,
-    LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
-    RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition, SearchResultKey,
-    SearchSurface, WorkspaceSupervisor,
+    ActorHandle, ApplyDisposition, ApplyOutcome, CancellationToken, ConflictApplyResult,
+    FaultInjector, LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration,
+    RelayOperation, RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition,
+    SearchResultKey, SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -9200,7 +9200,7 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result, ApplyOutcome::Applied(_)) {
+            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
                 open.request_collection_reconcile();
             }
             return Ok(replicated_conflict_json(result));
@@ -9252,7 +9252,7 @@ impl EngineService {
                 )
                 .await
                 .map_err(map_runtime)?;
-            if matches!(&result, ApplyOutcome::Applied(_)) {
+            if matches!(&result.primary, ApplyDisposition::Applied(_)) {
                 open.request_collection_reconcile();
             }
             return Ok(replicated_conflict_json(result));
@@ -12493,8 +12493,8 @@ fn conflict_state_json(state: &ConflictFileState) -> Value {
 }
 
 fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value {
-    match outcome {
-        ApplyOutcome::Applied(result) => {
+    let mut value = match outcome.primary {
+        ApplyDisposition::Applied(result) => {
             json!({
                 "replicated": true,
                 "status": "applied",
@@ -12503,7 +12503,7 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
                 "matched": result.matched
             })
         }
-        ApplyOutcome::Refused(refusal) => json!({
+        ApplyDisposition::Refused(refusal) => json!({
             "replicated": true,
             "status": "refused",
             "workspaceId": refusal.workspace_id,
@@ -12513,49 +12513,43 @@ fn replicated_conflict_json(outcome: ApplyOutcome<ConflictApplyResult>) -> Value
             "code": refusal.reason.code(),
             "reason": refusal.reason.message()
         }),
-        ApplyOutcome::Skipped => json!({ "replicated": true, "status": "skipped" }),
-        ApplyOutcome::Crashed { committed } => json!({
+        ApplyDisposition::Skipped => json!({ "replicated": true, "status": "skipped" }),
+        ApplyDisposition::Crashed { committed } => json!({
             "replicated": true,
             "status": "crashed",
             "committed": committed
         }),
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => {
-            let mut value = replicated_conflict_json(*outcome);
-            if let Some(object) = value.as_object_mut() {
-                if !refusals.is_empty() {
-                    object.insert(
-                        "refusals".to_owned(),
-                        Value::Array(
-                            refusals
-                                .into_iter()
-                                .map(|refusal| {
-                                    json!({
-                                        "workspaceId": refusal.workspace_id,
-                                        "originId": refusal.origin_id,
-                                        "originSeq": refusal.origin_seq,
-                                        "opKind": refusal.op_kind,
-                                        "code": refusal.reason.code(),
-                                        "reason": refusal.reason.message()
-                                    })
-                                })
-                                .collect(),
-                        ),
-                    );
-                }
-                if !sharing_declined.is_empty() {
-                    object.insert(
-                        "sharingDeclined".to_owned(),
-                        Value::Array(sharing_declined_json(sharing_declined)),
-                    );
-                }
-            }
-            value
+    };
+    if let Some(object) = value.as_object_mut() {
+        if !outcome.refusals.is_empty() {
+            object.insert(
+                "refusals".to_owned(),
+                Value::Array(
+                    outcome
+                        .refusals
+                        .into_iter()
+                        .map(|refusal| {
+                            json!({
+                                "workspaceId": refusal.workspace_id,
+                                "originId": refusal.origin_id,
+                                "originSeq": refusal.origin_seq,
+                                "opKind": refusal.op_kind,
+                                "code": refusal.reason.code(),
+                                "reason": refusal.reason.message()
+                            })
+                        })
+                        .collect(),
+                ),
+            );
+        }
+        if !outcome.sharing_declined.is_empty() {
+            object.insert(
+                "sharingDeclined".to_owned(),
+                Value::Array(sharing_declined_json(outcome.sharing_declined)),
+            );
         }
     }
+    value
 }
 
 fn deserialize_optional_non_null_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
@@ -14882,7 +14876,7 @@ mod tests {
 
     #[test]
     fn replicated_conflict_json_surfaces_an_acked_refusal() {
-        let value = replicated_conflict_json(ApplyOutcome::Refused(
+        let value = replicated_conflict_json(ApplyOutcome::new(ApplyDisposition::Refused(
             dohc_engine_sync::ReplicationRefusal {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -14892,7 +14886,7 @@ mod tests {
                     reason: "conflict.open must describe an unresolved conflict".to_owned(),
                 },
             },
-        ));
+        )));
 
         assert_eq!(
             value,

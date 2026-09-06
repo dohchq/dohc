@@ -20,7 +20,7 @@ use dohc_engine_files::{
 
 use crate::error::local_corruption;
 use crate::file_search::{search_policy_for_store, upsert_file_search_index};
-use crate::{ApplyOutcome, ReplicationEnvelope, SyncError};
+use crate::{ApplyDisposition, ApplyOutcome, ReplicationEnvelope, SyncError};
 
 fn projection_too_large_reason(
     content_kind: dohc_engine_collab::ContentKind,
@@ -2783,18 +2783,21 @@ pub fn apply_ydoc_envelope(
             }
             Err(hard) => return Err(hard),
         };
-        if matches!(outcome, ApplyOutcome::Applied(_) | ApplyOutcome::Skipped)
-            && dohc_engine_collab::read_marker(store, &key)
-                .map_err(map_collab_hard_error)?
-                .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
+        if matches!(
+            outcome.primary,
+            ApplyDisposition::Applied(_) | ApplyDisposition::Skipped
+        ) && dohc_engine_collab::read_marker(store, &key)
+            .map_err(map_collab_hard_error)?
+            .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
             let drain = drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
-            return Ok(merge_drained(
+            let mut outcome = merge_drained(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
-            )
-            .with_sharing_declined(drain.sharing_declined)
-            .with_refusals(drain.refusals));
+            );
+            outcome.sharing_declined.extend(drain.sharing_declined);
+            outcome.refusals.extend(drain.refusals);
+            return Ok(outcome);
         }
         return Ok(outcome);
     }
@@ -2903,12 +2906,13 @@ pub fn apply_ydoc_envelope(
                 })
             })?;
             // The drain above ran before this apply, so its facts lead.
-            return Ok(merge_drained_first(
+            let mut outcome = merge_drained_first(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
-            )
-            .with_sharing_declined(drain.sharing_declined)
-            .with_refusals(drain.refusals));
+            );
+            outcome.sharing_declined.extend(drain.sharing_declined);
+            outcome.refusals.extend(drain.refusals);
+            return Ok(outcome);
         }
     }
     let update_path = payload.path.clone();
@@ -3016,19 +3020,19 @@ pub fn apply_ydoc_envelope(
             return Err(error);
         }
     };
-    match &outcome {
-        ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
+    match &outcome.primary {
+        ApplyDisposition::Applied(_) | ApplyDisposition::Refused(_) => {
             cache.finish_remote_append(&key, &remote.bytes, cache_probe);
         }
-        ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
-        ApplyOutcome::Crashed { committed: false } => {
+        ApplyDisposition::Crashed { committed: true } => cache.remove(&key),
+        ApplyDisposition::Crashed { committed: false } => {
             cache.finish_remote_gate_error(&key, &cache_probe);
         }
-        ApplyOutcome::Skipped | ApplyOutcome::WithDiagnostics { .. } => {}
+        ApplyDisposition::Skipped => {}
     }
     if matches!(
-        outcome,
-        ApplyOutcome::Applied(ReplicationApplyOutcome::Applied { .. })
+        outcome.primary,
+        ApplyDisposition::Applied(ReplicationApplyOutcome::Applied { .. })
     ) {
         let compacted = maybe_compact(
             store,
@@ -3052,15 +3056,16 @@ pub fn apply_ydoc_envelope(
     }
     // This path drained before the primary apply, so the drained facts
     // committed first and lead the emission order.
-    Ok(merge_drained_first(
+    let mut outcome = merge_drained_first(
         merge_lineage_replacements(
             map_applied_ydoc_outcome(outcome, sharing_declined, record_facts),
             drain.lineage_replacements,
         ),
         drain.record_facts,
-    )
-    .with_sharing_declined(drain.sharing_declined)
-    .with_refusals(drain.refusals))
+    );
+    outcome.sharing_declined.extend(drain.sharing_declined);
+    outcome.refusals.extend(drain.refusals);
+    Ok(outcome)
 }
 
 fn collapse_lineage_replacements(
@@ -3101,15 +3106,15 @@ fn merge_drained_first(
 }
 
 fn merge_drained_ordered(
-    outcome: ApplyOutcome<YdocApplyResult>,
+    mut outcome: ApplyOutcome<YdocApplyResult>,
     drained: Vec<dohc_engine_domain::CollectionRecordApplyFacts>,
     drained_first: bool,
 ) -> ApplyOutcome<YdocApplyResult> {
     if drained.is_empty() {
         return outcome;
     }
-    match outcome {
-        ApplyOutcome::Applied(mut result) => {
+    outcome.primary = match outcome.primary {
+        ApplyDisposition::Applied(mut result) => {
             if drained_first {
                 let own = std::mem::take(&mut result.record_facts);
                 result.record_facts = drained;
@@ -3117,42 +3122,30 @@ fn merge_drained_ordered(
             } else {
                 result.record_facts.extend(drained);
             }
-            ApplyOutcome::Applied(result)
+            ApplyDisposition::Applied(result)
         }
-        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+        ApplyDisposition::Skipped => ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-deferred-drained"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: drained,
         }),
-        // The drain committed before the primary was refused, so its facts
-        // are real; the refusal rides along as a diagnostic, the same way a
-        // drain's own refusals do.
-        ApplyOutcome::Refused(refusal) => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(ApplyOutcome::Applied(YdocApplyResult {
+        // The primary refusal precedes diagnostics from other drained work.
+        ApplyDisposition::Refused(refusal) => {
+            outcome.refusals.insert(0, refusal);
+            ApplyDisposition::Applied(YdocApplyResult {
                 deferred: false,
                 reason: Some("ydoc-deferred-drained"),
                 conflicts_opened: 0,
                 lineage_replacement: None,
                 record_facts: drained,
-            })),
-            refusals: vec![refusal],
-            sharing_declined: Vec::new(),
-        },
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(merge_drained_ordered(*outcome, drained, drained_first)),
-            refusals,
-            sharing_declined,
-        },
-        // A crash ends the pull pass before anything post-commit runs, so
-        // there is no emission to preserve facts for; the pass is retried.
-        crashed @ ApplyOutcome::Crashed { .. } => crashed,
-    }
+            })
+        }
+        // A crash ends the pull pass before post-commit emission; retry recovers the facts.
+        crashed @ ApplyDisposition::Crashed { .. } => crashed,
+    };
+    outcome
 }
 
 #[cfg(test)]
@@ -3173,18 +3166,21 @@ mod merge_drained_tests {
     }
 
     fn applied(record_id: &str) -> ApplyOutcome<YdocApplyResult> {
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: vec![facts(record_id)],
-        })
+        }))
     }
 
     fn ids(outcome: ApplyOutcome<YdocApplyResult>) -> Vec<String> {
         match outcome {
-            ApplyOutcome::Applied(result) => result
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(result),
+                ..
+            } => result
                 .record_facts
                 .into_iter()
                 .map(|facts| facts.record_id)
@@ -3196,29 +3192,23 @@ mod merge_drained_tests {
     #[test]
     fn drained_facts_keep_commit_order_on_both_paths() {
         // Drain after the primary: the primary's facts committed first.
-        assert_eq!(
-            ids(merge_drained(
-                applied("rec_primary"),
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_primary", "rec_parked"]
-        );
+        let outcome = merge_drained(applied("rec_primary"), vec![facts("rec_parked")]);
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_primary", "rec_parked"]);
         // Drain before the primary: the parked update's facts committed first.
-        assert_eq!(
-            ids(merge_drained_first(
-                applied("rec_primary"),
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_parked", "rec_primary"]
-        );
+        let outcome = merge_drained_first(applied("rec_primary"), vec![facts("rec_parked")]);
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_parked", "rec_primary"]);
         // A skipped primary still carries the drain's facts.
-        assert_eq!(
-            ids(merge_drained(
-                ApplyOutcome::Skipped,
-                vec![facts("rec_parked")]
-            )),
-            vec!["rec_parked"]
+        let outcome = merge_drained(
+            ApplyOutcome::new(ApplyDisposition::Skipped),
+            vec![facts("rec_parked")],
         );
+        assert!(outcome.refusals.is_empty());
+        assert!(outcome.sharing_declined.is_empty());
+        assert_eq!(ids(outcome), vec!["rec_parked"]);
         // A refused primary carries them too, with the refusal as a
         // diagnostic the pass still reports.
         let refusal = crate::ReplicationRefusal {
@@ -3231,24 +3221,97 @@ mod merge_drained_tests {
             },
         };
         let merged = merge_drained(
-            ApplyOutcome::Refused(refusal.clone()),
+            ApplyOutcome::new(ApplyDisposition::Refused(refusal.clone())),
             vec![facts("rec_parked")],
         );
-        let (primary, refusals, _) = merged.into_primary_and_diagnostics();
-        assert_eq!(refusals, vec![refusal]);
-        assert_eq!(ids(primary), vec!["rec_parked"]);
+        assert_eq!(merged.refusals, vec![refusal]);
+        assert_eq!(ids(merged), vec!["rec_parked"]);
+    }
+
+    #[test]
+    fn primary_changes_keep_diagnostics_in_reporting_order() {
+        let refusal = crate::ReplicationRefusal {
+            workspace_id: "ws".to_owned(),
+            origin_id: "peer".to_owned(),
+            origin_seq: 1,
+            op_kind: "ydoc.update".to_owned(),
+            reason: crate::RefusalReason::InvalidInput {
+                reason: "bad primary".to_owned(),
+            },
+        };
+        let older = crate::ReplicationRefusal {
+            origin_seq: 2,
+            ..refusal.clone()
+        };
+        let declined = crate::SharingDeclined {
+            path: "notes/drained.md".to_owned(),
+            constraint: "MAX_YDOC_UPDATE_BYTES",
+            limit_bytes: 20,
+            observed_bytes: 21,
+        };
+        let outcome = ApplyOutcome {
+            primary: ApplyDisposition::Refused(refusal.clone()),
+            refusals: vec![older.clone(), refusal.clone()],
+            sharing_declined: vec![declined.clone()],
+        };
+        let merged = merge_drained_first(outcome, vec![facts("committed")]);
+        // Keep duplicates here: relay accumulation owns coordinate deduplication.
+        assert_eq!(
+            merged.refusals,
+            [refusal.clone(), older.clone(), refusal.clone()]
+        );
+        assert_eq!(merged.sharing_declined, [declined.clone()]);
+        assert_eq!(ids(merged), ["committed"]);
+
+        let own_decline = crate::SharingDeclined {
+            path: "notes/primary.md".to_owned(),
+            ..declined.clone()
+        };
+        let mapped = map_applied_ydoc_outcome(
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(ReplicationApplyOutcome::Deduped { seq: 1 }),
+                refusals: vec![older],
+                sharing_declined: vec![declined.clone()],
+            },
+            Some(own_decline.clone()),
+            Some(facts("primary")),
+        );
+        assert_eq!(mapped.sharing_declined, [own_decline, declined.clone()]);
+        assert_eq!(mapped.refusals.len(), 1);
+        assert_eq!(mapped.refusals[0].origin_seq, 2);
+        assert_eq!(ids(mapped), ["primary"]);
+
+        for primary in [
+            ApplyDisposition::Skipped,
+            ApplyDisposition::Crashed { committed: true },
+        ] {
+            let outcome = ApplyOutcome {
+                primary,
+                refusals: vec![refusal.clone()],
+                sharing_declined: vec![declined.clone()],
+            };
+            let expected = outcome
+                .clone()
+                .map(|_: ReplicationApplyOutcome| unreachable!());
+            let mapped = map_applied_ydoc_outcome(
+                outcome,
+                Some(declined.clone()),
+                Some(facts("not-applied")),
+            );
+            assert_eq!(mapped, expected);
+        }
     }
 }
 
 fn merge_lineage_replacements(
-    outcome: ApplyOutcome<YdocApplyResult>,
+    mut outcome: ApplyOutcome<YdocApplyResult>,
     replacements: Vec<YdocLineageReplacement>,
 ) -> ApplyOutcome<YdocApplyResult> {
     let Some(replacement) = collapse_lineage_replacements(replacements) else {
         return outcome;
     };
-    match outcome {
-        ApplyOutcome::Applied(mut result) => {
+    outcome.primary = match outcome.primary {
+        ApplyDisposition::Applied(mut result) => {
             result.lineage_replacement = collapse_lineage_replacements(
                 result
                     .lineage_replacement
@@ -3256,26 +3319,18 @@ fn merge_lineage_replacements(
                     .chain([replacement])
                     .collect(),
             );
-            ApplyOutcome::Applied(result)
+            ApplyDisposition::Applied(result)
         }
-        ApplyOutcome::Skipped => ApplyOutcome::Applied(YdocApplyResult {
+        ApplyDisposition::Skipped => ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-deferred-lineage-replaced"),
             conflicts_opened: 0,
             lineage_replacement: Some(replacement),
             record_facts: Vec::new(),
         }),
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(merge_lineage_replacements(*outcome, vec![replacement])),
-            refusals,
-            sharing_declined,
-        },
-        hard @ (ApplyOutcome::Refused(_) | ApplyOutcome::Crashed { .. }) => hard,
-    }
+        hard @ (ApplyDisposition::Refused(_) | ApplyDisposition::Crashed { .. }) => hard,
+    };
+    outcome
 }
 
 fn map_applied_ydoc_outcome(
@@ -3283,32 +3338,19 @@ fn map_applied_ydoc_outcome(
     sharing_declined: Option<crate::SharingDeclined>,
     record_facts: Option<dohc_engine_domain::CollectionRecordApplyFacts>,
 ) -> ApplyOutcome<YdocApplyResult> {
-    match outcome {
-        ApplyOutcome::Applied(_) => ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: record_facts.into_iter().collect(),
-        })
-        .with_sharing_declined(sharing_declined.into_iter().collect()),
-        ApplyOutcome::Refused(refusal) => ApplyOutcome::Refused(refusal),
-        ApplyOutcome::Skipped => ApplyOutcome::Skipped,
-        ApplyOutcome::Crashed { committed } => ApplyOutcome::Crashed { committed },
-        ApplyOutcome::WithDiagnostics {
-            outcome,
-            refusals,
-            sharing_declined: nested,
-        } => ApplyOutcome::WithDiagnostics {
-            outcome: Box::new(map_applied_ydoc_outcome(
-                *outcome,
-                sharing_declined,
-                record_facts,
-            )),
-            refusals,
-            sharing_declined: nested,
-        },
+    let mut outcome = outcome.map(|_| YdocApplyResult {
+        deferred: false,
+        reason: None,
+        conflicts_opened: 0,
+        lineage_replacement: None,
+        record_facts: record_facts.into_iter().collect(),
+    });
+    if matches!(outcome.primary, ApplyDisposition::Applied(_))
+        && let Some(declined) = sharing_declined
+    {
+        outcome.sharing_declined.insert(0, declined);
     }
+    outcome
 }
 
 fn refuse_ydoc(

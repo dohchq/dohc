@@ -48,10 +48,14 @@ macro_rules! assert_invalid_refusal {
     ($result:expr) => {
         assert!(matches!(
             $result,
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                reason: RefusalReason::InvalidInput { .. },
-                ..
-            }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Refused(ReplicationRefusal {
+                    reason: RefusalReason::InvalidInput { .. },
+                    ..
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ))
     };
 }
@@ -378,7 +382,7 @@ fn local_only_decision_resolver_producer_converges_through_apply() {
         assert_eq!(
             apply_chat_envelope(&mut target, operation, &NoFaults)
                 .expect("apply produced chat envelope"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let applied: (String, Option<String>) = target
@@ -717,7 +721,10 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
         &AlwaysLive,
     )
     .expect("live lineage defers");
-    assert_eq!(outcome, ApplyOutcome::Applied(RoutedApply::default()));
+    assert_eq!(
+        outcome,
+        ApplyOutcome::new(ApplyDisposition::Applied(RoutedApply::default()))
+    );
     let deferred_rows: i64 = engine
         .read_with(|conn| {
             conn.query_row("SELECT COUNT(*) FROM ydoc_deferred_updates", [], |row| {
@@ -1105,7 +1112,10 @@ fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeApplyCommit);
     let outcome = apply_envelope_with(&mut engine, &op, faults.as_ref(), insert_probe)
         .expect("fault outcome");
-    assert_eq!(outcome, ApplyOutcome::Crashed { committed: false });
+    assert_eq!(
+        outcome,
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed: false })
+    );
     drop(engine);
     let mut reopened = EngineStore::open(&path, 2_001).expect("reopen");
     let probe_rows: i64 = reopened
@@ -1122,7 +1132,7 @@ fn fault_sync_before_apply_commit_reopens_unapplied_and_unacked() {
     );
     assert_eq!(
         apply_envelope_with(&mut reopened, &op, &NoFaults, insert_probe).expect("retry"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
 }
 
@@ -1266,7 +1276,11 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let delta = source.plaintext_insert(4, &"a".repeat(MAX_TEXT_BYTES));
@@ -1305,10 +1319,10 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
     );
     assert!(matches!(
         refusal,
-        ApplyOutcome::Refused(ReplicationRefusal {
+        ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        }) if reason == &expected_reason
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == &expected_reason)
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "over-cap-projection-peer").expect("ack"),
@@ -1394,11 +1408,15 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let base_op = envelope(
@@ -1423,8 +1441,12 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
         &NoLiveLeases,
     )
     .expect("base applies and drains the oversized update");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
-    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
+    assert!(matches!(primary, ApplyDisposition::Applied(_)));
     assert!(sharing_declined.is_empty());
     let expected_reason = format!(
         "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
@@ -1535,11 +1557,11 @@ fn exact_duplicate_is_noop_and_gap_is_rejected() {
     let op = envelope("peer", 0, "probe.apply", json!({"v":1}));
     assert_eq!(
         apply_envelope_with(&mut engine, &op, &NoFaults, insert_probe).expect("apply"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_envelope_with(&mut engine, &op, &NoFaults, insert_probe).expect("dedup"),
-        ApplyOutcome::Skipped
+        ApplyOutcome::new(ApplyDisposition::Skipped)
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
@@ -1595,7 +1617,7 @@ fn imported_opening_message_uses_zero_based_order() {
     for op in [&channel, &thread, &opening] {
         assert_eq!(
             apply_chat_envelope(&mut engine, op, &NoFaults).expect("apply chat op"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let order: i64 = engine
@@ -2013,7 +2035,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 1);
 
@@ -2034,7 +2060,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 2);
 
@@ -2046,7 +2076,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_winner, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 3);
     let reaction_loser = envelope(
@@ -2057,7 +2091,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &reaction_loser, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         chat_content_revision(&engine, "thread"),
@@ -2073,7 +2111,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_winner, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(chat_content_revision(&engine, "thread"), 4);
     let decision_loser = envelope(
@@ -2084,7 +2126,11 @@ fn imported_chat_winners_bump_and_losing_lww_coordinates_do_not() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decision_loser, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         chat_content_revision(&engine, "thread"),
@@ -2204,7 +2250,11 @@ fn chat_message_before_thread_is_parked_and_replayed_after_thread_arrives() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "early-message-peer").expect("message ack"),
@@ -2290,7 +2340,7 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let private_channel = envelope(
         "private-channel-source",
@@ -2307,9 +2357,13 @@ fn terminal_pending_chat_replay_is_persisted_and_returned_to_the_triggering_appl
     );
     let outcome =
         apply_chat_envelope(&mut engine, &private_channel, &NoFaults).expect("private channel");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
     assert!(sharing_declined.is_empty());
-    assert_eq!(primary, ApplyOutcome::Applied(()));
+    assert_eq!(primary, ApplyDisposition::Applied(()));
     assert_eq!(
         refusals,
         vec![ReplicationRefusal {
@@ -2367,7 +2421,7 @@ fn imported_follow_parks_until_its_cross_origin_thread_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -2448,7 +2502,7 @@ fn imported_feed_read_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &feed_read, &NoFaults).expect("park feed read"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2516,7 +2570,7 @@ fn imported_attachment_parks_until_its_cross_origin_message_arrives() {
 
     assert_eq!(
         apply_chat_envelope(&mut engine, &attachment, &NoFaults).expect("park attachment"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2606,7 +2660,7 @@ fn imported_feed_read_waits_for_placeholder_channel_resolution() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &read, &NoFaults).expect("defer placeholder feed read"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -2700,7 +2754,7 @@ fn imported_person_follow_waits_for_a_non_dm_message() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("defer DM-only person"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
 
@@ -3410,7 +3464,7 @@ fn overlong_wire_only_placeholder_slug_round_trips_through_local_thread_journal(
     assert_eq!(
         apply_chat_envelope(&mut second_peer, &outbound, &NoFaults)
             .expect("second peer accepts bounded outbound channelSlug"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
 }
 
@@ -3614,7 +3668,7 @@ fn parked_chat_coordinate_survives_store_reopen() {
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &follow, &NoFaults).expect("park before reopen"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     drop(engine);
@@ -4204,7 +4258,7 @@ fn refused_thread_log_cannot_suppress_the_current_thread_export() {
         assert_eq!(
             apply_chat_envelope(&mut second_peer, operation, &NoFaults)
                 .expect("apply collision recovery envelope"),
-            ApplyOutcome::Applied(())
+            ApplyOutcome::new(ApplyDisposition::Applied(()))
         );
     }
     let (message_body, message_rows, pending_rows): (String, i64, i64) = second_peer
@@ -4292,7 +4346,11 @@ fn imported_message_normalizes_before_enforcing_the_local_body_cap() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &boundary, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored: String = engine
         .read_with(|conn| {
@@ -4392,7 +4450,11 @@ fn imported_feed_read_rejects_an_invisible_coordinate_without_changing_unread_st
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &visible, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let before: (i64, String, i64) = engine
         .read_with(|conn| {
@@ -4545,15 +4607,27 @@ fn replicated_chat_writers_index_thread_title_message_and_redelivery_idempotentl
 
     assert!(matches!(
         apply_chat_envelope(&mut engine, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_chat_envelope(&mut engine, &message, &NoFaults),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let rows: Vec<(String, String)> = engine
@@ -4787,7 +4861,11 @@ fn imported_channel_name_uses_local_nfc_and_utf16_validation() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &decomposed, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored_name: String = engine
         .read_with(|conn| {
@@ -4836,7 +4914,11 @@ fn imported_channel_slug_is_validated_but_derived_from_the_normalized_name() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &caller_slug, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let stored_slug: String = engine
         .read_with(|conn| {
@@ -4902,7 +4984,7 @@ fn imported_attachment_requires_its_workspace_thread_message_without_fabricating
     );
     assert_eq!(
         result.expect("park missing attachment"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 1);
     assert_eq!(
@@ -5044,7 +5126,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     assert_eq!(
         apply_chat_envelope(&mut engine, &dm_only_person, &NoFaults)
             .expect("park DM-only person follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let unresolved = envelope(
         "follow-fabricated-channel",
@@ -5060,7 +5142,7 @@ fn imported_follow_reuses_local_target_visibility_and_prevents_metadata_leaks() 
     );
     assert_eq!(
         apply_chat_envelope(&mut engine, &unresolved, &NoFaults).expect("park unresolved follow"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(pending_chat_coordinate_count(&engine), 2);
     let leaked = LinkedChatStore::new(&mut engine)
@@ -5503,10 +5585,14 @@ fn imported_attachment_rejects_invalid_heading_and_bounds() {
         assert!(
             matches!(
                 &result,
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: outcome_refusals,
+                    sharing_declined: outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "case {case}"
         );
@@ -5640,7 +5726,11 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &other, &channel, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let thread = envelope(
         "cross-channel",
@@ -5655,7 +5745,11 @@ fn shared_channel_cross_channel_thread_and_message_are_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &other, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let allowed = ShareBoundary {
@@ -5722,7 +5816,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &channel, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let thread = envelope(
         "allowed-channel",
@@ -5737,7 +5835,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &thread, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let message = envelope(
         "allowed-channel",
@@ -5754,7 +5856,11 @@ fn shared_channel_correctly_scoped_ops_apply() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &message, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let rows: Vec<(String, String)> = engine
         .read_with(|conn| {
@@ -5818,7 +5924,11 @@ fn share_view_secondary_path_out_of_boundary_is_rejected() {
     );
     assert!(matches!(
         apply_shared_envelope(&mut engine, &boundary, &inside, &NoFaults),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -5887,7 +5997,11 @@ fn share_view_moment_from_an_ungranted_version_is_refused_naming_both_versions()
         assert!(
             matches!(
                 apply_shared_envelope(&mut engine, &boundary, &moment(entitled), &NoFaults),
-                Ok(ApplyOutcome::Applied(_))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "the granted version's own moments still apply"
         );
@@ -6225,7 +6339,11 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
     let _ = crate::relay::take_canonical_json_call_count();
     assert!(matches!(
         apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::relay::take_canonical_json_call_count(),
@@ -6234,7 +6352,11 @@ fn fresh_coordinate_does_not_canonicalize_payload_for_a_comparison_that_cannot_e
     );
     assert!(matches!(
         apply_envelope_with(&mut engine, &incoming, &NoFaults, |_, _| Ok(())),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::relay::take_canonical_json_call_count(),
@@ -7228,9 +7350,16 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
         &NoLiveLeases,
     )
     .expect("winning base applies");
-    let ApplyOutcome::Applied(result) = applied else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = applied
+    else {
         panic!("winning base did not apply: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result.lineage_replacement.expect("replacement result");
     assert_eq!(replacement.winner_lineage_claim_id, winner_claim);
     assert_eq!(replacement.recovered_paths.len(), 1);
@@ -7342,7 +7471,11 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let counts: (i64, i64) = engine
         .read_with(|conn| {
@@ -7585,9 +7718,16 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
         &NoLiveLeases,
     )
     .expect("winning scene base applies");
-    let ApplyOutcome::Applied(result) = applied else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = applied
+    else {
         panic!("winning scene base did not apply: {applied:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result
         .lineage_replacement
         .expect("scene replacement result");
@@ -7720,16 +7860,23 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let ApplyOutcome::Applied(result) = apply_ydoc_envelope(
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_ydoc_envelope(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &incoming,
         &NoFaults,
         &NoLiveLeases,
     )
-    .expect("winning base applies") else {
+    .expect("winning base applies")
+    else {
         panic!("winning base did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result.lineage_replacement.expect("replacement result");
     assert_eq!(replacement.recovered_paths.len(), 1);
     let recovered_text: String = engine
@@ -7831,7 +7978,14 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
         &NoLiveLeases,
     )
     .expect("winning base");
-    assert!(matches!(applied, ApplyOutcome::Applied(_)));
+    assert!(matches!(
+        applied,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let recovery_projection = dohc_engine_storage::hex_sha256(b"losing local draft");
     let first_recovery_path = format!(
         "notes/disk-occupant (recovered {} {recovery_projection}).md",
@@ -8036,10 +8190,11 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
             &NoFaults,
             &AlwaysLive
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let foreign = dohc_engine_collab::Ydoc::wire();
@@ -8071,10 +8226,11 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
             &NoFaults,
             &AlwaysLive
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let drained = drain_deferred_ydoc_for_live_session(
@@ -8195,10 +8351,14 @@ fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-lineage-lost"),
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-lineage-lost"),
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let persisted = dohc_engine_collab::load_persisted(&engine, &key)
         .expect("persisted doc")
@@ -8432,7 +8592,7 @@ fn seed_recovery_decision_conflict(
     );
     assert_eq!(
         apply_chat_envelope(engine, &peer_operation, &NoFaults).expect("apply peer decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     let local_seq = journal_test_op(
         engine,
@@ -8766,7 +8926,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
         &NoLiveLeases,
     );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
     let (scene_sha, updated_at_ms, latest_moment_id): (String, i64, String) = engine
@@ -8822,7 +8989,11 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
     assert!(
@@ -9027,7 +9198,11 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // Same coordinate (origin peer, seq 0), different payload — a tamper/replay.
     let divergent = envelope(
@@ -9055,7 +9230,11 @@ fn redelivered_divergent_coordinate_at_acked_seq_is_rejected() {
     // An exact redelivery is still an idempotent skip (not a divergence).
     assert!(matches!(
         apply_chat_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -9153,7 +9332,11 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             &put(0, 10, &sha_a, cipher_a.len() as i64),
             &NoFaults
         ),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // delete @20 wins and removes the materialized secret_files row.
     let delete = ReplicationEnvelope {
@@ -9167,7 +9350,11 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
     };
     assert!(matches!(
         apply_secret_envelope(&mut engine, &delete, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // A late delivery of an older put (@5) must not resurrect the secret.
     assert!(matches!(
@@ -9176,7 +9363,11 @@ fn secret_delete_tombstone_blocks_older_put_resurrection() {
             &put(2, 5, &sha_b, cipher_b.len() as i64),
             &NoFaults
         ),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let materialized: i64 = engine
         .read_with(|conn| {
@@ -9228,7 +9419,11 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &ahead, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // Older read position (50 < 100) but a newer clock (20 > 10).
     let behind = envelope(
@@ -9239,7 +9434,11 @@ fn feed_read_older_cursor_with_newer_clock_does_not_regress() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &behind, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let last_seen: i64 = engine
         .read_with(|conn| {
@@ -9293,7 +9492,11 @@ fn reserved_agent_channel_shapes_rejected() {
     );
     assert!(matches!(
         apply_chat_envelope(&mut engine, &canonical, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -9365,13 +9568,13 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
     .expect("live lineage defers");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-session-live"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
 
     // The lease is gone (close/eviction/crash — any teardown): the drain must
@@ -9515,10 +9718,11 @@ fn drained_parked_update_derives_its_record_facts() {
             &NoFaults,
             &AlwaysLive
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // The base arrives and the drain applies the parked edit: its facts
     // surface with the drain, so the pass that completes the dependency
@@ -9633,10 +9837,11 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             &NoFaults,
             &AlwaysLive
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     engine
         .write_with(&NoFaults, |tx| {
@@ -9825,10 +10030,11 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
             &NoFaults,
             &AlwaysLive
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     engine
@@ -10273,7 +10479,14 @@ fn apply_remote_cache_pair(
     .expect("cold remote apply");
     assert_eq!(warm, cold, "cached and cold remote verdicts");
     assert!(
-        matches!(&warm, ApplyOutcome::Applied(_)),
+        matches!(
+            &warm,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: outcome_refusals,
+                sharing_declined: outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "ordinary remote candidate must apply: {warm:?}"
     );
     warm
@@ -10604,7 +10817,14 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
     )
     .expect("cold frontier refusal");
     assert_eq!(warm, cold);
-    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(
         warm_cache.gate_scratch_is_resident_for_test(&key),
         "checks 1-3 refuse before mutating the remote scratch"
@@ -10673,7 +10893,14 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
     )
     .expect("cold check4 refusal");
     assert_eq!(warm, cold);
-    assert!(matches!(warm, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(
         warm_cache.contains_for_test(&key),
         "check4 refusal preserves the writer doc and frontier"
@@ -10755,7 +10982,14 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
             )
         })
         .expect("scratch apply error is a contained refusal");
-    assert!(matches!(outcome, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        outcome,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     assert!(warm_cache.contains_for_test(&key));
     assert_eq!(
         warm_cache
@@ -11190,7 +11424,14 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
     )
     .expect("cold retained refusal");
     assert_eq!(warm_refusal, cold_refusal);
-    assert!(matches!(warm_refusal, ApplyOutcome::Refused(_)));
+    assert!(matches!(
+        warm_refusal,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let after_refusal = warm_cache.stats();
     assert_eq!(after_refusal.hits, before.hits + 1);
     assert_eq!(
@@ -11252,7 +11493,14 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
     )
     .expect("cold descendant");
     assert_eq!(warm_descendant, cold_descendant);
-    assert!(matches!(warm_descendant, ApplyOutcome::Applied(_)));
+    assert!(matches!(
+        warm_descendant,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+    ));
     let final_stats = warm_cache.stats();
     assert_eq!(final_stats.hits, before.hits + 2);
     assert_eq!(final_stats.advances, before.advances + 2);
@@ -11348,7 +11596,10 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
     )
     .expect("cold crash outcome");
     assert_eq!(warm_outcome, cold_outcome);
-    assert_eq!(warm_outcome, ApplyOutcome::Crashed { committed });
+    assert_eq!(
+        warm_outcome,
+        ApplyOutcome::new(ApplyDisposition::Crashed { committed })
+    );
     assert_eq!(warm_cache.stats().hits, before.hits + 1);
     assert_eq!(
         warm_cache.stats().advances,
@@ -11380,7 +11631,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
                 &NoLiveLeases,
             )
             .expect("warm crash retry"),
-            ApplyOutcome::Skipped
+            ApplyOutcome::new(ApplyDisposition::Skipped)
         );
         assert!(!warm_cache.contains_for_test(&key));
 
@@ -11472,7 +11723,14 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
         )
         .expect("cold rollback retry");
         assert_eq!(warm_retry, cold_retry);
-        assert!(matches!(warm_retry, ApplyOutcome::Applied(_)));
+        assert!(matches!(
+            warm_retry,
+            ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ));
         assert_eq!(warm_cache.stats().hits, retry_before.hits + 1);
         assert_eq!(warm_cache.stats().advances, retry_before.advances + 1);
         assert_eq!(
@@ -11563,9 +11821,16 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
     );
     let outcome = apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
         .expect("replace local lineage");
-    let ApplyOutcome::Applied(result) = outcome else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = outcome
+    else {
         panic!("replacement did not apply: {outcome:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert!(result.lineage_replacement.is_some());
     assert!(!cache.contains_for_test(&key));
     assert_eq!(
@@ -11772,13 +12037,13 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
     .expect("base applies");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: Some("ydoc-base-conflict"),
             conflicts_opened: 1,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "peer").expect("ack"),
@@ -12003,9 +12268,16 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         &NoLiveLeases,
     )
     .expect("base applies");
-    let ApplyOutcome::Applied(result) = outcome else {
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = outcome
+    else {
         panic!("base did not apply: {outcome:?}");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(result.reason, Some("ydoc-base-conflict"));
     assert_eq!(result.conflicts_opened, 1);
     let replacement = result
@@ -12107,13 +12379,13 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
     .expect("base applies");
     assert_eq!(
         outcome,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     let conflicts: i64 = engine
         .read_with(|conn| {
@@ -12860,13 +13132,17 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "storage-update-peer").expect("retry ack"),
@@ -12912,13 +13188,13 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             &NoLiveLeases
         )
         .expect("early update parks"),
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome::new(ApplyDisposition::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
             conflicts_opened: 0,
             lineage_replacement: None,
             record_facts: Vec::new(),
-        })
+        }))
     );
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "early-update-peer").expect("update ack"),
@@ -13023,7 +13299,14 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
         &NoLiveLeases,
     );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
 
@@ -13128,7 +13411,14 @@ fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
         &NoLiveLeases,
     );
     assert!(
-        matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
+        matches!(
+            base_outcome,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "unexpected scene base outcome: {base_outcome:?}"
     );
 
@@ -13332,12 +13622,12 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
     assert!(
         matches!(
             outcome,
-            ApplyOutcome::Refused(ReplicationRefusal {
+            ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
-            }) if reason == &format!(
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == &format!(
                 "scene projection exceeds MAX_PROJECTION_BYTES: limit {limit_bytes} bytes, observed at least {actual_bytes} bytes"
-            )
+            ))
         ),
         "unexpected oversized scene outcome: {outcome:?}"
     );
@@ -13910,10 +14200,14 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
                     &NoFaults,
                     &NoLiveLeases
                 ),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{case}"
         );
@@ -13999,13 +14293,17 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 &NoFaults,
                 &NoLiveLeases
             ),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let descendant = envelope(
             &queued_origin,
@@ -14029,13 +14327,17 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 &NoFaults,
                 &NoLiveLeases
             ),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
 
         let base = envelope(
@@ -14060,9 +14362,13 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             &NoLiveLeases,
         )
         .expect("base applies and mismatched kind is drained");
-        let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+        let ApplyOutcome {
+            primary,
+            refusals,
+            sharing_declined,
+        } = outcome;
         assert!(sharing_declined.is_empty());
-        assert!(matches!(primary, ApplyOutcome::Applied(_)));
+        assert!(matches!(primary, ApplyDisposition::Applied(_)));
         assert_eq!(
             refusals,
             vec![ReplicationRefusal {
@@ -14325,13 +14631,17 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let deferred: i64 = engine
         .read_with(|conn| {
@@ -14387,7 +14697,11 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let binary_head: (String, String) = engine
         .read_with(|conn| {
@@ -14493,7 +14807,11 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     assert!(matches!(
@@ -14504,13 +14822,17 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: false,
-            reason: None,
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: false,
+                reason: None,
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "device-y").expect("base ack"),
@@ -14608,13 +14930,17 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "missing-version-ydoc-peer")
@@ -14661,13 +14987,17 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let placeholder_timestamp: i64 = engine
         .read_with(|conn| {
@@ -14777,13 +15107,17 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
                 &NoFaults,
                 &NoLiveLeases
             ),
-            Ok(ApplyOutcome::Applied(YdocApplyResult {
-                deferred: true,
-                reason: Some("ydoc-lineage-absent"),
-                conflicts_opened: 0,
-                lineage_replacement: None,
-                record_facts: _,
-            }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(YdocApplyResult {
+                    deferred: true,
+                    reason: Some("ydoc-lineage-absent"),
+                    conflicts_opened: 0,
+                    lineage_replacement: None,
+                    record_facts: _,
+                }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
 
@@ -14809,10 +15143,13 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
         &NoLiveLeases,
     )
     .expect("base applies and drains");
-    let (base_primary, drain_refusals, sharing_declined) =
-        base_outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary: base_primary,
+        refusals: drain_refusals,
+        sharing_declined,
+    } = base_outcome;
     assert!(sharing_declined.is_empty());
-    assert!(matches!(base_primary, ApplyOutcome::Applied(_)));
+    assert!(matches!(base_primary, ApplyDisposition::Applied(_)));
     assert_eq!(
         drain_refusals,
         vec![ReplicationRefusal {
@@ -14921,13 +15258,17 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let base = envelope(
         "prebase-mismatch-base-peer",
@@ -14952,9 +15293,13 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         &NoLiveLeases,
     )
     .expect("base applies and mismatched path drains");
-    let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
+    let ApplyOutcome {
+        primary,
+        refusals,
+        sharing_declined,
+    } = outcome;
     assert!(sharing_declined.is_empty());
-    assert!(matches!(primary, ApplyOutcome::Applied(_)));
+    assert!(matches!(primary, ApplyDisposition::Applied(_)));
     assert_eq!(
         refusals,
         vec![ReplicationRefusal {
@@ -15036,10 +15381,11 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     seed_text_head(
         &mut engine,
@@ -15161,7 +15507,11 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     seed_text_head(
         &mut engine,
@@ -15191,10 +15541,14 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let descendant = envelope(
         "clock-update-peer",
@@ -15218,7 +15572,11 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let key = dohc_engine_collab::DocKey::new("ws", "main", "object-causal-refusal").expect("key");
@@ -15291,7 +15649,11 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let losing_base = apply_ydoc_envelope(
@@ -15304,11 +15666,15 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     .expect("later base is handled");
     assert!(matches!(
         losing_base,
-        ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-base-already-won"),
-            lineage_replacement: None,
-            ..
-        })
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-base-already-won"),
+                lineage_replacement: None,
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let losing_delta = second_doc.plaintext_insert(6, " delta");
@@ -15336,11 +15702,15 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            reason: Some("ydoc-lineage-lost"),
-            lineage_replacement: None,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                reason: Some("ydoc-lineage-lost"),
+                lineage_replacement: None,
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "second-base-peer").expect("loser ack"),
@@ -15533,16 +15903,23 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
             "isBaseState": true
         }),
     );
-    let ApplyOutcome::Applied(result) = apply_ydoc_envelope(
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(result),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_ydoc_envelope(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &base_op,
         &NoFaults,
         &NoLiveLeases,
     )
-    .expect("base applies") else {
+    .expect("base applies")
+    else {
         panic!("base did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     let replacement = result
         .lineage_replacement
         .expect("local-only lineage replacement");
@@ -15882,7 +16259,11 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
     seed_replication_version(&mut secret_engine, "late-secret-version", "named");
     assert!(matches!(
         apply_secret_envelope(&mut secret_engine, &secret, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let (_version_scratch, _version_path, mut version_engine) = open_store();
@@ -15934,7 +16315,11 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_replication_envelope(
@@ -15944,7 +16329,11 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let created: bool = version_engine
         .read_with(|conn| {
@@ -15995,7 +16384,11 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
@@ -16007,7 +16400,11 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -16031,7 +16428,11 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -16059,7 +16460,11 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let main: (String, String, String, i64) = engine
         .read_with(|conn| {
@@ -16170,7 +16575,11 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     type CopiedSnapshot = (
         String,
@@ -16286,7 +16695,11 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let replay_counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -16321,7 +16734,11 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -16366,7 +16783,11 @@ fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
     let second = chunk(1, "origin-pending-object", "pending.md", &pending_sha);
     assert!(matches!(
         apply_version_envelope(&mut engine, &first, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     VersionedTextStore::new(&mut engine)
@@ -16391,7 +16812,14 @@ fn later_version_create_chunk_preserves_a_local_write_to_its_pending_path() {
 
     let second_result = apply_version_envelope(&mut engine, &second, &NoFaults);
     assert!(
-        matches!(second_result, Ok(ApplyOutcome::Applied(()))),
+        matches!(
+            second_result,
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+        ),
         "later chunk failed: {second_result:?}"
     );
     let head = VersionedTextStore::new(&mut engine)
@@ -16477,7 +16905,11 @@ fn version_create_stamps_a_shipped_capture_head_as_replicated() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let (head_origin, base_origin): (String, String) = engine
         .read_with(|conn| {
@@ -16591,7 +17023,11 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
                     &NoFaults,
                     &NoLiveLeases
                 ),
-                Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{content_kind:?} must remain accepted"
         );
@@ -16623,12 +17059,12 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot content kind is invalid"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot content kind is invalid")
     ));
     let (journaled, versions, snapshots): (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -16685,7 +17121,11 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "richdoc-refusal-peer").expect("ack"),
@@ -16720,12 +17160,12 @@ fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot paths must be unique"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot paths must be unique")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "duplicate-path-peer").expect("ack"),
@@ -16759,12 +17199,12 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
 
         assert!(matches!(
             apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput {
                     ref reason
                 },
                 ..
-            })) if reason == "version.create shipped snapshot path must be tracked"
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be tracked")
         ));
         assert_eq!(
             read_replication_acked_seq(&engine, "ws", &origin).expect("ack"),
@@ -16834,7 +17274,11 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     assert_eq!(
@@ -16859,12 +17303,12 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
     assert_eq!(alias_rows, 0, "nothing from the disclosure op may persist");
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version.create shipped snapshot path must be tracked"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be tracked")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "secret-snapshot-peer").expect("ack"),
@@ -16907,12 +17351,12 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
         assert!(
             matches!(
                 apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput {
                         ref reason
                     },
                     ..
-                })) if reason == "version.create shipped snapshot path must be canonical"
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version.create shipped snapshot path must be canonical")
             ),
             "{path}"
         );
@@ -17045,7 +17489,11 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let counts: (i64, i64, i64) = engine
         .read_with(|conn| {
@@ -17149,12 +17597,12 @@ fn version_create_rejects_a_version_id_owned_by_another_workspace() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "version id belongs to another workspace"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "version id belongs to another workspace")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "collision-peer").expect("ack"),
@@ -17267,7 +17715,11 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let rows: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -17303,7 +17755,11 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let replayed_rows: (i64, i64) = engine
         .read_with(|conn| {
@@ -17332,7 +17788,11 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -17375,7 +17835,11 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let local_ciphertext = b"local edit";
@@ -17403,7 +17867,11 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
     assert!(
         matches!(
             second_result,
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ),
         "later chunk failed: {second_result:?}"
     );
@@ -17466,7 +17934,11 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
                 &NoFaults,
                 &NoLiveLeases
             ),
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         let result = apply_replication_envelope(
             &mut engine,
@@ -17478,10 +17950,14 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         assert!(
             matches!(
                 result,
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
-                    reason: RefusalReason::InvalidInput { .. },
-                    ..
-                }))
+                Ok(ApplyOutcome {
+                    primary: ApplyDisposition::Refused(ReplicationRefusal {
+                        reason: RefusalReason::InvalidInput { .. },
+                        ..
+                    }),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
             ),
             "{label} was not refused: {result:?}"
         );
@@ -17519,7 +17995,11 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     );
     assert!(matches!(
         apply_secret_envelope(&mut engine, &peer_edit, &NoFaults),
-        Ok(ApplyOutcome::Applied(()))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(()),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let fork = envelope(
@@ -17560,7 +18040,11 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
     assert!(
         matches!(
             outcome,
-            Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ) && ack == 0,
         "fork outcome: {outcome:?}; ack: {ack}"
     );
@@ -17621,10 +18105,10 @@ fn secret_version_fork_refuses_duplicate_paths() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &duplicate, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "secret fork contains duplicate paths"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret fork contains duplicate paths")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "duplicate-fork-peer").expect("duplicate ack"),
@@ -17684,10 +18168,10 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
         assert!(
             matches!(
                 apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-                Ok(ApplyOutcome::Refused(ReplicationRefusal {
+                Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { reason },
                     ..
-                })) if reason == expected_reason
+                }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == expected_reason)
             ),
             "{origin} must reject with {expected_reason}"
         );
@@ -17724,7 +18208,11 @@ fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let destination: (Vec<String>, Vec<String>) = engine
         .read_with(|conn| {
@@ -17792,7 +18280,11 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let fork = envelope(
@@ -17822,7 +18314,11 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let tips: (String, String) = engine
@@ -17897,12 +18393,12 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
     assert_eq!(stored, (0, 0), "an over-cap put must persist nothing");
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret ciphertext metadata is invalid"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret ciphertext metadata is invalid")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "oversized-secret-peer").expect("ack"),
@@ -17937,7 +18433,11 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 }
 
@@ -17967,12 +18467,12 @@ fn secret_put_ciphertext_length_mismatch_is_refused_and_acked() {
 
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret ciphertext blob does not match declared metadata"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret ciphertext blob does not match declared metadata")
     ));
     let stored: (i64, i64) = engine
         .read_with(|conn| {
@@ -18153,7 +18653,11 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let shadow = envelope(
@@ -18181,7 +18685,10 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         .expect("secret paths");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            ..
+        })
     ) {
         assert_eq!(
             paths,
@@ -18191,12 +18698,12 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     }
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "secret replication path must be canonical"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "secret replication path must be canonical")
     ));
     assert_eq!(
         paths,
@@ -18223,7 +18730,11 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "canonical-secret-update").expect("ack"),
@@ -18296,7 +18807,10 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
         .expect("secret collision state");
     if matches!(
         refusal,
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            ..
+        })
     ) {
         assert_eq!(
             state,
@@ -18306,12 +18820,12 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
     }
     assert!(matches!(
         refusal,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "replicated secret moment id collides with existing history"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated secret moment id collides with existing history")
     ));
     assert_eq!(
         state,
@@ -18381,10 +18895,10 @@ fn secret_put_refuses_and_acks_synthesized_moment_id_owned_by_plaintext_history(
     assert!(
         matches!(
             apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Refused(ReplicationRefusal {
+            Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
-            })) if reason == "replicated secret moment id collides with existing history"
+            }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "replicated secret moment id collides with existing history")
         ),
         "checking only secret_moments permits the synthesized secret ID to alias an unrelated plaintext row in the shared identity namespace."
     );
@@ -18454,7 +18968,11 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(RoutedApply { conflict: None, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_replication_envelope(
@@ -18464,7 +18982,11 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let history_rows: i64 = engine
         .read_with(|conn| {
@@ -18520,15 +19042,15 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
     .expect("apply protected put");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(RoutedApply {
+        ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             ..
-        }) if materialization_changes == [MomentMaterializationChange {
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes == [MomentMaterializationChange {
             version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "write",
             content_kind: "secret",
-        }]
+        }])
     ));
 
     engine
@@ -18550,7 +19072,11 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
             &NoFaults,
             &NoLiveLeases,
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::router::redelivered_materialization_changes(&engine, &operation)
@@ -18591,15 +19117,15 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
     .expect("apply protected delete");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(RoutedApply {
+        ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             ..
-        }) if materialization_changes == [MomentMaterializationChange {
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes == [MomentMaterializationChange {
             version_id: "main".to_owned(),
             path: ".env".to_owned(),
             operation: "delete",
             content_kind: "secret",
-        }]
+        }])
     ));
 
     engine
@@ -18621,7 +19147,11 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
             &NoFaults,
             &NoLiveLeases,
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         crate::router::redelivered_materialization_changes(&engine, &operation)
@@ -18673,11 +19203,11 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
     );
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &first, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(RoutedApply {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Applied(RoutedApply {
             materialization_changes,
             conflict: None,
             ..
-        })) if materialization_changes.is_empty()
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (materialization_changes.is_empty())
     ));
     assert!(
         crate::router::redelivered_materialization_changes(&engine, &first)
@@ -18861,7 +19391,11 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     // moment.append is no longer the not-implemented stub: it routes to the real
     // applier, so a malformed payload is rejected by that applier rather than by
@@ -18869,18 +19403,18 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
     let moment = envelope("router-moment", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &moment, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "moment.append payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is malformed")
     ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &unknown, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "operation kind is not supported by this client"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "operation kind is not supported by this client")
     ));
     let next = envelope(
         "router-unknown",
@@ -18902,7 +19436,11 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "router-unknown")
@@ -19223,28 +19761,52 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
             .expect("hydrate peer text");
         assert!(matches!(
             apply_envelope_with(engine, &shared_probe, &NoFaults, insert_probe),
-            Ok(ApplyOutcome::Applied(()))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(()),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
         assert!(matches!(
             apply_moment_envelope(engine, &shared_base, &NoFaults, &NoLiveLeases),
-            Ok(ApplyOutcome::Applied(_))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ));
     }
     assert!(matches!(
         apply_moment_envelope(&mut peer_a, &original_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_a, &recovered_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_b, &recovered_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_moment_envelope(&mut peer_b, &original_op, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let conflict_ids = |engine: &EngineStore| {
         engine
@@ -19527,13 +20089,13 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
     .expect("apply lower relay base");
     assert!(matches!(
         applied,
-        ApplyOutcome::Applied(YdocApplyResult {
+        ApplyOutcome { primary: ApplyDisposition::Applied(YdocApplyResult {
             lineage_replacement: Some(YdocLineageReplacement {
                 winner_lineage_claim_id,
                 ..
             }),
             ..
-        }) if winner_lineage_claim_id == winner_claim
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (winner_lineage_claim_id == winner_claim)
     ));
 }
 
@@ -19609,12 +20171,12 @@ fn recover_origin_recomputes_when_rebased_decision_winner_becomes_a_loser() {
     let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased losing decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
@@ -19647,12 +20209,12 @@ fn recover_origin_recomputes_when_rebased_decision_loser_becomes_the_winner() {
     let (_peer_scratch, _peer_path, mut peer) = open_store();
     assert_eq!(
         apply_chat_envelope(&mut peer, &peer_operation, &NoFaults).expect("apply peer winner"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(
         apply_chat_envelope(&mut peer, &rebased_operation, &NoFaults)
             .expect("apply rebased winning decision"),
-        ApplyOutcome::Applied(())
+        ApplyOutcome::new(ApplyDisposition::Applied(()))
     );
     assert_eq!(conflicted_decision_projection(&peer), recovered_projection);
 }
@@ -20300,7 +20862,11 @@ fn share_view_admits_a_granted_version_create_that_carries_no_snapshots() {
     assert!(
         matches!(
             apply_shared_envelope(&mut engine, &boundary, &empty, &NoFaults),
-            Ok(ApplyOutcome::Applied(_))
+            Ok(ApplyOutcome {
+                primary: ApplyDisposition::Applied(_),
+                refusals: ref outcome_refusals,
+                sharing_declined: ref outcome_sharing_declined,
+            }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
         ),
         "refusing an empty snapshot list records damage on a healthy version share"
     );
@@ -22951,13 +23517,17 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            reason: Some("ydoc-lineage-absent"),
-            conflicts_opened: 0,
-            lineage_replacement: None,
-            record_facts: _,
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult {
+                deferred: true,
+                reason: Some("ydoc-lineage-absent"),
+                conflicts_opened: 0,
+                lineage_replacement: None,
+                record_facts: _,
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let base = envelope(
@@ -23158,10 +23728,11 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(YdocApplyResult {
-            deferred: true,
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(YdocApplyResult { deferred: true, .. }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let first_client = RelaySyncClient::new(FakeRelay {
@@ -23343,7 +23914,11 @@ fn relay_claim_does_not_consume_a_direct_rpc_refusal() {
     let direct = envelope("direct-conflict-peer", 0, "conflict.open", json!({}));
     assert!(matches!(
         apply_conflict_envelope(&mut engine, &direct, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     retain_refusal_for_direct_retry(&mut engine, &direct, &NoFaults)
         .expect("protect direct refusal");
@@ -23447,16 +24022,23 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     });
 
     let first = envelope("router-open-a", 0, "conflict.open", payload.clone());
-    let ApplyOutcome::Applied(first) = apply_replication_envelope(
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(first),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_replication_envelope(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &first,
         &NoFaults,
         &NoLiveLeases,
     )
-    .expect("first routed open") else {
+    .expect("first routed open")
+    else {
         panic!("first conflict.open did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(
         first.conflict.as_ref().and_then(|row| row.inserted),
         Some(true)
@@ -23464,16 +24046,23 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     assert_eq!(first.conflicts_opened, 1);
 
     let duplicate = envelope("router-open-b", 0, "conflict.open", payload);
-    let ApplyOutcome::Applied(duplicate) = apply_replication_envelope(
+    let ApplyOutcome {
+        primary: ApplyDisposition::Applied(duplicate),
+        refusals: ref outcome_refusals,
+        sharing_declined: ref outcome_sharing_declined,
+    } = apply_replication_envelope(
         &mut engine,
         &mut dohc_engine_collab::WriterDocCache::new(),
         &duplicate,
         &NoFaults,
         &NoLiveLeases,
     )
-    .expect("idempotent routed open") else {
+    .expect("idempotent routed open")
+    else {
         panic!("duplicate conflict.open did not apply");
     };
+    assert!(outcome_refusals.is_empty());
+    assert!(outcome_sharing_declined.is_empty());
     assert_eq!(
         duplicate.conflict.as_ref().and_then(|row| row.inserted),
         Some(false)
@@ -23490,10 +24079,10 @@ fn malformed_moment_append_router_refuses_and_acks() {
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
-        })) if reason == "moment.append payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "moment.append payload is malformed")
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "moment-peer").expect("ack"),
@@ -23519,10 +24108,14 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
     );
     assert!(matches!(
         outcome,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
 
     let next = envelope("progress-peer", 1, "workspace.init", json!({}));
@@ -23534,7 +24127,11 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "progress-peer").expect("ack"),
@@ -23548,12 +24145,12 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
     let malformed = envelope("ydoc-refusal-peer", 0, "ydoc.update", json!({}));
     assert!(matches!(
         apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &malformed, &NoFaults, &NoLiveLeases),
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
+        Ok(ApplyOutcome { primary: ApplyDisposition::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
             },
             ..
-        })) if reason == "ydoc.update payload is malformed"
+        }), refusals: ref outcome_refusals, sharing_declined: ref outcome_sharing_declined, }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() && (reason == "ydoc.update payload is malformed")
     ));
 
     let next = envelope("ydoc-refusal-peer", 1, "workspace.init", json!({}));
@@ -23565,7 +24162,11 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Applied(_))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Applied(_),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert_eq!(
         read_replication_acked_seq(&engine, "ws", "ydoc-refusal-peer").expect("ack"),
@@ -23759,10 +24360,14 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
     );
     assert!(matches!(
         first,
-        Ok(ApplyOutcome::Refused(ReplicationRefusal {
-            reason: RefusalReason::InvalidInput { .. },
-            ..
-        }))
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Refused(ReplicationRefusal {
+                reason: RefusalReason::InvalidInput { .. },
+                ..
+            }),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     assert!(matches!(
         apply_replication_envelope(
@@ -23772,7 +24377,11 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
             &NoFaults,
             &NoLiveLeases
         ),
-        Ok(ApplyOutcome::Skipped)
+        Ok(ApplyOutcome {
+            primary: ApplyDisposition::Skipped,
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        }) if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
     ));
     let recorded: i64 = engine
         .read_with(|conn| {
@@ -23806,16 +24415,23 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
             }),
         ),
     ] {
-        let ApplyOutcome::Refused(expected) = apply_replication_envelope(
+        let ApplyOutcome {
+            primary: ApplyDisposition::Refused(expected),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } = apply_replication_envelope(
             &mut engine,
             &mut dohc_engine_collab::WriterDocCache::new(),
             &operation,
             &NoFaults,
             &NoLiveLeases,
         )
-        .expect("refusal") else {
+        .expect("refusal")
+        else {
             panic!("operation must be refused");
         };
+        assert!(outcome_refusals.is_empty());
+        assert!(outcome_sharing_declined.is_empty());
         assert_eq!(
             crate::apply::read_replayed_refusal(&engine, &operation)
                 .expect("read refusal")
@@ -25790,7 +26406,11 @@ fn share_view_refuses_a_thread_about_a_file_outside_the_grant() {
     let outcome = apply_shared_envelope(&mut engine, &boundary, &absent, &NoFaults)
         .expect("a missing file is a refusal, not a failed pull");
     let refusal = match outcome {
-        ApplyOutcome::Refused(refusal) => refusal,
+        ApplyOutcome {
+            primary: ApplyDisposition::Refused(refusal),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() => refusal,
         other => panic!("expected a recorded refusal, got {other:?}"),
     };
     assert_eq!(refusal.op_kind, "chat.thread.create");
@@ -27388,7 +28008,11 @@ fn apply_accepted_change(
     match apply_moment_envelope_detailed(engine, &operation, &NoFaults, &NoLiveLeases)
         .expect("accepted change applies")
     {
-        ApplyOutcome::Applied(result) => result,
+        ApplyOutcome {
+            primary: ApplyDisposition::Applied(result),
+            refusals: ref outcome_refusals,
+            sharing_declined: ref outcome_sharing_declined,
+        } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty() => result,
         other => panic!("accepted change must apply: {other:?}"),
     }
 }
@@ -27558,7 +28182,14 @@ fn share_view_chat_kinds_and_the_boundary_match_agree() {
         )
         .unwrap_or_else(|error| panic!("{kind} was refused: {error:?}"));
         assert!(
-            matches!(outcome, ApplyOutcome::Applied(_)),
+            matches!(
+                outcome,
+                ApplyOutcome {
+                    primary: ApplyDisposition::Applied(_),
+                    refusals: ref outcome_refusals,
+                    sharing_declined: ref outcome_sharing_declined,
+                } if outcome_refusals.is_empty() && outcome_sharing_declined.is_empty()
+            ),
             "{kind} is on SHARE_VIEW_CHAT_KINDS but the match does not apply it",
         );
         seq += 1;
