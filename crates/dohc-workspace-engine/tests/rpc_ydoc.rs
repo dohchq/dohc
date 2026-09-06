@@ -3178,7 +3178,8 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     // the one ydoc.close performs by default — then sees a changed target and
     // fails ConflictStaleTarget.
     //
-    // A captured sibling proves the scan ran after the settle.
+    // A captured sibling proves the watcher scan ran after the settle.
+    // Rebuilding the manifest would seed the settled head and skip its ingest.
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
@@ -3205,7 +3206,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    call(
+    let settled = call(
         &transport,
         &handle,
         4,
@@ -3215,7 +3216,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     .await;
 
     write_file(scratch.path(), "load/scan-confirmed.md", b"capture barrier");
-    let mut flushed = call(&transport, &handle, 5, "capture.reconcile", json!({})).await;
+    let mut flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut id = 2_000_000;
     let listed = loop {
@@ -3244,7 +3245,11 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
         tokio::task::yield_now().await;
     };
-    assert_eq!(flushed["settled"], json!(false));
+    assert_eq!(
+        flushed["settled"],
+        json!(false),
+        "capture must defer the new path while its Y.Doc session holds the lease"
+    );
 
     // The same scan must leave the settled head owned by the Y.Doc.
     let head = listed["files"]
@@ -3260,6 +3265,16 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     let head = head.expect("head");
     assert_eq!(head["metadataOrigin"], json!("ydoc"));
     assert_eq!(head["byteLength"], json!(MAX_CAPTURE_TEXT_BYTES));
+    assert_eq!(head["latestMomentId"], settled["momentId"]);
+    assert_eq!(head["sha256"], settled["sha256"]);
+    assert_eq!(
+        head["sha256"],
+        json!(dohc_engine_storage::hex_sha256(huge.as_bytes()))
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("load/big.md")).expect("settled bytes"),
+        huge.as_bytes()
+    );
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.

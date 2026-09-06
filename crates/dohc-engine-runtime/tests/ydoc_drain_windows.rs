@@ -43,7 +43,7 @@ fn applied_update_rows(db: &std::path::Path) -> i64 {
 /// A captured head, a replicated base, and one update parked behind a live
 /// lease — the state a crashed session leaves for a later drain to apply.
 async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
-    let db = engine_db_path(&scratch).expect("db");
+    let db = engine_db_path(scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let written = handle

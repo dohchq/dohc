@@ -7,7 +7,7 @@ use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Envelope, Request, Response, WorkspaceHandle, encode_control},
+    wire::{Envelope, Response, WorkspaceHandle, encode_control},
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;

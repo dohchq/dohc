@@ -25,7 +25,7 @@ use dohc_engine_storage::{EngineStore, hex_sha256};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;

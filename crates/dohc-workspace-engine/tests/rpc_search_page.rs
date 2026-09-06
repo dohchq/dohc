@@ -12,7 +12,7 @@ use dohc_engine_protocol::{
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
 
 async fn open_workspace(

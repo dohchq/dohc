@@ -12,7 +12,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
