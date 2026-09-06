@@ -157,7 +157,7 @@ describe("start site preview IPC", () => {
     expect(result).not.toHaveProperty("handle");
     expect(test.subjects).toEqual([
       {
-        subject: "Site preview request",
+        subject: "app preview request",
         action: "start the preview again",
       },
     ]);
@@ -185,7 +185,7 @@ describe("start site preview IPC", () => {
         siteRoot: "ancestor/stale-child",
         mode: "dev",
       }),
-    ).rejects.toThrow("Not a detected site: ancestor/stale-child");
+    ).rejects.toThrow("Not a detected app: ancestor/stale-child");
 
     expect(test.get).toHaveBeenCalledWith(
       test.workspace,
@@ -205,7 +205,7 @@ describe("start site preview IPC", () => {
         mode: "build",
       }),
     ).rejects.toThrow(
-      "Live and built site previews run the site's own code, so they're disabled in a shared view. Use the static preview.",
+      "Live and built app previews run the app's own code, so they're disabled in a shared view. Use the static preview.",
     );
 
     expect(test.get).not.toHaveBeenCalled();
@@ -222,7 +222,7 @@ describe("start site preview IPC", () => {
         mode: "dev",
       }),
     ).rejects.toThrow(
-      "Sites opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
+      "Apps opened from shared-with-me use the static preview. Copy it into your own files to run dev or build commands.",
     );
 
     expect(test.get).not.toHaveBeenCalled();
@@ -257,7 +257,7 @@ describe("start site preview IPC", () => {
         mode: "static",
       }),
     ).rejects.toThrow(
-      "The Site preview request does not target the active workspace. Open the workspace and start the preview again.",
+      "The app preview request does not target the active workspace. Open the workspace and start the preview again.",
     );
 
     expect(test.get).not.toHaveBeenCalled();

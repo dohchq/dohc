@@ -1,4 +1,4 @@
-use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, FaultPoint, TxnOutcome, hex};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Deserializer};
 use sha2::{Digest, Sha256};
@@ -577,7 +577,7 @@ pub fn apply_chat_envelope(
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
-    serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+    Deserialize::deserialize(value).map_err(|_| SyncError::InvalidInput {
         reason: "chat replication payload is malformed",
     })
 }
@@ -975,11 +975,7 @@ fn channel_collision_slug(requested: &str, allocation_identity: &str, attempt: u
         hasher.update([0]);
         hasher.update(attempt.to_be_bytes());
     }
-    let suffix = hasher
-        .finalize()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let suffix = hex(&hasher.finalize());
     const MAX_COLLISION_BASE_UTF16_UNITS: usize = 200 - 1 - 64;
     let bounded_requested = truncate_slug_base(requested, MAX_COLLISION_BASE_UTF16_UNITS);
     let slug = format!("{bounded_requested}-{suffix}");

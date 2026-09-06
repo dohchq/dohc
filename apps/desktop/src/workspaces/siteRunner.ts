@@ -93,14 +93,14 @@ const DEV_URL_CARRY_CHARS = 2 * 1024;
 
 async function resolveContainedDir(rootPath: string, relativePath: string): Promise<string> {
   if (relativePath.includes("\0") || relativePath.includes("\\")) {
-    throw new Error(`Invalid site path: ${relativePath}`);
+    throw new Error(`Invalid app path: ${relativePath}`);
   }
   if (relativePath.startsWith("/") || /^[A-Za-z]:/.test(relativePath)) {
-    throw new Error(`Site path must be relative: ${relativePath}`);
+    throw new Error(`App path must be relative: ${relativePath}`);
   }
   const parts = relativePath === "." ? [] : relativePath.split("/").filter(Boolean);
   if (parts.some((part) => part === "." || part === "..")) {
-    throw new Error(`Site path contains traversal: ${relativePath}`);
+    throw new Error(`App path contains traversal: ${relativePath}`);
   }
   const absolute = join(rootPath, ...parts);
   // A site root is a directory dohc serves, spawns a dev server in, and builds
@@ -116,11 +116,11 @@ async function resolveContainedDir(rootPath: string, relativePath: string): Prom
     rootPath,
     absolutePath: absolute,
     spelled: relativePath,
-    label: "Site path",
+    label: "App path",
     access: "read",
   });
   const info = await stat(realSite);
-  if (!info.isDirectory()) throw new Error(`Site path is not a directory: ${relativePath}`);
+  if (!info.isDirectory()) throw new Error(`App path is not a directory: ${relativePath}`);
   return realSite;
 }
 
@@ -270,7 +270,7 @@ export async function startStaticSitePreview(
       ? "inside shared-with-me"
       : `outside its own shared mount ${options.authority.mountRoot}`;
     throw new Error(
-      `This site's served root is ${constraint}. dohc cannot preview it: ${siteRoot}`,
+      `This app's served root is ${constraint}. dohc cannot preview it: ${siteRoot}`,
     );
   }
   const containmentRoot = options.authority.kind === "share"
@@ -279,7 +279,7 @@ export async function startStaticSitePreview(
   return startStaticDirectoryPreview(root, {
     containmentRoot,
     entry: options.entry ?? "index.html",
-    entryLabel: "site entry",
+    entryLabel: "app entry",
     forbidSharedWithMePaths: true,
     fileSource: options.fileSource,
   });
@@ -340,7 +340,7 @@ export function splitCommandLine(commandLine: string): { command: string; args: 
     // parse (ENV_OPTIONS_UNVERIFIABLE, MAX_SHELL_NESTING_DEPTH).
     if (char === "(" || char === ")" || char === "{" || char === "}" || char === "`") {
       throw new Error(
-        `Site dev server command contains an unquoted "${char}", a shell grouping or command-substitution ` +
+        `App dev server command contains an unquoted "${char}", a shell grouping or command-substitution ` +
         `construct dohc cannot statically decompose to verify its loopback-only host binding: ${commandLine}`,
       );
     }
@@ -653,7 +653,7 @@ function explicitHostEnvironmentAssignments(
     }
     if (ENV_OPTIONS_UNVERIFIABLE.has(longOptionName)) {
       throw new Error(
-        `Site dev server command uses "env ${longOptionName}", whose payload dohc cannot statically re-split, so its loopback-only host binding cannot be verified: ${token}`,
+        `App dev server command uses "env ${longOptionName}", whose payload dohc cannot statically re-split, so its loopback-only host binding cannot be verified: ${token}`,
       );
     }
     // A token that isn't "-"-prefixed is the wrapped command itself — the
@@ -664,7 +664,7 @@ function explicitHostEnvironmentAssignments(
     // host binding — the wrapped command receives, so refuse rather than
     // silently skip past it.
     throw new Error(
-      `Site dev server command uses an unrecognized "env" option, so its loopback-only host binding cannot be verified: ${token}`,
+      `App dev server command uses an unrecognized "env" option, so its loopback-only host binding cannot be verified: ${token}`,
     );
   }
   return { hosts, consumedThrough: index };
@@ -702,7 +702,7 @@ function assertDirectHostBinds(command: string, args: string[]): void {
   for (const { value: host, unverifiableFlag } of hosts) {
     if (unverifiableFlag) {
       throw new Error(
-        `Site dev server command uses "${unverifiableFlag}" without a value dohc can read, so its loopback-only host binding cannot be verified: ${[
+        `App dev server command uses "${unverifiableFlag}" without a value dohc can read, so its loopback-only host binding cannot be verified: ${[
           command,
           ...args,
         ].join(" ")}`,
@@ -711,7 +711,7 @@ function assertDirectHostBinds(command: string, args: string[]): void {
     if (host !== "" && isLoopbackHostname(host)) continue;
     const displayHost = host === "" ? "all interfaces" : host;
     throw new Error(
-      `Site dev server command must bind to a loopback host, not ${displayHost}: ${[
+      `App dev server command must bind to a loopback host, not ${displayHost}: ${[
         command,
         ...args,
       ].join(" ")}`,
@@ -766,7 +766,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
   const commandName = command.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase();
   if (commandName && PASSTHROUGH_WRAPPER_COMMAND_NAMES.has(commandName)) {
     throw new Error(
-      `Site dev server command uses "${commandName}", whose own wrapped command dohc cannot statically ` +
+      `App dev server command uses "${commandName}", whose own wrapped command dohc cannot statically ` +
       `re-parse to verify its loopback-only host binding: ${[command, ...args].join(" ")}`,
     );
   }
@@ -779,7 +779,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
   if (nested === null && wrappedByEnv === null) return;
   if (shellDepth >= MAX_SHELL_NESTING_DEPTH) {
     throw new Error(
-      "Site dev server command could not statically validate the nested shell command " +
+      "App dev server command could not statically validate the nested shell command " +
       "for the loopback-only constraint because it exceeds " +
       String(MAX_SHELL_NESTING_DEPTH) +
       " shell levels.",
@@ -808,7 +808,7 @@ function assertLoopbackOnlyDevServerCommandAtDepth(
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       throw new Error(
-        "Site dev server command could not statically validate the nested shell command " +
+        "App dev server command could not statically validate the nested shell command " +
         "for the loopback-only constraint: " +
         reason,
       );
@@ -925,7 +925,7 @@ export async function startSiteDevServer(input: {
       stopped = true;
       clearTimers();
       void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
-        reject(new Error("Site dev server start was cancelled."));
+        reject(new Error("App dev server start was cancelled."));
       });
     }
 
@@ -942,7 +942,7 @@ export async function startSiteDevServer(input: {
       void stopChild(child, descendants.captured, undefined, descendants.awaitAll).finally(() => {
         reject(
           new Error(
-            `Site dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
+            `App dev server did not report a local URL within ${input.readyTimeoutMs ?? 15000}ms.`,
           ),
         );
       });
@@ -1011,7 +1011,7 @@ export async function startSiteDevServer(input: {
     child.once("exit", (code, signal) => {
       clearTimers();
       if (!resolved && !stopped) {
-        reject(new Error(`Site dev server exited before it was ready (code=${code}, signal=${signal}).`));
+        reject(new Error(`App dev server exited before it was ready (code=${code}, signal=${signal}).`));
       }
     });
   });

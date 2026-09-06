@@ -1,26 +1,18 @@
+mod common;
+
+use common::*;
 use std::sync::Arc;
 
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 
 const WORKSPACE_ID: &str = "cli-read-attach";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open(
     transport: &InProcessTransport<EngineService>,

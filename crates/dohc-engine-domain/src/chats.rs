@@ -41,7 +41,7 @@ use crate::error::DomainError;
 use crate::store::hash_fields;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome};
+use dohc_engine_storage::{EngineStore, FaultInjector, StorageError, TxnOutcome, hex};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -1808,13 +1808,7 @@ pub fn attachment_id_for(
             hasher.update(occurrence.to_string().as_bytes());
         }
     }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
+    hex(&hasher.finalize())
 }
 
 fn attachment_fingerprint_bytes(attachments: &[LocalAttachmentInput]) -> Vec<u8> {

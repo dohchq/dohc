@@ -10,28 +10,20 @@
 //! races the first real open. The OpenGuard and the Closing marker are what
 //! keep the registry consistent through the drop; this pins them.
 
+mod common;
+
+use common::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dohc_engine_protocol::{
     error::{ErrorCode, WireError},
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 struct Harness {
     transport: Arc<InProcessTransport<EngineService>>,

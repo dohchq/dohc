@@ -2304,27 +2304,6 @@ pub fn record_update_in_tx(
     )
 }
 
-/// Append only if the active claim matches the lineage an open session bound
-/// to. The check runs before any blob, update, or journal mutation.
-pub fn record_update_for_lineage_in_tx(
-    tx: &Transaction<'_>,
-    key: &DocKey,
-    expected_lineage_claim_id: Option<&str>,
-    update: &[u8],
-    now_ms: i64,
-) -> Result<AppendOutcome, CollabError> {
-    let marker = query_marker(tx, key)?.ok_or(CollabError::NoMarker)?;
-    if marker.lineage_claim_id.as_deref() != expected_lineage_claim_id {
-        return Err(CollabError::LineageWriteStale {
-            expected: expected_lineage_claim_id.map(ToOwned::to_owned),
-            observed: marker.lineage_claim_id,
-        });
-    }
-    validate_update_bytes(update)?;
-    let sha = crate::hex_sha256(update);
-    append_local_update(tx, key, &marker, update, &sha, None, None, now_ms)
-}
-
 /// Encode the base bytes (and their state vector) that originate `key`'s
 /// replicated lineage, from the state persisted inside the caller's
 /// transaction.
@@ -2759,67 +2738,41 @@ pub(crate) fn query_marker(conn: &Connection, key: &DocKey) -> Result<Option<Mar
 /// settled) — the durable settle-handoff marker the local-only close guard reads.
 /// Full durable admission check for a remote update without applying it:
 /// byte validation (empty/5 MiB cap/abort-safe prevalidation) plus the
-/// replay-parity gate against the lineage's current base. The sync defer
-/// path runs this before acking a coordinate it can only replay later —
-/// an update the drain would refuse must never be acked.
-pub fn validate_remote_update_for(
-    store: &EngineStore,
-    key: &DocKey,
-    bytes: &[u8],
-) -> Result<(), CollabError> {
-    validate_remote_update_with_pending(store, key, &[], bytes)
-}
-
-/// [`validate_remote_update_for`] with already-acked-but-deferred
-/// predecessor updates replayed onto the gate doc first — a later deferred
-/// update may only become invalid after its queued predecessors apply, and
-/// acking it against the bare durable head would strand the drain.
-pub fn validate_remote_update_with_pending(
-    store: &EngineStore,
-    key: &DocKey,
-    pending: &[Vec<u8>],
-    bytes: &[u8],
-) -> Result<(), CollabError> {
-    validate_update_bytes(bytes)?;
-    let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
-    validate_remote_update_with_pending_base(&base, pending, bytes)
-}
-
-/// Cache-backed form of [`validate_remote_update_with_pending`]. Serves only
-/// the no-predecessor case: the gate consumes exactly the canonical scan of
-/// the base's full-state re-encode, which is the predicate CACHE-VALID proves
-/// equal to the cold rebuild, so a cached base with an empty queue is
-/// verdict-identical by construction. With queued predecessors it falls back
-/// to cold reconstruction: a scratch forked from the cached full state and a
-/// cold incremental rebuild can hold differently-merged blocks, and applying
-/// the queued prefix to each can fragment the re-encoded delete-set endpoints
-/// differently — endpoints the gate reads — so a fork could accept a candidate
-/// the cold path rejects.
-pub fn validate_remote_update_with_pending_cached(
+/// replay-parity gate against the lineage's current base, with the
+/// already-acked-but-deferred predecessors in `pending` replayed onto the
+/// gate doc first — a later deferred update may only become invalid after its
+/// queued predecessors apply, and acking it against the bare durable head
+/// would strand the drain. The sync defer path runs this before acking a
+/// coordinate it can only replay later — an update the drain would refuse
+/// must never be acked.
+///
+/// The cache serves only the no-predecessor case: the gate consumes exactly
+/// the canonical scan of the base's full-state re-encode, which is the
+/// predicate CACHE-VALID proves equal to the cold rebuild, so a cached base
+/// with an empty queue is verdict-identical by construction. With queued
+/// predecessors it reconstructs cold: a scratch forked from the cached full
+/// state and a cold incremental rebuild can hold differently-merged blocks,
+/// and applying the queued prefix to each can fragment the re-encoded
+/// delete-set endpoints differently — endpoints the gate reads — so a fork
+/// could accept a candidate the cold path rejects.
+pub fn validate_remote_update(
     store: &EngineStore,
     cache: &WriterDocCache,
     key: &DocKey,
     pending: &[Vec<u8>],
     bytes: &[u8],
 ) -> Result<(), CollabError> {
+    validate_update_bytes(bytes)?;
     if pending.is_empty() {
-        validate_update_bytes(bytes)?;
         if let Some(cached) = store.read_with(|conn| cache.doc_for_consumer(conn, key))? {
             return crate::validate_replay_parity(cached, bytes);
         }
     }
-    validate_remote_update_with_pending(store, key, pending, bytes)
-}
-
-fn validate_remote_update_with_pending_base(
-    base: &Ydoc,
-    pending: &[Vec<u8>],
-    bytes: &[u8],
-) -> Result<(), CollabError> {
+    let base = store.read_with(|conn| load_for_replay_gate(conn, key))?;
     for queued in pending {
         base.apply(queued)?;
     }
-    crate::validate_replay_parity(base, bytes)
+    crate::validate_replay_parity(&base, bytes)
 }
 
 /// The content sha the lineage last durably settled (public read for the

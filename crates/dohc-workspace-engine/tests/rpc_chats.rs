@@ -1,30 +1,20 @@
 //! RPC-B acceptance: the complete R09 chat read/write surface through the
 //! in-process protocol transport, backed only by real domain writes.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     error::ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, StorageError};
 use dohc_engine_sync::{ReplicationEnvelope, apply_chat_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
@@ -579,7 +569,7 @@ async fn negative_reaction_cursor_boundary_round_trips() {
     )
     .await;
 
-    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+    let conn = rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
         .expect("open database");
     for (reaction_id, emoji, author_id, at_ms, origin_seq) in [
         ("reaction-negative-a", "👍", "ada", -10_i64, 0_i64),
@@ -662,7 +652,7 @@ async fn single_oversize_row_fails_instead_of_truncating() {
     )
     .await;
 
-    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+    let conn = rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
         .expect("open database");
     let oversize_title = "x".repeat(700 * 1024 + 1);
     conn.execute(
@@ -832,7 +822,7 @@ async fn attachments_and_file_threads_keep_their_wire_contracts() {
 async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
@@ -937,7 +927,7 @@ async fn file_mentions_cap_at_2000_newest_and_hydrate_all_message_attachments() 
 async fn mentions_backfill_marker_makes_second_open_a_noop() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
@@ -1068,7 +1058,7 @@ async fn mentions_backfill_marker_makes_second_open_a_noop() {
 async fn synced_negative_agent_read_cursor_round_trips_over_the_wire() {
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db_path, 1).expect("store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store
@@ -1186,7 +1176,7 @@ async fn persisted_chat_identities_are_normalized() {
     .await;
     assert_eq!(missing.code, ErrorCode::InvalidParams);
 
-    let db_path = scratch.engine_db_path().expect("engine db path");
+    let db_path = engine_db_path(&scratch).expect("engine db path");
     let conn = rusqlite::Connection::open(&db_path).expect("open engine db");
     conn.execute(
         "DELETE FROM chat_channel_wire_ids WHERE workspace_id = ?1 AND channel_id = ?2",
@@ -3785,7 +3775,7 @@ async fn small_chat_arms_round_trip_strict_shapes_and_recovery_mutations() {
         }),
     )
     .await;
-    let db_path = scratch.engine_db_path().expect("db");
+    let db_path = engine_db_path(&scratch).expect("db");
     let conn = rusqlite::Connection::open(db_path).expect("open db");
     conn.execute(
         "INSERT INTO chat_threads \
@@ -4254,7 +4244,7 @@ async fn granular_chat_search_arm_preserves_header_mapping_and_cli_saturation() 
     let mut id = 10;
 
     let mut conn =
-        rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
             .expect("open database");
     let tx = conn.transaction().expect("begin FTS seed");
     {
@@ -4590,7 +4580,7 @@ async fn unread_file_thread_arm_fails_closed_on_non_safe_read_state() {
     )
     .await;
 
-    let conn = rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+    let conn = rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
         .expect("open database");
     conn.execute(
         "UPDATE chat_thread_read_state SET last_read_sequence = ?1 \

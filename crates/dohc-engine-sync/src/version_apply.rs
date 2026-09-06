@@ -105,7 +105,7 @@ fn apply_version_create(tx: &Transaction<'_>, op: &ReplicationEnvelope) -> Resul
         });
     }
     let payload: VersionCreatePayload =
-        serde_json::from_value(op.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&op.payload).map_err(|_| SyncError::InvalidInput {
             reason: "version.create payload is malformed",
         })?;
     validate_version_payload(&payload)?;

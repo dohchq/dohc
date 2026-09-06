@@ -9,7 +9,7 @@ use dohc_engine_domain::{
 };
 use dohc_engine_runtime::search::{ensure_search_index_for_version, search_workspace_page};
 use dohc_engine_storage::{EngineStore, NoFaults, Preimage, hex_sha256, put_binary_blob};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-1";
 const V: &str = "v-main";
@@ -18,7 +18,7 @@ const V: &str = "v-main";
 fn binary_head_is_excluded_from_file_fts_and_rebuild_does_not_crash() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db, 1).expect("open");
 
     let mut vt = VersionedTextStore::new(&mut store);
