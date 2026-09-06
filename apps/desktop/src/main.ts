@@ -15,8 +15,8 @@ import {
   CHATS_METHOD,
   VersionedLiveAdapter,
   WORKSPACE_METHOD,
-  decodeGranularChatMessageSearchResponse,
-  decodeUnreadFileThreads,
+  decodeWorkspaceResult,
+  decodeChatsResult,
 } from "@dohc/workspace-engine-client";
 import {
   app,
@@ -4960,7 +4960,8 @@ async function openCliWorkspace(
     fileObjectIdForPath: (path) => capture.fileObjectIdForPath(path),
     daemonReads: {
       async queryChatMessagesGranular(input: { query: string; limit: number }) {
-        return decodeGranularChatMessageSearchResponse(
+        return decodeWorkspaceResult(
+          WORKSPACE_METHOD.searchQueryChatMessagesGranular,
           await daemon.requestWorkspace(
             workspace.rootPath,
             workspace.workspaceId,
@@ -4973,7 +4974,8 @@ async function openCliWorkspace(
         pageLimit: number;
         afterThreadId?: string;
       }) {
-        return decodeUnreadFileThreads(
+        return decodeChatsResult(
+          CHATS_METHOD.readStateListUnreadFileThreads,
           await daemon.requestWorkspace(
             workspace.rootPath,
             workspace.workspaceId,
