@@ -46,7 +46,7 @@ export type RealTarget =
 const ABSENT_CODES = new Set(["ENOENT", "ENOTDIR"]);
 const UNNAMED_ERROR = "unknown error";
 
-function errnoCode(error: unknown): string | null {
+export function errnoCode(error: unknown): string | null {
   const code = (error as NodeJS.ErrnoException | null)?.code;
   return typeof code === "string" ? code : null;
 }
