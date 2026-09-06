@@ -171,7 +171,7 @@ afterEach(async () => {
 });
 
 describe("listOfferedPlugins", () => {
-  it("offers both built-in drivers when neither exists in the workspace", async () => {
+  it("offers the built-in driver plugin when it does not exist in the workspace", async () => {
     const fixture = await createFixture();
 
     const offers = await listOfferedPlugins(
@@ -180,43 +180,21 @@ describe("listOfferedPlugins", () => {
       NO_EXISTING_PLUGIN_IDS,
     );
 
-    expect(offers.map((offer) => offer.directoryName)).toEqual([
-      "codex",
-      "claude-code",
+    expect(offers).toEqual([
+      {
+        directoryName: "agent-chat",
+        displayName: "agent-chat driver",
+        description: "Runs agent-chat",
+        publisher: "dohc",
+      },
     ]);
-    expect(offers[0]).toMatchObject({
-      displayName: "codex driver",
-      description: "Runs codex",
-      publisher: "dohc",
-    });
   });
 
   it("does not offer a driver whose workspace directory exists in any state", async () => {
     const fixture = await createFixture();
-    await mkdir(join(fixture.workspaceRoot, "plugins", "codex"), {
+    await mkdir(join(fixture.workspaceRoot, "plugins", "agent-chat"), {
       recursive: true,
     });
-
-    await expect(
-      listOfferedPlugins(
-        fixture.builtinPluginsRoot,
-        fixture.workspaceRoot,
-        NO_EXISTING_PLUGIN_IDS,
-      ),
-    ).resolves.toEqual([
-      expect.objectContaining({ directoryName: "claude-code" }),
-    ]);
-  });
-
-  it("returns no offers when both workspace directories exist", async () => {
-    const fixture = await createFixture();
-    await Promise.all(
-      BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES.map((directoryName) =>
-        mkdir(join(fixture.workspaceRoot, "plugins", directoryName), {
-          recursive: true,
-        }),
-      ),
-    );
 
     await expect(
       listOfferedPlugins(
@@ -228,16 +206,16 @@ describe("listOfferedPlugins", () => {
   });
 
   // Identity is the manifest id, not the directory: a driver copied and then
-  // renamed by hand (or an agent) still claims the id "codex", and offering
-  // "codex" again would only degrade to discovery's existing duplicate-id
-  // handling on install, never a clean one.
+  // renamed by hand (or an agent) still claims the id "agent-chat", and
+  // offering "agent-chat" again would only degrade to discovery's existing
+  // duplicate-id handling on install, never a clean one.
   it("suppresses an offer whose manifest id already exists under a different directory", async () => {
     const fixture = await createFixture();
-    const renamedRoot = join(fixture.workspaceRoot, "plugins", "my-codex");
+    const renamedRoot = join(fixture.workspaceRoot, "plugins", "my-chat");
     await mkdir(join(renamedRoot, "src"), { recursive: true });
     await writeFile(
       join(renamedRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "codex", entry: "src/main.ts" }, null, 2)}\n`,
+      `${JSON.stringify({ version: 1, name: "agent-chat", entry: "src/main.ts" }, null, 2)}\n`,
     );
     await writeFile(join(renamedRoot, "src", "main.ts"), "export default {};\n");
 
@@ -246,9 +224,7 @@ describe("listOfferedPlugins", () => {
 
     await expect(
       listOfferedPlugins(fixture.builtinPluginsRoot, fixture.workspaceRoot, existingPluginIds),
-    ).resolves.toEqual([
-      expect.objectContaining({ directoryName: "claude-code" }),
-    ]);
+    ).resolves.toEqual([]);
   });
 
   // Suppression reads the packaged manifest's own declared name, not the
@@ -258,11 +234,11 @@ describe("listOfferedPlugins", () => {
   it("suppresses a built-in by its packaged manifest's declared name, not its directory", async () => {
     const fixture = await createFixture();
     await writeFile(
-      join(fixture.builtinPluginsRoot, "codex", "dohc-plugin.json"),
+      join(fixture.builtinPluginsRoot, "agent-chat", "dohc-plugin.json"),
       `${JSON.stringify({
         version: 1,
         name: "renamed-id",
-        displayName: "codex driver",
+        displayName: "agent-chat driver",
         entry: "src/main.ts",
       }, null, 2)}\n`,
     );
@@ -273,9 +249,14 @@ describe("listOfferedPlugins", () => {
         fixture.workspaceRoot,
         new Set(["renamed-id"]),
       ),
-    ).resolves.toEqual([
-      expect.objectContaining({ directoryName: "claude-code" }),
-    ]);
+    ).resolves.toEqual([]);
+    await expect(
+      listOfferedPlugins(
+        fixture.builtinPluginsRoot,
+        fixture.workspaceRoot,
+        new Set(["agent-chat"]),
+      ),
+    ).resolves.toEqual([expect.objectContaining({ directoryName: "agent-chat" })]);
   });
 
   // A built-in ships with dohc itself — its manifest is never optional the
@@ -285,7 +266,7 @@ describe("listOfferedPlugins", () => {
   it("propagates a broken built-in manifest as a real failure, not a silent omission", async () => {
     const fixture = await createFixture();
     await writeFile(
-      join(fixture.builtinPluginsRoot, "codex", "dohc-plugin.json"),
+      join(fixture.builtinPluginsRoot, "agent-chat", "dohc-plugin.json"),
       "not valid json",
     );
 
@@ -295,7 +276,7 @@ describe("listOfferedPlugins", () => {
         fixture.workspaceRoot,
         NO_EXISTING_PLUGIN_IDS,
       ),
-    ).rejects.toThrow(/codex/);
+    ).rejects.toThrow(/agent-chat/);
   });
 
   // listOfferedPlugins suppresses by manifest id, and
@@ -329,7 +310,7 @@ describe("listOfferedPlugins", () => {
 describe("addOfferedPlugin", () => {
   it("copies source files and excludes generated or private directories", async () => {
     const fixture = await createFixture();
-    const sourceRoot = join(fixture.builtinPluginsRoot, "codex");
+    const sourceRoot = join(fixture.builtinPluginsRoot, "agent-chat");
     await Promise.all([
       mkdir(join(sourceRoot, "node_modules", "dependency"), { recursive: true }),
       mkdir(join(sourceRoot, ".dohc"), { recursive: true }),
@@ -342,15 +323,15 @@ describe("addOfferedPlugin", () => {
     const result = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
-    expect(result.rootPath).toBe(join(fixture.workspaceRoot, "plugins", "codex"));
+    expect(result.rootPath).toBe(join(fixture.workspaceRoot, "plugins", "agent-chat"));
     await expect(readFile(join(result.rootPath, "src", "main.ts"), "utf8"))
       .resolves.toBe("export default {};\n");
     await expect(readFile(join(result.rootPath, "dohc-plugin.json"), "utf8"))
-      .resolves.toContain('"name": "codex"');
+      .resolves.toContain('"name": "agent-chat"');
     for (const excluded of ["node_modules", ".dohc"]) {
       await expect(lstat(join(result.rootPath, excluded))).rejects.toMatchObject({
         code: "ENOENT",
@@ -363,11 +344,11 @@ describe("addOfferedPlugin", () => {
     // A real, already-installed plugin, so discovery is genuinely scanning
     // plugins/ in this test rather than short-circuiting on an absent
     // directory.
-    const otherPluginRoot = join(fixture.workspaceRoot, "plugins", "claude-code");
+    const otherPluginRoot = join(fixture.workspaceRoot, "plugins", "notes-widget");
     await mkdir(join(otherPluginRoot, "src"), { recursive: true });
     await writeFile(
       join(otherPluginRoot, "dohc-plugin.json"),
-      `${JSON.stringify({ version: 1, name: "claude-code", entry: "src/main.ts" }, null, 2)}\n`,
+      `${JSON.stringify({ version: 1, name: "notes-widget", entry: "src/main.ts" }, null, 2)}\n`,
     );
     await writeFile(join(otherPluginRoot, "src", "main.ts"), "export default {};\n");
 
@@ -380,19 +361,19 @@ describe("addOfferedPlugin", () => {
       fixture.workspaceRoot,
       ".dohc",
       "plugin-offer-staging",
-      `codex-${randomUUID()}`,
+      `agent-chat-${randomUUID()}`,
     );
     await mkdir(stagingDir, { recursive: true });
     await writeFile(join(stagingDir, "dohc-plugin.json"), "{}");
 
     const discovered = await discoverInstalledPlugins(fixture.workspaceRoot, new Map());
 
-    expect(discovered.map((plugin) => plugin.directoryName)).toEqual(["claude-code"]);
+    expect(discovered.map((plugin) => plugin.directoryName)).toEqual(["notes-widget"]);
   });
 
   it("refuses an existing target without changing its contents", async () => {
     const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await mkdir(target, { recursive: true });
     await writeFile(join(target, "keep.txt"), "keep");
 
@@ -400,13 +381,13 @@ describe("addOfferedPlugin", () => {
       addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof OfferedPluginAddError &&
-        error.message.includes("plugins/codex"),
+        error.message.includes("plugins/agent-chat"),
     );
     await expect(readFile(join(target, "keep.txt"), "utf8")).resolves.toBe("keep");
     await expect(lstat(join(target, "src"))).rejects.toMatchObject({ code: "ENOENT" });
@@ -415,26 +396,26 @@ describe("addOfferedPlugin", () => {
   // On win32, rename() onto an existing FILE (unlike a directory) succeeds
   // and replaces it — verified empirically. publishStaged's own upfront
   // check has to refuse on any existing entry, not only a directory, or an
-  // agent's own stub file sitting at plugins/codex gets silently destroyed.
+  // agent's own stub file sitting at plugins/agent-chat gets silently destroyed.
   // POSIX already refuses this through mkdir()'s EEXIST regardless of what
   // occupies the name, so this pin holds on both platforms.
   it("refuses without clobbering a plain file sitting at the target", async () => {
     const fixture = await createFixture();
     await mkdir(join(fixture.workspaceRoot, "plugins"), { recursive: true });
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await writeFile(target, "a stray file, not a plugin directory");
 
     await expect(
       addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toSatisfy(
       (error: unknown) =>
         error instanceof OfferedPluginAddError &&
-        error.message.includes("plugins/codex"),
+        error.message.includes("plugins/agent-chat"),
     );
 
     await expect(readFile(target, "utf8")).resolves.toBe(
@@ -455,12 +436,12 @@ describe("addOfferedPlugin", () => {
       addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
-        existingPluginIds: new Set(["codex"]),
+        directoryName: "agent-chat",
+        existingPluginIds: new Set(["agent-chat"]),
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
 
-    await expect(lstat(join(fixture.workspaceRoot, "plugins", "codex"))).rejects.toMatchObject({
+    await expect(lstat(join(fixture.workspaceRoot, "plugins", "agent-chat"))).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -496,7 +477,7 @@ describe("addOfferedPlugin", () => {
       addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       }),
     ).rejects.toBeInstanceOf(OfferedPluginAddError);
@@ -515,7 +496,7 @@ describe("addOfferedPlugin", () => {
     "refuses without clobbering a target directory created after the copy started",
     async () => {
       const fixture = await createFixture();
-      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
       raceState.mkdirTrap = {
         path: target,
         run: async () => {
@@ -528,13 +509,13 @@ describe("addOfferedPlugin", () => {
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof OfferedPluginAddError &&
-          error.message.includes("plugins/codex"),
+          error.message.includes("plugins/agent-chat"),
       );
 
       // The concurrently created directory survived, untouched by this call.
@@ -564,7 +545,7 @@ describe("addOfferedPlugin", () => {
     "[Windows] refuses without clobbering a competitor that claims the slot mid-copy",
     async () => {
       const fixture = await createFixture();
-      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
       raceState.renameRaceTrap = {
         path: target,
         run: async () => {
@@ -577,13 +558,13 @@ describe("addOfferedPlugin", () => {
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toSatisfy(
         (error: unknown) =>
           error instanceof OfferedPluginAddError &&
-          error.message.includes("plugins/codex"),
+          error.message.includes("plugins/agent-chat"),
       );
 
       // The competitor's directory survived, untouched — never clobbered
@@ -601,14 +582,14 @@ describe("addOfferedPlugin", () => {
     "[Windows] names the lock, not a false 'already exists', when EPERM outlives every retry with nothing at target",
     async () => {
       const fixture = await createFixture();
-      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
       raceState.renameFailureTrap = { path: target, code: "EPERM", persist: true };
 
       await expect(
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toSatisfy(
@@ -634,7 +615,7 @@ describe("addOfferedPlugin", () => {
   // semantics under test here.
   it("[POSIX] removes its own leaked claim when the publish rename fails, so a retried Add still works", async () => {
     const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     raceState.renameFailureTrap = { path: target, code: "EACCES" };
 
     // Forced only around the call under test: this dev host's real
@@ -650,7 +631,7 @@ describe("addOfferedPlugin", () => {
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toBeInstanceOf(OfferedPluginAddError);
@@ -668,18 +649,18 @@ describe("addOfferedPlugin", () => {
       fixture.workspaceRoot,
       NO_EXISTING_PLUGIN_IDS,
     );
-    expect(offers.map((offer) => offer.directoryName)).toContain("codex");
+    expect(offers.map((offer) => offer.directoryName)).toContain("agent-chat");
 
     // ...and a retried Add succeeds, using a fresh copy this time.
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
     expect(added.rootPath).toBe(target);
     await expect(readFile(join(target, "dohc-plugin.json"), "utf8"))
-      .resolves.toContain('"name": "codex"');
+      .resolves.toContain('"name": "agent-chat"');
   });
 
   // Round 11 finding 2: removeOwnedEmptyClaim used to verify only "still an
@@ -690,7 +671,7 @@ describe("addOfferedPlugin", () => {
   // also leaving it empty, used to pass that check and get deleted anyway.
   it("[POSIX] leaves a replaced claim alone instead of deleting it", async () => {
     const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     raceState.renameFailureTrap = {
       path: target,
       code: "EACCES",
@@ -713,7 +694,7 @@ describe("addOfferedPlugin", () => {
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toBeInstanceOf(OfferedPluginAddError);
@@ -732,7 +713,7 @@ describe("addOfferedPlugin", () => {
       fixture.workspaceRoot,
       NO_EXISTING_PLUGIN_IDS,
     );
-    expect(offers.map((offer) => offer.directoryName)).not.toContain("codex");
+    expect(offers.map((offer) => offer.directoryName)).not.toContain("agent-chat");
   });
 
   // dev/ino can read as 0 on some Windows filesystems and network shares —
@@ -743,7 +724,7 @@ describe("addOfferedPlugin", () => {
   // only ever read for the mkdir() claim, which only POSIX takes.
   it("refuses to publish when the claim's own identity cannot be verified (zeroed dev/ino)", async () => {
     const fixture = await createFixture();
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     raceState.zeroIdentityTrap = { path: target };
 
     const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
@@ -753,7 +734,7 @@ describe("addOfferedPlugin", () => {
         addOfferedPlugin({
           builtinPluginsRoot: fixture.builtinPluginsRoot,
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           existingPluginIds: NO_EXISTING_PLUGIN_IDS,
         }),
       ).rejects.toBeInstanceOf(OfferedPluginAddError);
@@ -772,7 +753,7 @@ describe("addOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
     expect(added.rootPath).toBe(target);
@@ -789,7 +770,7 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
@@ -806,7 +787,7 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       removeAddedOfferedPlugin({
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       }),
@@ -825,11 +806,11 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await rm(target, { recursive: true, force: true });
     await mkdir(target, { recursive: true });
     await writeFile(join(target, "keep.txt"), "keep");
@@ -837,7 +818,7 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       removeAddedOfferedPlugin({
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       }),
@@ -848,7 +829,7 @@ describe("removeAddedOfferedPlugin", () => {
 
   // The mechanism this pins: a check on `target` followed by a separate
   // delete call stays racy no matter how tight the gap, because Node has
-  // no fd-bound recursive delete — plugins/codex itself could be swapped
+  // no fd-bound recursive delete — plugins/agent-chat itself could be swapped
   // for a junction in between. Binding the delete to a rename closes that:
   // the rename is one atomic syscall that grabs whatever entry is actually
   // there, verifies it in its own contained staging area, and only ever
@@ -858,14 +839,14 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
     const outside = await mkdtemp(join(tmpdir(), "dohc-plugin-offers-outside-"));
     roots.push(outside);
     await writeFile(join(outside, "marker.txt"), "keep");
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await rm(target, { recursive: true, force: true });
     await symlink(
       outside,
@@ -876,7 +857,7 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       removeAddedOfferedPlugin({
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       }),
@@ -901,11 +882,11 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await rm(target, { recursive: true, force: true });
     await mkdir(target, { recursive: true });
     await writeFile(join(target, "keep.txt"), "keep");
@@ -934,7 +915,7 @@ describe("removeAddedOfferedPlugin", () => {
     await expect(
       removeAddedOfferedPlugin({
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       }),
@@ -966,11 +947,11 @@ describe("removeAddedOfferedPlugin", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       });
 
-      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
       await rm(target, { recursive: true, force: true });
       await mkdir(target, { recursive: true });
       await writeFile(join(target, "keep.txt"), "keep");
@@ -986,7 +967,7 @@ describe("removeAddedOfferedPlugin", () => {
       await expect(
         removeAddedOfferedPlugin({
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           identity: added.identity,
           contentHash: added.contentHash,
         }),
@@ -1016,11 +997,11 @@ describe("removeAddedOfferedPlugin", () => {
       const added = await addOfferedPlugin({
         builtinPluginsRoot: fixture.builtinPluginsRoot,
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         existingPluginIds: NO_EXISTING_PLUGIN_IDS,
       });
 
-      const target = join(fixture.workspaceRoot, "plugins", "codex");
+      const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
       await rm(target, { recursive: true, force: true });
       await mkdir(target, { recursive: true });
       await writeFile(join(target, "keep.txt"), "keep");
@@ -1036,7 +1017,7 @@ describe("removeAddedOfferedPlugin", () => {
       await expect(
         removeAddedOfferedPlugin({
           workspaceRoot: fixture.workspaceRoot,
-          directoryName: "codex",
+          directoryName: "agent-chat",
           identity: added.identity,
           contentHash: added.contentHash,
         }),
@@ -1066,20 +1047,20 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
     // Real work landing inside the same directory entry — its own identity
     // is untouched by this, which is exactly what makes it distinct from
     // every other case in this file.
-    const target = join(fixture.workspaceRoot, "plugins", "codex");
+    const target = join(fixture.workspaceRoot, "plugins", "agent-chat");
     await writeFile(join(target, "NOTES.md"), "left after publish");
 
     await expect(
       removeAddedOfferedPlugin({
         workspaceRoot: fixture.workspaceRoot,
-        directoryName: "codex",
+        directoryName: "agent-chat",
         identity: added.identity,
         contentHash: added.contentHash,
       }),
@@ -1099,19 +1080,19 @@ describe("removeAddedOfferedPlugin", () => {
     const added = await addOfferedPlugin({
       builtinPluginsRoot: fixture.builtinPluginsRoot,
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       existingPluginIds: NO_EXISTING_PLUGIN_IDS,
     });
 
     await removeAddedOfferedPlugin({
       workspaceRoot: fixture.workspaceRoot,
-      directoryName: "codex",
+      directoryName: "agent-chat",
       identity: added.identity,
       contentHash: added.contentHash,
     });
 
     await expect(
-      lstat(join(fixture.workspaceRoot, "plugins", "codex")),
+      lstat(join(fixture.workspaceRoot, "plugins", "agent-chat")),
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 });
