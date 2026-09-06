@@ -14001,8 +14001,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn owner_outbox_main_version_mismatch_is_refused_over_the_wire() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -16210,8 +16208,6 @@ mod tests {
     #[tokio::test]
     async fn owner_outbox_read_pages_fit_negotiated_frames_for_large_blobs_and_queues() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -16307,8 +16303,6 @@ mod tests {
     #[tokio::test]
     async fn owner_outbox_queued_mutations_honor_embedded_cancellation_and_deadlines() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -16438,8 +16432,6 @@ mod tests {
         // MUTATION: remove the owner outbox session_ops acquisition -> the
         // append commits while this test still holds the lifecycle guard.
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -16502,8 +16494,6 @@ mod tests {
         // MUTATION: bypass the actor with EngineStore::open after the session_ops
         // barrier -> the paused append reopens engine.db and commits after close.
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
