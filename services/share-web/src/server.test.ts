@@ -4,8 +4,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadShareWebConfig } from "./config";
 import {
-  createShareWebHandler as createRawShareWebHandler,
-  type CreateShareWebHandlerOptions,
+  createShareWebApplication,
+  type CreateShareWebApplicationOptions,
   EXCHANGE_BUCKET_CAPACITY,
   LINK_SESSION_RENEWAL_GRACE_MS,
   MAX_SESSIONS_PER_GRANT,
@@ -27,11 +27,11 @@ const HANDOFF_EXCHANGE_KEY = "share-web-to-relay-handoff-exchange-key";
 const PUBLIC_RELAY_URL = "https://relay.public.test";
 
 function createShareWebHandler(
-  options: Omit<CreateShareWebHandlerOptions, "publicRelayUrl"> & {
+  options: Omit<CreateShareWebApplicationOptions, "publicRelayUrl"> & {
     publicRelayUrl?: string;
   },
-): ReturnType<typeof createRawShareWebHandler> {
-  return createRawShareWebHandler({ publicRelayUrl: PUBLIC_RELAY_URL, ...options });
+): ReturnType<typeof createShareWebApplication>["handle"] {
+  return createShareWebApplication({ publicRelayUrl: PUBLIC_RELAY_URL, ...options }).handle;
 }
 
 function request(path: string, init: RequestInit = {}): Request {

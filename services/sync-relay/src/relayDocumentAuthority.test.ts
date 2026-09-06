@@ -1,9 +1,11 @@
 import { mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, expect, it } from "vitest";
-import { openSyncRelayStorage } from "./storage.js";
+import { afterEach, expect, it, vi } from "vitest";
+import { parseHostEpoch } from "@dohc/live-session-contract/host-control";
+import { openSyncRelayStorage, type CurrentLiveBindingRequest, type SyncRelayStorage } from "./storage.js";
 
 interface RawDatabase {
   close(): void;
@@ -253,5 +255,273 @@ it("enforces baseline range bounds and composite identity", async () => {
     }
     insert(9007199254740991, 4294967294, 4294967295);
     expect(() => insert(9007199254740991, 4294967294, 4294967295)).toThrow();
+  });
+});
+
+// These synthetic bytes and moments prove authority reads, not validated registration.
+const readBaseline = new Uint8Array([0, 0]);
+const readLineage = createHash("sha256").update(readBaseline).digest("hex");
+const readDocument = { workspaceId: "workspace-1", mainVersionId: "main", objectId: "object-1", lineageClaimId: readLineage };
+const ownerActor = { kind: "owner", userId: "owner-1", shareId: "share-1" } as const;
+const namedActor = { kind: "named", userId: "reader-1", grantId: "edit-1" } as const;
+const readHost = { mode: "device", hostId: "host-1", hostEpoch: parseHostEpoch(1), instanceId: "instance-1", connectionId: "connection-1" } as const;
+
+function seedReadMoment(db: RawDatabase, changed: Record<string, unknown> = {}): void {
+  const row = { workspace_id: "workspace-1", object_id: "object-1", relay_seq: 1, moment_id: "moment-1",
+    version_id: "main", path: "docs/a.md", blob_sha256: "b".repeat(64), content_kind: "text", byte_length: 1,
+    recorded_at_ms: 1, ...changed };
+  db.prepare(`INSERT INTO sync_relay_object_moments (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`)
+    .run(...Object.values(row));
+}
+
+function seedReadGrant(db: RawDatabase, changed: Record<string, unknown> = {}): void {
+  const row = { grant_id: "edit-1", share_id: "share-1", principal_kind: "user", principal_user_id: "reader-1",
+    principal_email: null, access: "edit", generation: 4, status: "active", created_at_ms: 0, revoked_at_ms: null,
+    parent_grant_id: null, ...changed };
+  db.prepare(`INSERT INTO sync_relay_share_grants (${Object.keys(row).join(",")}) VALUES (${Object.keys(row).map(() => "?").join(",")})`)
+    .run(...Object.values(row));
+}
+
+async function withBindingFixture(run: (storage: SyncRelayStorage, path: string) => void): Promise<void> {
+  const path = await database();
+  raw(path, db => {
+    workspace(db);
+    seedReadMoment(db);
+    baseline(db, { lineage_claim_id: readLineage, baseline_digest: readLineage, baseline_bytes: readBaseline,
+      baseline_projected_byte_length: 1, restore_fence_generation: 7 });
+    db.prepare("INSERT INTO sync_relay_shares (share_id, workspace_id, granter_user_id, selector_json, created_at_ms) VALUES (?, ?, ?, ?, ?)")
+      .run("share-1", "workspace-1", "owner-1", JSON.stringify({ paths: ["docs"], versionId: null }), 0);
+    seedReadGrant(db);
+    seedReadGrant(db, { grant_id: "view-1", access: "view" });
+  });
+  const storage = openSyncRelayStorage(path);
+  try {
+    expect(storage.provisionLiveHostControl({ mode: readHost.mode, hostId: readHost.hostId, updatedAtMs: 1, guard: () => undefined }).ok).toBe(true);
+    expect(storage.registerLiveHost({ ...readHost, updatedAtMs: 2, guard: () => undefined }).ok).toBe(true);
+    run(storage, path);
+  } finally { storage.close(); }
+}
+
+it("reads owned current owner and exact named authority, preserving the stored fence across reopen", async () => {
+  await withBindingFixture((storage, path) => {
+    const before = raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all());
+    for (const actor of [ownerActor, namedActor]) {
+      const request = { document: { ...readDocument }, actor: { ...actor } };
+      const result = storage.resolveCurrentLiveDocumentBinding(request);
+      expect(result).toEqual({ kind: "current", host: readHost,
+        binding: { ...readDocument, currentPath: "docs/a.md", selectorPaths: ["docs"], restoreFenceGeneration: 7 },
+        authority: actor.kind === "owner"
+          ? { principalKind: "owner", principalId: "owner-1", grantId: null, grantGeneration: null }
+          : { principalKind: "named", principalId: "reader-1", grantId: "edit-1", grantGeneration: 4 } });
+      if (result.kind !== "current") throw new Error("expected current authority");
+      (result.binding.selectorPaths as string[]).push("outside");
+      (result.host as { hostId: string }).hostId = "poison";
+      (result.authority as { principalId: string }).principalId = "poison";
+      expect(request).toEqual({ document: readDocument, actor });
+      const reopened = openSyncRelayStorage(path);
+      try {
+        const fresh = reopened.resolveCurrentLiveDocumentBinding({ document: readDocument, actor });
+        expect(fresh.kind).toBe("current");
+        if (fresh.kind === "current") {
+          expect(fresh.binding.selectorPaths).toEqual(["docs"]);
+          expect(fresh.binding.restoreFenceGeneration).toBe(7);
+          expect(fresh.host).toEqual(readHost);
+          expect(fresh.authority.principalId).toBe(actor.userId);
+        }
+      } finally { reopened.close(); }
+    }
+    expect(raw(path, db => db.prepare(`SELECT * FROM ${documents}`).all())).toEqual(before);
+  });
+});
+
+it("never substitutes another grant and reads current same-grant generation", async () => {
+  await withBindingFixture((storage, path) => {
+    const enumeration = vi.spyOn(storage, "listActiveShareGrantsForRecipient").mockImplementation(() => { throw new Error("enumerated grants"); });
+    try {
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: { ...namedActor, grantId: "view-1" } }))
+        .toEqual({ kind: "refused", reason: "stale-selector" });
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: { ...namedActor, grantId: "missing" } }))
+        .toEqual({ kind: "refused", reason: "not-authorized" });
+      raw(path, db => db.exec("UPDATE sync_relay_share_grants SET generation = 5 WHERE grant_id = 'edit-1'"));
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
+        .toMatchObject({ kind: "current", authority: { grantId: "edit-1", grantGeneration: 5 } });
+      expect(enumeration).not.toHaveBeenCalled();
+    } finally { enumeration.mockRestore(); }
+  });
+});
+
+it.each([
+  ["revoked grant", "UPDATE sync_relay_share_grants SET status = 'revoked', revoked_at_ms = 3 WHERE grant_id = 'edit-1'", "not-authorized"],
+  ["another principal", "UPDATE sync_relay_share_grants SET principal_user_id = 'other' WHERE grant_id = 'edit-1'", "not-authorized"],
+  ["narrowed grant", "UPDATE sync_relay_share_grants SET access = 'comment' WHERE grant_id = 'edit-1'", "stale-selector"],
+  ["lost granter standing", "UPDATE sync_relay_workspaces SET owner_user_id = 'other'", "not-authorized"],
+  ["missing grant", "DELETE FROM sync_relay_share_grants WHERE grant_id = 'edit-1'", "not-authorized"],
+] as const)("current named authority refuses %s", async (_label, sql, reason) => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => db.exec(sql));
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toEqual({ kind: "refused", reason });
+  });
+});
+
+it.each(["revoked", "narrowed", "wrong-kind", "missing"] as const)("rechecks dependent Edit parent standing: %s", async change => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => {
+      seedReadGrant(db, { grant_id: "parent-1", principal_kind: "link", principal_user_id: null });
+      db.exec("UPDATE sync_relay_share_grants SET parent_grant_id = 'parent-1' WHERE grant_id = 'edit-1'");
+    });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }).kind).toBe("current");
+    raw(path, db => {
+      if (change === "revoked") db.exec("UPDATE sync_relay_share_grants SET status = 'revoked', revoked_at_ms = 3 WHERE grant_id = 'parent-1'");
+      if (change === "narrowed") db.exec("UPDATE sync_relay_share_grants SET access = 'comment' WHERE grant_id = 'parent-1'");
+      if (change === "wrong-kind") db.exec("UPDATE sync_relay_share_grants SET principal_kind = 'user', principal_user_id = 'owner-1' WHERE grant_id = 'parent-1'");
+      if (change === "missing") db.exec("PRAGMA foreign_keys = OFF; DELETE FROM sync_relay_share_grants WHERE grant_id = 'parent-1'");
+    });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
+      .toEqual({ kind: "refused", reason: "not-authorized" });
+  });
+});
+
+it.each([
+  "{", JSON.stringify({ paths: ["docs"], versionId: "pinned" }), JSON.stringify({ paths: [], versionId: null }),
+  JSON.stringify({ kind: "chat-channel", channelWireId: "channel-1" }), JSON.stringify({ paths: ["docs-private"], versionId: null }),
+  JSON.stringify({ paths: ["outside"], versionId: null }), JSON.stringify({ paths: ["../docs"], versionId: null }),
+  JSON.stringify({ paths: ["docs//"], versionId: null }), JSON.stringify({ paths: ["docs", "docs"], versionId: null }),
+  JSON.stringify({ paths: ["docs"], versionId: null, extra: true }),
+])("refuses selector damage or drift for both actor kinds: %s", async selector => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => db.prepare("UPDATE sync_relay_shares SET selector_json = ?").run(selector));
+    for (const actor of [ownerActor, namedActor]) {
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor })).toEqual({ kind: "refused", reason: "stale-selector" });
+    }
+  });
+});
+
+it("checks owner and workspace standing before constructing either authority envelope", async () => {
+  await withBindingFixture((storage, path) => {
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: { ...ownerActor, userId: "reader-1" } }))
+      .toEqual({ kind: "refused", reason: "not-authorized" });
+    raw(path, db => {
+      db.exec("INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms) VALUES ('other-workspace', 'owner-1', 0)");
+      db.exec("UPDATE sync_relay_shares SET workspace_id = 'other-workspace'");
+    });
+    for (const actor of [ownerActor, namedActor]) {
+      expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor })).toEqual({ kind: "refused", reason: "not-authorized" });
+    }
+  });
+});
+
+it.each(["moved", "deleted", "binary", "replacement"] as const)("rechecks the latest main moment and reverse path: %s", async change => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => seedReadMoment(db, { relay_seq: 2, moment_id: "moment-2", ...(change === "moved" ? { path: "elsewhere/a.md" }
+      : change === "deleted" ? { path: null, content_kind: null, blob_sha256: null, byte_length: null }
+        : change === "binary" ? { content_kind: "binary" } : { object_id: "replacement-1" }) }));
+    for (const actor of [ownerActor, namedActor]) expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor }))
+      .toEqual({ kind: "refused", reason: "stale-document" });
+  });
+});
+
+it("ignores a later pinned moment and permits a later valid same-path main edit", async () => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => {
+      seedReadMoment(db, { relay_seq: 2, moment_id: "edit-2", blob_sha256: "c".repeat(64), byte_length: 5 });
+      seedReadMoment(db, { relay_seq: 3, moment_id: "fork-3", version_id: "fork", path: "outside/a.md" });
+    });
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }).kind).toBe("current");
+  });
+});
+
+it.each(["absent", "closed", "retired", "another-lineage"] as const)("classifies current authority history as stale: %s", async state => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => {
+      if (state === "absent") db.exec(`DELETE FROM ${documents}`);
+      if (state === "closed") db.exec(`UPDATE ${documents} SET admission_state = 'closed'`);
+      if (state === "retired") db.exec(`UPDATE ${documents} SET lineage_state = 'retired', admission_state = 'closed', retired_at_ms = 10`);
+    });
+    const document = state === "another-lineage" ? { ...readDocument, lineageClaimId: "f".repeat(64) } : readDocument;
+    for (const actor of [ownerActor, namedActor]) expect(storage.resolveCurrentLiveDocumentBinding({ document, actor }))
+      .toEqual({ kind: "refused", reason: "stale-document" });
+  });
+});
+
+it("returns host-unavailable on disconnect or transition and rereads a new connection", async () => {
+  await withBindingFixture((storage, path) => {
+    expect(storage.disconnectLiveHost({ ...readHost, updatedAtMs: 3, guard: () => undefined }).ok).toBe(true);
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
+      .toEqual({ kind: "refused", reason: "host-unavailable" });
+    const newHost = { ...readHost, connectionId: "connection-2" };
+    expect(storage.registerLiveHost({ ...newHost, updatedAtMs: 4, guard: () => undefined }).ok).toBe(true);
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor })).toMatchObject({ kind: "current", host: newHost });
+    expect(storage.beginLiveHostTransition({ from: newHost, toMode: "service", toHostId: "service-1", transitionId: "transition-1", startedAtMs: 5, guard: () => undefined }).ok).toBe(true);
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
+      .toEqual({ kind: "refused", reason: "host-unavailable" });
+    raw(path, db => db.exec("DELETE FROM sync_relay_session_host_control"));
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: ownerActor }))
+      .toEqual({ kind: "refused", reason: "host-unavailable" });
+  });
+});
+
+it.each([
+  `UPDATE ${documents} SET baseline_bytes = x'01'`,
+  `UPDATE ${documents} SET baseline_projected_sha256 = '${"c".repeat(64)}'`,
+  `UPDATE ${documents} SET baseline_projected_byte_length = 2`,
+  `UPDATE ${documents} SET baseline_moment_relay_seq = 2`,
+  `UPDATE ${documents} SET current_path = 'docs//a.md'`,
+  `UPDATE ${documents} SET current_path = 'docs/a.txt'`,
+  `PRAGMA ignore_check_constraints = ON; UPDATE ${documents} SET restore_fence_generation = -1`,
+  `PRAGMA ignore_check_constraints = ON; UPDATE sync_relay_session_host_control SET admission_state = 'broken'`,
+  `PRAGMA ignore_check_constraints = ON; UPDATE sync_relay_session_host_control SET admission_state = 'closed'`,
+  `PRAGMA ignore_check_constraints = ON; UPDATE sync_relay_session_host_control SET transition_id = 'orphan-transition'`,
+])("throws on stored authority or host damage without normalizing it: %s", async sql => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => {
+      seedReadMoment(db, { relay_seq: 2, moment_id: "later-same-digest", path: "elsewhere/a.md" });
+      db.exec(sql);
+    });
+    expect(() => storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toThrow();
+  });
+});
+
+it.each([2, 3])("rejects overlapping or mergeable-adjacent baseline ranges ending at %s", async end => {
+  await withBindingFixture((storage, path) => {
+    raw(path, db => {
+      const insert = db.prepare(`INSERT INTO ${ranges} VALUES (?, ?, ?, ?, ?, ?, ?)`);
+      insert.run("workspace-1", "main", "object-1", readLineage, 1, 0, end);
+      insert.run("workspace-1", "main", "object-1", readLineage, 1, 2, 4);
+    });
+    expect(() => storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor })).toThrow(/damaged/);
+  });
+});
+
+it("holds one write transaction through grant lookup, preventing a second writer and leaving no transaction open", async () => {
+  await withBindingFixture((storage, path) => {
+    const getGrant = storage.getShareGrant.bind(storage);
+    const lookup = vi.spyOn(storage, "getShareGrant").mockImplementation(id => {
+      raw(path, db => {
+        db.exec("PRAGMA busy_timeout = 0");
+        expect(() => db.exec("UPDATE sync_relay_share_grants SET generation = 9 WHERE grant_id = 'edit-1'")).toThrow(/locked|busy/i);
+      });
+      return getGrant(id);
+    });
+    try { expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }).kind).toBe("current"); }
+    finally { lookup.mockRestore(); }
+    raw(path, db => db.exec("UPDATE sync_relay_share_grants SET generation = 9 WHERE grant_id = 'edit-1'"));
+    expect(storage.resolveCurrentLiveDocumentBinding({ document: readDocument, actor: namedActor }))
+      .toMatchObject({ kind: "current", authority: { grantGeneration: 9 } });
+  });
+});
+
+it("rejects inherited, accessor, proxy and extra caller fields without invoking them", async () => {
+  await withBindingFixture(storage => {
+    const getter = vi.fn(() => readDocument);
+    const request = { document: readDocument, actor: namedActor };
+    for (const malformed of [
+      Object.create(request), { ...request, extra: true }, { ...request, actor: { ...namedActor, kind: "link" } },
+      { ...request, document: Object.defineProperty({ ...readDocument }, "objectId", { get: getter }) },
+      Object.defineProperty({ actor: namedActor }, "document", { get: getter }),
+      { ...request, actor: Object.defineProperty({ ...namedActor }, "kind", { get: getter }) },
+      new Proxy(request, { getOwnPropertyDescriptor() { getter(); throw new Error("proxy inspected"); } }),
+    ]) expect(() => storage.resolveCurrentLiveDocumentBinding(malformed as CurrentLiveBindingRequest)).toThrow(TypeError);
+    expect(getter).not.toHaveBeenCalled();
+    expect(storage.resolveCurrentLiveDocumentBinding(request).kind).toBe("current");
   });
 });
