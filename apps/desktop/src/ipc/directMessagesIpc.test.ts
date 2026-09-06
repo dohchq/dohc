@@ -87,7 +87,7 @@ async function harness() {
   const capture = { fileObjectIdForPath } as unknown as WorkspaceEngineCapture;
   const requireEngineCapture = vi.fn(async (value: RegistryEntry, _feature: "Chats") => ({ workspace: value, capture }));
   const linkedChatStoreFor = vi.fn(() => store);
-  const warm = vi.fn(async () => undefined);
+  const warm = vi.fn<() => Promise<void>>(async () => undefined);
   const remote = vi.fn(async () => ({ credentials: current!, credentialGeneration: generation }));
   const relayJson = vi.fn(async (_credentials: CloudCredentials, path: string, init?: RequestInit): Promise<unknown> => {
     if (path === "/sync/shares") { events.push("list-grants"); return { granted: [], received: [] }; }
