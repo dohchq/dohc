@@ -61,6 +61,16 @@ export {
   type ServerDerivedLiveUpdateAuthority,
 } from "./liveUpdateAdmission.js";
 export {
+  LIVE_TICKET_ENTROPY_BYTES,
+  LIVE_TICKET_TOKEN_PATTERN,
+  LIVE_TICKET_LIFETIME_MS,
+  parseLiveTicketClaims,
+  parseRedeemedLiveTicket,
+  parseLiveTicketToken,
+  type LiveTicketClaims,
+  type RedeemedLiveTicket,
+} from "./liveTicket.js";
+export {
   LIVE_MARKDOWN_MAX_BYTES,
   exceedsLiveMarkdownLimit,
   exceedsUtf8Bytes,
