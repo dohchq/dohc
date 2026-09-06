@@ -1732,8 +1732,8 @@ describe("plugin details tabs", () => {
     bridge.listPlugins = vi.fn(async () => ({
       ok: true as const,
       plugins: [
-        { ...rowFields, id: "codex", directoryName: "codex-a", displayName: "Codex A" },
-        { ...rowFields, id: "codex", directoryName: "codex-b", displayName: "Codex B" },
+        { ...rowFields, id: "agent-chat", directoryName: "chat-a", displayName: "Chat A" },
+        { ...rowFields, id: "agent-chat", directoryName: "chat-b", displayName: "Chat B" },
       ] as PluginStatusRecord[],
     }));
     renderShell(bridge);
@@ -1741,13 +1741,13 @@ describe("plugin details tabs", () => {
     await userEvent.click(await screen.findByTestId("activity-plugins"));
     const rows = await screen.findAllByTestId("plugin-row");
     expect(rows).toHaveLength(2);
-    const rowB = rows.find((row) => within(row).queryByText("Codex B"));
-    if (!rowB) throw new Error("Codex B row not found among the rendered rows.");
+    const rowB = rows.find((row) => within(row).queryByText("Chat B"));
+    if (!rowB) throw new Error("Chat B row not found among the rendered rows.");
     await userEvent.click(within(rowB).getByTestId("plugin-open-details"));
 
     const page = await screen.findByTestId("plugin-details-page");
-    expect(page.getAttribute("data-directory-name")).toBe("codex-b");
-    expect(within(page).getByText("Codex B")).toBeTruthy();
+    expect(page.getAttribute("data-directory-name")).toBe("chat-b");
+    expect(within(page).getByText("Chat B")).toBeTruthy();
   });
 
   it("restores a plugin's details tab and mounts its page", async () => {

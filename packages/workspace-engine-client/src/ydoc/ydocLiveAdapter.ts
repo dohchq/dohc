@@ -15,10 +15,7 @@ import {
   WorkspaceDaemonRequester,
   type DaemonRequesterClient,
 } from "../live/daemonLiveAdapter";
-import type { Event } from "./generated/Event";
-import type { Request } from "./generated/Request";
-import type { Response } from "./generated/Response";
-import type { WorkspaceHandle } from "./generated/WorkspaceHandle";
+import type { Event, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   YDOC_EVENT,
   YDOC_METHOD,

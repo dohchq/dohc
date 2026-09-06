@@ -1,9 +1,4 @@
-import type { ErrorCode } from "../ydoc/generated/ErrorCode";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { Retryability } from "../ydoc/generated/Retryability";
-import type { WireError } from "../ydoc/generated/WireError";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { ErrorCode, Request, Response, Retryability, WireError, WorkspaceHandle } from "../protocol";
 
 export type DaemonErrorCode =
   | ErrorCode

@@ -5,14 +5,7 @@ import { cpus } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  RESOLVE_REQUEST_FRAME_BYTES,
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
-  conflictListRowForWire,
-  jsonStringEncodedLength,
-  settledConflictForWire,
-  settledSnapshotForWire,
   type ConflictRecord,
   type JsonObject,
   type JsonValue,
@@ -20,6 +13,17 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import {
+  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
+  RESOLVE_REQUEST_FRAME_BYTES,
+  jsonStringEncodedLength,
+} from "@dohc/workspace-engine-client/limits";
+import {
+  VersionedLoopbackEngine,
+  conflictListRowForWire,
+  settledConflictForWire,
+  settledSnapshotForWire,
+} from "@dohc/workspace-engine-client/testing";
 import {
   encodedEnvelopeBytes,
   requestEnvelope,

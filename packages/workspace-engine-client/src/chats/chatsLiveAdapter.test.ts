@@ -1,8 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue, Request, Response } from "../protocol";
 import {
   DaemonRefusalError,
   type MinimalDaemonClient,
@@ -18,7 +16,7 @@ import {
   ChatsAdapterCapabilityError,
   ChatsLiveAdapter,
 } from "./chatsLiveAdapter";
-import { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
+import { ChatsLoopbackEngine } from "../testing/chatsLoopbackEngine";
 
 const WORKSPACE = "ws-handle";
 const SENTINEL = new Error("captured");

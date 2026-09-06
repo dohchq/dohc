@@ -6,7 +6,7 @@ import {
   WorkspaceDaemonRequester,
   type MinimalDaemonClient,
 } from "../live/daemonLiveAdapter";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { JsonValue, WorkspaceHandle } from "../protocol";
 import {
   WORKSPACE_METHOD,
   collectionResultExpectsBlob,
@@ -45,7 +45,6 @@ import {
   type WorkspaceMethodResultMap,
   type WorkspaceOpenParams,
 } from "../workspace/workspaceWireContract";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import {
   VERSIONED_METHOD,
   decodeVersionedResult,

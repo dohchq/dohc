@@ -1,8 +1,8 @@
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";

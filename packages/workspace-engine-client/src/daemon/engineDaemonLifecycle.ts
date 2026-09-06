@@ -5,11 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, posix, win32 } from "node:path";
 import { performance } from "node:perf_hooks";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
-import type { Event } from "../ydoc/generated/Event";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { Event, JsonValue, Request, Response, WorkspaceHandle } from "../protocol";
 import {
   createEngineClient,
   type EngineClientSpawnOptions,

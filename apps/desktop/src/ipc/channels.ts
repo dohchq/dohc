@@ -133,10 +133,7 @@ export const PLUGIN_PIPELINE_ERROR_STAGES = [
   "uninstall",
 ] as const;
 
-export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = [
-  "codex",
-  "claude-code",
-] as const;
+export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = ["agent-chat"] as const;
 
 // How many unrecoverable paths the uninstall preflight sends to the renderer.
 // The dialog lists this sample and says how many more there are; a plugin

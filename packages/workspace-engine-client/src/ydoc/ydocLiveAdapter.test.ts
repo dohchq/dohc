@@ -11,7 +11,7 @@ import {
   DaemonRefusalError,
   isYdocUnsettledCloseRefusal,
 } from "../live/daemonLiveAdapter";
-import type { Request } from "./generated/Request";
+import type { Request } from "../protocol";
 import {
   ENGINE_DELIVERED_ORIGIN,
   IllFormedUtf16EditError,
@@ -24,7 +24,7 @@ import {
   isWellFormedUtf16,
   type EngineTransport,
 } from "./ydocLiveAdapter";
-import { YdocLoopbackEngine } from "./ydocLoopbackEngine";
+import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
 import {
   openEngineYdocProviderSession,
   YdocReleasedWithSettleFailureError,

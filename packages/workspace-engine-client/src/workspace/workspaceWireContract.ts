@@ -15,7 +15,7 @@ import {
   type CollectionQueryResult as CollectionQueryContractResult,
   type CollectionValue,
 } from "@dohc/workspace-contracts/collection";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
+import type { JsonValue } from "../protocol";
 
 export const WORKSPACE_METHOD = {
   open: "workspace.open",

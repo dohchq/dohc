@@ -1,9 +1,9 @@
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type { SecretFileMoment } from "@dohc/workspace-contracts/engine";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as fsPromises from "node:fs/promises";

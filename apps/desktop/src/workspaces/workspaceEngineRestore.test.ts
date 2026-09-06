@@ -4,9 +4,9 @@ import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockDaemonSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,
