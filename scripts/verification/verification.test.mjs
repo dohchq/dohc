@@ -293,7 +293,7 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
         engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
           'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
           'CC','CXX','AR','CFLAGS','CXXFLAGS'],
-        desktop:['VITE_FIXTURE','NODE_ENV'],
+        desktop:['VITE_FIXTURE','NODE_ENV','ESBUILD_BINARY_PATH'],
       };
       for(const [owner,names] of Object.entries(settings)) for(const name of names) {
         delete process.env[name];
@@ -306,7 +306,7 @@ for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes e
         assert.equal(edited!==created,kind===owner,name+' edit for '+kind);
         delete process.env[name];
         assert.equal(sourceFingerprint(kind,root),absent,name+' removal for '+kind);
-        if(process.platform==='win32' && ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS'].includes(name)) {
+        if(process.platform==='win32' && ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','ESBUILD_BINARY_PATH'].includes(name)) {
           const mixed=name.toLowerCase();
           process.env[mixed]='fixture-one';
           assert.equal(sourceFingerprint(kind,root),created,mixed+' normalized casing');

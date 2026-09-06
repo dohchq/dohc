@@ -25,7 +25,7 @@ const inputPaths = {
 };
 const environmentInputs = {
   engine: /^(CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
-  desktop: /^(VITE_|NODE_ENV$)/,
+  desktop: /^(VITE_|NODE_ENV$|ESBUILD_BINARY_PATH$)/,
 };
 
 export function hashFile(path) {
