@@ -4863,8 +4863,14 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         recorded_at_ms: 2,
     };
     let mut store = EngineStore::open(&db_path, 3).expect("reopen fixture store");
-    apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
-        .expect("queue foreign base behind live session");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &foreign,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue foreign base behind live session");
     drop(store);
     let deferred_count = || {
         connection
@@ -5075,8 +5081,14 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
         }),
         recorded_at_ms: 30,
     };
-    let applied = apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
-        .expect("queue winning base behind live session");
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &foreign,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue winning base behind live session");
     assert!(
         matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
         "the winning base must start deferred behind the live session"

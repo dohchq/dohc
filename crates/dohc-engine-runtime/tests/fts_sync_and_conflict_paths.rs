@@ -159,7 +159,13 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let hits = search_store(&store, scratch.path(), NEEDLE, 1_300);
@@ -213,7 +219,7 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_110,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &base_operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &base_operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(result)) if !result.deferred
     ));
     let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
@@ -234,13 +240,18 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_120,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &AlwaysLive),
         Ok(ApplyOutcome::Applied(result)) if result.deferred
     ));
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("first drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("first drain")
+        .drained,
         1
     );
 
@@ -294,9 +305,14 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         .expect("activate replay version");
 
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("historical replay drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("historical replay drain")
+        .drained,
         1
     );
     assert_eq!(

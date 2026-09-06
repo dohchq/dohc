@@ -116,8 +116,14 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             }),
             recorded_at_ms: 3,
         };
-        apply_ydoc_envelope(&mut store, &base_envelope, &NoFaults, &NoLiveLeases)
-            .expect("apply verified base");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base_envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply verified base");
         let remote = doc.plaintext_insert(6, " remote");
         let remote_sha = store.put_binary_blob(&remote).expect("remote update blob");
         let envelope = ReplicationEnvelope {
@@ -137,8 +143,14 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
             }),
             recorded_at_ms: 4,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-            .expect("park stale-path remote update");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park stale-path remote update");
         (key, head.blob_sha256, lineage_claim_id)
     };
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");

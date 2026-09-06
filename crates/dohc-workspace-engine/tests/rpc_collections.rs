@@ -1035,8 +1035,14 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
                 }),
                 recorded_at_ms: 200 + i64::try_from(origin_seq).expect("recorded time"),
             };
-            let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-                .expect("queue remote collection update");
+            let applied = apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &envelope,
+                &NoFaults,
+                &AlwaysLive,
+            )
+            .expect("queue remote collection update");
             assert!(
                 matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
                 "the live device must defer the remote update"
@@ -2201,8 +2207,14 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
         recorded_at_ms: 2_000,
     };
     let mut store = EngineStore::open(&db, 2).expect("open replication store");
-    let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("apply remote moment");
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply remote moment");
     // A file-authored edit derives the same field facts a frontmatter-map
     // edit does: the record events and history ride this apply too.
     let ApplyOutcome::Applied(routed) = &applied else {
@@ -2367,8 +2379,14 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
         recorded_at_ms: 2_000,
     };
     let mut store = EngineStore::open(&db, 2).expect("open replication store");
-    let applied = apply_replication_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("apply remote moment");
+    let applied = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply remote moment");
     assert!(
         matches!(applied, ApplyOutcome::Applied(_)),
         "the remote moment must fast-forward the seeded head: {applied:?}"
@@ -2579,8 +2597,14 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         }),
         recorded_at_ms: 200,
     };
-    let applied = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive)
-        .expect("queue remote collection update");
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue remote collection update");
     assert!(
         matches!(applied, ApplyOutcome::Applied(result) if result.deferred),
         "the live device must defer the remote update"

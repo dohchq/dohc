@@ -7380,14 +7380,7 @@ fn execute_relay_operation(
             workspace_id,
             now_ms,
         } => client
-            .pull_chat_workspace_with_cache(
-                store,
-                doc_cache,
-                &workspace_id,
-                &NoFaults,
-                leases,
-                now_ms,
-            )
+            .pull_chat_workspace(store, doc_cache, &workspace_id, &NoFaults, leases, now_ms)
             .map(RelayOperationOutcome::Sync)
             .map_err(RuntimeError::from),
         RelayOperation::CommitCursor {
@@ -11991,19 +11984,16 @@ fn ydoc_close_session_on_store(
         // facts persisted on them — were already deleted, and no retry could
         // ever emit the events. With the rows kept, the retried
         // close re-drains content-deduped and reads the facts back.
-        let (drained, cleanup) =
-            dohc_engine_sync::drain_deferred_ydoc_for_key_cached_holding_cleanup(
-                store, doc_cache, key, faults,
-            )?;
+        let (drained, cleanup) = dohc_engine_sync::drain_deferred_ydoc_for_key_holding_cleanup(
+            store, doc_cache, key, faults,
+        )?;
         for declined in &drained.sharing_declined {
             eprintln!("engine: {declined}");
         }
         if let Some(materialization) = materialization {
             materialize_ydoc_drain(store, key, &drained, materialization, now_ms, faults)?;
         }
-        if let Some(cleanup) = cleanup {
-            dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
-        }
+        dohc_engine_sync::complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
         record_facts = drained.record_facts;
     }
     Ok(YdocCloseSessionOutcome {
@@ -12097,8 +12087,7 @@ fn drain_deferred_ydoc_for_local_rpc(
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained =
-        dohc_engine_sync::drain_deferred_ydoc_for_key_cached(store, doc_cache, key, faults)?;
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_key(store, doc_cache, key, faults)?;
     for declined in &drained.sharing_declined {
         eprintln!("engine: {declined}");
     }
@@ -12115,7 +12104,7 @@ fn drain_deferred_ydoc_for_live_session_rpc(
     expected_lineage_claim_id: Option<&str>,
     faults: &dyn FaultInjector,
 ) -> Result<dohc_engine_sync::YdocDrainResult, RuntimeError> {
-    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session_cached(
+    let drained = dohc_engine_sync::drain_deferred_ydoc_for_live_session(
         store,
         doc_cache,
         key,

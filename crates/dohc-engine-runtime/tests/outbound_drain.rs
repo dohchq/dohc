@@ -180,6 +180,7 @@ fn apply_remote_scene_asset_authority(
     assert!(matches!(
         apply_remote_update(
             store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "origin-scene-source".to_owned(),
@@ -223,6 +224,7 @@ fn apply_remote_scene_image_tombstone(
     assert!(matches!(
         apply_remote_update(
             store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "origin-scene-source".to_owned(),
@@ -520,6 +522,7 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
             assert!(matches!(
                 apply_replication_envelope(
                     peer,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
                     &envelope,
                     &NoFaults,
                     &dohc_engine_sync::NoLiveLeases,

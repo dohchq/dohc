@@ -705,6 +705,7 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
         }
         dohc_engine_sync::apply_replication_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &dohc_engine_sync::ReplicationEnvelope {
                 workspace_id: workspace_id.to_owned(),
                 origin_id: origin_id.clone(),

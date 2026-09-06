@@ -396,8 +396,14 @@ fn replay_into_clean_peer(
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("the clean peer applies every originated op");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the clean peer applies every originated op");
     }
 
     peer.read_with(|conn| {
@@ -541,8 +547,14 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("peer applies replicated collection edit");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer applies replicated collection edit");
     }
 
     let details = peer
@@ -961,8 +973,14 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
         }),
         recorded_at_ms: 300,
     };
-    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
-        .expect("park predecessor behind the live lease");
+    let parked = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLiveLease,
+    )
+    .expect("park predecessor behind the live lease");
     assert!(
         matches!(
             parked,
@@ -972,7 +990,12 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     );
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity"
         })
@@ -1010,15 +1033,26 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
 
     let mut store = EngineStore::open(&db, 9_501).expect("open store");
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
-    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
-        .expect("park remote edit behind the live lease");
+    let parked = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLiveLease,
+    )
+    .expect("park remote edit behind the live lease");
     assert!(matches!(
         parked,
         dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
     ));
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity"
         })
@@ -1089,7 +1123,13 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
         recorded_at_ms: 300,
     };
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update delta is waiting for a verified base identity"
         })
@@ -1127,7 +1167,13 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
     let mut store = EngineStore::open(&db, 9_511).expect("open store");
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update delta is waiting for a verified base identity"
         })
@@ -1900,8 +1946,14 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             }),
             recorded_at_ms: 300,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("the peer base applies");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the peer base applies");
     }
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
 
@@ -2005,8 +2057,14 @@ async fn redelivering_an_originated_base_is_idempotent() {
         }),
         recorded_at_ms: 500,
     };
-    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("a redelivered identical base resumes instead of failing");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("a redelivered identical base resumes instead of failing");
     drop(store);
 
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
@@ -2412,8 +2470,14 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_replication_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("apply ordered operation");
+        apply_replication_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply ordered operation");
     }
     let peer_local_ydoc_ops: i64 = peer
         .read_with(|conn| {

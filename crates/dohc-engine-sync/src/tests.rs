@@ -16,7 +16,6 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
 use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
 use rusqlite::{OptionalExtension, params};
-use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -718,7 +717,13 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &missing, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &missing,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Err(SyncError::BlobInvalid)
     ));
     assert_eq!(
@@ -742,8 +747,14 @@ fn leased_ydoc_envelope_acks_and_defers_without_mutating_the_ydoc_log() {
             "isBaseState": false
         }),
     );
-    let outcome = apply_replication_envelope(&mut engine, &op, &NoFaults, &AlwaysLive)
-        .expect("live lineage defers");
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("live lineage defers");
     assert_eq!(outcome, ApplyOutcome::Applied(RoutedApply::default()));
     let deferred_rows: i64 = engine
         .read_with(|conn| {
@@ -1286,7 +1297,13 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base_op,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
 
@@ -1312,8 +1329,14 @@ fn ydoc_projection_over_the_text_cap_is_acked_as_a_refusal() {
         }),
     );
 
-    let refusal = apply_ydoc_envelope(&mut engine, &over_cap, &NoFaults, &NoLiveLeases)
-        .expect("oversized projection is an acknowledged refusal");
+    let refusal = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &over_cap,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("oversized projection is an acknowledged refusal");
     let expected_reason = format!(
         "plaintext projection exceeds MAX_TEXT_BYTES: limit {MAX_TEXT_BYTES} bytes, observed at least {} bytes",
         MAX_TEXT_BYTES + 4
@@ -1402,7 +1425,13 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta_op,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -1424,8 +1453,14 @@ fn deferred_ydoc_projection_over_the_text_cap_is_persisted_and_returned() {
             "isBaseState": true,
         }),
     );
-    let outcome = apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases)
-        .expect("base applies and drains the oversized update");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and drains the oversized update");
     let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
     assert!(matches!(primary, ApplyOutcome::Applied(_)));
     assert!(sharing_declined.is_empty());
@@ -1511,7 +1546,14 @@ fn oversized_relay_blob_is_refused_before_it_is_hashed_or_copied() {
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobTooLarge {
             constraint: "MAX_TEXT_BYTES",
             limit_bytes: MAX_TEXT_BYTES,
@@ -6790,6 +6832,7 @@ fn pull_repairs_legacy_null_base_coordinates_only_from_exact_relay_answers() {
         .with_coordinate("legacy-peer", 0, response);
         let result = RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -6926,6 +6969,7 @@ fn invalid_pull_page_leaves_legacy_base_repair_and_pull_state_unchanged() {
     assert_eq!(
         RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -7043,7 +7087,14 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
     let client = RelaySyncClient::new(relay);
 
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_200)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_200,
+        )
         .expect("pull before push");
     let pending = engine
         .read_with(|conn| {
@@ -7069,7 +7120,14 @@ fn local_unpushed_absence_stays_pending_until_push_makes_the_coordinate_present(
         .push_workspace(&mut engine, "ws", &NoFaults, 1_300)
         .expect("push local coordinate");
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_400)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_400,
+        )
         .expect("repair after push");
     let repaired = engine
         .read_with(|conn| {
@@ -7157,6 +7215,7 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
     assert!(matches!(
         dohc_engine_collab::apply_remote_update(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &dohc_engine_collab::RemoteUpdate {
                 origin_id: "loser".to_owned(),
@@ -7204,8 +7263,14 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-        .expect("winning base applies");
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base applies");
     let ApplyOutcome::Applied(result) = applied else {
         panic!("winning base did not apply: {applied:?}");
     };
@@ -7313,7 +7378,13 @@ fn lower_relay_base_recovers_the_loser_as_one_ordinary_sibling() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     let counts: (i64, i64) = engine
@@ -7549,8 +7620,14 @@ fn lower_relay_scene_base_recovers_the_loser_as_one_ordinary_sibling() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-        .expect("winning scene base applies");
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning scene base applies");
     let ApplyOutcome::Applied(result) = applied else {
         panic!("winning scene base did not apply: {applied:?}");
     };
@@ -7686,10 +7763,14 @@ fn lower_relay_base_recovers_the_loser_even_when_the_text_matches() {
         }),
     );
     incoming.relay_seq = Some(10);
-    let ApplyOutcome::Applied(result) =
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases)
-            .expect("winning base applies")
-    else {
+    let ApplyOutcome::Applied(result) = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base applies") else {
         panic!("winning base did not apply");
     };
     let replacement = result.lineage_replacement.expect("replacement result");
@@ -7785,8 +7866,14 @@ fn captured_disk_occupant_relocates_the_recovery_exactly_once() {
         }),
     );
     winner_base.relay_seq = Some(10);
-    let applied = apply_ydoc_envelope(&mut engine, &winner_base, &NoFaults, &NoLiveLeases)
-        .expect("winning base");
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &winner_base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("winning base");
     assert!(matches!(applied, ApplyOutcome::Applied(_)));
     let recovery_projection = dohc_engine_storage::hex_sha256(b"losing local draft");
     let first_recovery_path = format!(
@@ -7985,7 +8072,13 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
     );
     same_lineage.relay_seq = Some(10);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &same_lineage, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &same_lineage,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -8014,16 +8107,27 @@ fn live_drain_stops_before_a_foreign_lineage_without_replacing_the_session() {
     );
     foreign_lineage.relay_seq = Some(20);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &foreign_lineage, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &foreign_lineage,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
         }))
     ));
 
-    let drained =
-        drain_deferred_ydoc_for_live_session(&mut engine, &key, Some(&current_claim), &NoFaults)
-            .expect("live-session drain");
+    let drained = drain_deferred_ydoc_for_live_session(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        Some(&current_claim),
+        &NoFaults,
+    )
+    .expect("live-session drain");
     assert_eq!(drained.drained, 1, "the current-lineage delta drains");
     assert!(drained.lineage_replacements.is_empty());
     let state: (String, i64, i64, String) = engine
@@ -8127,7 +8231,13 @@ fn a_losing_lineage_delta_is_acked_without_entering_the_winner() {
     );
     incoming.relay_seq = Some(2);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &incoming, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &incoming,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             reason: Some("ydoc-lineage-lost"),
             ..
@@ -8479,7 +8589,14 @@ fn relay_pull_recovers_only_a_diverged_local_origin() {
         });
 
         assert_eq!(
-            client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+            client.pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1_000
+            ),
             Err(expected),
             "{origin_id}"
         );
@@ -8601,7 +8718,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
     let client = RelaySyncClient::new(fake);
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull fault");
     assert!(matches!(
         first,
@@ -8615,7 +8739,14 @@ fn fault_sync_between_apply_and_cursor_commit_refetches_and_dedups() {
             .is_none()
     );
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let pending = match retry {
         SyncPassOutcome::Complete {
@@ -8670,7 +8801,13 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
         "unexpected scene base outcome: {base_outcome:?}"
@@ -8721,7 +8858,13 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
         delete_payload("first-scene-delete"),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first_delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &first_delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let key = dohc_engine_collab::DocKey::new("ws", "main", object_id).expect("scene key");
@@ -8749,7 +8892,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     });
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_200)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_200,
+        )
         .expect("retained scene delete must not wedge the relay");
     let first_cursor = match first {
         SyncPassOutcome::Complete {
@@ -8768,7 +8918,14 @@ fn retained_scene_lineage_does_not_wedge_a_later_peer_delete() {
     );
 
     let replay = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 3_300)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_300,
+        )
         .expect("cursor-crash replay must dedupe");
     let replay_cursor = match replay {
         SyncPassOutcome::Complete {
@@ -8970,7 +9127,14 @@ fn pull_rejects_op_for_foreign_workspace() {
     };
     let client = RelaySyncClient::new(fake);
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::InvalidResponse)
     ));
     // Fail closed: the cursor was never persisted, so the pass is retryable.
@@ -9234,8 +9398,14 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
             "isBaseState": false
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &op, &NoFaults, &AlwaysLive).expect("live lineage defers");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &op,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("live lineage defers");
     assert_eq!(
         outcome,
         ApplyOutcome::Applied(YdocApplyResult {
@@ -9249,7 +9419,13 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
 
     // The lease is gone (close/eviction/crash — any teardown): the drain must
     // land the acked-but-parked envelope in the durable lineage.
-    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
     assert_eq!(drained.drained, 1, "the parked envelope must apply");
     assert!(drained.refusals.is_empty());
     // The drain projects: the drained content is the visible head, not just
@@ -9274,7 +9450,13 @@ fn parked_ydoc_envelope_drains_into_the_lineage_and_redrains_deduped() {
         .expect("count Y.Doc updates");
     assert_eq!(update_rows, 1, "the drained update reaches the Y.Doc log");
 
-    let redrained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain");
     assert_eq!(
         redrained.drained, 0,
         "replaying the parked row is content-deduped"
@@ -9369,7 +9551,13 @@ fn drained_parked_update_derives_its_record_facts() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -9378,7 +9566,13 @@ fn drained_parked_update_derives_its_record_facts() {
     // The base arrives and the drain applies the parked edit: its facts
     // surface with the drain, so the pass that completes the dependency
     // fires the parked update's record events.
-    let drained = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain");
     assert_eq!(drained.drained, 1);
     assert_eq!(drained.record_facts.len(), 1, "{:?}", drained.record_facts);
     let facts = &drained.record_facts[0];
@@ -9475,7 +9669,13 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -9494,7 +9694,12 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
         .expect("install projection failure");
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::Storage(_))
     ));
     let after_failure: (i64, i64, i64) = engine
@@ -9532,8 +9737,13 @@ fn compacted_deferred_update_redelivery_does_not_duplicate_collection_history() 
             Ok::<_, SyncError>(())
         })
         .expect("clear projection failure");
-    let redrained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain update");
     assert_eq!(redrained.drained, 1);
     // The failed first drain committed the update, its history row, and its
     // record-event decision, then dropped the derived facts with its error —
@@ -9651,7 +9861,13 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -9670,7 +9886,12 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
         })
         .expect("install projection failure");
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::Storage(_))
     ));
     // The apply's transaction committed the update, the history row, and the
@@ -9709,8 +9930,13 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
             Ok::<_, SyncError>(())
         })
         .expect("clear projection failure");
-    let redrained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("redrain update");
+    let redrained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("redrain update");
     assert_eq!(redrained.drained, 1);
     assert_eq!(
         redrained.record_facts.len(),
@@ -9759,186 +9985,15 @@ fn a_failed_drain_projection_surfaces_record_facts_exactly_once_on_the_redrain()
 
     // Exactly once: with the decision consumed, a further drain has nothing
     // to apply and nothing to surface.
-    let idle = drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("idle drain");
+    let idle = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("idle drain");
     assert_eq!(idle.drained, 0);
     assert!(idle.record_facts.is_empty());
-}
-
-#[test]
-fn cached_defer_and_drain_match_the_cold_path() {
-    let (_warm_scratch, _warm_path, mut warm_store) = store();
-    let (_cold_scratch, _cold_path, mut cold_store) = store();
-    let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
-    let mut cold_seed_cache = dohc_engine_collab::WriterDocCache::new();
-    let key = dohc_engine_collab::DocKey::new("ws", "main", "object-cache-pair").expect("key");
-
-    let author = dohc_engine_collab::Ydoc::wire();
-    let local = author.plaintext_insert(0, "local");
-    let remote_one = author.plaintext_insert(5, " remote");
-    let remote_two = author.plaintext_insert(12, " final");
-    let empty_base = dohc_engine_collab::Ydoc::wire().encode_full_state();
-
-    let setup =
-        |store: &mut EngineStore, cache: &mut dohc_engine_collab::WriterDocCache| -> String {
-            VersionedTextStore::new(store)
-                .ensure_main_version("ws", "main", 1_000, &NoFaults)
-                .expect("main version");
-            store
-                .write_with(&NoFaults, |tx| {
-                    tx.execute(
-                    "INSERT OR IGNORE INTO file_objects (workspace_id, object_id, created_at_ms) \
-                     VALUES ('ws','object-cache-pair',1_001)",
-                    [],
-                )
-                .map_err(SyncError::persist)?;
-                    Ok::<_, SyncError>(())
-                })
-                .expect("file object");
-            let claim = match dohc_engine_collab::claim_base(
-                store,
-                &key,
-                dohc_engine_collab::ContentKind::Plaintext,
-                &empty_base,
-                &NoFaults,
-                1_002,
-            )
-            .expect("claim base")
-            {
-                TxnOutcome::Committed(dohc_engine_collab::ClaimOutcome::Claimed {
-                    base_snapshot_sha,
-                }) => base_snapshot_sha,
-                other => panic!("unexpected claim: {other:?}"),
-            };
-            dohc_engine_collab::record_local_update(store, cache, &key, &local, &NoFaults, 1_003)
-                .expect("warm local append");
-            claim
-        };
-    let warm_claim = setup(&mut warm_store, &mut warm_cache);
-    let cold_claim = setup(&mut cold_store, &mut cold_seed_cache);
-    assert_eq!(warm_claim, cold_claim);
-
-    let remote_one_sha = warm_store
-        .put_binary_blob(&remote_one)
-        .expect("warm first remote blob");
-    cold_store
-        .put_binary_blob(&remote_one)
-        .expect("cold first remote blob");
-    let remote_two_sha = warm_store
-        .put_binary_blob(&remote_two)
-        .expect("warm second remote blob");
-    cold_store
-        .put_binary_blob(&remote_two)
-        .expect("cold second remote blob");
-    let deferred = [
-        envelope(
-            "peer",
-            0,
-            "ydoc.update",
-            json!({
-                "versionId": "main",
-                "objectId": "object-cache-pair",
-                "path": "notes/cache-pair.md",
-                "contentKind": "plaintext",
-                "updateBlobSha256": remote_one_sha,
-                "lineageClaimId": warm_claim,
-                "isBaseState": false
-            }),
-        ),
-        envelope(
-            "peer",
-            1,
-            "ydoc.update",
-            json!({
-                "versionId": "main",
-                "objectId": "object-cache-pair",
-                "path": "notes/cache-pair.md",
-                "contentKind": "plaintext",
-                "updateBlobSha256": remote_two_sha,
-                "lineageClaimId": cold_claim,
-                "isBaseState": false
-            }),
-        ),
-    ];
-
-    for operation in &deferred {
-        let warm = apply_ydoc_envelope_cached(
-            &mut warm_store,
-            &mut warm_cache,
-            operation,
-            &NoFaults,
-            &AlwaysLive,
-        )
-        .expect("warm defer");
-        let cold = apply_ydoc_envelope(&mut cold_store, operation, &NoFaults, &AlwaysLive)
-            .expect("cold defer");
-        assert_eq!(warm, cold);
-    }
-
-    let warm_drain =
-        drain_deferred_ydoc_for_key_cached(&mut warm_store, &mut warm_cache, &key, &NoFaults)
-            .expect("warm drain");
-    let cold_drain =
-        drain_deferred_ydoc_for_key(&mut cold_store, &key, &NoFaults).expect("cold drain");
-    assert_eq!(warm_drain, cold_drain);
-
-    let warm_doc = dohc_engine_collab::load_persisted(&warm_store, &key)
-        .expect("warm persisted")
-        .expect("warm doc");
-    let cold_doc = dohc_engine_collab::load_persisted(&cold_store, &key)
-        .expect("cold persisted")
-        .expect("cold doc");
-    // One author produced every delta, so no Any::Map or multi-client map
-    // iteration can perturb this plaintext full-state encoding: byte equality
-    // is the strongest valid assertion here.
-    assert_eq!(
-        warm_doc.doc.encode_full_state(),
-        cold_doc.doc.encode_full_state()
-    );
-    assert_eq!(
-        warm_cache
-            .doc_full_state_for_test(&key)
-            .expect("warm cache remains resident"),
-        cold_doc.doc.encode_full_state()
-    );
-    assert_eq!(
-        warm_cache
-            .frontier_matches_doc_for_test(&key)
-            .expect("deferred frontier comparison"),
-        Some(true),
-        "deferred commits keep the companion frontier aligned"
-    );
-    assert_eq!(
-        warm_cache
-            .gate_scratch_matches_doc_for_test(&key)
-            .expect("deferred scratch comparison"),
-        Some(true),
-        "deferred commits keep the check-4 scratch aligned"
-    );
-    let warm_head = VersionedTextStore::new(&mut warm_store)
-        .read_text("ws", "main", "notes/cache-pair.md")
-        .expect("warm head")
-        .expect("warm snapshot");
-    let cold_head = VersionedTextStore::new(&mut cold_store)
-        .read_text("ws", "main", "notes/cache-pair.md")
-        .expect("cold head")
-        .expect("cold snapshot");
-    assert_eq!(warm_head.text, cold_head.text);
-    assert_eq!(warm_head.blob_sha256, cold_head.blob_sha256);
-    assert_eq!(warm_head.latest_moment_id, cold_head.latest_moment_id);
-    assert_eq!(warm_head.text, "local remote final");
-
-    let stats = warm_cache.stats();
-    // The second defer gate has a queued predecessor, and the cached form
-    // deliberately reconstructs cold for a non-empty queue: a scratch forked
-    // from the cached full state can re-encode delete-set endpoints the gate
-    // reads differently than the cold incremental rebuild.
-    assert_eq!(
-        stats.hits, 2,
-        "empty-queue defer gate plus final drain projection"
-    );
-    assert_eq!(stats.misses, 1, "only the first local append reconstructs");
-    assert_eq!(stats.installs, 1);
-    assert_eq!(stats.advances, 2, "both committed drain deltas advance");
 }
 
 fn seed_warm_and_cold_remote_lineage(
@@ -9974,11 +10029,16 @@ fn seed_warm_and_cold_remote_lineage(
             "isBaseState": true
         }),
     );
-    let warm_base =
-        apply_ydoc_envelope_cached(warm_store, warm_cache, &base, &NoFaults, &NoLiveLeases)
-            .expect("warm base");
-    let cold_base =
-        apply_ydoc_envelope(cold_store, &base, &NoFaults, &NoLiveLeases).expect("cold base");
+    let warm_base = apply_ydoc_envelope(warm_store, warm_cache, &base, &NoFaults, &NoLiveLeases)
+        .expect("warm base");
+    let cold_base = apply_ydoc_envelope(
+        cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold base");
     assert_eq!(warm_base, cold_base);
 
     // This valid empty-state row changes no content. It establishes identical
@@ -10057,11 +10117,16 @@ fn apply_remote_cache_pair(
         json!(cold_sha),
         "paired stores address the same remote bytes"
     );
-    let warm =
-        apply_ydoc_envelope_cached(warm_store, warm_cache, &operation, &NoFaults, &NoLiveLeases)
-            .expect("warm remote apply");
-    let cold = apply_ydoc_envelope(cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold remote apply");
+    let warm = apply_ydoc_envelope(warm_store, warm_cache, &operation, &NoFaults, &NoLiveLeases)
+        .expect("warm remote apply");
+    let cold = apply_ydoc_envelope(
+        cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold remote apply");
     assert_eq!(warm, cold, "cached and cold remote verdicts");
     assert!(
         matches!(&warm, ApplyOutcome::Applied(_)),
@@ -10378,7 +10443,7 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
     cold_store
         .put_binary_blob(&hostile)
         .expect("cold hostile blob");
-    let warm = apply_ydoc_envelope_cached(
+    let warm = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10386,8 +10451,14 @@ fn cached_remote_frontier_refusal_leaves_the_persistent_scratch_untouched() {
         &NoLiveLeases,
     )
     .expect("warm frontier refusal");
-    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold frontier refusal");
+    let cold = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold frontier refusal");
     assert_eq!(warm, cold);
     assert!(matches!(warm, ApplyOutcome::Refused(_)));
     assert!(
@@ -10441,7 +10512,7 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
     cold_store
         .put_binary_blob(&hostile)
         .expect("cold check4 blob");
-    let warm = apply_ydoc_envelope_cached(
+    let warm = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10449,8 +10520,14 @@ fn cached_remote_check4_refusal_evicts_only_scratch_and_a_valid_gate_rebuilds_it
         &NoLiveLeases,
     )
     .expect("warm check4 refusal");
-    let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-        .expect("cold check4 refusal");
+    let cold = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold check4 refusal");
     assert_eq!(warm, cold);
     assert!(matches!(warm, ApplyOutcome::Refused(_)));
     assert!(
@@ -10525,7 +10602,7 @@ fn cached_remote_scratch_apply_error_evicts_only_scratch_and_a_valid_gate_rebuil
     );
     let outcome =
         dohc_engine_collab::replay_parity::with_armed_scratch_apply_error_for_test(|| {
-            apply_ydoc_envelope_cached(
+            apply_ydoc_envelope(
                 &mut warm_store,
                 &mut warm_cache,
                 &operation,
@@ -10595,7 +10672,7 @@ fn remote_frontier_oracle_catches_a_poisoned_identity() {
     let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
     let operation =
         remote_delta_operation(&mut warm_store, target, "remote-frontier-poison", 1, &u2);
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10648,7 +10725,7 @@ fn remote_frontier_oracle_catches_a_poisoned_multi_unit_string_run() {
         1,
         &u2,
     );
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -10695,202 +10772,13 @@ fn remote_scratch_oracle_catches_a_poisoned_scratch() {
     let u2 = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, "b");
     let operation =
         remote_delta_operation(&mut warm_store, target, "remote-scratch-poison", 1, &u2);
-    let _ = apply_ydoc_envelope_cached(
+    let _ = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
         &NoFaults,
         &NoLiveLeases,
     );
-}
-
-#[derive(Deserialize)]
-struct RemoteCacheFixtureCorpus {
-    scenarios: Vec<RemoteCacheScenario>,
-}
-
-#[derive(Deserialize)]
-struct RemoteCacheScenario {
-    name: String,
-    #[serde(rename = "contentKind")]
-    content_kind: String,
-    #[serde(rename = "authoredUpdates")]
-    authored_updates: Vec<RemoteCacheAuthoredUpdate>,
-    #[serde(rename = "replayOrder")]
-    replay_order: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct RemoteCacheAuthoredUpdate {
-    id: String,
-    #[serde(rename = "updateBase64")]
-    update_base64: String,
-}
-
-#[test]
-fn cross_engine_replay_fixtures_match_cold_through_a_warmed_remote_cache() {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-
-    const FIXTURES: &str =
-        include_str!("../../../tools/rust-engine-program/ydoc-replay-fixtures.json");
-    let fixtures: RemoteCacheFixtureCorpus =
-        serde_json::from_str(FIXTURES).expect("Y.Doc replay fixtures");
-    assert!(fixtures.scenarios.len() >= 6, "retain the full T6 corpus");
-
-    for (scenario_index, scenario) in fixtures.scenarios.iter().enumerate() {
-        let (_warm_scratch, _warm_path, mut warm_store) = store();
-        let (_cold_scratch, _cold_path, mut cold_store) = store();
-        let mut warm_cache = dohc_engine_collab::WriterDocCache::new();
-        let object_id = format!("object-remote-cache-{scenario_index}");
-        let extension = if scenario.content_kind == "scene" {
-            "excalidraw"
-        } else {
-            "md"
-        };
-        let path = format!("cache/{scenario_index}.{extension}");
-        let (key, claim) = seed_warm_and_cold_remote_lineage(
-            &mut warm_store,
-            &mut warm_cache,
-            &mut cold_store,
-            &object_id,
-            &path,
-            &scenario.content_kind,
-        );
-        let updates: BTreeMap<&str, &RemoteCacheAuthoredUpdate> = scenario
-            .authored_updates
-            .iter()
-            .map(|update| (update.id.as_str(), update))
-            .collect();
-        assert_eq!(updates.len(), scenario.authored_updates.len());
-        let before = warm_cache.stats();
-
-        for (step, update_id) in scenario.replay_order.iter().enumerate() {
-            let update = updates.get(update_id.as_str()).unwrap_or_else(|| {
-                panic!("{} references unknown update {update_id}", scenario.name)
-            });
-            let bytes = STANDARD
-                .decode(&update.update_base64)
-                .unwrap_or_else(|error| panic!("{} {update_id}: {error}", scenario.name));
-            let warm_sha = warm_store
-                .put_binary_blob(&bytes)
-                .expect("warm fixture blob");
-            let cold_sha = cold_store
-                .put_binary_blob(&bytes)
-                .expect("cold fixture blob");
-            assert_eq!(warm_sha, cold_sha);
-            let mut operation = envelope(
-                &format!("fixture-{scenario_index}-{step}"),
-                0,
-                "ydoc.update",
-                json!({
-                    "versionId": "main",
-                    "objectId": object_id.clone(),
-                    "path": path.clone(),
-                    "contentKind": scenario.content_kind.clone(),
-                    "updateBlobSha256": warm_sha,
-                    "lineageClaimId": claim.clone(),
-                    "isBaseState": false
-                }),
-            );
-            operation.relay_seq = Some(i64::try_from(step + 1).expect("relay sequence"));
-            let warm = apply_ydoc_envelope_cached(
-                &mut warm_store,
-                &mut warm_cache,
-                &operation,
-                &NoFaults,
-                &NoLiveLeases,
-            )
-            .unwrap_or_else(|error| panic!("{} {update_id} warm: {error}", scenario.name));
-            let cold = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-                .unwrap_or_else(|error| panic!("{} {update_id} cold: {error}", scenario.name));
-            assert_eq!(
-                warm, cold,
-                "{} {update_id} warm/cold verdict",
-                scenario.name
-            );
-        }
-
-        let after = warm_cache.stats();
-        let count = u64::try_from(scenario.replay_order.len()).expect("fixture update count");
-        assert_eq!(
-            after.hits - before.hits,
-            count,
-            "{} every remote candidate gates on the warmed cache",
-            scenario.name
-        );
-        assert_eq!(
-            after.advances - before.advances,
-            count,
-            "{} every committed remote candidate advances the cache",
-            scenario.name
-        );
-        let warm = dohc_engine_collab::load_persisted(&warm_store, &key)
-            .expect("warm persisted")
-            .expect("warm lineage");
-        let cold = dohc_engine_collab::load_persisted(&cold_store, &key)
-            .expect("cold persisted")
-            .expect("cold lineage");
-        assert!(
-            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&warm.doc, &cold.doc)
-                .expect("warm/cold scan_v2"),
-            "{} final warm/cold replay structure",
-            scenario.name
-        );
-        let cached = dohc_engine_collab::Ydoc::wire();
-        cached
-            .apply(
-                &warm_cache
-                    .doc_full_state_for_test(&key)
-                    .expect("remote cache remains resident"),
-            )
-            .expect("cached full state");
-        assert!(
-            dohc_engine_collab::replay_parity::structurally_equal_v2_for_test(&cached, &cold.doc)
-                .expect("cache/cold scan_v2"),
-            "{} final cache/cold replay structure",
-            scenario.name
-        );
-        assert_eq!(
-            warm_cache
-                .frontier_matches_doc_for_test(&key)
-                .expect("remote frontier comparison"),
-            Some(true),
-            "{} remote commits keep the companion frontier aligned",
-            scenario.name
-        );
-        assert_eq!(
-            warm_cache
-                .gate_scratch_matches_doc_for_test(&key)
-                .expect("remote scratch comparison"),
-            Some(true),
-            "{} remote commits keep the check-4 scratch aligned",
-            scenario.name
-        );
-        let warm_head = VersionedTextStore::new(&mut warm_store)
-            .read_text("ws", "main", &path)
-            .expect("warm visible head")
-            .expect("warm visible snapshot");
-        let cold_head = VersionedTextStore::new(&mut cold_store)
-            .read_text("ws", "main", &path)
-            .expect("cold visible head")
-            .expect("cold visible snapshot");
-        assert_eq!(
-            warm_head.text, cold_head.text,
-            "{} visible text",
-            scenario.name
-        );
-        assert_eq!(
-            warm_head.blob_sha256, cold_head.blob_sha256,
-            "{} visible digest",
-            scenario.name
-        );
-        assert_eq!(
-            warm_head.latest_moment_id, cold_head.latest_moment_id,
-            "{} visible moment",
-            scenario.name
-        );
-    }
 }
 
 #[test]
@@ -10946,7 +10834,7 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         }),
     );
     let before = warm_cache.stats();
-    let warm_refusal = apply_ydoc_envelope_cached(
+    let warm_refusal = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &refused,
@@ -10954,8 +10842,14 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         &NoLiveLeases,
     )
     .expect("warm retained refusal");
-    let cold_refusal = apply_ydoc_envelope(&mut cold_store, &refused, &NoFaults, &NoLiveLeases)
-        .expect("cold retained refusal");
+    let cold_refusal = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold retained refusal");
     assert_eq!(warm_refusal, cold_refusal);
     assert!(matches!(warm_refusal, ApplyOutcome::Refused(_)));
     let after_refusal = warm_cache.stats();
@@ -11002,7 +10896,7 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
             "isBaseState": false
         }),
     );
-    let warm_descendant = apply_ydoc_envelope_cached(
+    let warm_descendant = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &descendant,
@@ -11010,9 +10904,14 @@ fn refused_remote_projection_retains_and_advances_the_warmed_cache() {
         &NoLiveLeases,
     )
     .expect("warm descendant");
-    let cold_descendant =
-        apply_ydoc_envelope(&mut cold_store, &descendant, &NoFaults, &NoLiveLeases)
-            .expect("cold descendant");
+    let cold_descendant = apply_ydoc_envelope(
+        &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &descendant,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("cold descendant");
     assert_eq!(warm_descendant, cold_descendant);
     assert!(matches!(warm_descendant, ApplyOutcome::Applied(_)));
     let final_stats = warm_cache.stats();
@@ -11093,7 +10992,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
     let before = warm_cache.stats();
     let warm_faults = ScriptedFaults::crash_at(point);
     let cold_faults = ScriptedFaults::crash_at(point);
-    let warm_outcome = apply_ydoc_envelope_cached(
+    let warm_outcome = apply_ydoc_envelope(
         &mut warm_store,
         &mut warm_cache,
         &operation,
@@ -11103,6 +11002,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
     .expect("warm crash outcome");
     let cold_outcome = apply_ydoc_envelope(
         &mut cold_store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &operation,
         cold_faults.as_ref(),
         &NoLiveLeases,
@@ -11133,7 +11033,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
                 .expect("post-commit crash parity")
         );
         assert_eq!(
-            apply_ydoc_envelope_cached(
+            apply_ydoc_envelope(
                 &mut warm_store,
                 &mut warm_cache,
                 &operation,
@@ -11167,7 +11067,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             }),
         );
         let before_rebuild = warm_cache.stats();
-        let warm_second = apply_ydoc_envelope_cached(
+        let warm_second = apply_ydoc_envelope(
             &mut warm_store,
             &mut warm_cache,
             &second_operation,
@@ -11175,9 +11075,14 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             &NoLiveLeases,
         )
         .expect("warm post-crash append");
-        let cold_second =
-            apply_ydoc_envelope(&mut cold_store, &second_operation, &NoFaults, &NoLiveLeases)
-                .expect("cold post-crash append");
+        let cold_second = apply_ydoc_envelope(
+            &mut cold_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &second_operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("cold post-crash append");
         assert_eq!(warm_second, cold_second);
         assert_eq!(warm_cache.stats().misses, before_rebuild.misses + 1);
         assert_eq!(warm_cache.stats().installs, before_rebuild.installs + 1);
@@ -11211,7 +11116,7 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             "the accepted candidate mutated the rollback-less scratch"
         );
         let retry_before = warm_cache.stats();
-        let warm_retry = apply_ydoc_envelope_cached(
+        let warm_retry = apply_ydoc_envelope(
             &mut warm_store,
             &mut warm_cache,
             &operation,
@@ -11219,8 +11124,14 @@ fn assert_remote_cache_crash_seam(point: FaultPoint, committed: bool) {
             &NoLiveLeases,
         )
         .expect("warm rollback retry");
-        let cold_retry = apply_ydoc_envelope(&mut cold_store, &operation, &NoFaults, &NoLiveLeases)
-            .expect("cold rollback retry");
+        let cold_retry = apply_ydoc_envelope(
+            &mut cold_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("cold rollback retry");
         assert_eq!(warm_retry, cold_retry);
         assert!(matches!(warm_retry, ApplyOutcome::Applied(_)));
         assert_eq!(warm_cache.stats().hits, retry_before.hits + 1);
@@ -11311,9 +11222,8 @@ fn pulled_lineage_replacement_evicts_the_warmed_remote_path_entry() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope_cached(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
-            .expect("replace local lineage");
+    let outcome = apply_ydoc_envelope(&mut store, &mut cache, &base, &NoFaults, &NoLiveLeases)
+        .expect("replace local lineage");
     let ApplyOutcome::Applied(result) = outcome else {
         panic!("replacement did not apply: {outcome:?}");
     };
@@ -11371,7 +11281,14 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     let (head_text, head_origin): (String, String) = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11417,7 +11334,14 @@ fn applied_ydoc_envelopes_materialize_the_projection_with_the_cursorable_ack() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &update_op, &NoFaults, &NoLiveLeases).expect("update applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &update_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("update applies");
     let updated_text: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11499,8 +11423,14 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     assert_eq!(
         outcome,
         ApplyOutcome::Applied(YdocApplyResult {
@@ -11595,7 +11525,14 @@ fn first_inbound_base_over_divergent_plain_head_opens_conflict_not_overwrite() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delta_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("delta applies");
     let head_after_delta: String = engine
         .read_with(|conn| {
             conn.query_row(
@@ -11708,6 +11645,7 @@ fn a_base_over_an_unmerged_head_conflicts_even_when_the_lineage_holds_rows() {
         .expect("base blob");
     let outcome = apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "peer",
             0,
@@ -11820,8 +11758,14 @@ fn first_inbound_base_matching_the_local_head_needs_no_conflict() {
             "isBaseState": true
         }),
     );
-    let outcome =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     assert_eq!(
         outcome,
         ApplyOutcome::Applied(YdocApplyResult {
@@ -11902,7 +11846,14 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base conflicts");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base conflicts");
     // A later delta coalesces the conflict, rewriting its incoming anchor.
     let delta = base_doc.plaintext_insert(0, "more ");
     let delta_sha = engine.put_binary_blob(&delta).expect("delta blob");
@@ -11920,7 +11871,14 @@ fn a_coalesced_conflict_still_recounts_on_redelivery() {
             "isBaseState": false
         }),
     );
-    apply_ydoc_envelope(&mut engine, &delta_op, &NoFaults, &NoLiveLeases).expect("delta coalesces");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delta_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("delta coalesces");
     assert_eq!(
         crate::router::redelivered_conflicts_opened(&engine, &base_op).expect("recount"),
         1,
@@ -12145,6 +12103,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
         .expect("base blob");
     apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "peer",
             0,
@@ -12172,6 +12131,7 @@ fn a_resolution_over_an_incomplete_lineage_refuses() {
     let dependent_sha = engine.put_binary_blob(&dependent).expect("dependent blob");
     apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &envelope(
             "dep-peer",
             0,
@@ -12473,7 +12433,13 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         "ydoc_snapshots",
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(_))
     ));
     assert_eq!(
@@ -12482,7 +12448,14 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
         "a base-claim storage failure must leave the coordinate retryable"
     );
     drop_trigger(&mut engine, "inject_ydoc_base_storage_failure");
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
 
     let update_sha = engine
         .put_binary_blob(&doc.plaintext_insert(0, "updated "))
@@ -12511,7 +12484,13 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     ] {
         install_abort_trigger(&mut engine, trigger_name, table_name);
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &update,
+                &NoFaults,
+                &NoLiveLeases
+            ),
             Err(SyncError::Storage(_))
         ));
         assert_eq!(
@@ -12535,7 +12514,13 @@ fn ydoc_storage_failure_is_hard_unacked_and_retryable() {
     }
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
@@ -12580,8 +12565,14 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
         }),
     );
     assert_eq!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases)
-            .expect("early update parks"),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        )
+        .expect("early update parks"),
         ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -12618,8 +12609,14 @@ fn ydoc_update_before_base_is_parked_then_drained_when_lineage_arrives() {
             "isBaseState": true
         }),
     );
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base arrives and drains");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base arrives and drains");
     let (parked, updates, head): (i64, i64, String) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -12679,7 +12676,13 @@ fn external_text_write_to_a_closed_scene_retires_the_lineage_for_reseed() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
         "unexpected scene base outcome: {base_outcome:?}"
@@ -12778,7 +12781,13 @@ fn replicated_text_write_to_a_scene_retires_the_receiver_lineage() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_replication_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases);
+    let base_outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(base_outcome, Ok(ApplyOutcome::Applied(_))),
         "unexpected scene base outcome: {base_outcome:?}"
@@ -12973,8 +12982,14 @@ fn oversized_hydrated_scene_base_is_refused_without_storing_the_projection() {
         }),
     );
 
-    let outcome = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("oversized projection is a terminal refusal");
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("oversized projection is a terminal refusal");
     assert!(
         matches!(
             outcome,
@@ -13316,7 +13331,14 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = asset_first_pull
-        .pull_chat_workspace(&mut asset_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .pull_chat_workspace(
+            &mut asset_first,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2_100,
+        )
         .expect("asset-first relay pull")
     else {
         panic!("asset-first relay pull must complete");
@@ -13338,7 +13360,14 @@ fn scene_base_and_asset_moment_converge_in_both_arrival_orders() {
         refused: 0,
         ..
     } = scene_first_pull
-        .pull_chat_workspace(&mut scene_first, "ws", &NoFaults, &NoLiveLeases, 2_100)
+        .pull_chat_workspace(
+            &mut scene_first,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            2_100,
+        )
         .expect("scene-first relay pull retries after the asset moment")
     else {
         panic!("scene-first relay pull must complete");
@@ -13535,7 +13564,13 @@ fn scene_base_permanently_refuses_forged_asset_authority() {
         );
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
                 Ok(ApplyOutcome::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { .. },
                     ..
@@ -13618,7 +13653,13 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &queued,
+                &NoFaults,
+                &NoLiveLeases
+            ),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
@@ -13642,7 +13683,13 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &descendant,
+                &NoFaults,
+                &NoLiveLeases
+            ),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
@@ -13666,8 +13713,14 @@ fn ydoc_prebase_content_kind_refusal_retains_clocks_for_a_dependent_descendant()
                 "isBaseState": true
             }),
         );
-        let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-            .expect("base applies and mismatched kind is drained");
+        let outcome = apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("base applies and mismatched kind is drained");
         let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
         assert!(sharing_declined.is_empty());
         assert!(matches!(primary, ApplyOutcome::Applied(_)));
@@ -13788,7 +13841,14 @@ fn relay_pull_reports_applied_and_redelivered_ydoc_materialization_paths() {
 
     for (expected_applied, expected_skipped) in [(1, 0), (0, 1)] {
         let outcome = client
-            .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+            .pull_chat_workspace(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                "ws",
+                &NoFaults,
+                &NoLiveLeases,
+                1_000,
+            )
             .expect("pull ydoc projection");
         let SyncPassOutcome::Complete {
             applied,
@@ -13866,7 +13926,13 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update object already occupies another path"
         })
@@ -13913,7 +13979,13 @@ fn ydoc_prebase_update_with_an_existing_other_alias_retries_before_parking() {
         })
         .expect("later delete frees the identity");
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -13969,7 +14041,13 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &binary_write, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &binary_write,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let binary_head: (String, String) = engine
@@ -14007,7 +14085,13 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update targets a binary head"
         })
@@ -14063,12 +14147,24 @@ fn ydoc_base_retries_until_a_concurrent_binary_head_is_deleted_then_converges() 
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &binary_delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &binary_delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: false,
             reason: None,
@@ -14119,7 +14215,13 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update version is missing"
         })
@@ -14160,7 +14262,13 @@ fn ydoc_prebase_update_for_missing_version_retries_then_parks_after_version_crea
     );
     seed_replication_version(&mut engine, "never-created", "branch");
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -14207,7 +14315,13 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
     );
     update.recorded_at_ms = 2_000;
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -14243,7 +14357,14 @@ fn ydoc_base_replaces_prebase_placeholder_timestamp_with_base_provenance() {
         }),
     );
     base.recorded_at_ms = 7_000;
-    apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases).expect("base arrives");
+    apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base arrives");
     let created_at_ms: i64 = engine
         .read_with(|conn| {
             conn.query_row(
@@ -14310,7 +14431,13 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             }),
         );
         assert!(matches!(
-            apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+            apply_ydoc_envelope(
+                &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &update,
+                &NoFaults,
+                &NoLiveLeases
+            ),
             Ok(ApplyOutcome::Applied(YdocApplyResult {
                 deferred: true,
                 reason: Some("ydoc-lineage-absent"),
@@ -14335,8 +14462,14 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
             "isBaseState": true
         }),
     );
-    let base_outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base applies and drains");
+    let base_outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and drains");
     let (base_primary, drain_refusals, sharing_declined) =
         base_outcome.into_primary_and_diagnostics();
     assert!(sharing_declined.is_empty());
@@ -14402,9 +14535,14 @@ fn ydoc_prebase_drain_refuses_invalid_update_and_continues_in_order() {
     );
     assert_eq!(reason, "parked ydoc.update could not be applied");
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults)
-            .expect("redrain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("redrain")
+        .drained,
         0,
         "retaining the invalid marker wedges every later drain"
     );
@@ -14437,7 +14575,13 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -14461,8 +14605,14 @@ fn ydoc_prebase_path_mismatch_is_refused_but_retains_causal_bytes() {
         }),
     );
 
-    let outcome = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base applies and mismatched path drains");
+    let outcome = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies and mismatched path drains");
     let (primary, refusals, sharing_declined) = outcome.into_primary_and_diagnostics();
     assert!(sharing_declined.is_empty());
     assert!(matches!(primary, ApplyOutcome::Applied(_)));
@@ -14540,7 +14690,13 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &queued, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &queued,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -14568,13 +14724,25 @@ fn retried_identity_blocked_ydoc_base_does_not_drain_its_prebase_queue() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update path is occupied by another object"
         })
     ));
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update path is occupied by another object"
         })
@@ -14647,7 +14815,13 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     seed_text_head(
@@ -14671,7 +14845,13 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &refused,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { .. },
             ..
@@ -14692,7 +14872,13 @@ fn refused_ydoc_projection_retains_clocks_for_a_dependent_descendant() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &descendant, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &descendant,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
 
@@ -14761,6 +14947,7 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     assert!(matches!(
         apply_ydoc_envelope(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &base("first-base-peer", 1, &first_sha),
             &NoFaults,
             &NoLiveLeases
@@ -14770,6 +14957,7 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
 
     let losing_base = apply_ydoc_envelope(
         &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &base("second-base-peer", 2, &second_sha),
         &NoFaults,
         &NoLiveLeases,
@@ -14802,7 +14990,13 @@ fn later_losing_base_and_delta_are_acked_without_touching_the_winner() {
     );
     delta.relay_seq = Some(3);
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &delta, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             reason: Some("ydoc-lineage-lost"),
             lineage_replacement: None,
@@ -14895,7 +15089,13 @@ fn live_lease_on_local_only_lineage_is_retryable_unacked_and_unjournaled() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &update, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &AlwaysLive
+        ),
         Err(SyncError::RetryableState {
             reason: "live lease on a non-replicated Y.Doc lineage"
         })
@@ -14994,9 +15194,14 @@ fn a_pulled_base_replaces_local_only_rows_and_recovers_their_content() {
             "isBaseState": true
         }),
     );
-    let ApplyOutcome::Applied(result) =
-        apply_ydoc_envelope(&mut engine, &base_op, &NoFaults, &NoLiveLeases).expect("base applies")
-    else {
+    let ApplyOutcome::Applied(result) = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies") else {
         panic!("base did not apply");
     };
     let replacement = result
@@ -15135,8 +15340,13 @@ fn a_deferred_base_replaces_local_only_rows_and_recovers_their_content() {
         })
         .expect("deferred base row");
 
-    let drained =
-        drain_deferred_ydoc_for_key(&mut engine, &key, &NoFaults).expect("drain deferred base");
+    let drained = drain_deferred_ydoc_for_key(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &key,
+        &NoFaults,
+    )
+    .expect("drain deferred base");
     assert_eq!(drained.drained, 1);
     let replacement = drained
         .lineage_replacements
@@ -15247,7 +15457,13 @@ fn divergent_base_waits_for_the_existing_base_relay_position() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "Y.Doc base is waiting for its authenticated relay position"
         })
@@ -15347,7 +15563,13 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "version.create source version is missing"
         })
@@ -15366,11 +15588,23 @@ fn secret_and_version_missing_dependencies_retry_and_apply_after_version_arrival
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &source, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &source,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut version_engine, &child, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut version_engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let created: bool = version_engine
@@ -15415,13 +15649,25 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
     let (_scratch, _path, mut engine) = store();
     let seed = envelope("workspace-seed-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &seed,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
     let operation = envelope("workspace-replay-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
@@ -15439,7 +15685,13 @@ fn workspace_init_router_apply_is_idempotent_on_replay() {
         .expect("main version");
     assert_eq!(main, ("main".into(), "main".into(), "Main".into(), 2_000));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
 }
@@ -15461,7 +15713,13 @@ fn workspace_init_repairs_a_workspace_row_missing_its_main_version() {
 
     let operation = envelope("partial-workspace-peer", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let main: (String, String, String, i64) = engine
@@ -15566,7 +15824,13 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     type CopiedSnapshot = (
@@ -15676,7 +15940,13 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         .expect("fork row counts");
     assert_eq!(counts, (2, 2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     let replay_counts: (i64, i64, i64) = engine
@@ -15705,7 +15975,13 @@ fn version_create_router_materializes_shipped_fork_snapshots_and_replays_idempot
         .expect("replayed fork row counts");
     assert_eq!(replay_counts, (2, 2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
 }
@@ -15855,7 +16131,13 @@ fn version_create_stamps_a_shipped_capture_head_as_replicated() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let (head_origin, base_origin): (String, String) = engine
@@ -15898,7 +16180,13 @@ fn version_create_shipped_snapshot_rejects_a_missing_blob_deliberately() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::BlobInvalid)
     ));
     assert_eq!(
@@ -15957,7 +16245,13 @@ fn version_create_shipped_snapshot_accepts_only_oracle_content_kinds() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
                 Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
             ),
             "{content_kind:?} must remain accepted"
@@ -15989,7 +16283,7 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
@@ -16045,7 +16339,13 @@ fn version_create_unknown_content_kind_is_refused_and_acked() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert_eq!(
@@ -16080,7 +16380,7 @@ fn version_create_shipped_snapshot_rejects_duplicate_paths_deliberately() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
@@ -16119,7 +16419,7 @@ fn version_create_shipped_snapshot_rejects_unsafe_and_secret_paths() {
         );
 
         assert!(matches!(
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+            apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput {
                     ref reason
@@ -16163,7 +16463,13 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
         "feature",
         vec![shipped_text_snapshot("secret-object", "app/.env", &sha)],
     );
-    let refusal = apply_replication_envelope(&mut engine, &disclosure, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &disclosure,
+        &NoFaults,
+        &NoLiveLeases,
+    );
 
     // Create `feature` honestly. If the disclosure op had persisted anything,
     // this becomes a no-op over the already-created version and the secret
@@ -16182,7 +16488,13 @@ fn version_create_secret_fork_snapshot_never_becomes_readable_plaintext() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &honest, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &honest,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
@@ -16255,7 +16567,7 @@ fn version_create_fork_snapshot_refuses_a_non_canonical_tracked_path() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
                 Ok(ApplyOutcome::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput {
                         ref reason
@@ -16387,7 +16699,13 @@ fn version_create_shipped_payload_materializes_only_workspace_scoped_rows() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let counts: (i64, i64, i64) = engine
@@ -16491,7 +16809,7 @@ fn version_create_rejects_a_version_id_owned_by_another_workspace() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
@@ -16603,7 +16921,13 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let rows: (Vec<String>, Vec<String>) = engine
@@ -16633,7 +16957,13 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
     let mut applier_replay = operation.clone();
     applier_replay.origin_id = "secret-fork-applier-replay-peer".into();
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &applier_replay,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let replayed_rows: (i64, i64) = engine
@@ -16656,7 +16986,13 @@ fn secret_version_fork_router_copies_the_complete_payload_and_replays_idempotent
         .expect("replayed secret fork rows");
     assert_eq!(replayed_rows, (2, 2));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &applier_replay, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &applier_replay,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
 }
@@ -16693,7 +17029,13 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
     let first = chunk(0, 0, "app/.env");
     let second = chunk(1, 1, "pending.env");
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &first,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
@@ -16712,7 +17054,13 @@ fn later_secret_version_fork_chunk_preserves_a_local_write_to_its_pending_path()
         })
         .expect("write pending secret locally");
 
-    let second_result = apply_replication_envelope(&mut engine, &second, &NoFaults, &NoLiveLeases);
+    let second_result = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &second,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(
             second_result,
@@ -16774,6 +17122,7 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         assert!(matches!(
             apply_replication_envelope(
                 &mut engine,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &chunk(0, 0, 2, "app/.env"),
                 &NoFaults,
                 &NoLiveLeases
@@ -16782,6 +17131,7 @@ fn secret_version_fork_refuses_divergent_chunk_assembly() {
         ));
         let result = apply_replication_envelope(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &chunk(1, chunk_index, total_rows, path),
             &NoFaults,
             &NoLiveLeases,
@@ -16860,7 +17210,13 @@ fn secret_version_fork_applies_the_shipped_snapshot_after_a_peer_source_edit() {
         }),
     );
 
-    let outcome = apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &fork,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let ack = read_replication_acked_seq(&engine, "ws", "fork-after-peer-edit").expect("ack");
     assert!(
         matches!(
@@ -16925,7 +17281,7 @@ fn secret_version_fork_refuses_duplicate_paths() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &duplicate, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &duplicate, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
@@ -16988,7 +17344,7 @@ fn secret_version_fork_refuses_each_invalid_row_boundary() {
 
         assert!(
             matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
                 Ok(ApplyOutcome::Refused(ReplicationRefusal {
                     reason: RefusalReason::InvalidInput { reason },
                     ..
@@ -17022,7 +17378,13 @@ fn secret_version_fork_with_no_rows_clears_the_destination_secrets() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     let destination: (Vec<String>, Vec<String>) = engine
@@ -17084,7 +17446,13 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &put, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &put,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
@@ -17108,7 +17476,13 @@ fn secret_version_fork_uses_peer_local_tip_ids() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &fork, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &fork,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
@@ -17166,7 +17540,13 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
         }),
     );
 
-    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let stored: (i64, i64) = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -17211,7 +17591,13 @@ fn secret_put_over_the_domain_cap_is_refused_without_a_tip_or_moment() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &admitted, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &admitted,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 }
@@ -17241,7 +17627,7 @@ fn secret_put_ciphertext_length_mismatch_is_refused_and_acked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
@@ -17305,7 +17691,13 @@ fn secret_put_corrupt_local_ciphertext_blob_is_hard_and_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(
             dohc_engine_storage::StorageError::BlobIntegrity { .. }
         ))
@@ -17367,7 +17759,13 @@ fn secret_put_corrupt_local_ciphertext_length_is_hard_and_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::Storage(
             dohc_engine_storage::StorageError::StateCorrupt { .. }
         ))
@@ -17409,7 +17807,13 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         payload("a/b.env"),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &seed, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &seed,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
 
@@ -17419,7 +17823,13 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
         "secret.file.put",
         payload("a//b.env"),
     );
-    let refusal = apply_replication_envelope(&mut engine, &shadow, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &shadow,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let paths = engine
         .read_with(|conn| {
             conn.prepare(
@@ -17467,7 +17877,13 @@ fn secret_put_rejects_noncanonical_shadow_path_but_accepts_canonical_spelling() 
     );
     canonical.recorded_at_ms = 3_000;
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &canonical, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &canonical,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     assert_eq!(
@@ -17514,7 +17930,13 @@ fn secret_put_rejects_synthesized_moment_id_owned_by_unrelated_local_history() {
             "byteLength": ciphertext.len()
         }),
     );
-    let refusal = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases);
+    let refusal = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     let state = engine
         .read_with(|conn| {
             Ok::<_, rusqlite::Error>((
@@ -17619,7 +18041,7 @@ fn secret_put_refuses_and_acks_synthesized_moment_id_owned_by_plaintext_history(
 
     assert!(
         matches!(
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+            apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
             Ok(ApplyOutcome::Refused(ReplicationRefusal {
                 reason: RefusalReason::InvalidInput { ref reason },
                 ..
@@ -17686,11 +18108,23 @@ fn secret_put_redelivery_skips_its_own_synthesized_moment() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(RoutedApply { conflict: None, .. }))
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     let history_rows: i64 = engine
@@ -17737,8 +18171,14 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
         }),
     );
 
-    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("apply protected put");
+    let applied = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply protected put");
     assert!(matches!(
         applied,
         ApplyOutcome::Applied(RoutedApply {
@@ -17764,7 +18204,13 @@ fn secret_put_reports_active_protected_disk_work_on_apply_and_redelivery() {
         .expect("switch active version after protected put");
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     assert_eq!(
@@ -17796,8 +18242,14 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
         }),
     );
 
-    let applied = apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-        .expect("apply protected delete");
+    let applied = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &operation,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply protected delete");
     assert!(matches!(
         applied,
         ApplyOutcome::Applied(RoutedApply {
@@ -17823,7 +18275,13 @@ fn secret_delete_reports_active_protected_disk_work_on_apply_and_redelivery() {
         .expect("switch active version after protected delete");
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases,),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     assert_eq!(
@@ -17875,7 +18333,7 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &first, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(RoutedApply {
             materialization_changes,
             conflict: None,
@@ -17963,7 +18421,14 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
 
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBetweenApplyAndCursorCommit);
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 2_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            2_000,
+        )
         .expect("pull active secret fork");
     assert!(matches!(
         first,
@@ -17986,7 +18451,14 @@ fn relay_secret_fork_reports_active_disk_work_across_crash_redelivery() {
         })
         .expect("switch active version after apply");
     let retry = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 3_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            3_000,
+        )
         .expect("redeliver active secret fork");
     assert!(matches!(
         retry,
@@ -18027,7 +18499,13 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
         let operation = envelope("router-peer", 0, kind, json!({}));
         assert!(
             !matches!(
-                apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+                apply_replication_envelope(
+                    &mut engine,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
+                    &operation,
+                    &NoFaults,
+                    &NoLiveLeases
+                ),
                 Err(SyncError::UnsupportedOperation)
             ),
             "{kind} fell through the router"
@@ -18037,7 +18515,13 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
     let (_scratch, _path, mut engine) = store();
     let workspace = envelope("router-workspace", 0, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &workspace, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &workspace,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     // moment.append is no longer the not-implemented stub: it routes to the real
@@ -18045,7 +18529,7 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
     // the router.
     let moment = envelope("router-moment", 0, "moment.append", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &moment, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &moment, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
@@ -18053,7 +18537,7 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
     ));
     let unknown = envelope("router-unknown", 0, "version.rename", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &unknown, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &unknown, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
@@ -18072,7 +18556,13 @@ fn central_router_recognizes_owned_kinds_and_refuses_unknown_kinds_forward_compa
         }),
     );
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert_eq!(
@@ -18128,7 +18618,14 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
     ]));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("bounded first pass");
     let SyncPassOutcome::Complete {
         fetched,
@@ -18157,7 +18654,14 @@ fn relay_pull_operation_ceiling_returns_a_resumable_completed_page() {
         .expect("commit bounded prefix");
 
     let second = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("resume after bounded prefix");
     assert!(matches!(
         second,
@@ -18208,7 +18712,14 @@ fn relay_pull_page_ceiling_stops_an_advancing_sparse_stream() {
     let client = RelaySyncClient::new(PagedRelay::new(pages));
 
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("page-bounded pull");
     let SyncPassOutcome::Complete {
         fetched,
@@ -18636,7 +19147,14 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         .push_workspace(&mut engine, "ws", &NoFaults, 1_200)
         .expect("push recovered suffix");
     client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_300)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_300,
+        )
         .expect("stamp recovered base relay position");
     let winner = dohc_engine_collab::Ydoc::wire();
     winner.plaintext_insert(0, "relay winner");
@@ -18660,8 +19178,14 @@ fn recover_origin_rebases_ydoc_suffix_coordinates_before_repair_and_arbitration(
         ),
     );
     competing.relay_seq = Some(50);
-    let applied = apply_ydoc_envelope(&mut engine, &competing, &NoFaults, &NoLiveLeases)
-        .expect("apply lower relay base");
+    let applied = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &competing,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply lower relay base");
     assert!(matches!(
         applied,
         ApplyOutcome::Applied(YdocApplyResult {
@@ -20978,7 +21502,14 @@ fn pull_first_enrollment_does_not_echo_the_imported_moment_on_the_next_push() {
     });
 
     let pull = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first relay contact pulls the moment");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(cursor),
@@ -21203,7 +21734,14 @@ fn invalid_blob_in_batch_stops_before_later_collection_order_hydration() {
     let client = RelaySyncClient::new(relay);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobInvalid)
     );
     let present = ordered
@@ -21285,13 +21823,27 @@ fn crashed_blob_batch_reconstructs_the_same_request_after_reopen() {
     let faults = ScriptedFaults::crash_at(FaultPoint::SyncBeforeBlobHydrateCommit);
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", faults.as_ref(), &NoLiveLeases, 1_000,),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            1_000,
+        ),
         Err(RelayError::Local("injected-crash".to_owned()))
     );
     drop(engine);
     let mut reopened = EngineStore::open(&path, 2_000).expect("reopen after hydration crash");
     assert!(matches!(
-        client.pull_chat_workspace(&mut reopened, "ws", faults.as_ref(), &NoLiveLeases, 2_000,),
+        client.pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            faults.as_ref(),
+            &NoLiveLeases,
+            2_000,
+        ),
         Ok(SyncPassOutcome::Complete { .. })
     ));
 
@@ -21353,7 +21905,14 @@ fn relay_hydration_failure_mid_page_leaves_no_cursor_and_applies_nothing() {
     )]));
 
     assert_eq!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::BlobMissing)
     );
     assert!(
@@ -21421,7 +21980,14 @@ fn relay_hydrates_text_and_binary_rows_for_one_shared_digest() {
     relay.blobs.insert(sha256.clone(), bytes);
     let client = RelaySyncClient::new(relay);
 
-    let outcome = client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000);
+    let outcome = client.pull_chat_workspace(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        "ws",
+        &NoFaults,
+        &NoLiveLeases,
+        1_000,
+    );
     assert!(
         matches!(outcome, Ok(SyncPassOutcome::Complete { .. })),
         "dual-kind hydration pass must complete: {outcome:?}"
@@ -21484,7 +22050,14 @@ fn pull_blob_existence_probe_does_not_read_and_rehash_present_content() {
     )]));
     let _ = crate::relay::take_local_blob_bytes_call_count();
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Ok(SyncPassOutcome::Complete { .. })
     ));
     assert_eq!(
@@ -21561,7 +22134,14 @@ fn relay_multi_page_pull_reports_conflicts_opened() {
     ]));
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("multi-page conflict pull");
     let SyncPassOutcome::Complete {
         fetched,
@@ -21655,7 +22235,14 @@ fn relay_pull_reports_conflicts_opened_by_a_divergent_moment_append() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -21765,7 +22352,14 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     let persisted: i64 = engine
@@ -21798,7 +22392,14 @@ fn relay_retry_surfaces_refusal_acked_before_later_error() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -21843,7 +22444,14 @@ fn pull_keeps_a_genuine_origin_gap_hard() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert_eq!(
@@ -21941,7 +22549,14 @@ fn pull_reaches_later_cross_origin_work_before_retrying_a_deferred_origin() {
     let leases = FirstLeaseCheckLive(AtomicUsize::new(0));
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &leases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &leases,
+            1_000,
+        )
         .expect("later cross-origin work must run before the deferred origin retry pass");
     assert!(
         matches!(outcome, SyncPassOutcome::Complete { applied: 4, .. }),
@@ -21990,7 +22605,13 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &deferred,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             reason: Some("ydoc-lineage-absent"),
@@ -22042,7 +22663,14 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert!(
@@ -22059,7 +22687,14 @@ fn relay_retry_surfaces_drain_refusal_from_an_earlier_cursor_page() {
         .expect("clear later apply failure");
 
     let retry = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("retry pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -22112,7 +22747,14 @@ fn committed_pull_cursor_clears_persisted_refusals() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(pending_cursor),
@@ -22170,7 +22812,13 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         }),
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut engine, &deferred, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &deferred,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(YdocApplyResult {
             deferred: true,
             ..
@@ -22197,7 +22845,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let first = first_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first pull");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(first_cursor),
@@ -22230,8 +22885,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
             "isBaseState": true
         }),
     );
-    let _ignored_drain_result = apply_ydoc_envelope(&mut engine, &base, &NoFaults, &NoLiveLeases)
-        .expect("base triggers drain refusal");
+    let _ignored_drain_result = apply_ydoc_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base triggers drain refusal");
     let pending_before_commit: Vec<(String, Option<String>)> = engine
         .read_with(|conn| {
             let mut stmt = conn.prepare(
@@ -22289,7 +22950,14 @@ fn cursor_commit_preserves_an_unread_refusal_created_by_a_later_ydoc_drain() {
         })),
     });
     let second = second_client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("next pull surfaces drain refusal");
     let SyncPassOutcome::Complete {
         pending_cursor: Some(second_cursor),
@@ -22440,10 +23108,14 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     });
 
     let first = envelope("router-open-a", 0, "conflict.open", payload.clone());
-    let ApplyOutcome::Applied(first) =
-        apply_replication_envelope(&mut engine, &first, &NoFaults, &NoLiveLeases)
-            .expect("first routed open")
-    else {
+    let ApplyOutcome::Applied(first) = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &first,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("first routed open") else {
         panic!("first conflict.open did not apply");
     };
     assert_eq!(
@@ -22453,10 +23125,14 @@ fn router_counts_only_newly_inserted_replicated_open_conflicts() {
     assert_eq!(first.conflicts_opened, 1);
 
     let duplicate = envelope("router-open-b", 0, "conflict.open", payload);
-    let ApplyOutcome::Applied(duplicate) =
-        apply_replication_envelope(&mut engine, &duplicate, &NoFaults, &NoLiveLeases)
-            .expect("idempotent routed open")
-    else {
+    let ApplyOutcome::Applied(duplicate) = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &duplicate,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("idempotent routed open") else {
         panic!("duplicate conflict.open did not apply");
     };
     assert_eq!(
@@ -22474,7 +23150,7 @@ fn malformed_moment_append_router_refuses_and_acks() {
     let (_scratch, _path, mut engine) = store();
     let operation = envelope("moment-peer", 0, "moment.append", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput { ref reason },
             ..
@@ -22495,7 +23171,13 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
         "chat.decision.set",
         decision_payload("open", i64::MAX, None),
     );
-    let outcome = apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(matches!(
         outcome,
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
@@ -22506,7 +23188,13 @@ fn refused_op_acks_and_the_next_same_origin_op_applies() {
 
     let next = envelope("progress-peer", 1, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert_eq!(
@@ -22520,7 +23208,7 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
     let (_scratch, _path, mut engine) = store();
     let malformed = envelope("ydoc-refusal-peer", 0, "ydoc.update", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &malformed, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(&mut engine,&mut dohc_engine_collab::WriterDocCache::new(), &malformed, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
             reason: RefusalReason::InvalidInput {
                 ref reason
@@ -22531,7 +23219,13 @@ fn malformed_ydoc_op_is_refused_without_wedging_its_origin() {
 
     let next = envelope("ydoc-refusal-peer", 1, "workspace.init", json!({}));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &next, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert_eq!(
@@ -22565,7 +23259,14 @@ fn relay_pull_surfaces_refusal_reason_to_the_caller() {
     });
 
     let outcome = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("a refused operation must not fail the pull");
     let SyncPassOutcome::Complete {
         applied,
@@ -22631,7 +23332,14 @@ fn coordinate_divergence_still_stops_a_pass_after_an_acked_refusal() {
     });
 
     assert!(matches!(
-        client.pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000),
+        client.pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000
+        ),
         Err(RelayError::Local(_))
     ));
     assert_eq!(
@@ -22659,7 +23367,13 @@ fn structurally_invalid_envelope_remains_unrecorded_and_unacked() {
     invalid.origin_seq = MAX_WIRE_INTEGER + 1;
 
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &invalid, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &invalid,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::InvalidInput {
             reason: "origin_seq is outside the wire integer range"
         })
@@ -22697,7 +23411,13 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
             "createdAtMs": -1
         }),
     );
-    let first = apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases);
+    let first = apply_replication_envelope(
+        &mut engine,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &refused,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(matches!(
         first,
         Ok(ApplyOutcome::Refused(ReplicationRefusal {
@@ -22706,7 +23426,13 @@ fn redelivered_refusal_is_recorded_once_and_skipped() {
         }))
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut engine, &refused, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &refused,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Skipped)
     ));
     let recorded: i64 = engine
@@ -22741,10 +23467,14 @@ fn every_refusal_reason_round_trips_through_persist_and_read() {
             }),
         ),
     ] {
-        let ApplyOutcome::Refused(expected) =
-            apply_replication_envelope(&mut engine, &operation, &NoFaults, &NoLiveLeases)
-                .expect("refusal")
-        else {
+        let ApplyOutcome::Refused(expected) = apply_replication_envelope(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("refusal") else {
             panic!("operation must be refused");
         };
         assert_eq!(
@@ -22930,7 +23660,14 @@ fn a_ydoc_base_over_the_captured_file_cap_still_hydrates() {
     // runs first, and that is what this test is about. The refusal must not be
     // a ceiling refusal.
     let outcome = RelaySyncClient::new(relay)
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("the pull completes: an oversized-for-binary Y.Doc base is not a transport error");
     assert!(
         matches!(outcome, SyncPassOutcome::Complete { .. }),
@@ -23026,6 +23763,7 @@ fn a_ydoc_payload_cannot_be_reused_as_an_over_cap_captured_binary() {
     assert_eq!(
         RelaySyncClient::new(relay).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,

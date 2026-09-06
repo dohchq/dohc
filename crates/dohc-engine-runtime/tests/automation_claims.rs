@@ -396,8 +396,14 @@ async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("peer applies replicated collection edit");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer applies replicated collection edit");
     }
     drop(peer);
     let peer_claims = claim_rows(&peer_db, WS);

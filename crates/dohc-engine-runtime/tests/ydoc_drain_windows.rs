@@ -112,7 +112,14 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
         }),
         recorded_at_ms: 110,
     };
-    apply_ydoc_envelope(&mut store, &base, &NoFaults, &NoLiveLeases).expect("apply verified base");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply verified base");
 
     let update_bytes = doc.plaintext_insert(6, " parked");
     let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
@@ -133,7 +140,14 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
         }),
         recorded_at_ms: 120,
     };
-    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive).expect("park");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park");
     drop(store);
     assert_eq!(deferred_rows(&db), 1, "the envelope starts parked");
     key

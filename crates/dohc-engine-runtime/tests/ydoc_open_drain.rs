@@ -90,8 +90,14 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
             }),
             recorded_at_ms: 110,
         };
-        apply_ydoc_envelope(&mut store, &base, &NoFaults, &NoLiveLeases)
-            .expect("apply verified base");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &base,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply verified base");
 
         let update_bytes = doc.plaintext_insert(6, " parked");
         let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
@@ -112,7 +118,14 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
             }),
             recorded_at_ms: 120,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive).expect("park");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &AlwaysLive,
+        )
+        .expect("park");
     }
     assert_eq!(ydoc_update_rows(&db), 0, "the envelope starts parked");
 

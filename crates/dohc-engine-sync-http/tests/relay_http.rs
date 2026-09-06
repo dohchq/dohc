@@ -593,7 +593,14 @@ fn pull_aborts_when_has_more_cursor_does_not_advance() {
     seed_identity(&mut engine, &json!({}));
     let server = FakeServer::start(|_| log_page(Vec::new(), 0, true));
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("non-advancing page must abort");
     assert_eq!(
         error,
@@ -628,7 +635,14 @@ fn pull_rejects_byte_different_coordinate_collision_before_apply() {
         )
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("a foreign coordinate collision must fail closed");
     assert_eq!(error, RelayError::InvalidResponse);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -660,7 +674,14 @@ fn pull_accepts_the_relays_integral_float_normalization() {
     });
 
     let outcome = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("semantically identical number");
     assert!(matches!(
         outcome,
@@ -865,7 +886,14 @@ fn pull_rejects_fetched_blob_with_wrong_sha() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("wrong blob content must fail");
     assert_eq!(error, RelayError::BlobInvalid);
     assert!(read_relay_cursor(&engine, "ws").expect("cursor").is_none());
@@ -918,7 +946,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
     });
     let client = RelaySyncClient::new(transport(&server));
     let first = client
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("first pull");
     assert!(matches!(
         first,
@@ -947,7 +982,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         "the simulated crash must leave the persisted cursor unchanged"
     );
     let second = client
-        .pull_chat_workspace(&mut reopened, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut reopened,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("second pull");
     let pending = match second {
         SyncPassOutcome::Complete {
@@ -989,7 +1031,14 @@ fn pull_cursor_stays_deferred_across_crash_and_refetches_ops() {
         1
     );
     let third = client
-        .pull_chat_workspace(&mut committed, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut committed,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect("pull after cursor commit");
     assert!(matches!(
         third,
@@ -1511,6 +1560,7 @@ fn pull_names_the_text_ceiling_for_an_oversized_relay_blob() {
     assert_eq!(
         RelaySyncClient::new(transport(&server)).pull_chat_workspace(
             &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
             "ws",
             &NoFaults,
             &NoLiveLeases,
@@ -1610,7 +1660,14 @@ fn a_binary_blob_past_the_read_limit_names_the_binary_ceiling() {
         _ => TestResponse::json(500, json!({"code": "internal_error"})),
     });
     let error = RelaySyncClient::new(transport(&server))
-        .pull_chat_workspace(&mut engine, "ws", &NoFaults, &NoLiveLeases, 1_000)
+        .pull_chat_workspace(
+            &mut engine,
+            &mut dohc_engine_sync::WriterDocCache::new(),
+            "ws",
+            &NoFaults,
+            &NoLiveLeases,
+            1_000,
+        )
         .expect_err("a binary body past the read limit is refused");
     assert_eq!(
         error,

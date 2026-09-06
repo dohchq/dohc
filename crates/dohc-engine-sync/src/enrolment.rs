@@ -1120,6 +1120,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1257,6 +1258,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut local,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1502,6 +1504,7 @@ mod tests {
             }
             crate::apply_replication_envelope(
                 &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
@@ -1806,6 +1809,7 @@ mod tests {
         .expect("peer applies version.create");
         let outcome = crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),

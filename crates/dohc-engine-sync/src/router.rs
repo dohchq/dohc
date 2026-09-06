@@ -98,28 +98,7 @@ pub(crate) fn is_owned_op_kind(kind: &str) -> bool {
 
 pub fn apply_replication_envelope(
     store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_inner(store, None, envelope, faults, leases)
-}
-
-/// Actor pull route carrying the writer-thread document cache to the narrow
-/// Y.Doc PR3 consumers.
-pub fn apply_replication_envelope_with_cache(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<RoutedApply>, SyncError> {
-    apply_replication_envelope_inner(store, Some(cache), envelope, faults, leases)
-}
-
-fn apply_replication_envelope_inner(
-    store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
@@ -138,9 +117,7 @@ fn apply_replication_envelope_inner(
             |_tx, _op| Err(SyncError::UnsupportedOperation),
         ));
     };
-    if !matches!(route, OwnedRoute::Ydoc)
-        && let Some(cache) = cache.as_deref_mut()
-    {
+    if !matches!(route, OwnedRoute::Ydoc) {
         // Other replicated routes can archive or replace Y.Doc lineages. Clear
         // before their transactions so a later envelope in this pull cannot
         // observe an ABA-valid stale entry after a committed crash.
@@ -155,18 +132,14 @@ fn apply_replication_envelope_inner(
                 ..RoutedApply::default()
             },
         ),
-        OwnedRoute::Ydoc => {
-            let applied = if let Some(cache) = cache {
-                crate::apply_ydoc_envelope_cached(store, cache, envelope, faults, leases)
-            } else {
-                crate::apply_ydoc_envelope(store, envelope, faults, leases)
-            };
-            map_applied(applied, |ydoc| RoutedApply {
+        OwnedRoute::Ydoc => map_applied(
+            crate::apply_ydoc_envelope(store, cache, envelope, faults, leases),
+            |ydoc| RoutedApply {
                 conflicts_opened: ydoc.conflicts_opened,
                 record_facts: ydoc.record_facts,
                 ..RoutedApply::default()
-            })
-        }
+            },
+        ),
         OwnedRoute::Conflict => map_applied(
             crate::apply_conflict_envelope(store, envelope, faults, leases),
             |conflict| {

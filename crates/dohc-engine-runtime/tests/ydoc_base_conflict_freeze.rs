@@ -81,7 +81,14 @@ fn seed_divergent_base(
         }),
         recorded_at_ms: 3,
     };
-    apply_ydoc_envelope(store, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     let conflict_id: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -543,8 +550,14 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 }),
                 recorded_at_ms: 100 + seq,
             };
-            apply_ydoc_envelope(&mut store, &op, &NoFaults, &NoLiveLeases)
-                .expect("delta coalesces");
+            apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("delta coalesces");
         }
         (key, winner_doc, conflict_id)
     };
