@@ -127,11 +127,9 @@ export function DesktopRoot() {
   }, []);
 
   useEffect(() => {
-    const unsubscribe = bridge().onUserSettingsChanged((rawResult) => {
-      const result = DesktopUserSettingsResult.safeParse(rawResult);
-      if (!result.success) return;
+    const unsubscribe = bridge().onUserSettingsChanged((result) => {
       userSettingsRequests.next();
-      setUserSettings(result.data);
+      setUserSettings(result);
       // The broadcast is the writer's authoritative result. Re-read as a
       // backstop for an external edit that landed beside that write.
       void refreshUserSettings().catch(() => undefined);

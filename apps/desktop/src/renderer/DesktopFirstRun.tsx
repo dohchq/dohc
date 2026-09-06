@@ -142,7 +142,6 @@ export function DesktopFirstRun(props: {
         <SecondaryButton
           type="button"
           onClick={() => void openExisting()}
-
         >
           Open an existing folder as a workspace
         </SecondaryButton>
@@ -151,7 +150,6 @@ export function DesktopFirstRun(props: {
           type="button"
           data-testid="first-run-join-synced"
           onClick={() => setJoining(true)}
-
         >
           Join a synced workspace from another machine
         </SecondaryButton>
@@ -160,7 +158,6 @@ export function DesktopFirstRun(props: {
           type="button"
           data-testid="first-run-open-share"
           onClick={() => setOpeningShare(true)}
-
         >
           Open a share someone sent you
         </SecondaryButton>

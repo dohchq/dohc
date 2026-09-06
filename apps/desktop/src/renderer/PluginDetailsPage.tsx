@@ -68,7 +68,7 @@ type ReadmeState =
 // Electron wraps a rejected handler's error; the workspace surfaces strip the
 // wrapper before showing the reason (WorkspaceVersions precedent).
 function readableReason(error: unknown): string {
-  return ipcErrorMessage(error instanceof Error ? error : "") || "Try again.";
+  return ipcErrorMessage(error, "Try again.");
 }
 
 // ENOENT is the file system's own answer to "is it there", carried out on the
@@ -892,7 +892,9 @@ function PluginDetailsHeader(props: {
                   key={webApp.id}
                   data-testid="plugin-open-web-app"
                   data-web-app-id={webApp.id}
-                  disabled={disabled || catalog.openingWebApp !== null}
+                  disabled={
+                    disabled || catalog.openingWebApp !== null || catalog.webAppRootPending(plugin)
+                  }
                   onClick={() => catalog.openWebApp(plugin, webApp.id)}
                 >
                   {catalog.openingWebApp === key
