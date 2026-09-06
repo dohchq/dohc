@@ -5965,9 +5965,16 @@ describe("ui-state merge-on-load", () => {
       folders: string[];
     }>();
     let issued = 0;
+    // The subscriber count below pins the shell's listing refresh listener
+    // (notifications subscribes first). The Chats panel subscribes too, from
+    // a lazy chunk whose load time depends on whether an earlier test already
+    // imported it, so this stored state keeps the panel closed.
     const bridge = holdHistory(
       makeBridge(
-        Promise.resolve(storedStateWithTabs(["b.md", "pulled.md"], "b.md")),
+        Promise.resolve({
+          ...storedStateWithTabs(["b.md", "pulled.md"], "b.md"),
+          chatsVisible: false,
+        }),
       ),
     );
     bridge.listWorkspaceFiles = vi.fn(() => {
