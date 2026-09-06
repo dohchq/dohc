@@ -2481,7 +2481,7 @@ export function createSyncRelayHandler({
                 );
               } catch (error) {
                 if (error instanceof DiscussionActivityCapacityError) {
-                  throw linkReadRateLimited();
+                  throw relayError("link_read_rate_limited");
                 }
                 throw error;
               }
