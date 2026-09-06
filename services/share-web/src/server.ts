@@ -1,6 +1,9 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
+import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
+import { TokenBucketLimiter } from "@dohc/service-http";
+import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
@@ -15,7 +18,8 @@ export const SHARE_WEB_SECURITY_HEADERS = Object.freeze({
   "cache-control": "private, no-store",
 });
 
-const REFUSAL_BODY = JSON.stringify({ ok: false, error: "not found" });
+const REFUSAL_VALUE = { ok: false, error: "not found" };
+const REFUSAL_BODY = JSON.stringify(REFUSAL_VALUE);
 const MAX_EXCHANGE_BODY_BYTES = 8 * 1024;
 const MAX_DISCUSSION_ENVELOPE_BYTES = 16 * 1024;
 const MAX_RELAY_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -33,15 +37,12 @@ const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const PROFILE_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 const RASTER_SIGNATURE_BYTES = 12;
-const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
 const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
-const PROFILE_SECRET = /^[A-Za-z0-9_-]{43}$/u;
 const DISCUSSION_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/u;
 const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
 const DISCUSSION_REVISION = /^(?:0|[1-9][0-9]{0,15})$/u;
 const DISCUSSION_HOLD = /^(?:0|[1-9][0-9]{0,4})$/u;
 const MAX_DISCUSSION_ACTIVITY_HOLD_MS = 30_000;
-const SHA256_HEX = /^[a-f0-9]{64}$/u;
 
 type RelayFetch = (request: Request) => Promise<Response>;
 
@@ -57,11 +58,6 @@ type RefreshAttempt =
   | { status: "refreshed"; session: ShareWebSession }
   | { status: "invalid" }
   | { status: "unavailable" };
-
-interface ExchangeBucket {
-  tokens: number;
-  updatedAtMs: number;
-}
 
 export interface CreateShareWebHandlerOptions {
   relayUrl: string;
@@ -190,41 +186,6 @@ class ShareWebSessionStore {
   }
 }
 
-class ShareWebExchangeRateLimiter {
-  private readonly buckets = new Map<string, ExchangeBucket>();
-
-  allow(clientIp: string, nowMs: number): boolean {
-    const key = clientIp || "unknown";
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      if (this.buckets.size >= EXCHANGE_MAX_IPS) this.evictOldest();
-      bucket = { tokens: EXCHANGE_BUCKET_CAPACITY, updatedAtMs: nowMs };
-      this.buckets.set(key, bucket);
-    }
-    const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAtMs) / 1_000;
-    bucket.tokens = Math.min(
-      EXCHANGE_BUCKET_CAPACITY,
-      bucket.tokens + elapsedSeconds * EXCHANGE_REFILL_PER_SECOND,
-    );
-    bucket.updatedAtMs = nowMs;
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
-    return true;
-  }
-
-  private evictOldest(): void {
-    let oldestKey: string | null = null;
-    let oldestMs = Number.POSITIVE_INFINITY;
-    for (const [key, bucket] of this.buckets) {
-      if (bucket.updatedAtMs < oldestMs) {
-        oldestKey = key;
-        oldestMs = bucket.updatedAtMs;
-      }
-    }
-    if (oldestKey !== null) this.buckets.delete(oldestKey);
-  }
-}
-
 class ShareWebInFlightLimiter {
   private readonly inFlightBySession = new Map<string, number>();
   private readonly inFlightByGrant = new Map<string, number>();
@@ -280,19 +241,13 @@ function profileCookieName(discriminator: string): string {
   return `dohc_share_profile_${discriminator}`;
 }
 
-function securityHeaders(init: HeadersInit = {}): Headers {
-  const headers = new Headers(init);
-  for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) {
-    headers.set(key, value);
-  }
-  return headers;
-}
-
+// Every response the viewer origin serves carries the security headers.
 function response(
   body: BodyInit | null,
   init: { status?: number; headers?: HeadersInit } = {},
 ): Response {
-  const headers = securityHeaders(init.headers);
+  const headers = new Headers(init.headers);
+  for (const [key, value] of Object.entries(SHARE_WEB_SECURITY_HEADERS)) headers.set(key, value);
   return new Response(body, { status: init.status ?? 200, headers });
 }
 
@@ -302,17 +257,11 @@ function jsonResponse(
 ): Response {
   const headers = new Headers(init.headers);
   headers.set("content-type", "application/json");
-  return response(JSON.stringify(body), {
-    ...init,
-    headers,
-  });
+  return response(JSON.stringify(body), { status: init.status, headers });
 }
 
 function refused(status: 404 | 409 | 429 | 503 = 404, headers: HeadersInit = {}): Response {
-  return response(REFUSAL_BODY, {
-    status,
-    headers: { "content-type": "application/json", ...Object.fromEntries(new Headers(headers)) },
-  });
+  return jsonResponse(REFUSAL_VALUE, { status, headers });
 }
 
 function parseCookies(header: string | null): Map<string, string> {
@@ -331,10 +280,10 @@ async function exchangeInput(request: Request): Promise<string | null> {
   try {
     const text = await request.text();
     if (Buffer.byteLength(text) > MAX_EXCHANGE_BODY_BYTES) return null;
-    const input: unknown = JSON.parse(text);
-    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-    const secret = (input as { secret?: unknown }).secret;
-    return typeof secret === "string" && /^[A-Za-z0-9_-]{43}$/u.test(secret)
+    const input = asRecord(JSON.parse(text));
+    if (!input) return null;
+    const secret = input.secret;
+    return typeof secret === "string" && LINK_SECRET_PATTERN.test(secret)
       ? secret
       : null;
   } catch {
@@ -346,9 +295,8 @@ async function discussionInput(request: Request): Promise<string | null> {
   try {
     const text = await request.text();
     if (Buffer.byteLength(text, "utf8") > MAX_DISCUSSION_ENVELOPE_BYTES) return null;
-    const input: unknown = JSON.parse(text);
-    if (!input || typeof input !== "object" || Array.isArray(input)) return null;
-    const body = input as Record<string, unknown>;
+    const body = asRecord(JSON.parse(text));
+    if (!body) return null;
     if (
       Object.keys(body).some(
         (key) => key !== "body" && key !== "idempotencyKey" && key !== "claimedName",
@@ -456,47 +404,32 @@ async function discussionState(
   | { state: "limit-reached" }
   | null
 > {
+  // The relay error code is the contract; its message text is not.
   try {
-    const body: unknown = await relayResponse.json();
-    if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-    const record = body as Record<string, unknown>;
+    const record = asRecord(await relayResponse.json());
+    if (!record || record.ok !== false || typeof record.error !== "string") return null;
     if (relayResponse.status === 403) {
+      const state =
+        record.code === "link_discussion_blocked"
+          ? "blocked"
+          : record.code === "link_discussion_paused"
+            ? "paused"
+            : null;
       if (
-        Object.keys(record).sort().join(",") !==
-          "activityRevision,code,error,ok" ||
-        record.ok !== false ||
+        state === null ||
+        Object.keys(record).sort().join(",") !== "activityRevision,code,error,ok" ||
         typeof record.activityRevision !== "number" ||
         !Number.isSafeInteger(record.activityRevision) ||
         record.activityRevision < 0
       ) {
         return null;
       }
-      if (
-        record.code === "link_discussion_blocked" &&
-        record.error === "link discussion writes are blocked"
-      ) {
-        return {
-          state: "blocked",
-          activityRevision: record.activityRevision,
-        };
-      }
-      if (
-        record.code === "link_discussion_paused" &&
-        record.error === "link discussion writes are paused"
-      ) {
-        return {
-          state: "paused",
-          activityRevision: record.activityRevision,
-        };
-      }
-      return null;
+      return { state, activityRevision: record.activityRevision };
     }
     if (
       relayResponse.status === 413 &&
       Object.keys(record).sort().join(",") === "code,error,ok" &&
-      record.ok === false &&
-      record.code === "discussion_limit_reached" &&
-      record.error === "discussion message limit reached"
+      record.code === "discussion_limit_reached"
     ) {
       return { state: "limit-reached" };
     }
@@ -617,8 +550,8 @@ function parsedRelaySession(
   value: unknown,
   nowMs: number,
 ): { grantId: string; capabilityToken: string; expiresAtMs: number } | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const relaySession = value as Record<string, unknown>;
+  const relaySession = asRecord(value);
+  if (!relaySession) return null;
   const grantId = relaySession.grantId;
   const capabilityToken = relaySession.capabilityToken;
   const expiresAtMs = relaySession.capabilityExpiresAtMs;
@@ -626,7 +559,7 @@ function parsedRelaySession(
     typeof grantId !== "string" ||
     grantId.length === 0 ||
     typeof capabilityToken !== "string" ||
-    !/^[A-Za-z0-9_-]{43}$/u.test(capabilityToken) ||
+    !LINK_SECRET_PATTERN.test(capabilityToken) ||
     typeof expiresAtMs !== "number" ||
     !Number.isSafeInteger(expiresAtMs) ||
     expiresAtMs <= nowMs
@@ -640,12 +573,12 @@ function parsedRelayHandoff(
   value: unknown,
   nowMs: number,
 ): { code: string; expiresAtMs: number } | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const handoff = value as Record<string, unknown>;
+  const handoff = asRecord(value);
+  if (!handoff) return null;
   if (
     handoff.ok !== true ||
     typeof handoff.code !== "string" ||
-    !HANDOFF_CODE.test(handoff.code) ||
+    !LINK_SECRET_PATTERN.test(handoff.code) ||
     typeof handoff.expiresAtMs !== "number" ||
     !Number.isSafeInteger(handoff.expiresAtMs) ||
     handoff.expiresAtMs <= nowMs
@@ -821,7 +754,11 @@ export function createShareWebHandler({
     timeoutMs: DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   }) : undefined;
   const sessions = new ShareWebSessionStore(maxSessions);
-  const exchangeRateLimiter = new ShareWebExchangeRateLimiter();
+  const exchangeRateLimiter = new TokenBucketLimiter(
+    EXCHANGE_BUCKET_CAPACITY,
+    EXCHANGE_REFILL_PER_SECOND,
+    EXCHANGE_MAX_IPS,
+  );
   const blobProxyLimiter = new ShareWebInFlightLimiter(
     MAX_BLOB_PROXIES_PER_SESSION,
     MAX_BLOB_PROXIES_PER_GRANT,
@@ -1008,10 +945,10 @@ export function createShareWebHandler({
         const cookies = parseCookies(request.headers.get("cookie"));
         const existingProfile = cookies.get(profileCookieName(discriminator));
         const profile =
-          existingProfile && PROFILE_SECRET.test(existingProfile)
+          existingProfile && LINK_SECRET_PATTERN.test(existingProfile)
             ? existingProfile
             : newProfileSecret();
-        if (!PROFILE_SECRET.test(profile)) return refused();
+        if (!LINK_SECRET_PATTERN.test(profile)) return refused();
         sessions.set(
           token,
           {
@@ -1128,7 +1065,7 @@ export function createShareWebHandler({
         profileSecret = parseCookies(request.headers.get("cookie")).get(
           profileCookieName(authenticated.discriminator),
         ) ?? null;
-        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       } else if (request.method === "GET") {
         const parsedPath = discussionRelayPath(request);
         if (!parsedPath) return refused();
@@ -1136,7 +1073,7 @@ export function createShareWebHandler({
         profileSecret = parseCookies(request.headers.get("cookie")).get(
           profileCookieName(authenticated.discriminator),
         ) ?? null;
-        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
       } else {
         if (
           !relayExchangeKey ||
@@ -1147,7 +1084,7 @@ export function createShareWebHandler({
         profileSecret = parseCookies(request.headers.get("cookie")).get(
           profileCookieName(authenticated.discriminator),
         ) ?? null;
-        if (!profileSecret || !PROFILE_SECRET.test(profileSecret)) return refused();
+        if (!profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) return refused();
         appendBody = await discussionInput(request);
         if (appendBody === null) return refused();
         relayPath = "/sync/link/discussion";
@@ -1270,7 +1207,7 @@ export function createShareWebHandler({
         relayPath = `/sync/link/log${search}`;
       } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {
         const sha = pathname.slice("/api/view/blob/".length);
-        if (SHA256_HEX.test(sha)) relayPath = `/sync/link/blobs/${sha}`;
+        if (SHA256_HEX_PATTERN.test(sha)) relayPath = `/sync/link/blobs/${sha}`;
       }
       if (!relayPath) return refused();
 

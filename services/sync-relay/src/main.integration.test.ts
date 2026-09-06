@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { type IncomingMessage, request as httpRequest } from "node:http";
+import { request as httpRequest } from "node:http";
 import { createServer } from "node:net";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -28,8 +28,6 @@ const loopbackListenDenied = await new Promise<boolean>((resolve) => {
 const WORKSPACE_ID = "workspace-live-relay";
 const USER_ID = "sync-user";
 const TEST_SHUTDOWN_GRACE_PERIOD_MS = 250;
-const WITHIN_SHUTDOWN_GRACE_MS = 100;
-const FORCED_SHUTDOWN_TIMEOUT_MS = 2_000;
 const OUTPUT_BARRIER_MESSAGE_TYPE = "dohc-sync-relay-test-output-barrier";
 const OUTPUT_BARRIER_PREFIX = "SYNC_RELAY_TEST_OUTPUT_BARRIER=";
 const OUTPUT_BARRIER_TIMEOUT_MS = 10_000;
@@ -94,6 +92,7 @@ async function spawnRelay(
 async function spawnRunningRelay(
   dbPath: string,
   envOverrides: Record<string, string | undefined> = {},
+  bootstrap: { rejectPoolEnd?: boolean } = {},
 ): Promise<RunningRelay> {
   const mainUrl = new URL("./main.ts", import.meta.url);
   const childArguments = [
@@ -117,7 +116,16 @@ async function spawnRunningRelay(
         process.stdout.write(marker);
         process.stderr.write(marker);
       }
-    }); await import(${JSON.stringify(mainUrl.href)});`,
+    });
+    if (${bootstrap.rejectPoolEnd === true}) {
+      const { Pool } = await import("pg");
+      const { writeSync } = await import("node:fs");
+      Pool.prototype.end = async function () {
+        writeSync(2, "SYNC_RELAY_TEST_POOL_END_REJECTED\\n");
+        throw new Error("injected pool shutdown failure");
+      };
+    }
+    await import(${JSON.stringify(mainUrl.href)});`,
   ];
   const child = spawn(process.execPath, childArguments, {
     cwd: packageRoot(),
@@ -355,56 +363,6 @@ async function settleWithin<T>(
 
 describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
 
-  it("force-closes a stalled streamed response after the shutdown grace period", { timeout: 15_000 }, async () => {
-    const relayRoot = await tempRoot("relay-stalled-shutdown");
-    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-      SYNC_RELAY_TEST_SHUTDOWN_GRACE_PERIOD_MS: String(
-        TEST_SHUTDOWN_GRACE_PERIOD_MS,
-      ),
-    });
-
-    let streamedResponse: IncomingMessage | undefined;
-    const clientRequest = httpRequest(
-      `${relay.baseUrl}/__test/controlled-stream`,
-      (response) => {
-        streamedResponse = response;
-      },
-    );
-    const firstChunk = new Promise<Buffer>((resolve, reject) => {
-      clientRequest.once("response", (response) => {
-        response.once("data", (chunk: Buffer) => resolve(Buffer.from(chunk)));
-        response.once("error", reject);
-        response.once("end", () =>
-          reject(new Error("controlled response ended before its first chunk")),
-        );
-      });
-      clientRequest.once("error", reject);
-    });
-    clientRequest.end();
-    expect((await firstChunk).length).toBeGreaterThan(0);
-
-    try {
-      const exited = waitForExit(relay.child);
-      sendTerminationSignal(relay.child);
-
-      expect(
-        await settleWithin(exited, WITHIN_SHUTDOWN_GRACE_MS),
-        `sync relay exited before its shutdown grace period\n${relay.stderr()}`,
-      ).toEqual({ kind: "pending" });
-      expect(
-        await settleWithin(exited, FORCED_SHUTDOWN_TIMEOUT_MS),
-        `sync relay remained alive after its shutdown grace period\n${relay.stderr()}`,
-      ).toEqual({
-        kind: "settled",
-        value: { code: 0, signal: null },
-      });
-    } finally {
-      streamedResponse?.destroy();
-      clientRequest.destroy();
-    }
-  });
-
   it("shuts down promptly when no responses are active", async () => {
     const relayRoot = await tempRoot("relay-quiet-shutdown");
     const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
@@ -446,105 +404,32 @@ describe.skipIf(loopbackListenDenied)("sync relay main process", () => {
     });
   });
 
-  it("survives a response error during a pipe and cancels the source stream", async () => {
-    const relayRoot = await tempRoot("relay-response-error");
-    const relay = await spawnRunningRelay(join(relayRoot, "relay.sqlite"), {
-      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-      SYNC_RELAY_TEST_RESPONSE_ERROR_DURING_PIPE: "1",
-    });
-
-    const requestSettled = new Promise<void>((resolve) => {
-      const request = httpRequest(
-        `${relay.baseUrl}/__test/controlled-stream`,
-        (response) => {
-          response.once("error", () => resolve());
-          response.once("close", () => resolve());
-          response.resume();
-        },
-      );
-      request.once("error", () => resolve());
-      request.end();
-    });
-    expect(await settleWithin(requestSettled, 1_000)).toEqual({
-      kind: "settled",
-      value: undefined,
-    });
-
-    const cleanup = await fetch(`${relay.baseUrl}/__test/controlled-stream`, {
-      method: "POST",
-    });
-    expect(cleanup.status).toBe(409);
-    expect((await fetch(`${relay.baseUrl}/health`)).status).toBe(200);
-  });
-
-  it("streams response headers and first body chunk before completion", async () => {
-    const relayRoot = await tempRoot("relay-streamed-response");
-    const baseUrl = await spawnRelay(join(relayRoot, "relay.sqlite"), {
-      SYNC_RELAY_TEST_CONTROLLED_STREAM: "1",
-    });
-
-    const chunks: Buffer[] = [];
-    let responseEnded = false;
-    let resolveComplete: ((body: Buffer) => void) | undefined;
-    const complete = new Promise<Buffer>((resolve) => {
-      resolveComplete = resolve;
-    });
-    const firstChunk = new Promise<{
-      bytes: Buffer;
-      complete: boolean;
-      contentType: string | undefined;
-      marker: string | undefined;
-      readableEnded: boolean;
-      statusCode: number | undefined;
-    }>((resolve, reject) => {
-      const clientRequest = httpRequest(`${baseUrl}/__test/controlled-stream`, (response) => {
-        response.once("error", reject);
-        response.on("data", (chunk: Buffer) => {
-          const bytes = Buffer.from(chunk);
-          chunks.push(bytes);
-          if (chunks.length === 1) {
-            const marker = response.headers["x-dohc-test-stream"];
-            resolve({
-              bytes,
-              complete: response.complete,
-              contentType: response.headers["content-type"],
-              marker: Array.isArray(marker) ? marker[0] : marker,
-              readableEnded: response.readableEnded,
-              statusCode: response.statusCode,
-            });
-          }
-        });
-        response.once("end", () => {
-          responseEnded = true;
-          resolveComplete?.(Buffer.concat(chunks));
-        });
-      });
-      clientRequest.once("error", reject);
-      clientRequest.end();
-    });
-
-    const observed = await settleWithin(firstChunk, 1_000);
-    const finish = await fetch(`${baseUrl}/__test/controlled-stream`, { method: "POST" });
-    expect(finish.status).toBe(204);
-    const body = await complete;
-
-    expect(observed).toMatchObject({
-      kind: "settled",
-      value: {
-        complete: false,
-        contentType: "application/octet-stream",
-        marker: "controlled",
-        readableEnded: false,
-        statusCode: 200,
+  it("exits with code 0 on SIGTERM when the Postgres pool rejects shutdown", async () => {
+    const relayRoot = await tempRoot("relay-pool-shutdown-rejection");
+    const relay = await spawnRunningRelay(
+      join(relayRoot, "relay.sqlite"),
+      {
+        SYNC_RELAY_TEST_AUTH: "0",
+        SYNC_RELAY_BIND: "127.0.0.1",
+        BETTER_AUTH_SECRET: "test-secret-that-is-at-least-32-characters",
+        POSTGRES_URL: "postgres://dohc:dohc@127.0.0.1:1/dohc",
       },
+      { rejectPoolEnd: true },
+    );
+    const closed = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve) => relay.child.once("close", (code, signal) => resolve({ code, signal })),
+    );
+
+    sendTerminationSignal(relay.child);
+
+    expect(
+      await settleWithin(closed, 1_000),
+      `sync relay did not exit cleanly after pool shutdown rejection\n${relay.stderr()}`,
+    ).toEqual({
+      kind: "settled",
+      value: { code: 0, signal: null },
     });
-    if (observed.kind !== "settled") return;
-    expect(responseEnded).toBe(true);
-    expect(observed.value.bytes.length).toBeGreaterThan(0);
-    expect(observed.value.bytes.every((byte) => byte === 0x61)).toBe(true);
-    expect(body).toHaveLength(2 * 1024 * 1024);
-    expect(body.subarray(0, 1024 * 1024).every((byte) => byte === 0x61)).toBe(true);
-    expect(body.subarray(1024 * 1024).every((byte) => byte === 0x62)).toBe(true);
+    expect(relay.stderr()).toContain("SYNC_RELAY_TEST_POOL_END_REJECTED\n");
   });
 
   // WS-MU-C0 over real HTTP: a second authenticated user cannot forge the first

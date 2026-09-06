@@ -1,3 +1,5 @@
+import { sha256Hex } from "@dohc/workspace-core/hash";
+import { isRecord } from "@dohc/workspace-core/records";
 // Pure MCP tool implementations. Each operates on a workspace ROOT dir and a
 // state HOME (the desktop registry/state location). Every workspace-relative
 // write path is validated through validateUserMaterializePath (reads through
@@ -7,38 +9,7 @@
 // materialized on this host. Writes are scoped to the root and never
 // auto-apply a boundary crossing.
 
-import {
-  databaseSyncStrategy,
-  DOHC_METADATA_GUARD,
-  DOHC_TRASH_GUARD,
-  frameworkConfigName,
-  hasIgnoredSegment,
-  hasWebDependency,
-  hasWebScript,
-  isDohcMetadataPath,
-  mediaTypeForPath,
-  notARealFolderRefusal,
-  outsideWorkspaceRefusal,
-  packageManagerFromFiles,
-  nameUnitFor,
-  sameFsEntry,
-  entryCharBudget,
-  trashEntryPlan,
-  WINDOWS_MAX_PATH_CHARS,
-  validateUserMaterializePath,
-  validateUserReadPath,
-  type DohcPathGuard,
-  type DohcSiteConfig,
-  type FsEntryIdentity,
-  type PackageJson,
-  type SiteConfidence,
-  type SiteDiagnostic,
-  type SiteKind,
-  type SiteScripts,
-  type WorkspaceSite,
-  isSharedWithMePath,
-  safeRelativeConfigPath,
-} from "@dohc/workspace-core";
+import { databaseSyncStrategy, DOHC_METADATA_GUARD, DOHC_TRASH_GUARD, frameworkConfigName, hasIgnoredSegment, hasWebDependency, hasWebScript, mediaTypeForPath, notARealFolderRefusal, outsideWorkspaceRefusal, packageManagerFromFiles, nameUnitFor, sameFsEntry, entryCharBudget, trashEntryPlan, WINDOWS_MAX_PATH_CHARS, validateUserMaterializePath, validateUserReadPath, type DohcPathGuard, type DohcSiteConfig, type FsEntryIdentity, type PackageJson, type SiteConfidence, type SiteDiagnostic, type SiteKind, type SiteScripts, type WorkspaceSite, isSharedWithMePath, safeRelativeConfigPath } from "@dohc/workspace-core";
 import { sendCliRequest } from "@dohc/cli/client";
 import { DohcCliError } from "@dohc/cli/errors";
 import {
@@ -58,7 +29,7 @@ import type { ShareAccess } from "@dohc/security-contract/share-selector";
 import { mergeMarkdown } from "@dohc/workspace-core/mergeMarkdown";
 // The resolved-path rule lives in one place for every surface that decides
 // authority from a path. This surface owns only its wording.
-import {
+import { errnoCode,
   realRelativeInRoot,
   resolvedAreaRefusal,
   type RealTarget,
@@ -79,7 +50,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, join, sep } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 export interface ToolContext {
   // Workspace root the server is scoped to (the --workspace arg). All file
@@ -207,10 +178,6 @@ async function safeResolveForMutation(
   return resolved;
 }
 
-function sha256(bytes: Uint8Array | string): string {
-  return createHash("sha256").update(bytes).digest("hex");
-}
-
 async function readFileWindowWithDigest(
   absolute: string,
   offsetBytes: number,
@@ -334,22 +301,6 @@ function deleteAftermath(path: string, aftermath: Aftermath): string {
       // dohc did, which is what a retry decision needs.
       return "";
   }
-}
-
-// The errno code alone, for refusals that translate a filesystem failure. An
-// agent can act on "EACCES"; it cannot act on a sentence that hides which
-// failure happened.
-//
-// null means "this is not an errno at all", which is a different fact and has
-// to stay one: it is how a guard refusal this code wrote is told apart from a
-// failure the platform reported, and rendering it as "(unknown)" would put a
-// non-code in a slot that is documented to hold one.
-function errnoCode(error: unknown): string | null {
-  if (typeof error === "object" && error !== null && "code" in error) {
-    const { code } = error as { code?: unknown };
-    if (typeof code === "string") return code;
-  }
-  return null;
 }
 
 async function ensureRecordable(ctx: ToolContext) {
@@ -490,7 +441,7 @@ async function writeFileAtomicallyForTool(
       });
     }
     const currentBytes = existing ? await readFile(finalPath) : Buffer.alloc(0);
-    const currentSha256 = sha256(currentBytes);
+    const currentSha256 = sha256Hex(currentBytes);
     if (currentSha256 !== options.expectedSha256) {
       throw expectedSha256Mismatch(currentSha256);
     }
@@ -989,7 +940,7 @@ export async function writeWorkspaceFile(
     ok: true as const,
     path: resolved.normalized,
     bytes: bytes.byteLength,
-    sha256: sha256(bytes),
+    sha256: sha256Hex(bytes),
     ...RECORDED_BY_ENGINE,
   };
 }
@@ -1479,9 +1430,6 @@ const SITE_SCAN_IGNORED_NAMES = new Set([
   "node_modules",
 ]);
 const SITE_BUILD_OUTPUT_NAMES = ["dist", "build", "out"];
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function relativeJoin(prefix: string, name: string): string {
   return prefix && prefix !== "." ? `${prefix}/${name}` : name;
