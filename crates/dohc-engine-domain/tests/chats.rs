@@ -14,7 +14,7 @@ use dohc_engine_domain::{
     encode_feed_cursor, linked_chat_projection_path,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 
@@ -80,7 +80,7 @@ fn send_msg(
 #[test]
 fn create_list_find_channel_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
 
@@ -112,7 +112,7 @@ fn create_list_find_channel_round_trip() {
 #[test]
 fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let plan = store
         .read_with(|conn| {
@@ -149,7 +149,7 @@ fn empty_pending_replay_fast_path_does_not_open_the_replication_log() {
 #[test]
 fn reserved_channel_ids_refuse_and_wire_mapping_is_first_writer_wins() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -209,7 +209,7 @@ fn reserved_channel_ids_refuse_and_wire_mapping_is_first_writer_wins() {
 #[test]
 fn list_channels_fails_closed_on_negative_read_state() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -243,7 +243,7 @@ fn list_channels_fails_closed_on_negative_read_state() {
 #[test]
 fn duplicate_slug_and_reserved_name_and_agent_kind_fail_closed() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -293,7 +293,7 @@ fn duplicate_slug_and_reserved_name_and_agent_kind_fail_closed() {
 #[test]
 fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
 
@@ -344,7 +344,7 @@ fn ensure_general_and_agent_channels_are_idempotent_with_wellknown_wire_ids() {
 #[test]
 fn start_channel_thread_creates_thread_and_first_message_atomically() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -370,7 +370,7 @@ fn start_channel_thread_creates_thread_and_first_message_atomically() {
 #[test]
 fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
 
@@ -506,7 +506,7 @@ fn conversation_revision_tracks_local_content_winners_but_not_read_state() {
 #[test]
 fn untitled_thread_responses_and_listings_use_first_message_title() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -586,7 +586,7 @@ fn untitled_thread_responses_and_listings_use_first_message_title() {
 #[test]
 fn thread_header_message_id_is_reserved_before_search_index_write() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -637,7 +637,7 @@ fn thread_header_message_id_is_reserved_before_search_index_write() {
 #[test]
 fn feed_cursor_message_id_cap_applies_to_start_and_send() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -771,7 +771,7 @@ fn feed_cursor_message_id_cap_applies_to_start_and_send() {
 #[test]
 fn crash_mid_send_strands_no_empty_thread() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
@@ -807,7 +807,7 @@ fn crash_mid_send_strands_no_empty_thread() {
 #[test]
 fn send_message_reply_parent_must_exist_in_thread() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -840,7 +840,7 @@ fn send_message_reply_parent_must_exist_in_thread() {
 #[test]
 fn list_messages_keyset_pagination_limit_minus_one_limit_plus_one() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -884,7 +884,7 @@ fn list_messages_keyset_pagination_limit_minus_one_limit_plus_one() {
 #[test]
 fn mark_thread_read_cas_monotonic_and_over_count_repair() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -941,7 +941,7 @@ fn mark_thread_read_cas_monotonic_and_over_count_repair() {
 #[test]
 fn follow_lww_last_write_wins_and_lists_active() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -989,7 +989,7 @@ fn follow_lww_last_write_wins_and_lists_active() {
 #[test]
 fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -1042,7 +1042,7 @@ fn local_follow_uses_persisted_origin_and_next_journal_sequence() {
 #[test]
 fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1113,7 +1113,7 @@ fn local_follow_timestamp_advances_past_same_millisecond_unfollow() {
 #[test]
 fn follow_and_feed_read_journaling_require_matching_replication_owner() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1228,7 +1228,7 @@ fn follow_and_feed_read_journaling_require_matching_replication_owner() {
 #[test]
 fn core_chat_creates_journal_exact_relay_payloads() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1358,7 +1358,7 @@ fn core_chat_creates_journal_exact_relay_payloads() {
 #[test]
 fn authorless_message_and_derived_state_stay_local() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -1441,7 +1441,7 @@ fn authorless_message_and_derived_state_stay_local() {
 #[test]
 fn authored_reply_exports_structure_without_exporting_local_parent() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     {
         let mut chats = LinkedChatStore::new(&mut store);
@@ -1551,7 +1551,7 @@ fn authored_reply_exports_structure_without_exporting_local_parent() {
 #[test]
 fn personal_feed_visibility_and_base64url_cursor_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1654,7 +1654,7 @@ fn personal_feed_visibility_and_base64url_cursor_round_trip() {
 #[test]
 fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let attach = |object: &str| LocalAttachmentInput {
         object_id: object.to_owned(),
@@ -1780,7 +1780,7 @@ fn personal_feed_batch_keeps_attachments_with_their_own_messages() {
 #[test]
 fn personal_feed_reads_normalize_owner_before_follow_matching() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1824,7 +1824,7 @@ fn personal_feed_reads_normalize_owner_before_follow_matching() {
 #[test]
 fn bookmark_generation_cas_stale_worker_loses() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1872,7 +1872,7 @@ fn bookmark_generation_cas_stale_worker_loses() {
 #[test]
 fn bookmark_lifecycle_lookups_normalize_owner() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -1968,7 +1968,7 @@ fn bookmark_ids_match_sha256_base32_oracle() {
 #[test]
 fn bookmark_destination_change_clears_projection_ownership() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2033,7 +2033,7 @@ fn bookmark_destination_change_clears_projection_ownership() {
 #[test]
 fn dispatch_claim_is_single_writer_idempotent() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2150,7 +2150,7 @@ fn dispatch_claim_is_single_writer_idempotent() {
 #[test]
 fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2204,7 +2204,7 @@ fn dispatch_failure_reason_is_validated_and_stored_verbatim() {
 #[test]
 fn dispatch_completes_then_next_trigger_is_claimable() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2297,7 +2297,7 @@ fn dispatch_completes_then_next_trigger_is_claimable() {
 #[test]
 fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
@@ -2360,7 +2360,7 @@ fn dispatch_crash_leaves_running_row_then_reclaim_makes_claimable() {
 #[test]
 fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     {
         let mut store = open(&db, 1);
         let mut chats = LinkedChatStore::new(&mut store);
@@ -2417,7 +2417,7 @@ fn start_thread_after_commit_before_ack_retry_replays_exactly_once() {
 #[test]
 fn idempotency_hash_frames_fields_so_an_embedded_nul_cannot_collide() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2449,7 +2449,7 @@ fn idempotency_hash_frames_fields_so_an_embedded_nul_cannot_collide() {
 #[test]
 fn author_kind_check_constraint_rejects_bogus_wire_value() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let store = open(&db, 1);
     // A wrong-case / bogus author_kind (as a future R10 replication-apply might
     // receive over the wire) is rejected AT write by the CHECK, not stored to
@@ -2470,7 +2470,7 @@ fn author_kind_check_constraint_rejects_bogus_wire_value() {
 #[test]
 fn normalize_body_matches_js_trimend_including_zwnbsp() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2492,7 +2492,7 @@ fn normalize_body_matches_js_trimend_including_zwnbsp() {
 #[test]
 fn list_messages_huge_limit_is_bounded_no_overflow() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2518,7 +2518,7 @@ fn list_messages_huge_limit_is_bounded_no_overflow() {
 #[test]
 fn create_channel_preserves_requested_dm_kind() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     let ch = chats
@@ -2536,7 +2536,7 @@ fn create_channel_preserves_requested_dm_kind() {
 #[test]
 fn find_channel_by_slug_normalizes_display_name_input() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2559,7 +2559,7 @@ fn find_channel_by_slug_normalizes_display_name_input() {
 #[test]
 fn human_reply_advances_read_cursor_agent_reply_does_not() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2597,7 +2597,7 @@ fn human_reply_advances_read_cursor_agent_reply_does_not() {
 #[test]
 fn list_messages_unknown_thread_fails_closed() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let chats = LinkedChatStore::new(&mut store);
     let err = chats.list_messages(WS, "nope", 10, None).unwrap_err();
@@ -2607,7 +2607,7 @@ fn list_messages_unknown_thread_fails_closed() {
 #[test]
 fn save_bookmark_rejects_unsafe_destination_path() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2640,7 +2640,7 @@ fn save_bookmark_rejects_unsafe_destination_path() {
 #[test]
 fn message_append_requeues_active_live_bookmark() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2683,7 +2683,7 @@ fn message_append_requeues_active_live_bookmark() {
 #[test]
 fn mark_feed_seen_rejects_non_visible_coordinate() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     chats
@@ -2767,7 +2767,7 @@ fn mark_feed_seen_rejects_non_visible_coordinate() {
 #[test]
 fn baseline_creates_the_chat_tables() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let store = open(&db, 1);
     store
         .read_with(|conn| {
@@ -2881,7 +2881,7 @@ fn claim_refuses_a_run_id_already_used_anywhere() {
     // surface a storage error instead of "invalid-input".
     const OTHER_WS: &str = "ws-2";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let mut chats = LinkedChatStore::new(&mut store);
     for ws in [WS, OTHER_WS] {

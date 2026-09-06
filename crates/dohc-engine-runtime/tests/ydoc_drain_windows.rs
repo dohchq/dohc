@@ -14,7 +14,7 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
 
 const WS: &str = "ws-drain-windows";
@@ -60,7 +60,7 @@ fn applied_update_rows(db: &std::path::Path) -> i64 {
 /// A captured head, a replicated base, and one update parked behind a live
 /// lease — the state a crashed session leaves for a later drain to apply.
 async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let written = handle
@@ -161,7 +161,7 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
 
     // An open sync conflict on the object, in the shape
@@ -253,7 +253,7 @@ async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
 
     let supervisor = WorkspaceSupervisor::new();

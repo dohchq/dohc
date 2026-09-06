@@ -11,7 +11,7 @@ use dohc_engine_runtime::{
 };
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, try_make_dir_alias};
+use dohc_engine_testkit::{ScratchDir, engine_db_path, try_make_dir_alias};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -61,7 +61,7 @@ async fn settle_refuses_when_every_drained_update_is_identity_refused_but_applie
     const PATH: &str = "notes/client.md";
     const WRONG_PATH: &str = "notes/stale-remote-name.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let (key, expected_head_sha, lineage_claim_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
@@ -216,7 +216,7 @@ async fn idempotent_settle_refuses_a_rebound_path_even_with_identical_content() 
     const WS: &str = "ws-settle-rebind";
     const PATH: &str = "notes/own.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // The session creates and settles PATH ("same text").
     let supervisor = WorkspaceSupervisor::new();
@@ -365,7 +365,7 @@ async fn reopening_a_pruned_lineage_over_a_newer_head_settles_cleanly() {
     const WS: &str = "ws-prune-reseed";
     const PATH: &str = "notes/prune.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -524,7 +524,7 @@ async fn a_retired_local_only_doc_reopens_as_absent() {
     const WS: &str = "ws-retired-reopen";
     const PATH: &str = "notes/retired.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -679,7 +679,7 @@ async fn settle_replay_recovers_cross_platform_via_fault_injection() {
     const WS: &str = "ws-portable-replay";
     const PATH: &str = "notes/portable.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -840,7 +840,7 @@ async fn blocked_settle_keeps_its_marker_and_crdt_retryable() {
     const PATH: &str = "notes/linked/blocked.md";
     let scratch = ScratchDir::new().expect("scratch");
     let outside = ScratchDir::new().expect("outside scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::create_dir(scratch.path().join("notes")).expect("notes parent");
     let alias = scratch.path().join("notes/linked");
     if !try_make_dir_alias(outside.path(), &alias).expect("create directory alias") {

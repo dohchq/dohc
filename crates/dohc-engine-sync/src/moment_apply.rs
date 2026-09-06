@@ -5,7 +5,6 @@ use dohc_engine_files::{
 use dohc_engine_storage::{EngineStore, FaultInjector, get_binary_blob, hex_sha256};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 
 use crate::file_search::{
@@ -1702,13 +1701,8 @@ pub(crate) fn sync_conflict_id(
         input.push('\0');
         input.push_str(high);
     }
-    let digest = Sha256::digest(input.as_bytes());
-    let mut hex = String::with_capacity(64);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    format!("conflict_sync_{}", &hex[..32])
+    let digest = hex_sha256(input.as_bytes());
+    format!("conflict_sync_{}", &digest[..32])
 }
 
 fn js_string_cmp(left: &str, right: &str) -> Ordering {

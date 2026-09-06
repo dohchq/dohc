@@ -7,7 +7,7 @@ use dohc_engine_collab::DocKey;
 use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 
 struct AlwaysLive;
@@ -34,7 +34,7 @@ async fn open_only_drains_deferred_updates_for_the_expected_key() {
     const WS: &str = "ws-drain-gate";
     const PATH: &str = "notes/live.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // A captured head gives the path a real owner object.
     let supervisor = WorkspaceSupervisor::new();

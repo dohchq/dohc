@@ -10,7 +10,7 @@ use dohc_engine_runtime::{
 use dohc_engine_storage::{
     EngineStore, FaultAction, FaultInjector, FaultPoint, StorageError, TxnOutcome,
 };
-use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{EngineDbScan, ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +58,7 @@ async fn binary_head_retires_its_ydoc_lineage_before_the_unsettled_scan() {
     const WS: &str = "ws-binary-unsettled";
     const PATH: &str = "notes/binary.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -152,7 +152,7 @@ async fn pathless_settled_scene_is_not_reported_as_unsettled() {
     const PATH: &str = "drawings/settled.excalidraw";
     const OBJECT: &str = "pathless-scene-object";
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let imported = dohc_engine_collab::import_portable_scene(
         r#"{"type":"excalidraw","version":2,"source":"https://excalidraw.com","elements":[],"appState":{},"files":{}}"#,
     )
@@ -260,7 +260,7 @@ impl FaultInjector for RewriteAtJobStart {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn destination_is_active_when_switch_materialization_fails() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -344,7 +344,7 @@ async fn destination_is_active_when_switch_materialization_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -451,7 +451,7 @@ async fn secret_switch_write_preserves_an_edit_between_planning_and_phase_two() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn secret_switch_delete_preserves_an_edit_between_planning_and_phase_two() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -556,7 +556,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
 
     let first_root = ScratchDir::new().expect("first root");
     let second_root = ScratchDir::new().expect("second root");
-    let database = first_root.engine_db_path().expect("database");
+    let database = engine_db_path(&first_root).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     for workspace_id in [FIRST, SECOND] {
@@ -662,7 +662,7 @@ async fn switch_jobs_are_distinct_and_match_their_active_workspace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn switch_projection_generation_does_not_advance_moment_order() {
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&database, 1).expect("actor").actor;
     actor
@@ -809,7 +809,7 @@ async fn plaintext_never_leaks_across_a_version_switch_and_back() {
     // but for the wrong reason: the secret executor then cannot decrypt what it
     // was handed, so the switch itself errors before the scan runs.
     let scratch = ScratchDir::new().expect("scratch");
-    let database = scratch.engine_db_path().expect("database");
+    let database = engine_db_path(&scratch).expect("database");
     let env_path = scratch.path().join(".env");
 
     // One distinctive marker per version, so a leak names the side it came from.

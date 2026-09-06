@@ -14,7 +14,7 @@ use dohc_engine_domain::{
 use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
 use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -182,9 +182,9 @@ fn claim_rows(db: &Path, workspace_id: &str) -> Vec<(String, String, Option<Stri
 async fn a_local_apply_claims_exactly_once_and_a_synced_apply_never_claims() {
     let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     seed_collection_replica(&source_db, WS, OBJECT, PATH, &initial);
     seed_collection_replica(&peer_db, WS, OBJECT, PATH, &initial);
     enable_sync(&source_db, WS);
@@ -458,7 +458,7 @@ fn claim_ledger(db: &Path, workspace_id: &str, claim_id: &str) -> (String, i64, 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -606,7 +606,7 @@ async fn a_crashed_settle_stays_running_and_the_reaper_requeues_then_exhausts() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -660,7 +660,7 @@ async fn a_crashed_claim_next_rolls_back_and_the_retry_serves_one_attempt() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_cancelled_token_short_circuits_every_automation_command_without_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_pending_claim(&db, WS, CRASH_CLAIM, 100);
 
     let supervisor = WorkspaceSupervisor::new();

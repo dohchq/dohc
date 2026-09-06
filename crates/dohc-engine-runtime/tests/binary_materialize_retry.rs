@@ -4,7 +4,7 @@ use dohc_engine_runtime::{
     SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
 
 struct NoRecorder;
@@ -34,7 +34,7 @@ fn binary_input(request_id: &str) -> WriteBinary {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_write_retries_its_original_pending_materialization() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     let input = binary_input("binary-materialize-request");
@@ -85,7 +85,7 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_rollback_retries_its_pending_compensation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -151,7 +151,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor

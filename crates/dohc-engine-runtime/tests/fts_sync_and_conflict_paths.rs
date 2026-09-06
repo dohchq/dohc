@@ -13,7 +13,7 @@ use dohc_engine_sync::{
     ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
     apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde_json::json;
 
@@ -30,7 +30,7 @@ impl LeaseProbe for AlwaysLive {
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db, 1_000).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1_000, &NoFaults)
@@ -481,7 +481,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     const OLD: &str = "localconflictoldneedle";
     const NEW: &str = "localconflictnewneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -604,7 +604,7 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     const NEEDLE: &str = "namedversionlazysearchneedle";
     const NAMED: &str = "named-version";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -703,7 +703,7 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
     const PATH: &str = "notes/becomes-binary.md";
     const OLD: &str = "becomesbinaryoldneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     // The incoming side references bytes that are already hydrated -- the shape
     // a merge or a replicated open records. Seed the blob before the actor

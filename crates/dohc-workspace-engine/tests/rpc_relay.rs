@@ -15,7 +15,7 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome, hex_sha256};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
@@ -681,10 +681,10 @@ async fn first_push_replays_a_live_never_settled_ydoc_to_a_clean_peer() {
             state.pushed_workspace_ops.clone(),
         )
     };
-    let source_db = Connection::open(scratch.engine_db_path().expect("source db path"))
+    let source_db = Connection::open(engine_db_path(&scratch).expect("source db path"))
         .expect("open source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let mut peer = EngineStore::open(&peer_scratch.engine_db_path().expect("peer db path"), 1_000)
+    let mut peer = EngineStore::open(&engine_db_path(&peer_scratch).expect("peer db path"), 1_000)
         .expect("open peer");
     VersionedTextStore::new(&mut peer)
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
@@ -958,7 +958,7 @@ async fn join_identity_adoption_is_local_idempotent_and_refuses_non_pristine_reb
         .await
         .expect_err("relay identity text must use the canonical form");
     assert_eq!(invalid.code, ErrorCode::InvalidParams);
-    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
         .expect("open inspection connection");
     let identity_count: i64 = db
         .query_row(
@@ -1239,7 +1239,7 @@ async fn pull_without_commit_keeps_persisted_cursor_unmoved_and_redelivers() {
     assert_eq!(first["fetched"], 1);
     close(&transport, &handle, &mut id).await;
 
-    let db_path = scratch.engine_db_path().expect("engine db path");
+    let db_path = engine_db_path(&scratch).expect("engine db path");
     let db = Connection::open(&db_path).expect("open engine db");
     let persisted: Option<String> = db
         .query_row(
@@ -1290,7 +1290,7 @@ async fn two_page_pull_keeps_relation_to_target_arriving_on_second_page() {
     let workspace_id = "rpc-relay-two-page-relation";
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db_path = scratch.engine_db_path().expect("engine db path");
+    let db_path = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db_path, 1_000).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -1817,7 +1817,7 @@ async fn shared_channel_pull_drops_own_echo_and_renumbers_each_source_densely() 
     assert_eq!(pulled["skipped"], 1);
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
         .expect("open engine db");
     let rows = db
         .prepare(
@@ -1893,7 +1893,7 @@ async fn shared_channel_stale_selector_reports_refusal_and_advances_cursor() {
     );
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
         .expect("open engine db");
     let cursor: Option<String> = db
         .query_row(
@@ -2006,7 +2006,7 @@ async fn share_view_pull_is_read_only_and_defers_its_persisted_cursor() {
     );
     let pending = pulled["pendingCursor"].clone();
 
-    let db_path = scratch.engine_db_path().expect("engine db path");
+    let db_path = engine_db_path(&scratch).expect("engine db path");
     let db = Connection::open(&db_path).expect("open engine db");
     let cursor: Option<String> = db
         .query_row(
@@ -2265,7 +2265,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
         .expect_err("corrupt replacement must reject the rename");
     assert_eq!(rename.code, ErrorCode::BlobInvalid);
 
-    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
         .expect("open engine db");
     let old_exists: bool = db
         .query_row(
@@ -2300,7 +2300,7 @@ async fn share_view_rename_validates_replacement_before_removing_old_path() {
     assert_eq!(retried["changedPaths"].as_array().map(Vec::len), Some(2));
     close(&transport, &handle, &mut id).await;
 
-    let db = Connection::open(scratch.engine_db_path().expect("engine db path"))
+    let db = Connection::open(engine_db_path(&scratch).expect("engine db path"))
         .expect("open engine db");
     let paths: (bool, bool) = db
         .query_row(

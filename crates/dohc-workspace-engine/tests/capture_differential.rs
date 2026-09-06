@@ -18,12 +18,11 @@ use dohc_engine_protocol::{
     transport::{EngineTransport, InProcessTransport, RequestContext},
     wire::{Request, WorkspaceHandle},
 };
-use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, hex_sha256};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::EngineService;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
@@ -185,7 +184,7 @@ fn expected_after(step: &Step) -> Projection {
                 Projection {
                     kind: "text".to_owned(),
                     text: Some(text.clone()),
-                    sha256: Some(hex(bytes)),
+                    sha256: Some(hex_sha256(bytes)),
                     byte_length: Some(bytes.len() as u64),
                     ever_tracked: true,
                 }
@@ -198,7 +197,7 @@ fn expected_after(step: &Step) -> Projection {
             Projection {
                 kind: "binary".to_owned(),
                 text: None,
-                sha256: Some(hex(&bytes)),
+                sha256: Some(hex_sha256(&bytes)),
                 byte_length: Some(bytes.len() as u64),
                 ever_tracked: true,
             }
@@ -212,18 +211,6 @@ fn is_secret_path(path: &str) -> bool {
         dohc_engine_files::policy::classify_engine_file_path(path),
         dohc_engine_files::policy::PathClassification::Secret
     )
-}
-
-fn hex(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 /// (everTracked, secret byte length, head (content_kind, binary sha)).
@@ -302,7 +289,7 @@ fn project_path(db: &Path, path: &str) -> Projection {
             Projection {
                 kind: "text".to_owned(),
                 text: Some(snapshot.text.clone()),
-                sha256: Some(hex(bytes)),
+                sha256: Some(hex_sha256(bytes)),
                 byte_length: Some(bytes.len() as u64),
                 ever_tracked: tracked,
             }
@@ -373,15 +360,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
         "ecf8710b19870fab090abfc2c6b78e80a050d245d60c42c21cc6eb62962122d7";
     const GOLDENS_SHA256: &str = "246655d8e2f697d069d121c50faec04222f7f45eecc970f1af4e0b4ee64e5292";
 
-    let hash_of = |raw: &str| -> String {
-        let mut hasher = Sha256::new();
-        hasher.update(raw.as_bytes());
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect()
-    };
+    let hash_of = |raw: &str| hex_sha256(raw.as_bytes());
     assert_eq!(
         hash_of(GOLDENS).as_str(),
         GOLDENS_SHA256,
@@ -423,7 +402,7 @@ async fn rust_capture_matches_the_typescript_oracle_goldens() {
             .unwrap_or_else(|| panic!("no golden for {}", scenario.name));
 
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("db path");
+        let db = engine_db_path(&scratch).expect("db path");
         let transport = InProcessTransport::new(Arc::new(EngineService::new()));
         let mut id: u64 = 1;
         let mut handle = open_workspace(&transport, scratch.path(), id).await;

@@ -4,7 +4,7 @@ use dohc_engine_domain::{
     WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ use crate::{
 
 fn test_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&path, 1_000).expect("store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -1837,7 +1837,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
         "omit any identity/metadata binding from insert_moment and the durable preimage tuple no longer matches the shipped snapshot.",
     );
 
-    let database_path = scratch.engine_db_path().expect("database path");
+    let database_path = engine_db_path(&scratch).expect("database path");
     drop(store);
     let mut reopened = EngineStore::open(&database_path, 3_000).expect("reopen");
     VersionedTextStore::new(&mut reopened)

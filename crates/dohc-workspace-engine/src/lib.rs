@@ -792,13 +792,7 @@ fn chat_cursor_binding(method: &str, workspace_id: &str, filters: &[&str]) -> St
         hasher.update(field.as_bytes());
         hasher.update([0]);
     }
-    let digest = hasher.finalize();
-    let mut binding = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(binding, "{byte:02x}");
-    }
-    binding
+    dohc_engine_storage::hex(&hasher.finalize())
 }
 
 fn encode_chat_cursor(cursor: &ChatKeysetCursor) -> Result<String, WireError> {
@@ -2624,10 +2618,7 @@ impl EngineService {
             let mut bytes = [0_u8; 32];
             getrandom::fill(&mut bytes)
                 .map_err(|_| wire(ErrorCode::Internal, "pending-cursor-token-failed"))?;
-            let token = bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
+            let token = dohc_engine_storage::hex(&bytes);
             let (kind, wire_kind) = match &cursor {
                 IssuedCursor::Relay(_) => (PendingCursorKind::Relay, "relay"),
                 IssuedCursor::ShareView(_) => (PendingCursorKind::ShareView, "shareView"),
@@ -3157,13 +3148,7 @@ impl EngineService {
             digest.update((field.len() as u64).to_le_bytes());
             digest.update(field);
         }
-        let digest = digest.finalize();
-        let mut hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{byte:02x}");
-        }
-        format!("{prefix}-{hex}")
+        format!("{prefix}-{}", dohc_engine_storage::hex(&digest.finalize()))
     }
 
     /// Acquire the ordering guard shared with `ydoc.open` before probing a
@@ -3401,10 +3386,7 @@ impl EngineService {
                         "content-exceeds-capture-cap",
                     ));
                 }
-                let actual = Sha256::digest(&bytes)
-                    .iter()
-                    .map(|byte| format!("{byte:02x}"))
-                    .collect::<String>();
+                let actual = dohc_engine_storage::hex_sha256(&bytes);
                 if actual != sha256 {
                     return Err(wire(ErrorCode::InvalidParams, "invalid-input"));
                 }
@@ -13483,10 +13465,7 @@ fn sync_identifier(prefix: &'static str) -> Result<String, WireError> {
 fn sync_identifier_from_entropy(prefix: &str, mut entropy: [u8; 16]) -> String {
     entropy[6] = (entropy[6] & 0x0f) | 0x40;
     entropy[8] = (entropy[8] & 0x3f) | 0x80;
-    let hex = entropy
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let hex = dohc_engine_storage::hex(&entropy);
     format!(
         "{prefix}_{}-{}-{}-{}-{}",
         &hex[0..8],

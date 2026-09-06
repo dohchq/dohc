@@ -20,7 +20,7 @@ use dohc_engine_sync::{
     ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_replication_envelope,
     apply_ydoc_envelope,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{
     AUTOMATION_CLAIMED_EVENT, EngineEventNotice, EngineService, RECORD_CREATED_EVENT,
     RECORD_FIELD_CHANGED_EVENT, RECORD_UPDATED_EVENT, root_binding::write_root_binding,
@@ -54,7 +54,7 @@ fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
 }
 
 fn seed_collection_state(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -77,7 +77,7 @@ fn seed_collection_state(scratch: &ScratchDir) {
 }
 
 fn seed_schema(scratch: &ScratchDir, schema: &str) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -363,7 +363,7 @@ async fn get_record_pages_all_history_past_the_per_request_limit() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
 
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut connection = rusqlite::Connection::open(&db).expect("open history database");
     let tx = connection.transaction().expect("begin history seed");
     for recorded_at_ms in 0..SEEDED_HISTORY as i64 {
@@ -621,7 +621,7 @@ async fn local_live_id_edit_reasserts_engine_identity_and_keeps_history() {
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
     let markdown = format!("---\nid: {RECORD_ID}\nstatus: open\n---\n\nAlpha\n");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
@@ -866,7 +866,7 @@ async fn remote_id_edit_converges_on_both_devices_under_the_original_identity() 
             &scratch,
             "name: Tasks\nfields:\n  status:\n    type: text\n",
         );
-        let db = scratch.engine_db_path().expect("engine db path");
+        let db = engine_db_path(&scratch).expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
         seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
@@ -1302,7 +1302,7 @@ async fn collection_larger_than_frame_cap_pages_completely_in_sorted_order() {
 
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -1401,7 +1401,7 @@ async fn overdepth_sort_values_page_without_gaps_or_duplicates() {
 
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -1551,7 +1551,7 @@ async fn big_collection_numbers_cross_every_request_and_response_surface() {
     ];
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -1790,7 +1790,7 @@ async fn near_limit_record_round_trips_via_query_and_get_record_blob_egress() {
     const LARGE_FIELD_BYTES: usize = dohc_engine_domain::MAX_TEXT_BYTES - 1024;
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -1934,7 +1934,7 @@ async fn collection_get_uses_blob_egress_only_above_inband_limit() {
 
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -2103,7 +2103,7 @@ async fn remote_moment_append_updates_the_collection_index_at_apply_time() {
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
@@ -2277,7 +2277,7 @@ async fn remote_moment_append_without_frontmatter_clears_the_collection_index() 
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
@@ -2442,7 +2442,7 @@ async fn park_remote_status_update() -> ParkedRecordUpdate {
         &scratch,
         "name: Tasks\nfields:\n  status:\n    type: text\n",
     );
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     seed_text(&mut store, "tasks/alpha.md", &markdown, 3);
@@ -2687,7 +2687,7 @@ fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
 }
 
 fn assert_no_automation_claims(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let store = EngineStore::open(&db, 9).expect("open claim probe store");
     let claims: i64 = store
         .read_with(|conn| {
@@ -2829,7 +2829,7 @@ async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal(
 }
 
 fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let store = EngineStore::open(&db, 8).expect("open deferred probe store");
     store
         .read_with(|conn| {
@@ -2861,7 +2861,7 @@ async fn a_parked_update_survives_the_collection_reconcile_pass_and_fires_record
     // Reopen the adoption so the reconcile pass processes the parked record's
     // document again, and touch the schema so the next capture pass runs
     // collection reconciliation at all.
-    let db = parked.scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&parked.scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 5).expect("open adoption reset store");
     store
         .write_with(&NoFaults, |tx| {
@@ -2962,7 +2962,7 @@ async fn get_record_history_pages_cut_by_bytes_and_continue_from_the_cursor() {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
     seed_collection_state(&scratch);
 
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut connection = rusqlite::Connection::open(&db).expect("open history database");
     let tx = connection.transaction().expect("begin history seed");
     let next_value = serde_json::to_string(&"x".repeat(VALUE_BYTES)).expect("history value");
@@ -3079,7 +3079,7 @@ async fn collections_list_pages_with_the_exclusive_cursor() {
     const COLLECTIONS: [&str; 3] = ["alpha", "beta", "gamma"];
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -3183,7 +3183,7 @@ async fn collections_list_byte_bounds_degradation_reasons_and_the_page() {
     const REASONS_PER_COLLECTION: usize = 700;
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -3321,7 +3321,7 @@ async fn collection_responses_honor_a_negotiated_frame_limit_below_the_default()
     const NEGOTIATED: u32 = dohc_engine_protocol::limits::MIN_NEGOTIABLE_FRAME_BYTES;
     let scratch = ScratchDir::new().expect("scratch");
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)

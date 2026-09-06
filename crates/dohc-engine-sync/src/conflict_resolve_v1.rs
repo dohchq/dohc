@@ -3256,8 +3256,11 @@ mod tests {
         predecessor_update: Option<&[u8]>,
     ) -> (ScratchDir, EngineStore, DocKey) {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db path"), 1_000).expect("store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db path"),
+            1_000,
+        )
+        .expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");
@@ -3618,7 +3621,7 @@ mod tests {
 
     fn receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)

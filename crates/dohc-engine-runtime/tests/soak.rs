@@ -4,7 +4,7 @@
 //! (the primitive the daemon's shutdown drain uses). Small-scale and fast.
 
 use dohc_engine_runtime::WorkspaceSupervisor;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 /// Enough cycles to expose a per-cycle leak, few enough to stay well under a
 /// second.
@@ -17,7 +17,7 @@ const SOAK_SMOKE_CYCLES: usize = 50;
 #[test]
 fn repeated_open_close_of_one_workspace_returns_to_baseline_every_cycle() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     // Isolated instance, never `WorkspaceSupervisor::global()` -- a soak
     // test must not pollute (or be polluted by) the process-wide registry.
     let supervisor = WorkspaceSupervisor::new();

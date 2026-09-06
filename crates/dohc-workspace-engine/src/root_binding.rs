@@ -58,10 +58,7 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
 pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| RootBindingError::Unwritable)?;
-    let token = bytes
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let token = dohc_engine_storage::hex(&bytes);
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
     create_binding_dir(&marker)?;
     let mut file = match std::fs::OpenOptions::new()

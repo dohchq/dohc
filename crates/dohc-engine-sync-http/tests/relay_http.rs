@@ -17,7 +17,7 @@ use dohc_engine_sync::{
     read_pushed_seq, read_relay_cursor,
 };
 use dohc_engine_sync_http::HttpRelayTransport;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use serde_json::{Value, json};
 
 #[derive(Debug)]
@@ -249,7 +249,7 @@ fn probe(transport: &HttpRelayTransport) -> Result<dohc_engine_sync::ProbeRespon
 
 fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("engine db path");
+    let path = engine_db_path(&scratch).expect("engine db path");
     let store = EngineStore::open(&path, 1_000).expect("open engine store");
     (scratch, path, store)
 }

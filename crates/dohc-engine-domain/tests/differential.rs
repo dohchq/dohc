@@ -12,12 +12,13 @@
 //! live TS-process runner would drive the same trace through the TS engine and
 //! apply N7 structural ID substitution before comparing — see the PR notes.
 
+use dohc_engine_domain::normalize;
 use dohc_engine_domain::{
     CreateNamedVersion, DeleteTextFile, NoFaults, RenameTextFile, RollbackTextFileMutation,
     VersionedTextStore, WriteText, store::text_blob_sha256,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
 const WS: &str = "ws-diff";
@@ -164,7 +165,7 @@ fn run_trace(db: &std::path::Path) -> String {
     vt.set_active_version(WS, "main", &NO_FAULTS)
         .expect("restore main");
 
-    vt.normalized_snapshot(WS)
+    normalize::capture(&vt, WS)
         .expect("normalize")
         .to_canonical_string()
 }
@@ -198,7 +199,7 @@ fn golden() -> String {
 #[test]
 fn restore_and_history_trace_matches_golden() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let actual = run_trace(&db);
     assert_eq!(actual, golden(), "normalized state diverged from golden");
 }
@@ -209,7 +210,7 @@ fn restore_and_history_trace_matches_golden() {
 fn trace_is_deterministic_across_fresh_stores() {
     let a = ScratchDir::new().expect("scratch a");
     let b = ScratchDir::new().expect("scratch b");
-    let out_a = run_trace(&a.engine_db_path().expect("db a"));
-    let out_b = run_trace(&b.engine_db_path().expect("db b"));
+    let out_a = run_trace(&engine_db_path(&a).expect("db a"));
+    let out_b = run_trace(&engine_db_path(&b).expect("db b"));
     assert_eq!(out_a, out_b);
 }

@@ -4,14 +4,14 @@ use dohc_engine_domain::{
     parse_mention_handles,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 
 const WS: &str = "b2-round2";
 const NO_FAULTS: NoFaults = NoFaults;
 
 fn store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&path, 1).expect("store");
     (scratch, store)
 }

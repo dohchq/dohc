@@ -11,7 +11,7 @@ use dohc_engine_protocol::{
     },
     wire::{BlobStart, Envelope, Request, WorkspaceHandle, decode_control, encode_control},
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc};
@@ -6715,7 +6715,7 @@ async fn unversioned_conflict_resolve_rpc_is_rejected_before_import_bookkeeping(
         "recordedAtMs": 2_000,
     });
     let store = dohc_engine_storage::EngineStore::open(
-        &scratch.engine_db_path().expect("engine db"),
+        &engine_db_path(&scratch).expect("engine db"),
         6_564,
     )
     .expect("open mutation witness");

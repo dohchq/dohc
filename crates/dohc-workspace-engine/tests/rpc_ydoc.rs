@@ -15,7 +15,7 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
@@ -757,7 +757,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
         "main",
         "drawings/delete.excalidraw",
     );
-    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 2)
         .expect("open marker store");
     ensure_marker(
         &mut store,
@@ -917,7 +917,7 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
     let handle = open_workspace(&transport, &scratch, WORKSPACE, 1).await;
     call(&transport, &handle, 2, "capture.flush", json!({})).await;
     let object_id = dohc_engine_domain::derive_capture_object_id(WORKSPACE, "main", PATH);
-    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 2)
         .expect("open marker store");
     ensure_marker(
         &mut store,
@@ -1335,7 +1335,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     .await;
     assert_eq!(restored["sha256"], opened["artifactAssets"][0]["sha256"]);
     let pending_restore_jobs: i64 =
-        EngineStore::open(&scratch.engine_db_path().expect("engine database"), 10)
+        EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 10)
             .expect("open job store")
             .read_with(|conn| {
                 conn.query_row(
@@ -2308,7 +2308,7 @@ struct SettleFingerprint(Vec<TableFingerprint>);
 
 fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerprint {
     let connection =
-        rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
             .expect("open engine database");
     let rows = |table: &'static str, workspace_scoped: bool| {
         let sql = if workspace_scoped {
@@ -4756,7 +4756,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
-    let db_path = scratch.engine_db_path().expect("engine database path");
+    let db_path = engine_db_path(&scratch).expect("engine database path");
     let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
     connection
         .execute(
@@ -4975,7 +4975,7 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
-    let db_path = scratch.engine_db_path().expect("engine database path");
+    let db_path = engine_db_path(&scratch).expect("engine database path");
     let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
     connection
         .execute(

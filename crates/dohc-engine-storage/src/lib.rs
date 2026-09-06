@@ -39,7 +39,7 @@ pub use backup::{
     create_verified_backup, load_valid_backup,
 };
 pub use blob::{
-    get_binary_blob, has_binary_blob, hex_sha256, put_binary_blob, put_binary_blob_verified,
+    get_binary_blob, has_binary_blob, hex, hex_sha256, put_binary_blob, put_binary_blob_verified,
     put_binary_blob_with_sha,
 };
 pub use diagnostics::{CorruptionKind, DiagnosticBundle, classify};

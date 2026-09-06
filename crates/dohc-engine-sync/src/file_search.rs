@@ -90,7 +90,7 @@ mod tests {
     #[test]
     fn replicated_write_indexes_only_excalidraw_text() {
         let scratch = ScratchDir::new().expect("scratch");
-        let database = scratch.engine_db_path().expect("database path");
+        let database = dohc_engine_testkit::engine_db_path(&scratch).expect("database path");
         let mut store = EngineStore::open(&database, 1).expect("open store");
         let policy = search_policy_for_store(&store).expect("search policy");
         let scene = json!({

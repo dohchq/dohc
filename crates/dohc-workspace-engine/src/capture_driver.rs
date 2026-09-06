@@ -3871,9 +3871,7 @@ mod root_bound_run_tests {
         std::fs::write(root.join("plan.md"), b"original workspace content")
             .expect("write original content");
 
-        let db = store_scratch
-            .engine_db_path()
-            .expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let seed_actor = actor.clone();
@@ -4216,7 +4214,7 @@ mod collection_reconcile_scheduling_tests {
         std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
             .expect("collection record");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         seed_collection_capture(
@@ -4316,7 +4314,7 @@ mod collection_reconcile_scheduling_tests {
         std::fs::write(collection_dir.join("beta.md"), b"Beta task\n")
             .expect("second collection record");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         seed_collection_capture(
@@ -4424,7 +4422,7 @@ mod collection_reconcile_scheduling_tests {
         let record_path = collection_dir.join("alpha.md");
         std::fs::create_dir_all(&collection_dir).expect("collection directory");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let leases = LeaseRegistry::new();
@@ -4646,7 +4644,7 @@ mod collection_reconcile_scheduling_tests {
         .expect("collection schema");
         std::fs::write(&record_path, MALFORMED).expect("malformed collection record");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let leases = LeaseRegistry::new();
@@ -4883,7 +4881,7 @@ mod collection_reconcile_scheduling_tests {
         std::fs::write(collection_dir.join("alpha.md"), b"Alpha task\n")
             .expect("collection record");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let seed_actor = actor.clone();
@@ -4997,7 +4995,7 @@ mod collection_reconcile_scheduling_tests {
         )
         .expect("collection record");
 
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         seed_collection_capture(
@@ -5102,7 +5100,7 @@ mod selected_recovery_replay_tests {
         let scratch = ScratchDir::new().expect("scratch");
         std::fs::write(scratch.path().join(UNRELATED_PATH), b"external occupant")
             .expect("unrelated occupant");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let mut store = EngineStore::open(&db, 1).expect("open fixture store");
         let unrelated_sha = store
             .put_binary_blob(b"unrelated intended bytes")

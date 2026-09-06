@@ -374,7 +374,7 @@ mod tests {
 
     fn store() -> (ScratchDir, EngineStore) {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let store = EngineStore::open(&path, 1_000).expect("open store");
         (scratch, store)
     }

@@ -14,7 +14,7 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -95,7 +95,7 @@ fn facts(origin_seq: i64) -> CollectionRecordApplyFacts {
 /// claims from real apply facts, and two stale running claims for the
 /// open-time reaper — one with attempts left, one exhausted.
 fn seed_claims(scratch: &ScratchDir) {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     store

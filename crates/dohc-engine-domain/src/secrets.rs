@@ -158,7 +158,7 @@ impl core::fmt::Debug for CaptureSecret {
     }
 }
 
-/// Inputs to [`capture_secret_retire`]: the autonomous, KEYLESS secret retire
+/// Inputs to [`capture_secret_retire_with`]: the autonomous, KEYLESS secret retire
 /// (a delete never decrypts, so it works without the workspace key).
 #[derive(Debug, Clone)]
 pub struct CaptureSecretRetire {
@@ -425,7 +425,7 @@ impl<'a> SecretFileStore<'a> {
         input: &SecretDelete,
         faults: &dyn FaultInjector,
     ) -> Result<Option<SecretMomentRecord>, DomainError> {
-        delete_secret_file_keyless(self.store, input, faults)
+        delete_secret_file_keyless_with(self.store, input, faults, |_, _| Ok(()))
     }
 
     // -------------------------------------------------------------- capture
@@ -662,15 +662,6 @@ impl<'a> SecretFileStore<'a> {
 
     // ---------------------------------------------------------------- reads
 
-    /// List secret-file tips in a version (metadata only), ordered by path.
-    pub fn list_secret_files(
-        &self,
-        workspace_id: &str,
-        version_id: &str,
-    ) -> Result<Vec<SecretFileStat>, DomainError> {
-        list_secret_files_keyless(self.store, workspace_id, version_id)
-    }
-
     /// List secret moments, newest first, optionally scoped to a version.
     pub fn list_secret_moments(
         &self,
@@ -711,28 +702,6 @@ impl<'a> SecretFileStore<'a> {
             limit,
         )?
         .entries)
-    }
-
-    // ----------------------------------------------------------------- fork
-
-    /// Fork a version's secret files into `to_version_id`: copies every tip
-    /// verbatim as ciphertext (no decryption — the AAD is not version-bound) and
-    /// seeds `secret_fork_bases` with the same copy. Existing destination secret
-    /// rows are cleared first.
-    pub fn fork_version(
-        &mut self,
-        workspace_id: &str,
-        from_version_id: &str,
-        to_version_id: &str,
-        faults: &dyn FaultInjector,
-    ) -> Result<(), DomainError> {
-        fork_version_keyless(
-            self.store,
-            workspace_id,
-            from_version_id,
-            to_version_id,
-            faults,
-        )
     }
 
     // ------------------------------------------------------------- internals
@@ -778,26 +747,11 @@ pub(crate) fn fork_version_in_tx(
     Ok(())
 }
 
-/// Keyless standalone secret fork. Ciphertext is copied verbatim and both
-/// version references are validated before entering the write transaction.
-pub fn fork_version_keyless(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    from_version_id: &str,
-    to_version_id: &str,
-    faults: &dyn FaultInjector,
-) -> Result<(), DomainError> {
-    fork_version_keyless_with(
-        store,
-        workspace_id,
-        from_version_id,
-        to_version_id,
-        faults,
-        |_| Ok(()),
-    )
-}
-
-/// Fork secrets with a caller-supplied same-transaction side effect.
+/// Keyless standalone secret fork: copies every tip verbatim as ciphertext
+/// (no decryption — the AAD is not version-bound) and seeds
+/// `secret_fork_bases` with the same copy. Existing destination secret rows
+/// are cleared first. Both version references are validated before entering
+/// the write transaction; `after` runs inside it.
 pub fn fork_version_keyless_with<F>(
     store: &mut EngineStore,
     workspace_id: &str,
@@ -834,16 +788,7 @@ where
 /// The keyless secret delete: records a delete moment and removes the tip. A
 /// no-op (no moment) when there is no current tip. Free-standing because a
 /// delete never decrypts — capture retire must work even when the workspace
-/// key is unavailable.
-pub fn delete_secret_file_keyless(
-    store: &mut EngineStore,
-    input: &SecretDelete,
-    faults: &dyn FaultInjector,
-) -> Result<Option<SecretMomentRecord>, DomainError> {
-    delete_secret_file_keyless_with(store, input, faults, |_, _| Ok(()))
-}
-
-/// Delete a secret with a caller-supplied same-transaction side effect.
+/// key is unavailable. `after` runs inside the delete transaction.
 pub fn delete_secret_file_keyless_with<F>(
     store: &mut EngineStore,
     input: &SecretDelete,
@@ -1176,15 +1121,7 @@ pub fn compare_secret_files_page_keyless(
 
 /// Three-way-apply one source-version secret state to the destination. The key
 /// is used only for equality/base comparisons; writes copy sealed fields.
-pub fn apply_secret_file_from_version(
-    store: &mut EngineStore,
-    key: &SecretDataKey,
-    input: &ApplySecretFileFromVersion,
-    faults: &dyn FaultInjector,
-) -> Result<SecretWriteResult, DomainError> {
-    apply_secret_file_from_version_with(store, key, input, faults, |_, _| Ok(()))
-}
-
+/// `after` runs inside the apply transaction.
 pub fn apply_secret_file_from_version_with<F>(
     store: &mut EngineStore,
     key: &SecretDataKey,
@@ -1338,57 +1275,7 @@ fn secret_plaintexts_equal(
 
 /// Restore the sealed state that existed immediately before a secret moment.
 /// The prior ciphertext is copied forward verbatim; history is append-only.
-pub fn restore_secret_file_verbatim(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    path: &str,
-    before_moment_id: &str,
-    moment_id: &str,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-) -> Result<SecretRestoreResult, DomainError> {
-    restore_secret_file_verbatim_with_metadata(
-        store,
-        workspace_id,
-        path,
-        before_moment_id,
-        moment_id,
-        "restore",
-        None,
-        None,
-        now_ms,
-        faults,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn restore_secret_file_verbatim_with_metadata(
-    store: &mut EngineStore,
-    workspace_id: &str,
-    path: &str,
-    before_moment_id: &str,
-    moment_id: &str,
-    metadata_origin: &str,
-    metadata_summary: Option<String>,
-    metadata_correlation_id: Option<String>,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
-) -> Result<SecretRestoreResult, DomainError> {
-    restore_secret_file_verbatim_with_metadata_and_after(
-        store,
-        workspace_id,
-        path,
-        before_moment_id,
-        moment_id,
-        metadata_origin,
-        metadata_summary,
-        metadata_correlation_id,
-        now_ms,
-        faults,
-        |_, _| Ok(()),
-    )
-}
-
+/// `after` runs inside the restore transaction.
 #[allow(clippy::too_many_arguments)]
 pub fn restore_secret_file_verbatim_with_metadata_and_after<F>(
     store: &mut EngineStore,
@@ -1655,15 +1542,7 @@ fn delete_secret_file_inner(
 /// length-framed capture scheme (no caller-supplied ids) and removes the tip.
 /// An absent tip is an idempotent no-op. The reserved secret moment order is
 /// pinned against the one the delete actually persisted (release-safe).
-pub fn capture_secret_retire(
-    store: &mut EngineStore,
-    input: &CaptureSecretRetire,
-    faults: &dyn FaultInjector,
-) -> Result<Option<SecretMomentRecord>, DomainError> {
-    capture_secret_retire_with(store, input, faults, |_, _| Ok(()))
-}
-
-/// Retire a captured secret with a caller-supplied same-transaction side effect.
+/// `after` runs inside the retire transaction.
 pub fn capture_secret_retire_with<F>(
     store: &mut EngineStore,
     input: &CaptureSecretRetire,

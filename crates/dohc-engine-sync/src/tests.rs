@@ -14,7 +14,7 @@ use dohc_engine_domain::{
     WriteBinary, attachment_id_for, channel_slug_for_name,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, TxnOutcome};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::{OptionalExtension, params};
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -42,7 +42,7 @@ macro_rules! assert_invalid_refusal {
 
 fn store() -> (ScratchDir, std::path::PathBuf, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&path, 1_000).expect("open");
     (scratch, path, store)
 }
@@ -3351,13 +3351,8 @@ fn collision_slug_for_test(requested: &str, allocation_identity: &str, attempt: 
         end = index + ch.len_utf8();
     }
     let bounded = requested[..end].trim_end_matches('-');
-    let digest = hasher.finalize();
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    format!("{bounded}-{hex}")
+    let suffix = dohc_engine_storage::hex(&hasher.finalize());
+    format!("{bounded}-{suffix}")
 }
 
 #[test]
@@ -18817,7 +18812,7 @@ fn cloned_engines_capture_distinct_moments_and_converge_after_origin_recovery() 
     drop(source);
 
     let clone_scratch = ScratchDir::new().expect("clone scratch");
-    let clone_path = clone_scratch.engine_db_path().expect("clone db path");
+    let clone_path = engine_db_path(&clone_scratch).expect("clone db path");
     std::fs::copy(&source_path, &clone_path).expect("clone engine database");
     let mut left = EngineStore::open(&source_path, 1_200).expect("open original engine");
     let mut right = EngineStore::open(&clone_path, 1_200).expect("open cloned engine");

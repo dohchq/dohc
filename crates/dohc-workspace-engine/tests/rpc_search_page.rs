@@ -7,7 +7,7 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::{EngineService, root_binding::write_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -93,7 +93,7 @@ async fn write(
 
 fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatching_rows: usize) {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let faults = NoFaults;
     let mut store = EngineStore::open(&db, 1).expect("seed store");
     assert!(

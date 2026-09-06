@@ -17,7 +17,7 @@ use dohc_engine_domain::{
     VersionedTextStore, WriteText,
 };
 use dohc_engine_storage::{EngineStore, MAX_IDENTIFIER_BYTES};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const NO_FAULTS: NoFaults = NoFaults;
 const WS: &str = "ws-identifier-bounds";
@@ -40,7 +40,7 @@ fn write(object: &str, moment: &str) -> WriteText {
 }
 
 fn open(scratch: &ScratchDir) -> EngineStore {
-    let mut store = EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open");
+    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("db"), 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NO_FAULTS)
         .expect("ensure main");

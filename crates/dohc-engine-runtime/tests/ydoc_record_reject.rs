@@ -9,7 +9,7 @@
 use dohc_engine_collab::{CollabError, ContentKind, Regime, Ydoc};
 use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -17,7 +17,7 @@ async fn malformed_seed_is_rejected_without_stranding_the_parent_row() {
     const WS: &str = "ws-malformed-seed";
     const PATH: &str = "notes/malformed-seed.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("actor").actor;
@@ -138,7 +138,7 @@ async fn direct_record_update_refuses_invalid_actor_origins_before_journaling() 
     const WS: &str = "ws-invalid-actor-origin";
     const PATH: &str = "notes/invalid-actor-origin.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("actor").actor;

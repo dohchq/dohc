@@ -28,7 +28,7 @@ use dohc_engine_sync::{
     apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
     drain_deferred_ydoc_for_key,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use yrs::types::Attrs;
@@ -367,7 +367,7 @@ fn replay_into_clean_peer(
     path: &str,
 ) -> String {
     let scratch = ScratchDir::new().expect("peer scratch");
-    let db = scratch.engine_db_path().expect("peer db");
+    let db = engine_db_path(&scratch).expect("peer db");
     let mut peer = EngineStore::open(&db, 9_200).expect("open peer store");
     VersionedTextStore::new(&mut peer)
         .ensure_main_version(workspace_id, "main", 1_000, &NoFaults)
@@ -460,9 +460,9 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
     let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
     let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha");
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     seed_collection_replica(&source_db, WS, OBJECT, PATH, &initial);
     seed_collection_replica(&peer_db, WS, OBJECT, PATH, &initial);
     enable_sync(&source_db, WS);
@@ -711,7 +711,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     const WS: &str = "ws-originate-fresh";
     const PATH: &str = "notes/rich.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -802,7 +802,7 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
     const WS: &str = "ws-journal-blob-sha";
     const PATH: &str = "notes/journal-sha.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -909,7 +909,7 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     const WS: &str = "ws-originate-after-drain";
     const PATH: &str = "notes/deferred.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1021,7 +1021,7 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-drain-decline";
     const PATH: &str = "notes/oversized-drain.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1068,7 +1068,7 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
     const WS: &str = "ws-originate-after-ordinary-apply";
     const PATH: &str = "notes/ordinary.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1154,7 +1154,7 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-apply-decline";
     const PATH: &str = "notes/oversized-apply.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1185,7 +1185,7 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
 /// stayed private: no replication op, and a prunable local-only marker.
 async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &str)) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     prepare(&db, ws);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1277,7 +1277,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
     const WS: &str = "ws-originate-promote";
     const PATH: &str = "notes/promoted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // Private workspace, one durable edit, no close.
     let supervisor = WorkspaceSupervisor::new();
@@ -1417,7 +1417,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
     const WS: &str = "ws-originate-delete-before-enrollment";
     const PATH: &str = "notes/deleted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_identity(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1541,7 +1541,7 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
     const WS: &str = "ws-originate-capture-retire";
     const PATH: &str = "notes/capture-retired.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
@@ -1602,7 +1602,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     const WS: &str = "ws-originate-capture-live-lease";
     const PATH: &str = "notes/live-capture-retire.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1800,7 +1800,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
     const WS: &str = "ws-originate-merge-delete";
     const PATH: &str = "notes/merge-deleted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
@@ -1911,7 +1911,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
     const WS: &str = "ws-originate-race";
     const PATH: &str = "notes/raced.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -2002,7 +2002,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
     const WS: &str = "ws-originate-redeliver";
     const PATH: &str = "notes/redelivered.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -2089,7 +2089,7 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     const WS: &str = "ws-originate-close";
     const PATH: &str = "notes/closed.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -2168,7 +2168,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
     const BEFORE: &str = "seed\n";
     const AFTER: &str = "seed\nafter\n";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes directory");
     std::fs::write(scratch.path().join(PATH), BEFORE).expect("seed disk");
     enable_sync(&db, WS);
@@ -2351,9 +2351,9 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
     const BEFORE: &str = "before\n";
     const AFTER: &str = "after\n";
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     let base_doc = Ydoc::wire();
     base_doc.plaintext_insert(0, BEFORE);
     let base = base_doc.encode_full_state();
@@ -2535,7 +2535,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     const WS: &str = "ws-originate-oversize";
     const PATH: &str = "notes/oversize.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -2656,7 +2656,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
     const WS: &str = "ws-originate-past-old-cap";
     const PATH: &str = "notes/long-design-doc.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;

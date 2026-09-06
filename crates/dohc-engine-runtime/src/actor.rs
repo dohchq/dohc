@@ -14750,7 +14750,7 @@ mod capture_batch_fast_path_tests {
     #[test]
     fn clean_capture_batch_uses_one_batch_savepoint() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let begun_savepoints = Arc::new(Mutex::new(Vec::new()));
         let observed_savepoints = Arc::clone(&begun_savepoints);
@@ -14814,7 +14814,7 @@ mod capture_batch_fast_path_tests {
         const FAILED_PATH: &str = "note-1.md";
 
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let inputs = (0..3)
             .map(|index| CaptureIngest {
@@ -15333,8 +15333,11 @@ mod collection_relation_cleanup_tests {
     #[test]
     fn absent_relation_target_cleanup_refreshes_only_the_index() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
             .expect("ensure main version");
         write_text(
@@ -15474,8 +15477,11 @@ mod doc_cache_reset_tests {
     #[test]
     fn local_file_retire_removes_a_poisoned_warm_entry_immediately() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "document").expect("document key");
@@ -15650,8 +15656,11 @@ mod scene_seed_transaction_tests {
     #[test]
     fn scene_seed_rolls_back_lineage_assets_and_outbound_work_as_one_unit() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
@@ -15742,8 +15751,11 @@ mod scene_seed_transaction_tests {
     #[test]
     fn duplicate_content_scene_assets_return_only_created_jobs() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
@@ -15804,8 +15816,11 @@ mod scene_seed_transaction_tests {
     #[test]
     fn scene_asset_materialization_conflict_stays_closed_until_disk_is_resolved() {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 1)
-            .expect("open engine store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("engine database"),
+            1,
+        )
+        .expect("open engine store");
         ensure_mutation_version_on_store(&mut store, "workspace", "main", 1, &NoFaults)
             .expect("ensure main version");
         let key = DocKey::new("workspace", "main", "drawing-object").expect("document key");
@@ -15956,7 +15971,7 @@ mod share_view_identity_tests {
     #[test]
     fn a_view_share_is_never_enrolled() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::View),
@@ -15972,7 +15987,7 @@ mod share_view_identity_tests {
     #[test]
     fn a_comment_share_is_never_enrolled() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Comment),
@@ -16004,7 +16019,7 @@ mod share_view_identity_tests {
     fn only_an_edit_share_takes_the_file_lane() {
         for access in [ShareAccess::View, ShareAccess::Comment] {
             let scratch = ScratchDir::new().expect("scratch");
-            let path = scratch.engine_db_path().expect("db path");
+            let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
             let mut store = EngineStore::open(&path, 1_000).expect("open");
             assert_eq!(
                 record(&mut store, access),
@@ -16019,7 +16034,7 @@ mod share_view_identity_tests {
         }
 
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
@@ -16033,7 +16048,7 @@ mod share_view_identity_tests {
     #[test]
     fn an_edit_share_enrols_once_per_workspace() {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("open");
         assert_eq!(
             record(&mut store, ShareAccess::Edit),
@@ -16164,7 +16179,7 @@ mod capture_secret_root_guard_tests {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let root_scratch = ScratchDir::new().expect("workspace root scratch");
         let root = root_scratch.path();
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let guard = RejectSecondValidation {
             calls: AtomicUsize::new(0),
@@ -16234,7 +16249,7 @@ mod capture_secret_root_guard_tests {
         let moved_scratch = ScratchDir::new().expect("moved root scratch");
         let root = root_scratch.path().to_path_buf();
         let moved_root = moved_scratch.path().join("original-root");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         std::fs::create_dir_all(root.join("notes")).expect("create original notes");
@@ -16368,7 +16383,7 @@ mod capture_secret_root_guard_tests {
         let moved_scratch = ScratchDir::new().expect("moved root scratch");
         let root = root_scratch.path().to_path_buf();
         let moved_root = moved_scratch.path().join("original-root");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         std::fs::write(root.join(SECRET_PATH), b"TOKEN=original").expect("write original secret");
@@ -16511,7 +16526,7 @@ mod rollback_identity_tests {
     #[test]
     fn undecodable_or_foreign_rollback_identities_fail_closed() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine database path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine database path");
         let store = EngineStore::open(&db, 1).expect("open store");
 
         let bare = pending_write("rollback-restore_target", "ws-a");
