@@ -531,9 +531,6 @@ describe("share-web Node request adapter", () => {
     expect(secondClient).toMatchObject({ kind: "response", status: 200 });
   });
 
-  // Eight real concurrent streams through the spawned adapter: under full
-  // package-suite parallelism the default 5s budget starves (twice observed;
-  // isolated it finishes in <200ms). The wider budget is capacity, not a wait.
   it("limits each session to 8 blob proxies and releases settled slots", { timeout: 30_000 }, async () => {
     const relay = await startControlledBlobRelay();
     const server = await startShareWeb({ relayUrl: relay.url });
@@ -541,10 +538,12 @@ describe("share-web Node request adapter", () => {
     const firstEight = Array.from({ length: 8 }, () =>
       requestBlob(server.port, session),
     );
-    const ninth = requestBlob(server.port, session);
+    let ninth: PendingBlobRequest | undefined;
     let admitted: PendingBlobRequest | undefined;
 
     try {
+      await relay.waitForBlobRequests(8);
+      ninth = requestBlob(server.port, session);
       const ninthRelayRequest = relay.waitForBlobRequests(9);
       const outcome = await Promise.race([
         ninth.response.then((response) => ({ kind: "response" as const, response })),
@@ -569,7 +568,7 @@ describe("share-web Node request adapter", () => {
       await readResponse(admittedResponse);
     } finally {
       relay.finishAllBlobs();
-      for (const blob of [...firstEight, ninth]) blob.destroy();
+      for (const blob of [...firstEight, ninth]) blob?.destroy();
       admitted?.destroy();
     }
   });
