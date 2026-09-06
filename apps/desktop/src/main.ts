@@ -688,6 +688,7 @@ import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
   assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
+  START_CANCELLED_MESSAGE,
 } from "./workspaces/sitePreviewLifecycle";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
@@ -1433,7 +1434,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
     );
   }
   if (!input.isCurrent() || input.signal.aborted) {
-    throw new Error("App preview start was cancelled because the renderer restarted.");
+    throw new Error(START_CANCELLED_MESSAGE);
   }
   if (!outputRoot) throw new Error(`App has no build output to preview: ${input.site.root}`);
   const handle = await startStaticSitePreview(

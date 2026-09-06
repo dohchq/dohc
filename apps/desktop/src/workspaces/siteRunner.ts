@@ -702,7 +702,7 @@ function assertDirectHostBinds(command: string, args: string[]): void {
   for (const { value: host, unverifiableFlag } of hosts) {
     if (unverifiableFlag) {
       throw new Error(
-        `Site dev server command uses "${unverifiableFlag}" without a value dohc can read, so its loopback-only host binding cannot be verified: ${[
+        `App dev server command uses "${unverifiableFlag}" without a value dohc can read, so its loopback-only host binding cannot be verified: ${[
           command,
           ...args,
         ].join(" ")}`,
@@ -711,7 +711,7 @@ function assertDirectHostBinds(command: string, args: string[]): void {
     if (host !== "" && isLoopbackHostname(host)) continue;
     const displayHost = host === "" ? "all interfaces" : host;
     throw new Error(
-      `Site dev server command must bind to a loopback host, not ${displayHost}: ${[
+      `App dev server command must bind to a loopback host, not ${displayHost}: ${[
         command,
         ...args,
       ].join(" ")}`,

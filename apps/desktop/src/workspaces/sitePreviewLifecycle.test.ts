@@ -208,7 +208,7 @@ describe("site preview lifecycle", () => {
     finishExecution();
 
     await expect(stopping).rejects.toThrow(
-      "The site preview stop request does not target the active workspace. Open the workspace and stop the preview again.",
+      "The app preview stop request does not target the active workspace. Open the workspace and stop the preview again.",
     );
     expect(await starting).toBeInstanceOf(Error);
     expect(candidate.stop).toHaveBeenCalledTimes(1);

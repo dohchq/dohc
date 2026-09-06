@@ -22,6 +22,11 @@ import type {
 import { bridge } from "./bridge";
 import { openLinkExternally } from "./linkActivation";
 import { isLoopbackOrigin } from "./sdkFrame";
+import {
+  APP_CHECK_FALLBACK_MESSAGE,
+  APP_MISSING_MESSAGE,
+  NO_SHARE_OUTPUT_MESSAGE,
+} from "./appCopy";
 
 type WorkspacePreviewMode =
   WorkspaceSettingsResult["settings"]["sites"]["defaultPreviewMode"];
@@ -190,7 +195,7 @@ function shareRefusalMessage(
   if (result.reason === "non-file-reference") {
     return `dohc found a shared reference that is not a file: ${result.path}. Replace the reference, then try again.`;
   }
-  return "This app has no static entry file or build output to share.";
+  return NO_SHARE_OUTPUT_MESSAGE;
 }
 
 export function SitePreviewPage(props: {
@@ -367,7 +372,7 @@ export function SitePreviewPage(props: {
       // site under this tab's name, so both refresh points here require an
       // exact root match before exposing a target.
       if (!fresh || fresh.root !== props.siteRoot) {
-        setActionError("This app is no longer part of the workspace.");
+        setActionError(APP_MISSING_MESSAGE);
         return;
       }
       let latest = fresh;
@@ -393,7 +398,7 @@ export function SitePreviewPage(props: {
         });
         if (!isCurrent()) return;
         if (refreshedAfterBuild && refreshedAfterBuild.root !== props.siteRoot) {
-          setActionError("This app is no longer part of the workspace.");
+          setActionError(APP_MISSING_MESSAGE);
           return;
         }
         if (refreshedAfterBuild) latest = refreshedAfterBuild;
@@ -403,7 +408,7 @@ export function SitePreviewPage(props: {
         if (isCurrent()) {
           setActionError(
             latest.shareManifest.ok
-              ? "This app has no static entry file or build output to share."
+              ? NO_SHARE_OUTPUT_MESSAGE
               : shareRefusalMessage(latest.shareManifest),
           );
         }
@@ -644,7 +649,7 @@ export function SitePreviewPage(props: {
       ) : load.status === "ready" && !site ? (
         <EmptyState
           title="App not detected"
-          body="This app is no longer part of the workspace."
+          body={APP_MISSING_MESSAGE}
         />
       ) : site ? (
         <>
@@ -658,7 +663,7 @@ export function SitePreviewPage(props: {
                   <AlertTriangle size={12} aria-hidden />
                   <span className="font-mono">{diagnostic.code}</span>
                   <span>
-                    {diagnostic.message || "Could not check this app fully."}
+                    {diagnostic.message || APP_CHECK_FALLBACK_MESSAGE}
                   </span>
                 </div>
               ))}

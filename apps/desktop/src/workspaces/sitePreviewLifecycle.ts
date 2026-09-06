@@ -28,7 +28,7 @@ function previewKey(workspaceId: string, siteRoot: string): string {
 }
 
 const EXITED_LOG_ENTRY_BUDGET = MAX_LOG_ENTRIES - 1;
-const START_CANCELLED_MESSAGE =
+export const START_CANCELLED_MESSAGE =
   "App preview start was cancelled because the renderer restarted.";
 
 type RunningPreview = {
@@ -436,7 +436,7 @@ export function createSitePreviewLifecycle(input: {
     assertActiveWorkspaceForSite(
       stopInput.getActiveWorkspaceId(),
       stopInput.workspaceId,
-      "site preview stop request",
+      "app preview stop request",
       "stop the preview again",
     );
     const key = previewKey(stopInput.workspaceId, stopInput.siteRoot);
@@ -445,7 +445,7 @@ export function createSitePreviewLifecycle(input: {
       assertActiveWorkspaceForSite(
         stopInput.getActiveWorkspaceId(),
         stopInput.workspaceId,
-        "site preview stop request",
+        "app preview stop request",
         "stop the preview again",
       );
       await stopCurrent(key);

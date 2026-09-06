@@ -6,6 +6,7 @@ import {
   Globe2,
 } from "lucide-react";
 import { useState } from "react";
+import { APP_CHECK_FALLBACK_MESSAGE } from "../appCopy";
 import type { SitePackageInfo } from "../../ipc/bridgeContract";
 import { bridge } from "../bridge";
 import { PrimaryButton } from "../ui/controls";
@@ -51,7 +52,7 @@ function appDiagnosticLabel(app: SitePackageInfo): string | null {
     app.diagnostics[0];
   if (!diagnostic) return null;
   const prefix = diagnostic.severity === "error" ? "Error" : "Warning";
-  const detail = diagnostic.message || "Could not check this app fully.";
+  const detail = diagnostic.message || APP_CHECK_FALLBACK_MESSAGE;
   return diagnostic.path ? `${prefix}: ${detail} (${diagnostic.path})` : `${prefix}: ${detail}`;
 }
 
