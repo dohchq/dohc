@@ -161,7 +161,7 @@ describe("registered presence IPC", () => {
   it.each(["signed-out", "no-relay", "no-enrollment", "wrong-owner", "wrong-server", "missing-share", "ended-share"])("refuses unavailable transport: %s", async reason => {
     const h = await harness();
     const entry = h.entries.get("workspace-a")!;
-    let selectedScope = scope;
+    let selectedScope: PresenceScopeInput = scope;
     if (reason === "signed-out") h.setCredentials(null);
     if (reason === "no-relay") h.setCredentials({ serverUrl: "https://cloud.example.test", userId: "owner", email: "owner@example.test", token: "secret" });
     if (reason === "no-enrollment") delete entry.remote;
