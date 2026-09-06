@@ -8,15 +8,14 @@ import type {
   PluginPermissionDecision,
 } from "@dohc/sdk/node";
 import {
-  asString,
   claudeAuth,
   claudeSessionArgs,
   isFatalStderr,
-  isRecord,
   mapStreamMessage,
   permissionControlResponse,
   permissionRequestEvent,
 } from "./claudeProtocol.ts";
+import { absent, asString, commandSpec, isRecord, type CommandSpec } from "./shared.ts";
 import { ClaudeStream } from "./streamJson.ts";
 
 /** How long a one-shot `claude` command has to answer a probe. */
@@ -45,30 +44,9 @@ const MAX_PROBE_ERROR_CHARS = 300;
 /** The id dohc's readiness handshake carries, which is never a Claude id. */
 const HANDSHAKE_ID = "dohc-initialize";
 
-interface ClaudeCommandSpec {
-  command: string;
-  args: string[];
-}
-
-/**
- * Where the `claude` command is, and what to pass it.
- *
- * The two overrides point the driver at another build of Claude Code, or at a
- * stand-in, without changing the plugin.
- */
-export function claudeCommandSpec(env: Record<string, string | undefined>): ClaudeCommandSpec {
-  const command = env.DOHC_AGENT_CLAUDE_CODE_COMMAND?.trim() || "claude";
-  const raw = env.DOHC_AGENT_CLAUDE_CODE_ARGS_JSON?.trim();
-  if (!raw) return { command, args: [] };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    const args = Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-    return { command, args };
-  } catch {
-    return { command, args: raw.split(" ").filter(Boolean) };
-  }
+/** Where the `claude` command is, and what to pass it. */
+export function claudeCommandSpec(env: Record<string, string | undefined>): CommandSpec {
+  return commandSpec(env, "CLAUDE_CODE", "claude");
 }
 
 type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
@@ -199,7 +177,7 @@ class ClaudeSession implements PluginAgentSession {
 
 export function createClaudeDriver(
   spawnCommand: SpawnCommand,
-  spec: ClaudeCommandSpec,
+  spec: CommandSpec,
   readyTimeout: number = READY_TIMEOUT_MS,
 ): PluginAgentDriver {
   interface CommandResult {
@@ -369,13 +347,4 @@ export function createClaudeDriver(
   }
 
   return { probe, startSession };
-}
-
-function absent(errorMessage: string): PluginAgentProbe {
-  return {
-    installed: false,
-    auth: { status: "unknown", loginHint: "Install and log in with the provider CLI." },
-    models: [],
-    errorMessage,
-  };
 }

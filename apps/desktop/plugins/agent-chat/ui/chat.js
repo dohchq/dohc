@@ -6,7 +6,13 @@ const stopButton = document.querySelector("#stop");
 const composer = document.querySelector("#composer");
 const messageInput = document.querySelector("#message");
 const sendButton = document.querySelector("#send");
+// Which agent this page fronts: the server fills it into the template it
+// serves, so one script labels every card correctly for any driver.
+const AGENT = document.documentElement.dataset.agent;
 
+if (!AGENT) {
+  throw new Error("The chat page does not name its agent.");
+}
 if (
   !transcript ||
   !emptyState ||
@@ -17,7 +23,7 @@ if (
   !messageInput ||
   !sendButton
 ) {
-  throw new Error("The Claude Code chat page is missing a required control.");
+  throw new Error("The chat page is missing a required control.");
 }
 
 // This page's own per-start credential, handed only to the guest the host
@@ -186,7 +192,7 @@ function renderText(event) {
   let tail = textItems.get(key);
   if (!tail) {
     const { body } = messageCard(
-      event.stream === "reasoning" ? "Reasoning" : "Claude Code",
+      event.stream === "reasoning" ? "Reasoning" : AGENT,
       "",
       event.stream === "reasoning" ? "agent reasoning" : "agent",
       event.at,
@@ -441,7 +447,7 @@ function renderEvent(event) {
       break;
     }
     case "auth":
-      if (event.detail) messageCard("Claude Code", event.detail, "agent", event.at);
+      if (event.detail) messageCard(AGENT, event.detail, "agent", event.at);
       break;
     case "error":
       if (event.fatal) {
@@ -452,7 +458,7 @@ function renderEvent(event) {
           recoveryCard(event.message, event.replay);
         }
       } else {
-        messageCard("Claude Code", event.message, "agent", event.at);
+        messageCard(AGENT, event.message, "agent", event.at);
         announce(event.message);
       }
       break;

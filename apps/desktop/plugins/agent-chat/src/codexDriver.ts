@@ -15,11 +15,10 @@ import {
   codexThreadId,
   isApprovalMethod,
   isFatalStderr,
-  isRecord,
-  asString,
   mapNotification,
 } from "./codexProtocol.ts";
 import { CommandJsonRpc, JsonRpcError } from "./jsonRpc.ts";
+import { absent, asString, commandSpec, isRecord, type CommandSpec } from "./shared.ts";
 
 /** How long `codex --version` has to answer before the probe calls it absent. */
 export const PROBE_TIMEOUT_MS = 3000;
@@ -27,31 +26,9 @@ export const PROBE_TIMEOUT_MS = 3000;
 /** What a failed probe reports back, cut to what the driver list shows. */
 const MAX_PROBE_ERROR_CHARS = 300;
 
-interface CodexCommandSpec {
-  command: string;
-  args: string[];
-}
-
-/**
- * Where the `codex` command is, and what to pass it.
- *
- * The two overrides are the same ones dohc's built-in driver read before this
- * plugin existed: they point the driver at another build of Codex, or at a
- * stand-in, without changing the plugin.
- */
-export function codexCommandSpec(env: Record<string, string | undefined>): CodexCommandSpec {
-  const command = env.DOHC_AGENT_CODEX_COMMAND?.trim() || "codex";
-  const raw = env.DOHC_AGENT_CODEX_ARGS_JSON?.trim();
-  if (!raw) return { command, args: [] };
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    const args = Array.isArray(parsed)
-      ? parsed.filter((item): item is string => typeof item === "string")
-      : [];
-    return { command, args };
-  } catch {
-    return { command, args: raw.split(" ").filter(Boolean) };
-  }
+/** Where the `codex` command is, and what to pass it. */
+export function codexCommandSpec(env: Record<string, string | undefined>): CommandSpec {
+  return commandSpec(env, "CODEX", "codex");
 }
 
 type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
@@ -137,7 +114,7 @@ class CodexSession implements PluginAgentSession {
 
 export function createCodexDriver(
   spawnCommand: SpawnCommand,
-  spec: CodexCommandSpec,
+  spec: CommandSpec,
 ): PluginAgentDriver {
   async function probe(): Promise<PluginAgentProbe> {
     let child: Awaited<ReturnType<SpawnCommand>>;
@@ -258,13 +235,4 @@ export function createCodexDriver(
   }
 
   return { probe, startSession };
-}
-
-function absent(errorMessage: string): PluginAgentProbe {
-  return {
-    installed: false,
-    auth: { status: "unknown", loginHint: "Install and log in with the provider CLI." },
-    models: [],
-    errorMessage,
-  };
 }

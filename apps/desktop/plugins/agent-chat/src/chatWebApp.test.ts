@@ -23,7 +23,7 @@ const PLUGIN_UI_ROOT = fileURLToPath(new URL("../ui/", import.meta.url));
  * chat.js -- lets a test reach a real token (GET / still works) and still
  * exercise a genuinely missing asset. */
 function uiRootMissingScript(): string {
-  const dir = mkdtempSync(join(tmpdir(), "claude-code-chat-ui-"));
+  const dir = mkdtempSync(join(tmpdir(), "agent-chat-ui-"));
   cpSync(join(PLUGIN_UI_ROOT, "index.html"), join(dir, "index.html"));
   cpSync(join(PLUGIN_UI_ROOT, "chat.css"), join(dir, "chat.css"));
   return dir;
@@ -332,9 +332,15 @@ async function start(
   fake: FakeDriver,
   uiRoot = PLUGIN_UI_ROOT,
 ): Promise<{ app: ChatWebApp; url: string; token: string }> {
-  const app = createChatWebApp(fake.driver, "C:\\workspace", uiRoot);
+  const app = createChatWebApp({
+    agent: "Claude Code",
+    webAppId: "claude-code-chat",
+    driver: fake.driver,
+    workspaceRoot: "C:\\workspace",
+    uiRoot,
+  });
   runningApps.push(app);
-  const started = await app.startWebApp("chat", null);
+  const started = await app.startWebApp("claude-code-chat", null);
   return { app, url: started.url, token: tokenFromUrl(started.url) };
 }
 
@@ -343,7 +349,7 @@ afterEach(async () => {
   await Promise.all(runningApps.splice(0).map((app) => app.deactivate().catch(() => undefined)));
 });
 
-describe("Claude Code chat web app", () => {
+describe("agent chat web app", () => {
   it("starts one session and sends later messages through the same session", async () => {
     const fake = fakeDriver();
     const { url, token } = await start(fake);
@@ -861,7 +867,7 @@ describe("Claude Code chat web app", () => {
     expect(await reattached.next()).toEqual(ready);
     expect(await reattached.next()).toEqual(text);
 
-    const restarted = await app.startWebApp("chat", null);
+    const restarted = await app.startWebApp("claude-code-chat", null);
     expect(restarted.url).toBe(url);
     expect(fake.startInputs).toHaveLength(1);
     await reattached.close();
@@ -1545,6 +1551,29 @@ describe("Claude Code chat web app", () => {
     await reattached.close();
   });
 
+  it("renders the page for whichever agent it was created for, and answers only its own id", async () => {
+    const fake = fakeDriver();
+    const app = createChatWebApp({
+      agent: "Codex",
+      webAppId: "codex-chat",
+      driver: fake.driver,
+      workspaceRoot: "C:\\workspace",
+      uiRoot: PLUGIN_UI_ROOT,
+    });
+    runningApps.push(app);
+
+    await expect(app.startWebApp("claude-code-chat", null)).rejects.toThrow(
+      'This chat serves only the singleton "codex-chat" web app.',
+    );
+    const { url } = await app.startWebApp("codex-chat", null);
+    const html = await (await fetch(new URL("/", url))).text();
+    expect(html).toContain('<html lang="en" data-agent="Codex">');
+    expect(html).toContain("<title>Codex Chat</title>");
+    expect(html).toContain("Send a message to start a Codex session.");
+    expect(html).not.toContain("{{agent}}");
+    expect(html).not.toContain("Claude");
+  });
+
   it("serves its own static chat page, stylesheet, and script -- the page itself is token-free", async () => {
     const fake = fakeDriver();
     const { url, token } = await start(fake);
@@ -1585,7 +1614,7 @@ describe("Claude Code chat web app", () => {
     // included -- the guest can navigate back to it and still authenticate.
     const app = runningApps.at(-1);
     if (!app) throw new Error("No running app to reattach to.");
-    const again = await app.startWebApp("chat", null);
+    const again = await app.startWebApp("claude-code-chat", null);
     expect(again.url).toBe(url);
   });
 
@@ -2100,7 +2129,7 @@ describe("Claude Code chat web app", () => {
       // the abandoned prompt() call above eventually settles on its own.
       await app.deactivate();
 
-      const restarted = await app.startWebApp("chat", null);
+      const restarted = await app.startWebApp("claude-code-chat", null);
       const restartedToken = tokenFromUrl(restarted.url);
       const freshResponse = await post(
         restarted.url,
@@ -2173,12 +2202,12 @@ describe("Claude Code chat web app", () => {
 
       // The host dispatches this on failed-guest-load recovery, not on an
       // ordinary tab close -- see the comment on stopWebApp itself.
-      await app.stopWebApp("chat", null);
+      await app.stopWebApp("claude-code-chat", null);
 
       // The old server is really gone: nothing to reattach to.
       await expect(fetch(new URL("/", url))).rejects.toThrow();
 
-      const restarted = await app.startWebApp("chat", null);
+      const restarted = await app.startWebApp("claude-code-chat", null);
       expect(restarted.url).not.toBe(url);
       const freshToken = tokenFromUrl(restarted.url);
       expect(freshToken).not.toBe(token);
@@ -2249,17 +2278,24 @@ describe("Claude Code chat web app", () => {
     const fake = fakeDriver();
     const ref: { app?: ChatWebApp } = {};
     let triggered = false;
-    const app = createChatWebApp(fake.driver, "C:\\workspace", PLUGIN_UI_ROOT, {
-      beforeListen: async () => {
-        if (triggered) return;
-        triggered = true;
-        await ref.app?.deactivate();
+    const app = createChatWebApp({
+      agent: "Claude Code",
+      webAppId: "claude-code-chat",
+      driver: fake.driver,
+      workspaceRoot: "C:\\workspace",
+      uiRoot: PLUGIN_UI_ROOT,
+      testHooks: {
+        beforeListen: async () => {
+          if (triggered) return;
+          triggered = true;
+          await ref.app?.deactivate();
+        },
       },
     });
     ref.app = app;
     runningApps.push(app);
 
-    const started = await app.startWebApp("chat", null).then(
+    const started = await app.startWebApp("claude-code-chat", null).then(
       (result) => ({ ok: true as const, url: result.url }),
       (error: unknown) => ({ ok: false as const, error }),
     );
@@ -2274,7 +2310,7 @@ describe("Claude Code chat web app", () => {
 
     // Either way, a fresh start afterward must produce a real, working
     // server: the race must not leave the app permanently wedged.
-    const restarted = await app.startWebApp("chat", null);
+    const restarted = await app.startWebApp("claude-code-chat", null);
     const page = await fetch(new URL("/", restarted.url));
     expect(page.status).toBe(200);
   }, 10_000);
