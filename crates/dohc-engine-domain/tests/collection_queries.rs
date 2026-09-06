@@ -12,8 +12,8 @@ use dohc_engine_domain::{
     parse_collection_schema, query_collection_records, reconcile_collections_in_tx,
     set_collection_adoption_state_in_tx, synchronize_collection_frontmatter_index_in_tx,
 };
-use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_storage::{EngineStore, StorageError, hex};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde::Deserialize;
 use serde_json::json;
@@ -103,7 +103,7 @@ fn write_text_for_object(
 
 fn fresh_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
@@ -299,12 +299,7 @@ fn shared_collection_field_pipeline_vectors_index_and_query_exactly() {
             .insert(vector.class.clone());
         assert_eq!(vector.field.name(), vector.field_name, "{}", vector.name);
         assert_eq!(
-            vector
-                .value_yaml
-                .as_bytes()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>(),
+            hex(vector.value_yaml.as_bytes()),
             vector.value_yaml_utf8_hex,
             "{} source bytes",
             vector.name

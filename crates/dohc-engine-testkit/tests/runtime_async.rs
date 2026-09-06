@@ -4,7 +4,7 @@
 
 use dohc_engine_domain::WriteText;
 use dohc_engine_runtime::{ActorHandle, CancellationToken, NoFaults, WorkspaceSupervisor};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -44,7 +44,7 @@ fn unit(path: &str, text: &str, now_ms: i64) -> WriteText {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn async_write_read_round_trip() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let sup = WorkspaceSupervisor::new();
     let handle = sup.open(&db, 1).expect("open").actor;
     seed(&handle).await;
@@ -80,7 +80,7 @@ async fn async_write_read_round_trip() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn close_returns_promptly_under_sustained_submission() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let sup = Arc::new(WorkspaceSupervisor::new());
     let handle = sup.open(&db, 1).expect("open").actor;
     seed(&handle).await;

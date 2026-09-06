@@ -4,7 +4,7 @@ use dohc_engine_domain::{
     derive_capture_moment_id, derive_capture_object_id, write_text_in_tx,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-capture";
 const VERSION: &str = "main";
@@ -43,7 +43,7 @@ fn retire(path: &str, now_ms: i64) -> CaptureRetire {
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1, &NO_FAULTS)
@@ -155,7 +155,7 @@ fn length_prefixed_capture_ids_distinguish_embedded_nul_tuples() {
     assert_ne!(first_id, second_id);
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(FIRST_WS, FIRST_VERSION, 1, &NO_FAULTS)

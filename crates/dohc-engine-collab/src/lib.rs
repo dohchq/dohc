@@ -42,22 +42,18 @@ pub use durable::{
     record_base_coordinate, record_base_coordinate_in_tx, record_local_update,
     record_local_update_creating_marker, record_local_update_creating_marker_guarded,
     record_local_update_creating_marker_guarded_for_lineage, record_local_update_with_origin,
-    record_update_for_lineage_in_tx, record_update_in_tx, replace_lineage_with_successor,
-    replace_lineage_with_successor_in_tx, rewrite_bare_marker_content_kind, settle,
-    validate_remote_update_for, validate_remote_update_with_pending,
-    validate_remote_update_with_pending_cached, AppendOutcome, BaseCoordinateRecord,
-    BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CompactOutcome, LineageClaimStatus, Marker,
-    OriginationBase, PersistedDoc, Regime, SettleOutcome, SuccessorInstallOutcome,
-    SuccessorReplacement,
+    record_update_in_tx, replace_lineage_with_successor, replace_lineage_with_successor_in_tx,
+    rewrite_bare_marker_content_kind, settle, validate_remote_update, AppendOutcome,
+    BaseCoordinateRecord, BaseRelayCoordinate, ClaimOutcome, CloseOutcome, CompactOutcome,
+    LineageClaimStatus, Marker, OriginationBase, PersistedDoc, Regime, SettleOutcome,
+    SuccessorInstallOutcome, SuccessorReplacement,
 };
 pub use error::CollabError;
 pub use lease::{Lease, LeaseRegistry};
 pub use replay_parity::{validate_replay_parity, validate_replay_parity_with_scratch};
 pub use replication::{
-    apply_remote_update, apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction, apply_remote_update_in_transaction_cached_with_projection,
-    apply_remote_update_in_transaction_with_projection, RemoteApplyProjection, RemoteUpdate,
-    ReplicationApplyOutcome, UpdateOrigin,
+    apply_remote_update, apply_remote_update_in_transaction_with_projection, RemoteApplyProjection,
+    RemoteUpdate, ReplicationApplyOutcome, UpdateOrigin,
 };
 pub use scene::{
     encode_scene_asset_record, encode_scene_asset_records, fold_scene, import_portable_scene,

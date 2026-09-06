@@ -211,7 +211,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn interrupted_claims_recover_and_notify_after_the_guard_without_reopening() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("db");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("db");
         {
             let _store = EngineStore::open(&db, OPENED_AT).expect("migrate");
         }

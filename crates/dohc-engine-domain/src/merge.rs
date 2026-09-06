@@ -300,14 +300,6 @@ impl VersionedTextStore<'_> {
             .read_with(|conn| compare_text_file_versions_in_db(conn, input))
     }
 
-    pub fn merge_text_file_from_version(
-        &mut self,
-        input: &MergeTextFileFromVersion,
-        faults: &dyn FaultInjector,
-    ) -> Result<MergeTextFileResult, DomainError> {
-        self.merge_text_file_from_version_with(input, faults, |_, _| Ok(()))
-    }
-
     /// Merge with a caller-supplied same-transaction side effect (used by the
     /// runtime to keep FTS synchronized with a merged write/delete).
     pub fn merge_text_file_from_version_with<F>(

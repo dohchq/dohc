@@ -12,20 +12,18 @@ use dohc_engine_domain::{
     rollback_compensating_moment_id,
 };
 use dohc_engine_runtime::{
-    ActorHandle, CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
+    ActorHandle, CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError, TxnOutcome, hex_sha256};
 use dohc_engine_sync::{
     ApplyOutcome, MAX_PAYLOAD_JSON_BYTES, ReplicationEnvelope, apply_moment_envelope_detailed,
     apply_replication_envelope, apply_secret_envelope, apply_version_envelope,
 };
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::params;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-
-struct NoRecorder;
 
 const ONE_PIXEL_PNG: &[u8] = &[
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4, 0,
@@ -63,11 +61,6 @@ fn portable_image_scene() -> String {
   }}
 }}"#
     )
-}
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
 }
 
 #[derive(Debug)]
@@ -180,6 +173,7 @@ fn apply_remote_scene_asset_authority(
     assert!(matches!(
         apply_remote_update(
             store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "origin-scene-source".to_owned(),
@@ -223,6 +217,7 @@ fn apply_remote_scene_image_tombstone(
     assert!(matches!(
         apply_remote_update(
             store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "origin-scene-source".to_owned(),
@@ -520,6 +515,7 @@ fn apply_logged_op(peer: &mut EngineStore, workspace_id: &str, op: &LoggedOp) {
             assert!(matches!(
                 apply_replication_envelope(
                     peer,
+                    &mut dohc_engine_collab::WriterDocCache::new(),
                     &envelope,
                     &NoFaults,
                     &dohc_engine_sync::NoLiveLeases,
@@ -573,7 +569,7 @@ fn large_metadata_write(
 #[tokio::test]
 async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-named-fork-chunks";
     initialize_workspace(&source_db, workspace_id, true);
     let metadata = "\0".repeat(16 * 1024);
@@ -675,7 +671,7 @@ async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
     }));
 
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 4).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
@@ -695,7 +691,7 @@ async fn named_fork_splits_an_oversized_snapshot_payload_into_bounded_ops() {
 #[tokio::test]
 async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_write() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-moment-before-metadata";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -740,7 +736,7 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
     assert_eq!(op.payload["metadata"]["correlationId"], metadata);
 
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 3).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 4).expect("open peer store");
@@ -773,7 +769,7 @@ async fn moment_append_sheds_oversized_before_metadata_without_truncating_the_wr
 async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     const SECRET_ROWS: usize = 400;
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-secret-fork-chunks";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -857,7 +853,7 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
     }));
 
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 4).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
@@ -906,7 +902,7 @@ async fn secret_fork_splits_an_oversized_row_payload_into_bounded_ops() {
 #[tokio::test]
 async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-lagging-peer-chunked-fork";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -954,7 +950,7 @@ async fn lagging_peer_applies_prior_ops_then_a_chunked_fork_in_sequence() {
     );
 
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 4).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
@@ -1011,7 +1007,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 30,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1032,7 +1028,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 40,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1055,7 +1051,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 request_id: None,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1241,7 +1237,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 140,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1262,7 +1258,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 150,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1286,7 +1282,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
                 now_ms: 160,
             },
             root_dir.to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1485,7 +1481,7 @@ async fn drive_every_mutation_kind(actor: &ActorHandle, workspace_id: &str, root
 #[tokio::test]
 async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-resolve-outbound";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -1575,7 +1571,7 @@ async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer
     assert_eq!(ops[1].payload["effects"][0]["momentId"], "moment-resolved");
     assert_eq!(ops[2].payload["conflictId"], "conflict-resolve-outbound");
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 4).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
@@ -1593,7 +1589,7 @@ async fn conflict_resolution_moment_replays_to_the_resolved_text_on_a_clean_peer
 #[tokio::test]
 async fn conflict_resolution_delete_replays_to_an_absent_head_on_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-resolve-delete-outbound";
     let path = "notes/delete.md";
     initialize_workspace(&source_db, workspace_id, true);
@@ -1682,7 +1678,7 @@ async fn conflict_resolution_delete_replays_to_an_absent_head_on_a_clean_peer() 
     assert_eq!(ops[2].payload["momentId"], "moment-resolved-delete");
     assert_eq!(ops[2].payload["operation"], "delete");
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 4).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 5).expect("open peer store");
@@ -1701,7 +1697,7 @@ async fn conflict_resolution_delete_replays_to_an_absent_head_on_a_clean_peer() 
 #[tokio::test]
 async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-resolve-binary-outbound";
     let path = "assets/logo.bin";
     let incoming_bytes = b"\x89BIN\x00incoming";
@@ -1802,7 +1798,7 @@ async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_cle
     assert_eq!(ops[2].payload["momentId"], "moment-resolved-binary");
     assert_eq!(ops[2].payload["payloadAfterContentKind"], "binary");
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 5).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 6).expect("open peer store");
@@ -1821,7 +1817,7 @@ async fn conflict_resolution_binary_write_replays_to_the_incoming_bytes_on_a_cle
 #[tokio::test]
 async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-rollback-outbound";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -1853,7 +1849,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         .versioned_text_rollback(
             rollback.clone(),
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1864,7 +1860,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         .versioned_text_rollback(
             rollback,
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1890,7 +1886,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
         1
     );
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     let source_store = EngineStore::open(&source_db, 3).expect("open source store");
     let mut peer_store = EngineStore::open(&peer_db, 4).expect("open peer store");
@@ -1908,7 +1904,7 @@ async fn rollback_compensation_replays_to_the_restored_text_on_a_clean_peer() {
 #[tokio::test]
 async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-outbound-enabled";
     initialize_workspace(&source_db, workspace_id, true);
     let supervisor = WorkspaceSupervisor::new();
@@ -1959,7 +1955,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
     );
 
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     let mut peer_store = EngineStore::open(&peer_db, 100).expect("open peer store");
     VersionedTextStore::new(&mut peer_store)
         .ensure_main_version(workspace_id, "main", 1, &NoFaults)
@@ -2102,7 +2098,7 @@ async fn relay_enabled_mutations_emit_payloads_that_apply_to_a_clean_peer() {
 #[tokio::test]
 async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-scene-delete-replicates";
     let drawing_text = portable_image_scene();
     initialize_workspace(&source_db, workspace_id, true);
@@ -2171,7 +2167,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2192,7 +2188,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
                 now_ms: 5,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2211,7 +2207,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         "the asset delete must follow the authority-bearing drawing delete"
     );
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     EngineStore::open(&peer_db, 6)
         .expect("open peer identity store")
@@ -2293,7 +2289,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         .versioned_text_rollback(
             rollback_input.clone(),
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2314,7 +2310,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
     drop(peer_store);
 
     let third = ScratchDir::new().expect("third peer scratch");
-    let third_db = third.engine_db_path().expect("third peer db");
+    let third_db = engine_db_path(&third).expect("third peer db");
     initialize_workspace(&third_db, workspace_id, false);
     let mut third_store = EngineStore::open(&third_db, 9).expect("open third peer");
     for op in &ops[..2] {
@@ -2344,7 +2340,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
         .versioned_text_rollback(
             rollback_input,
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2449,7 +2445,7 @@ async fn scene_rollback_waits_for_asset_delete_then_converges_on_a_third_peer() 
 
 async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool) {
     let source = ScratchDir::new().expect("source scratch");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
     let workspace_id = "ws-live-synced-scene-delete";
     let drawing_path = "drawings/live-board.excalidraw";
     let drawing_text = portable_image_scene();
@@ -2506,7 +2502,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2538,7 +2534,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2563,7 +2559,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 request_id: None,
             },
             source.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2581,7 +2577,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
             .all(|op| op.payload["operation"] == "write")
     );
     let peer = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer).expect("peer db");
     initialize_workspace(&peer_db, workspace_id, false);
     EngineStore::open(&peer_db, 6)
         .expect("open peer identity store")
@@ -2689,7 +2685,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 now_ms: 9,
             },
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2760,7 +2756,7 @@ async fn assert_peer_local_scene_delete_retires_a_synced_asset(tombstoned: bool)
                 author_json: None,
             },
             peer.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2845,7 +2841,7 @@ async fn peer_local_scene_delete_retires_a_tombstoned_synced_asset() {
 #[tokio::test]
 async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let workspace_id = "ws-scene-delete-rollback";
     initialize_workspace(&db, workspace_id, false);
     let supervisor = WorkspaceSupervisor::new();
@@ -2906,7 +2902,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2931,7 +2927,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2952,7 +2948,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 now_ms: 5,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist),
             CancellationToken::new(),
         )
@@ -2990,7 +2986,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_delete(
             drawing_delete_input.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3015,7 +3011,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 now_ms: 7,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3041,7 +3037,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_delete(
             drawing_delete_input,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -3087,7 +3083,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_rollback(
             rollback.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3168,7 +3164,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -3179,7 +3175,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
         .versioned_text_rollback(
             rollback,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -3251,7 +3247,7 @@ async fn rollback_cancels_a_pending_scene_asset_delete_before_restart_replay() {
 #[tokio::test]
 async fn never_synced_mutations_append_no_relay_ops() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let workspace_id = "ws-outbound-disabled";
     initialize_workspace(&db, workspace_id, false);
     let supervisor = WorkspaceSupervisor::new();
@@ -3316,7 +3312,7 @@ fn initialize_share_view(db: &Path, workspace_id: &str, editable: bool) {
 #[tokio::test]
 async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let workspace_id = "ws-share-view-enrolled";
     initialize_share_view(&db, workspace_id, true);
 
@@ -3364,7 +3360,7 @@ async fn an_enrolled_share_view_journals_a_file_write_and_no_ydoc_update() {
 #[tokio::test]
 async fn a_read_only_share_view_journals_nothing_and_its_write_still_commits() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let workspace_id = "ws-share-view-unenrolled";
     initialize_share_view(&db, workspace_id, false);
 

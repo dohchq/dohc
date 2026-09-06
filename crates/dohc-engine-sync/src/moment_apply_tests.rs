@@ -4,7 +4,7 @@ use dohc_engine_domain::{
     WriteText,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, hex_sha256, put_binary_blob};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 
@@ -15,7 +15,7 @@ use crate::{
 
 fn test_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&path, 1_000).expect("store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -293,7 +293,14 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
         recorded_at_ms: 1_500,
         relay_seq: Some(0),
     };
-    apply_ydoc_envelope(&mut peer, &base, &NoFaults, &NoLiveLeases).expect("peer Y.Doc projection");
+    apply_ydoc_envelope(
+        &mut peer,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("peer Y.Doc projection");
     let peer_head: String = peer
         .read_with(|conn| {
             conn.query_row(
@@ -331,8 +338,14 @@ fn moment_after_equivalent_ydoc_projection_fast_forwards() {
             recorded_at_ms: 1_600 + index as i64,
             relay_seq: Some(index as i64 + 1),
         };
-        apply_ydoc_envelope(&mut peer, &delta, &NoFaults, &NoLiveLeases)
-            .expect("peer Y.Doc rewrite");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delta,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer Y.Doc rewrite");
     }
 
     hydrate_texts(&mut peer, &["next edit"]);
@@ -475,6 +488,7 @@ fn moment_delete_retires_the_receiver_ydoc_lineage() {
         .expect("Y.Doc base blob");
     apply_ydoc_envelope(
         &mut peer,
+        &mut dohc_engine_collab::WriterDocCache::new(),
         &ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
             origin_id: "ydoc-origin".to_owned(),
@@ -587,7 +601,13 @@ fn moment_delete_with_unsettled_lineage_stays_unacked() {
         ),
     );
 
-    let outcome = apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases);
+    let outcome = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &delete,
+        &NoFaults,
+        &NoLiveLeases,
+    );
     assert!(
         matches!(
             outcome,
@@ -708,7 +728,13 @@ fn moment_delete_with_orphan_scene_lineage_stays_unacked() {
     );
 
     assert!(matches!(
-        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc-lineage-unsettled"
         })
@@ -784,7 +810,13 @@ fn moment_delete_from_absent_sender_head_preserves_unsettled_lineage() {
     let delete = envelope("absent-delete-peer", 0, "ws", payload);
 
     assert!(matches!(
-        apply_replication_envelope(&mut store, &delete, &NoFaults, &NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &delete,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc-lineage-unsettled"
         })
@@ -826,8 +858,14 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
     let malformed = envelope("malformed-moment-peer", 0, "ws", json!({}));
 
     assert_eq!(
-        apply_replication_envelope(&mut store, &malformed, &NoFaults, &crate::NoLiveLeases)
-            .expect("malformed per-operation payload is a disposition"),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &malformed,
+            &NoFaults,
+            &crate::NoLiveLeases
+        )
+        .expect("malformed per-operation payload is a disposition"),
         ApplyOutcome::Refused(ReplicationRefusal {
             workspace_id: "ws".to_owned(),
             origin_id: "malformed-moment-peer".to_owned(),
@@ -860,7 +898,13 @@ fn malformed_moment_append_is_refused_and_acked_before_the_origin_continues() {
         relay_seq: Some(1),
     };
     assert!(matches!(
-        apply_replication_envelope(&mut store, &next, &NoFaults, &crate::NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &next,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let channel_rows: i64 = store
@@ -1095,7 +1139,13 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         let held = leases.acquire(&key).expect("hold document live");
 
         assert!(matches!(
-            apply_replication_envelope(&mut store, &op, &NoFaults, &leases),
+            apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &leases
+            ),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -1141,7 +1191,13 @@ fn moment_append_live_lease_blocks_all_mutations_and_write_waits_for_ydoc_rewrit
         assert_eq!(after_live, before, "live {operation} mutated durable state");
 
         drop(held);
-        let closed = apply_replication_envelope(&mut store, &op, &NoFaults, &leases);
+        let closed = apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &leases,
+        );
         if operation == "write" {
             assert!(matches!(
                 closed,
@@ -1703,8 +1759,14 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
         recorded_at_ms: 1_500,
         relay_seq: Some(0),
     };
-    apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases)
-        .expect("materialize shipped fork");
+    apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &version,
+        &NoFaults,
+        &crate::NoLiveLeases,
+    )
+    .expect("materialize shipped fork");
 
     let mut payload = present_text_payload(
         "remote-after-shipped",
@@ -1775,7 +1837,7 @@ fn moment_append_after_a_shipped_fork_head_rolls_back_after_reopen() {
         "omit any identity/metadata binding from insert_moment and the durable preimage tuple no longer matches the shipped snapshot.",
     );
 
-    let database_path = scratch.engine_db_path().expect("database path");
+    let database_path = engine_db_path(&scratch).expect("database path");
     drop(store);
     let mut reopened = EngineStore::open(&database_path, 3_000).expect("reopen");
     VersionedTextStore::new(&mut reopened)
@@ -1898,8 +1960,14 @@ fn redelivered_moment_uses_the_durable_apply_time_materialization_decision() {
             "incoming",
         ),
     );
-    let first = apply_replication_envelope(&mut store, &incoming, &NoFaults, &crate::NoLiveLeases)
-        .expect("apply active moment");
+    let first = apply_replication_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &incoming,
+        &NoFaults,
+        &crate::NoLiveLeases,
+    )
+    .expect("apply active moment");
     assert_eq!(
         first,
         ApplyOutcome::Applied(crate::RoutedApply {
@@ -2085,7 +2153,13 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
     payload["versionId"] = json!("missing");
     let op = envelope("peer", 0, "ws", payload);
     assert!(matches!(
-        apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "moment.append target version is missing"
         })
@@ -2127,11 +2201,23 @@ fn moment_append_requires_version_create_ordering_and_never_acks_a_missing_targe
         relay_seq: Some(0),
     };
     assert!(matches!(
-        apply_replication_envelope(&mut store, &version, &NoFaults, &crate::NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &version,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert!(matches!(
-        apply_replication_envelope(&mut store, &op, &NoFaults, &crate::NoLiveLeases),
+        apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &op,
+            &NoFaults,
+            &crate::NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     assert_eq!(

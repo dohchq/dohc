@@ -313,6 +313,7 @@ dependencies = [
  "base64 0.23.1",
  "dohc-engine-domain",
  "dohc-engine-storage",
+ "dohc-engine-testkit",
  "dohc-test-scratch",
  "rusqlite",
  "ryu-js",

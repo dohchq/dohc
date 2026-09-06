@@ -8,17 +8,10 @@
 //! a path the user deleted twice.
 
 use dohc_engine_domain::{DeleteTextFile, WriteBinary};
-use dohc_engine_runtime::{CancellationToken, NoFaults, SelfWriteRecorder, WorkspaceSupervisor};
+use dohc_engine_runtime::{CancellationToken, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::FaultPoint;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn binary_input(
     object_id: &str,
@@ -65,7 +58,7 @@ fn delete_input(moment_id: &str, request_id: &str, now_ms: i64) -> DeleteTextFil
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let target = scratch.path().join("asset.bin");
 
     let supervisor = WorkspaceSupervisor::new();
@@ -76,7 +69,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         .versioned_binary_write(
             binary_input("obj-v1", "moment-v1", "req-v1", vec![1, 1, 1], 10),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -90,7 +83,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         .versioned_text_delete(
             delete_input("moment-delete-1", "req-delete-1", 20),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -107,7 +100,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         .versioned_binary_write(
             binary_input("obj-v2", "moment-v2", "req-v2", vec![2, 2, 2], 30),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )
@@ -124,7 +117,7 @@ async fn a_second_delete_does_not_strand_the_first_deletes_own_pending_job() {
         .versioned_text_delete(
             delete_input("moment-delete-2", "req-delete-2", 40),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             ScriptedFaults::crash_at(FaultPoint::MaterializeAfterJobCommit),
             CancellationToken::new(),
         )

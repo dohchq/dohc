@@ -38,7 +38,7 @@ use dohc_engine_files::{
     ManifestEntry, PathClassification, ReconcileController, ReconcileRun, ScanBounds, ScanListing,
     ScanManifest, ScanOutcome, Scanner, apply_then_ack, classify_engine_file_path, diff_scans,
 };
-use dohc_engine_storage::NoFaults;
+use dohc_engine_storage::{NoFaults, hex_sha256};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -304,7 +304,7 @@ fn golden_is_sensitive_to_the_content_hash() {
             "a.md".to_owned(),
             ManifestEntry {
                 size: 5,
-                sha256: common::sha256_hex(b"same\n"),
+                sha256: hex_sha256(b"same\n"),
                 mtime_ms: 0,
             },
         ),
@@ -312,7 +312,7 @@ fn golden_is_sensitive_to_the_content_hash() {
             "b.md".to_owned(),
             ManifestEntry {
                 size: 6, // same size as "EDITED\n" — only the hash differs
-                sha256: common::sha256_hex(b"before\n"),
+                sha256: hex_sha256(b"before\n"),
                 mtime_ms: 0,
             },
         ),
@@ -438,14 +438,14 @@ fn extended_trace_covers_all_divergence_prone_paths() {
             NormOp::Ingest {
                 path: "keep.md".to_owned(),
                 size: 7,
-                sha256: common::sha256_hex(b"steady\n"),
+                sha256: hex_sha256(b"steady\n"),
                 media_type: "text/markdown".to_owned(),
                 reason: "added",
             },
             NormOp::Ingest {
                 path: "rename-src.md".to_owned(),
                 size: 8,
-                sha256: common::sha256_hex(b"movable\n"),
+                sha256: hex_sha256(b"movable\n"),
                 media_type: "text/markdown".to_owned(),
                 reason: "added",
             },
@@ -477,28 +477,28 @@ fn extended_trace_covers_all_divergence_prone_paths() {
             NormOp::Ingest {
                 path: "brand-new.md".to_owned(),
                 size: 6,
-                sha256: common::sha256_hex(b"hello\n"),
+                sha256: hex_sha256(b"hello\n"),
                 media_type: "text/markdown".to_owned(),
                 reason: "added",
             },
             NormOp::Ingest {
                 path: "huge.bin".to_owned(),
                 size: 5,
-                sha256: common::sha256_hex(b"small"),
+                sha256: hex_sha256(b"small"),
                 media_type: "application/octet-stream".to_owned(),
                 reason: "added",
             },
             NormOp::Ingest {
                 path: "keep.md".to_owned(),
                 size: 7,
-                sha256: common::sha256_hex(b"edited\n"),
+                sha256: hex_sha256(b"edited\n"),
                 media_type: "text/markdown".to_owned(),
                 reason: "changed",
             },
             NormOp::Ingest {
                 path: "rename-dst.md".to_owned(),
                 size: 8,
-                sha256: common::sha256_hex(b"movable\n"),
+                sha256: hex_sha256(b"movable\n"),
                 media_type: "text/markdown".to_owned(),
                 reason: "added",
             },

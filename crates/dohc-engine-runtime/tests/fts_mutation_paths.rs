@@ -2,21 +2,12 @@ use std::sync::Arc;
 
 use dohc_engine_collab::{ContentKind, Regime};
 use dohc_engine_domain::{CaptureIngest, CaptureIngestBinary, CaptureRetire, WriteBinary};
-use dohc_engine_runtime::{
-    CancellationToken, NoFaults, SearchResult, SelfWriteRecorder, WorkspaceSupervisor,
-};
+use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use serde_json::json;
 
 const VERSION: &str = "main";
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn capture_text(workspace_id: &str, path: &str, text: &str, now_ms: i64) -> CaptureIngest {
     CaptureIngest {
@@ -67,7 +58,7 @@ async fn capture_text_ingest_and_retire_update_certified_search_index() {
     const PATH: &str = "notes/captured.md";
     const NEEDLE: &str = "capturemutationneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -150,7 +141,7 @@ async fn excalidraw_capture_indexes_only_live_text_and_invalid_update_clears_it(
     const EMBEDDED: &str = "DRAWINGBASE64SEARCHSECRET";
     const INVALID: &str = "drawinginvalidrawneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -247,7 +238,7 @@ async fn aliased_database_capture_uses_session_root_and_indexes() {
     const PATH: &str = "notes/aliased.md";
     const NEEDLE: &str = "aliasedcapturemutationneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let canonical_db = scratch.engine_db_path().expect("canonical db");
+    let canonical_db = engine_db_path(&scratch).expect("canonical db");
     drop(EngineStore::open(&canonical_db, 1).expect("create canonical db"));
     let alias_dir = scratch.path().join("database-alias");
     std::fs::create_dir_all(&alias_dir).expect("alias dir");
@@ -302,7 +293,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
     const OLD: &str = "oldsettlemutationneedle";
     const NEW: &str = "newsettlemutationneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes dir");
     std::fs::write(scratch.path().join(PATH), OLD).expect("seed disk preimage");
 
@@ -372,7 +363,7 @@ async fn ydoc_settle_replaces_old_search_content_with_projected_text() {
             open.lineage_claim_id,
             open.head_blob_sha256,
             "fts-settle-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             50,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -405,7 +396,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
     const RPC_PATH: &str = "rpc.bin.md";
     const NEEDLE: &str = "binaryconversionmutationneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::write(scratch.path().join(CAPTURE_PATH), NEEDLE).expect("capture disk preimage");
     std::fs::write(scratch.path().join(RPC_PATH), NEEDLE).expect("rpc disk preimage");
 
@@ -485,7 +476,7 @@ async fn binary_capture_matches_rpc_binary_write_search_index_behavior() {
                 request_id: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

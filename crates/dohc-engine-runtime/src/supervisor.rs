@@ -441,7 +441,7 @@ mod tests {
     #[test]
     fn open_reports_actor_ownership_and_store_disposition() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
 
         let first = supervisor.open(&db, 1).expect("first open");

@@ -437,7 +437,7 @@ fn hash_one(job: &Job, buffer: &mut [u8], max_file_bytes: u64) -> HashOutcome {
         }
     };
     HashOutcome::Hashed {
-        sha256: to_hex(&hasher.finalize()),
+        sha256: dohc_engine_storage::hex(&hasher.finalize()),
         bytes,
         stable_mtime_ms,
     }
@@ -491,17 +491,6 @@ pub(crate) fn mtime_ms(metadata: &std::fs::Metadata) -> i64 {
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(0)
-}
-
-/// Lowercase-hex encode a digest without allocating twice or risking a panic
-/// (writing to a `String` is infallible).
-fn to_hex(digest: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 #[cfg(test)]
