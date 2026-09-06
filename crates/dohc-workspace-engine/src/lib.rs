@@ -2238,9 +2238,9 @@ impl EngineService {
             // bound root it never recorded and refuse it as a mismatch, for
             // good. So the stamp's storage failure lands in the same `bound`
             // error as the marker's, not in the open's own error.
-            let opened = opened.and_then(|open| {
+            let opened = opened.map(|open| {
                 if !open.created_actor {
-                    return Ok((open, Ok(())));
+                    return (open, Ok(()));
                 }
                 let binding = match root_binding::read_root_binding(&binding_root) {
                     Ok(Some(token)) => Ok(token),
@@ -2263,7 +2263,7 @@ impl EngineService {
                     },
                     Err(error) => Err(error),
                 };
-                Ok((open, bound))
+                (open, bound)
             });
             #[cfg(test)]
             if open_guard.db_path.is_some()
