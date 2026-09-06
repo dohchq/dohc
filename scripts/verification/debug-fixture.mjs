@@ -13,7 +13,7 @@ export function runEarlyCloseDebugFixture(source, closed) {
     put("package.json", '{"type":"module"}');
     put("apps/desktop/package.json", "{}");
     put("scripts/verification/build.mjs", "export const prepare=async()=>{};export const assertPrepared=()=>({});");
-    put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');");
+    put("scripts/verification/process.mjs", "import {resolve} from 'node:path';export const repoRoot=resolve(import.meta.dirname,'../..');export const git=()=> 'fixture-head';");
     copyFileSync(source, join(root, "scripts/verification/debug.mjs"));
     copyFileSync(new URL("./close-electron.mjs", import.meta.url), join(root, "scripts/verification/close-electron.mjs"));
     put("node_modules/electron/index.js", "module.exports='fixture-electron';");

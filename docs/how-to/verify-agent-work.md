@@ -10,6 +10,18 @@ Verification uses it to own command descendants and stop them after interruption
 Run `pnpm setup:worktree`. This installs the pinned dependencies and checks the local tools.
 Codex runs the same setup through `.codex/environments/environment.toml` when creating a worktree.
 
+For Rust PR verification, install these host tools at the versions pinned in `.github/workflows/pr-checks.yml`.
+Setup and doctor check Rust and Cargo, but do not install or check these additional tools.
+Use the [Rust build budget](../../.agents/skills/rust-gate/SKILL.md#cargo-outside-the-gate) for these installations.
+
+```sh
+cargo install cargo-deny --locked --version 0.20.2
+cargo install cargo-audit --locked --version 0.22.2
+cargo install cargo-nextest --locked --version 0.9.143
+```
+
+The PR verifier rejects missing tools or versions that differ from those workflow pins.
+
 Run `pnpm doctor` to inspect readiness without changing the checkout.
 Run `pnpm qa:prepare` to build the native engine and desktop.
 Preparation reconciles the installed dependencies with the frozen lockfile before reusing or building artifacts.

@@ -6,6 +6,7 @@ import { join, matchesGlob, resolve } from "node:path";
 import { prepare, assertPrepared, sourceFingerprint, buildEnvironment } from "./build.mjs";
 import { doctor } from "./doctor.mjs";
 import { git, pnpm, repoRoot, run } from "./process.mjs";
+import { cancellationScope } from "./cancellation.mjs";
 import { classifyTreeProvenance, readTreeState } from "../../tools/rust-engine-program/tree-provenance.mjs";
 
 const require = createRequire(join(repoRoot, "apps/desktop/package.json"));
@@ -111,15 +112,17 @@ export async function verify(args) {
   const reportPath = join(output, "result.json");
   const save = () => writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n");
   let startSource = {};
-  function checkTree(name) {
+  async function checkTree(name) {
     report.treeReadings.push({ step: name, state: treeState() });
     report.provenance = classifyTreeProvenance(report.treeReadings);
     save();
     if (report.provenance.status !== "PASS") throw new Error(report.provenance.reason);
     if (Object.entries(startSource).some(([kind, hash]) => sourceFingerprint(kind) !== hash)) throw new Error("Source changed during verification. The result cannot prove the starting checkout.");
+    await cancellation.checkpoint();
   }
   let database;
   async function step(name, command, commandArgs, env = process.env) {
+    await cancellation.checkpoint();
     const started = Date.now();
     const row = { name, command, args: commandArgs, verdict: "RUNNING", log: join(output, `${name}.log`) };
     report.steps.push(row); save();
@@ -127,26 +130,29 @@ export async function verify(args) {
     try { result = await run(command, commandArgs, { env, log: row.log }); row.verdict = "PASS"; }
     catch (error) { row.verdict = "FAIL"; throw error; }
     finally { row.seconds = (Date.now() - started) / 1000; save(); }
-    checkTree(name);
+    await checkTree(name);
     return result;
   }
   save();
+  const cancellation = cancellationScope("Verification");
   try {
     if (mode === "pr" && report.dirty) throw new Error("Commit the worktree before running the PR gate.");
     if (mode === "pr" && !gates.js && !gates.rust) {
       report.reason = "No code gate applies to the changed files.";
-      checkTree("finish");
+      await checkTree("finish");
       report.verdict = "PASS";
       return report;
     }
     startSource = { engine: sourceFingerprint("engine"), desktop: sourceFingerprint("desktop") };
+    await cancellation.checkpoint();
     if (mode === "pr" && (gates.js || gates.rust)) await step("install", ...pnpm(["install", "--frozen-lockfile"]));
     report.doctor = doctor(); save();
+    await cancellation.checkpoint();
     if (report.doctor.checks.some((check) => check.state === "FAIL")) throw new Error("Preflight failed. Read result.json and run pnpm setup:worktree.");
     if (mode !== "pr" || gates.js) {
       await prepare({ output });
       report.build = assertPrepared(); save();
-      checkTree("prepare");
+      await checkTree("prepare");
     }
     if (mode === "pr" && gates.rust) {
       const pins = require("js-yaml").load(workflow).env;
@@ -173,7 +179,7 @@ export async function verify(args) {
       if (mode !== "e2e" && report.desktop.skipped) throw new Error("The mandatory desktop smoke test was skipped.");
       assertPrepared();
     }
-    checkTree("finish");
+    await checkTree("finish");
     report.verdict = "PASS";
   } catch (error) {
     report.verdict = "FAIL"; report.error = error.message;
@@ -183,6 +189,8 @@ export async function verify(args) {
   finally {
     try { await database?.stop(); }
     catch (error) { report.verdict = "FAIL"; report.cleanupError = error.message; process.exitCode = 1; }
+    const interrupted = await cancellation.dispose();
+    if (interrupted) { report.verdict = "FAIL"; report.error ??= interrupted.message; }
     save(); console.log(`[verification] ${report.verdict} (${report.scope}): ${reportPath}`);
   }
 }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { prepare, assertPrepared } from "./build.mjs";
-import { repoRoot } from "./process.mjs";
+import { git, repoRoot } from "./process.mjs";
 import { closeDebugApplication } from "./close-electron.mjs";
 
 async function evaluateDebugger(url, expression) {
@@ -52,17 +52,17 @@ try {
   const env = { ...process.env, DOHC_DESKTOP_TEST: "1", DOHC_TEST_HOME: home, DOHC_TEST_PICK_PATH: workspace };
   if (process.argv.includes("--native-dialogs")) delete env.DOHC_TEST_PICK_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
+  const commit = git(["rev-parse", "HEAD"]);
   app = await electron.launch({ executablePath: require("electron"), cwd: join(repoRoot, "apps/desktop"),
     args: [`--user-data-dir=${profile}`, "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0", join(repoRoot, "apps/desktop/dist/main/main.js")], env, artifactsDir: directory });
   processHandle = app.process();
   const stopped = new Promise((done) => {
     stop = () => {
       app.off("close", stop); processHandle.off("exit", stop);
-      process.off("SIGINT", stop); process.off("SIGTERM", stop);
       done();
     };
     app.once("close", stop); processHandle.once("exit", stop);
-    process.once("SIGINT", stop); process.once("SIGTERM", stop);
+    process.on("SIGINT", stop); process.on("SIGTERM", stop);
     if (processHandle.exitCode !== null || processHandle.signalCode !== null) stop();
   });
   const record = (source, text) => logs.push({ at: new Date().toISOString(), source, text: String(text) });
@@ -74,7 +74,7 @@ try {
   await app.context().tracing.start({ screenshots: true, snapshots: true, sources: true });
   const mainPort = await app.evaluate(() => process.debugPort);
   const rendererPort = (await readFile(join(profile, "DevToolsActivePort"), "utf8")).split(/\r?\n/)[0];
-  const instance = { root: repoRoot, supervisorPid: process.pid, launcherPid: app.process().pid,
+  const instance = { root: repoRoot, commit, supervisorPid: process.pid, launcherPid: app.process().pid,
     electronPid: await app.evaluate(() => process.pid), workspace, profile, home,
     mainInspector: `http://127.0.0.1:${mainPort}/json/list`, rendererInspector: `http://127.0.0.1:${rendererPort}/json/list`, build: assertPrepared(), directory };
   const debuggerTargets = {};
@@ -105,8 +105,12 @@ finally {
     logs.push({ source: "cleanup", text: String(error) });
     process.exitCode = 1;
   } finally {
-    await mkdir(directory, { recursive: true });
-    await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
-    console.log(`[debug] Evidence retained at ${directory}`);
+    try {
+      await mkdir(directory, { recursive: true });
+      await writeFile(join(directory, "desktop.jsonl"), logs.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+      console.log(`[debug] Evidence retained at ${directory}`);
+    } finally {
+      if (stop) { process.off("SIGINT", stop); process.off("SIGTERM", stop); }
+    }
   }
 }

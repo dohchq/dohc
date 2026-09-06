@@ -7,6 +7,7 @@ import { acquireBuildSlot, freeDiskGb, resolveBuildBudget } from "../../tools/ru
 import { requireE2eEngine } from "../../apps/desktop/scripts/require-e2e-engine.mjs";
 import { stagedEsbuildExecutable } from "../../apps/desktop/scripts/stage-plugin-tools.mjs";
 import { git, pnpm, readJson, repoRoot, run } from "./process.mjs";
+import { cancellationScope } from "./cancellation.mjs";
 
 export const receiptPath = join(repoRoot, ".dohc-dev/verification/build.json");
 export const enginePath = join(repoRoot, "target/debug", `dohc-workspace-engine${process.platform === "win32" ? ".exe" : ""}`);
@@ -155,17 +156,26 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
   mkdirSync(output, { recursive: true });
   mkdirSync(resolve(receiptPath, ".."), { recursive: true });
   const lock = receiptPath + ".lock";
+  const cancellation = cancellationScope("Preparation");
+  let failure;
+  try {
   try { writeFileSync(lock, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }), { flag: "wx" }); }
   catch (error) { if (error.code === "EEXIST") throw new Error(`Another preparation owns ${lock}. Inspect its PID before removing a stale lock.`); throw error; }
   try {
+  await cancellation.checkpoint();
   await run(...pnpm(["install", "--frozen-lockfile"]), { log: join(output, "prepare-install.log") });
+  await cancellation.checkpoint();
   const receipt = readJson(receiptPath) ?? { version: 1 };
   for (const kind of engineOnly ? ["engine"] : ["engine", "desktop"]) {
     if (kind === "engine" && existsSync(enginePath)) repairOwnedEngineExecutable(enginePath);
-    if (preparedStatus(kind, receipt)) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
+    const prepared = preparedStatus(kind, receipt);
+    await cancellation.checkpoint();
+    if (prepared) { console.log(`[prepare] reuse ${kind} ${receipt[kind].artifact.slice(0, 12)}`); continue; }
     const source = sourceFingerprint(kind);
+    await cancellation.checkpoint();
     if (kind === "engine") {
       await withBuildBudget(async (env) => {
+        await cancellation.checkpoint();
         const result = await run("cargo", ["build", "--locked", "--target-dir", join(repoRoot, "target"), "--message-format=json-render-diagnostics", "-p", "dohc-workspace-engine", "--bin", "dohc-workspace-engine"], { env, log: join(output, "engine-build.log"), quietStdout: true });
         const artifacts = result.stdout.split(/\r?\n/).filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
         const executable = artifacts.findLast((entry) => entry.reason === "compiler-artifact" && entry.target?.name === "dohc-workspace-engine" && entry.executable)?.executable;
@@ -177,13 +187,20 @@ export async function prepare({ engineOnly = false, output = join(repoRoot, ".do
     }
     if (sourceFingerprint(kind) !== source) throw new Error(`${kind} inputs changed during the build. Run preparation again.`);
     receipt[kind] = { source, artifact: artifactFingerprint(kind), commit: git(["rev-parse", "HEAD"]), builtAt: new Date().toISOString() };
+    await cancellation.checkpoint();
     mkdirSync(resolve(receiptPath, ".."), { recursive: true });
     writeFileSync(receiptPath + ".tmp", JSON.stringify(receipt, null, 2) + "\n");
     renameSync(receiptPath + ".tmp", receiptPath);
   }
   requireE2eEngine({ override: enginePath });
+  await cancellation.checkpoint();
   return receipt;
   } finally { unlinkSync(lock); }
+  } catch (error) { failure = error; throw error; }
+  finally {
+    const interrupted = await cancellation.dispose();
+    if (!failure && interrupted) throw interrupted;
+  }
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === import.meta.filename) {

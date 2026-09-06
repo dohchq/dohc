@@ -34,7 +34,7 @@
     "migrate": "node scripts/migrate-postgres.mjs",
     "reset:postgres": "node scripts/reset-postgres-dev-data.mjs",
     "typecheck": "pnpm -r --if-present typecheck",
-    "test": "node scripts/check-brand.mjs && node --test scripts/verification/verification.test.mjs scripts/verification/postgres-cancellation.test.mjs scripts/verification/process-group.test.mjs scripts/ci-verdict-provenance.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/desktop-build-cancellation.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
+    "test": "node scripts/check-brand.mjs && node --test scripts/verification/verification.test.mjs scripts/verification/postgres-cancellation.test.mjs scripts/verification/process-group.test.mjs scripts/verification/debug.test.mjs scripts/verification/owner-cancellation.test.mjs scripts/ci-verdict-provenance.test.mjs scripts/rust-gate-artifact.test.mjs scripts/build-slot.test.mjs scripts/desktop-build-cancellation.test.mjs scripts/native-target-guard.test.mjs scripts/scratch-leak-report.test.mjs scripts/vitest-single-major.test.mjs scripts/self-host-compose.test.mjs tools/perf-profiling/run-profiles.test.mjs && pnpm -r --if-present test",
     "test:desktop:e2e": "node scripts/verification/verify.mjs e2e",
     "test:sites:e2e": "pnpm --filter @dohc/desktop run test:sites:e2e",
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",

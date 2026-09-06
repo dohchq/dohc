@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createServer } from "node:net";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,16 +19,38 @@ function killRecorded(path, group = false) {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   test(`POSIX repeated ${signal} waits for owned group escalation and caller cleanup`, {
     skip: process.platform === "win32" ? "Real POSIX signal delivery" : false,
-  }, () => {
+  }, async () => {
     const root = mkdtempSync(join(tmpdir(), "dohc-repeated-signal-"));
-    let completed = false;
+    let supervisor;
+    let supervisorClosed;
+    let deadline;
+    let commandSocket;
+    let commandClosed;
+    let cleaning = false;
+    const server = createServer((socket) => {
+      commandSocket = socket;
+      commandClosed = new Promise((done) => socket.once("close", done));
+      socket.on("error", () => {});
+      socket.resume();
+      if (cleaning) socket.end();
+    });
     try {
+      await new Promise((done, reject) => {
+        server.once("error", reject);
+        server.listen(join(root, "cleanup.sock"), done);
+      });
       writeFileSync(join(root, "command.mjs"), `
+        import {connect} from 'node:net';
+        import {join} from 'node:path';
+        const cleanup=connect(join(import.meta.dirname,'cleanup.sock'));
+        cleanup.on('end',()=>process.exit(0));
+        cleanup.on('error',()=>process.exit(1));
+        cleanup.resume();
         process.on('SIGTERM',()=>process.stderr.write('command ignored SIGTERM\\n'));
         setInterval(()=>{},1000);
-        console.log('command ready');
+        cleanup.once('connect',()=>console.log('command ready'));
       `);
-      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      supervisor = spawn(process.execPath, ["--input-type=module", "-e", `
         import assert from 'node:assert/strict';
         import {writeFileSync} from 'node:fs';
         import {join} from 'node:path';
@@ -40,7 +63,6 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
             timeoutMs:10000,log:join(root,'command.log'),
             onSpawn:child=>{
               command=child;
-              writeFileSync(join(root,'command.json'),JSON.stringify({pid:child.pid}));
               child.once('close',()=>{closed=true;});
               child.stdout.on('data',chunk=>{
                 stdout+=chunk;
@@ -60,19 +82,31 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
         assert.equal(signals,2);
         assert.equal(closed,true);
         assert.equal(command.signalCode,'SIGKILL');
-        assert.throws(()=>process.kill(-command.pid,0),{code:'ESRCH'});
         assert.equal(process.listenerCount('SIGINT'),0);
         assert.equal(process.listenerCount('SIGTERM'),0);
         writeFileSync(join(root,'completed.json'),JSON.stringify({signals,closed,callerFinally}));
-      `, root], { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
-      completed = existsSync(join(root, "completed.json"));
-      assert.equal(result.error, undefined, result.stderr);
+      `, root], { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      supervisor.stderr.on("data", (chunk) => { stderr += chunk; });
+      supervisorClosed = new Promise((done, reject) => {
+        supervisor.once("error", reject);
+        supervisor.once("close", (status, signal) => done({ status, signal }));
+      });
+      deadline = setTimeout(() => supervisor.kill("SIGKILL"), 15_000);
+      const result = await supervisorClosed;
       assert.equal(result.signal, null, "repeated signal must not terminate the supervisor before cleanup");
-      assert.equal(result.status, 0, result.stderr);
-      assert.equal(completed, true);
+      assert.equal(result.status, 0, stderr);
+      assert.ok(commandSocket);
+      await commandClosed;
+      assert.equal(commandSocket.destroyed, true);
       assert.deepEqual(JSON.parse(readFileSync(join(root, "completed.json"), "utf8")), { signals: 2, closed: true, callerFinally: true });
     } finally {
-      if (!completed) killRecorded(join(root, "command.json"), true);
+      clearTimeout(deadline);
+      cleaning = true;
+      commandSocket?.end();
+      if (supervisor?.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGKILL");
+      await supervisorClosed?.catch(() => {});
+      await new Promise((done) => server.close(done));
       rmSync(root, { recursive: true, force: true });
     }
   });

@@ -322,6 +322,7 @@ test("a docs-only PR records clean provenance without code tools, while dirty he
   try {
     for (const file of [
       "scripts/verification/verify.mjs", "scripts/verification/build.mjs", "scripts/verification/process.mjs", "scripts/verification/doctor.mjs",
+      "scripts/verification/cancellation.mjs",
       "tools/rust-engine-program/build-slot.mjs", "tools/rust-engine-program/tree-provenance.mjs",
       "apps/desktop/scripts/require-e2e-engine.mjs", "apps/desktop/scripts/stage-plugin-tools.mjs", ".github/workflows/pr-checks.yml",
     ]) {
