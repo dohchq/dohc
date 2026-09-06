@@ -748,6 +748,9 @@ importers:
 
   services/share-web:
     dependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../../packages/live-session-contract
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../../packages/security-contract
@@ -779,9 +782,6 @@ importers:
         specifier: ^19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
-      '@dohc/live-session-contract':
-        specifier: workspace:*
-        version: link:../../packages/live-session-contract
       '@dohc/sync-relay':
         specifier: workspace:*
         version: link:../sync-relay

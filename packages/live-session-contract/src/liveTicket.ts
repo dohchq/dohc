@@ -87,7 +87,7 @@ function snapshotSelectors(value: unknown): unknown[] {
   }
 }
 
-function audience(value: unknown): string {
+export function parseLiveTicketAudience(value: unknown): string {
   if (
     typeof value !== "string" || value.length > 2_048 || /[\ud800-\udfff]/u.test(value) ||
     /[\u0000-\u001f\u007f]/.test(value) ||
@@ -122,7 +122,7 @@ function claims(record: Record<string, unknown>): LiveTicketClaims {
   }
   return {
     ticketId: parseLiveUpdateIdentifier(record.ticketId, "ticketId"),
-    audience: audience(record.audience),
+    audience: parseLiveTicketAudience(record.audience),
     authority,
     binding: parseLiveObjectBinding(rawBinding),
     hostEpoch: parseHostEpoch(record.hostEpoch),

@@ -4,6 +4,7 @@ import {
   LIVE_TICKET_LIFETIME_MS,
   LIVE_TICKET_TOKEN_PATTERN,
   parseLiveTicketClaims,
+  parseLiveTicketAudience,
   parseLiveTicketToken,
   parseRedeemedLiveTicket,
 } from "./liveTicket.js";
@@ -23,6 +24,15 @@ function claim() {
     expiresAtMs: 31_000,
   };
 }
+
+describe("shared live-ticket audience", () => {
+  it.each(["https://share.example.test", "http://localhost:4173", "https://[::1]:4433"])("accepts canonical origin %s", value => {
+    expect(parseLiveTicketAudience(value)).toBe(value);
+  });
+  it.each(["https://share.example.test/", "https://share.example.test:443", "HTTPS://share.example.test", "https://user@share.example.test", "https://share.example.test?query", "null", null, "https://" + "a".repeat(2048)])("refuses noncanonical audience %s", value => {
+    expect(() => parseLiveTicketAudience(value)).toThrow(TypeError);
+  });
+});
 
 describe("shared live-ticket claims", () => {
   it("owns the named authority and canonical binding without retaining input aliases", () => {

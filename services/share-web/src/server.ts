@@ -5,6 +5,7 @@ import { LINK_SECRET_PATTERN, SHA256_HEX_PATTERN } from "@dohc/security-contract
 import { TokenBucketLimiter } from "@dohc/service-http";
 import { asRecord } from "@dohc/workspace-core";
 import { createAccountAuthHandler, type AccountAuthConfig } from "./accountAuth";
+import { isSessionDiscriminator } from "./sessionDiscriminator";
 
 export const LINK_SESSION_HEADER = "x-dohc-link-session";
 export const SHARE_WEB_CSP =
@@ -37,7 +38,6 @@ const LINK_REFRESH_WINDOW_MS = 5 * 60 * 1_000;
 export const LINK_SESSION_RENEWAL_GRACE_MS = 7 * 24 * 60 * 60 * 1_000;
 const PROFILE_COOKIE_MAX_AGE_SECONDS = 400 * 24 * 60 * 60;
 const RASTER_SIGNATURE_BYTES = 12;
-const SESSION_DISCRIMINATOR = /^[A-Za-z0-9_-]{12}$/u;
 const DISCUSSION_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/u;
 const DISCUSSION_LIMIT = /^[1-9][0-9]{0,2}$/u;
 const DISCUSSION_REVISION = /^(?:0|[1-9][0-9]{0,15})$/u;
@@ -778,7 +778,7 @@ export function createShareWebHandler({
       request.headers.get(LINK_SESSION_HEADER) ??
       new URL(request.url).searchParams.get("session") ??
       "";
-    if (!SESSION_DISCRIMINATOR.test(discriminator)) return null;
+    if (!isSessionDiscriminator(discriminator)) return null;
     const token = parseCookies(request.headers.get("cookie")).get(cookieName(discriminator));
     if (!token) return null;
     const session = sessions.get(discriminator, token, nowMs());
