@@ -25,6 +25,7 @@
 
 use crate::capture_sink::{
     CaptureProvenance, CapturedRoot, PolicyState, SelfWriteSuppression, StoreCaptureSink,
+    StoreCaptureSinkParams,
 };
 use crate::{CAPTURE_MOMENT_RECORDED_EVENT, EngineEvents};
 use dohc_engine_collab::LeaseRegistry;
@@ -3415,18 +3416,18 @@ async fn apply_bound_run_with_handle(
                         let thread = std::thread::Builder::new()
                             .name("dohc-capture-collection-reconcile".to_owned())
                             .spawn(move || {
-                                let sink = StoreCaptureSink::new_with_bound_root(
-                                    collection_actor,
-                                    collection_workspace,
+                                let sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                                    actor: collection_actor,
+                                    workspace_id: collection_workspace,
                                     version_id,
-                                    collection_root,
-                                    captured_root,
+                                    shadow_root: collection_root,
+                                    captured_root: Ok(captured_root),
                                     now_ms,
-                                    collection_author_json,
-                                    collection_leases,
-                                    collection_self_writes,
-                                    collection_provenance,
-                                );
+                                    author_json: collection_author_json,
+                                    leases: collection_leases,
+                                    self_writes: collection_self_writes,
+                                    provenance: collection_provenance,
+                                });
                                 let _ = done_tx.send(sink.reconcile_collections());
                             });
                         match thread {
@@ -3555,18 +3556,18 @@ async fn apply_bound_run_with_handle(
             // A fresh sink per run: the policy snapshot and (lazily loaded)
             // secret key are re-read per reconcile task, matching the TS
             // one-policy-snapshot-per-task rule.
-            let mut sink = StoreCaptureSink::new_with_bound_root(
-                apply_actor,
-                apply_workspace,
+            let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                actor: apply_actor,
+                workspace_id: apply_workspace,
                 version_id,
-                apply_root,
-                apply_captured_root,
+                shadow_root: apply_root,
+                captured_root: Ok(apply_captured_root),
                 now_ms,
-                apply_author_json,
-                apply_leases,
-                apply_self_writes,
-                apply_provenance,
-            );
+                author_json: apply_author_json,
+                leases: apply_leases,
+                self_writes: apply_self_writes,
+                provenance: apply_provenance,
+            });
             let result =
                 apply_reconcile_plan_cancellable(&apply_plan, &mut sink, &NoFaults, &apply_cancel);
             let collections =
@@ -3682,18 +3683,18 @@ async fn apply_bound_run_with_handle(
             let retire_thread = std::thread::Builder::new()
                 .name("dohc-capture-overcap-retire".to_owned())
                 .spawn(move || {
-                    let mut sink = StoreCaptureSink::new_with_bound_root(
-                        retire_actor,
-                        retire_workspace,
-                        retire_version,
-                        retire_root,
-                        retire_captured_root,
+                    let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                        actor: retire_actor,
+                        workspace_id: retire_workspace,
+                        version_id: retire_version,
+                        shadow_root: retire_root,
+                        captured_root: Ok(retire_captured_root),
                         now_ms,
-                        retire_author_json,
-                        retire_leases,
-                        retire_self_writes,
-                        retire_pass_provenance,
-                    );
+                        author_json: retire_author_json,
+                        leases: retire_leases,
+                        self_writes: retire_self_writes,
+                        provenance: retire_pass_provenance,
+                    });
                     let _ = retire_tx.send(sink.retire_policy_excluded(&retire_path));
                 });
             let retired = match retire_thread {
@@ -3852,6 +3853,27 @@ mod root_bound_run_tests {
 
     const WORKSPACE_ID: &str = "ws-root-bound-run";
 
+    fn sink_params(
+        actor: ActorHandle,
+        shadow_root: impl Into<PathBuf>,
+        now_ms: i64,
+    ) -> StoreCaptureSinkParams {
+        let shadow_root = shadow_root.into();
+        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+        StoreCaptureSinkParams {
+            actor,
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: "main".to_owned(),
+            shadow_root,
+            captured_root,
+            now_ms,
+            author_json: None,
+            leases: LeaseRegistry::new(),
+            self_writes: SelfWriteSuppression::default(),
+            provenance: CaptureProvenance::default(),
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn seeded_deletes_survive_an_over_cap_policy_hold_and_recovery() {
         let store_scratch = ScratchDir::new().expect("store scratch");
@@ -3866,8 +3888,7 @@ mod root_bound_run_tests {
         let seed_actor = actor.clone();
         let seed_root = root.clone();
         std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None);
+            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1));
             for path in ["big.md", "gone.md", ".env"] {
                 assert!(matches!(
                     sink.ingest(path, 0, "advisory-sha", "text/plain", IngestReason::Added)
@@ -4063,7 +4084,7 @@ mod root_bound_run_tests {
         let seed_actor = actor.clone();
         let seed_root = root.clone();
         std::thread::spawn(move || {
-            StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 1, None)
+            StoreCaptureSink::new(sink_params(seed_actor, seed_root, 1))
                 .ingest(
                     "seed.md",
                     0,
@@ -4181,6 +4202,27 @@ mod collection_reconcile_scheduling_tests {
 
     const WORKSPACE_ID: &str = "ws-idle-collection-reconcile";
 
+    fn sink_params(
+        actor: ActorHandle,
+        shadow_root: impl Into<PathBuf>,
+        now_ms: i64,
+    ) -> StoreCaptureSinkParams {
+        let shadow_root = shadow_root.into();
+        let captured_root = CapturedRoot::bind(&shadow_root).map(Arc::new);
+        StoreCaptureSinkParams {
+            actor,
+            workspace_id: WORKSPACE_ID.to_owned(),
+            version_id: "main".to_owned(),
+            shadow_root,
+            captured_root,
+            now_ms,
+            author_json: None,
+            leases: LeaseRegistry::new(),
+            self_writes: SelfWriteSuppression::default(),
+            provenance: CaptureProvenance::default(),
+        }
+    }
+
     fn plan_with(op: CaptureOp) -> ReconcilePlan {
         ReconcilePlan {
             from_generation: ScanGeneration(0),
@@ -4275,8 +4317,7 @@ mod collection_reconcile_scheduling_tests {
             .map(|path| (*path).to_owned())
             .collect::<Vec<_>>();
         std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
             for path in paths {
                 sink.ingest(
                     &path,
@@ -4621,17 +4662,11 @@ mod collection_reconcile_scheduling_tests {
         let seed_leases = leases.clone();
         let seed_self_writes = self_writes.clone();
         std::thread::spawn(move || {
-            let mut sink = StoreCaptureSink::new_with_self_writes(
-                seed_actor,
-                WORKSPACE_ID,
-                "main",
-                seed_root,
-                2,
-                None,
-                seed_leases,
-                seed_self_writes,
-                CaptureProvenance::default(),
-            );
+            let mut sink = StoreCaptureSink::new(StoreCaptureSinkParams {
+                leases: seed_leases,
+                self_writes: seed_self_writes,
+                ..sink_params(seed_actor, seed_root, 2)
+            });
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
                     path,
@@ -4657,17 +4692,11 @@ mod collection_reconcile_scheduling_tests {
         let adopt_self_writes = self_writes.clone();
         std::thread::spawn(move || {
             assert_eq!(
-                StoreCaptureSink::new_with_self_writes(
-                    adopt_actor,
-                    WORKSPACE_ID,
-                    "main",
-                    adopt_root,
-                    3,
-                    None,
-                    adopt_leases,
-                    adopt_self_writes,
-                    CaptureProvenance::default(),
-                )
+                StoreCaptureSink::new(StoreCaptureSinkParams {
+                    leases: adopt_leases,
+                    self_writes: adopt_self_writes,
+                    ..sink_params(adopt_actor, adopt_root, 3)
+                })
                 .reconcile_collections()
                 .expect("adopt shared-imported record"),
                 ["tasks/alpha.md"]
@@ -4838,8 +4867,7 @@ mod collection_reconcile_scheduling_tests {
         let seed_actor = actor.clone();
         let seed_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
                     path,
@@ -5073,8 +5101,7 @@ mod collection_reconcile_scheduling_tests {
         let seed_actor = actor.clone();
         let seed_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            let mut sink =
-                StoreCaptureSink::new(seed_actor, WORKSPACE_ID, "main", seed_root, 2, None);
+            let mut sink = StoreCaptureSink::new(sink_params(seed_actor, seed_root, 2));
             for path in ["tasks/collection.yaml", "tasks/alpha.md"] {
                 sink.ingest(
                     path,
@@ -5093,7 +5120,7 @@ mod collection_reconcile_scheduling_tests {
         let adopt_actor = actor.clone();
         let adopt_root = scratch.path().to_path_buf();
         std::thread::spawn(move || {
-            StoreCaptureSink::new(adopt_actor, WORKSPACE_ID, "main", adopt_root, 3, None)
+            StoreCaptureSink::new(sink_params(adopt_actor, adopt_root, 3))
                 .reconcile_collections()
                 .expect("adopt seeded record");
         })
