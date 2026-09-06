@@ -41,7 +41,7 @@ export function registerNativeMenusIpcHandlers<
   sharedViewOf(workspaceId: string): ExplorerMenuScope["shareView"];
   windowForSender(sender: Sender): NativeMenuOptions["window"];
   buildFromTemplate: NativeMenuOptions["buildFromTemplate"];
-  currentUpdateState(): { canInstall: boolean };
+  currentUpdateState(): { canInstall?: boolean };
   ensureOwnedProjectionCurrent(workspace: Workspace, path: string): Promise<void>;
   shell: { showItemInFolder(path: string): void };
 }): void {

@@ -88,7 +88,7 @@ async function harness() {
   const repair = vi.fn<() => Promise<void>>(async () => undefined);
   const openPath = vi.fn(async () => "");
   const reveal = vi.fn();
-  const renderPdf = vi.fn(async () => new Uint8Array([37, 80, 68, 70]));
+  const renderPdf = vi.fn<() => Promise<Uint8Array>>(async () => new Uint8Array([37, 80, 68, 70]));
   const notify = vi.fn();
   const listings = new WorkspaceFileListingCache();
   const fileOwner = createWorkspaceFilesIpc<Sender, Event, Workspace, Operation>({
@@ -322,7 +322,7 @@ describe("registered graph and heading handlers", () => {
     await writeFile(join(h.workspace.rootPath, "current.md"), "# Current\n");
     type Thread = Awaited<ReturnType<typeof h.store.listThreads>>[number];
     type Attachment = Awaited<ReturnType<typeof h.store.listThreadAttachments>>[number];
-    vi.mocked(h.store.listThreads).mockResolvedValue([{ id: "thread", title: "Discussion", channelId: null } as Thread]);
+    vi.mocked(h.store.listThreads).mockResolvedValue([{ id: "thread", workspaceId: h.workspace.workspaceId, title: "Discussion", createdAtMs: 1, updatedAtMs: 1 } satisfies Thread]);
     vi.mocked(h.store.listThreadAttachments).mockResolvedValue([
       { messageId: "message", objectId: "present", pathHint: "old.md" } as Attachment,
       { messageId: "removed-message", objectId: "removed", pathHint: "current.md" } as Attachment,
@@ -375,7 +375,7 @@ describe("registered native menu handlers", () => {
     await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
     expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(true);
     h.buildMenu.mockClear();
-    h.setSharedScope({ access: "read", ended: false });
+    h.setSharedScope({ access: "view", ended: false });
     await h.invoke(CHANNELS.showExplorerMenu, { workspaceId: "workspace", path: "notes.md", kind: "file", pinned: false });
     expect(h.buildMenu.mock.calls[0]![0].some((item) => item.label?.startsWith("Share"))).toBe(false);
     h.buildMenu.mockClear();

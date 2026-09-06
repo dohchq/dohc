@@ -6018,7 +6018,7 @@ function registerIpcHandlers(
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation,
+    DesktopRendererWorkspaceOperation
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
@@ -6105,7 +6105,7 @@ function registerIpcHandlers(
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation,
+    DesktopRendererWorkspaceOperation
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
@@ -6125,7 +6125,7 @@ function registerIpcHandlers(
     WebContents,
     IpcMainInvokeEvent,
     DesktopRendererWorkspaceOperation["workspace"],
-    DesktopRendererWorkspaceOperation,
+    DesktopRendererWorkspaceOperation
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,
@@ -7235,7 +7235,7 @@ function registerIpcHandlers(
     WebContents,
     IpcMainInvokeEvent,
     DesktopWorkspaceOperation["workspace"],
-    DesktopWorkspaceOperation,
+    DesktopWorkspaceOperation
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
     assertTrustedSender,

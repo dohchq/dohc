@@ -65,8 +65,8 @@ async function harness() {
   const claim = vi.fn(async () => { steps.push("claim"); });
   // These opaque collaborators are used only by the injected I/O functions below.
   const sessions = {} as EngineWorkspaceSessions;
-  const relay = { claim } as EngineRelayWorkspaceClient;
-  const daemonStartup = vi.fn(async () => undefined);
+  const relay = { claim } as unknown as EngineRelayWorkspaceClient;
+  const daemonStartup = vi.fn<() => Promise<void>>(async () => undefined);
   const readSecrets = vi.fn<Dependencies["readWorkspaceSecretState"]>(async () => "none");
   const readDataKey = vi.fn<Dependencies["readWorkspaceDataKeyForEnrollment"]>(async () => null);
   const enroll = vi.fn<Dependencies["enrollWorkspaceKeyEnvelope"]>(async () => { steps.push("enroll"); });
