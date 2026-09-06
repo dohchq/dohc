@@ -16,7 +16,6 @@ export function CopyButton(props: {
     const clipboard = navigator.clipboard;
     if (!clipboard) return;
     const request = requests.next();
-    if (timer.current) clearTimeout(timer.current);
     try {
       const text = await props.getText();
       if (text === null || !requests.isCurrent(request)) return;
@@ -27,6 +26,7 @@ export function CopyButton(props: {
       if (!requests.isCurrent(request)) return;
       setLabel("Couldn't copy");
     }
+    if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => setLabel("Copy"), 1200);
   }
 
