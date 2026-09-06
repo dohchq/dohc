@@ -70,7 +70,6 @@ function NewRecordButton({ onClick }: { onClick: () => void }) {
       type="button"
       data-testid="collection-new-record"
       onClick={onClick}
-
     >
       New record
     </SecondaryButton>

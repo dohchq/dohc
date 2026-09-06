@@ -246,7 +246,6 @@ export function TryInVersionReviewCard(props: {
               data-testid="try-review-back-to-main"
               disabled={busy !== null}
               onClick={() => void backToMain()}
-
             >
               {busy === "back-to-main" ? "Going back…" : "Back to Main"}
             </PrimaryButton>
@@ -255,7 +254,6 @@ export function TryInVersionReviewCard(props: {
               data-testid="try-review-keep-working"
               disabled={busy !== null}
               onClick={() => void dismiss()}
-
             >
               Keep working in it
             </SecondaryButton>
@@ -267,7 +265,6 @@ export function TryInVersionReviewCard(props: {
               data-testid="try-review-open-compare"
               disabled={busy !== null}
               onClick={() => props.onOpenCompare(state.versionId)}
-
             >
               Review changes
             </PrimaryButton>
@@ -277,7 +274,6 @@ export function TryInVersionReviewCard(props: {
                 data-testid="try-review-merge"
                 disabled={busy !== null}
                 onClick={() => void beginMerge()}
-
               >
                 {busy === "merge" ? "Preparing…" : "Merge into Main"}
               </SecondaryButton>
@@ -287,7 +283,6 @@ export function TryInVersionReviewCard(props: {
               data-testid="try-review-keep-working"
               disabled={busy !== null}
               onClick={() => void dismiss()}
-
             >
               Keep working in it
             </SecondaryButton>
@@ -297,7 +292,6 @@ export function TryInVersionReviewCard(props: {
               disabled={busy !== null}
               title="Go back to Main. The version stays in your versions list."
               onClick={() => void backToMain()}
-
             >
               {busy === "back-to-main" ? "Setting aside…" : "Set aside"}
             </SecondaryButton>

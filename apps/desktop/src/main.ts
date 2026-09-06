@@ -4635,7 +4635,9 @@ async function startDesktopCliServer(): Promise<CliServerHandle> {
       // A CLI or MCP reply can mark a live bookmark projection pending.
       queueChatBookmarkProjection(workspace.workspaceId);
       activity.queueCloudSync(workspace.workspaceId);
-      void syncSharedChannelsForChatTarget(workspace.workspaceId, target);
+      void syncSharedChannelsForChatTarget(workspace.workspaceId, target).catch((error) => {
+        console.error("[desktop] shared channel sync:", error);
+      });
       void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
         console.error("[desktop] CLI dispatch scan:", error);
       });
@@ -6584,7 +6586,9 @@ function registerIpcHandlers(
   // above refuses every received share before the store.
   function syncChatWriteFor(scope: ChatScope, target: { threadId: string }): void {
     if (scope.kind === "share") return;
-    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target);
+    void syncSharedChannelsForChatTarget(scope.workspace.workspaceId, target).catch((error) => {
+      console.error("[desktop] shared channel sync:", error);
+    });
     activity.queueCloudSync(scope.workspace.workspaceId);
   }
 
@@ -7995,6 +7999,8 @@ function registerIpcHandlers(
     });
     void syncSharedChannelsForChatTarget(workspace.workspaceId, {
       channelId: input.channelId,
+    }).catch((error) => {
+      console.error("[desktop] shared channel sync:", error);
     });
     activity.queueCloudSync(workspace.workspaceId);
     void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
@@ -8129,7 +8135,9 @@ function registerIpcHandlers(
       },
       // MU-C4: reactions in a joined shared channel push out promptly too.
       syncJoinedChannels: (workspaceId) => {
-        void syncWorkspaceSharedChannels(workspaceId);
+        void syncWorkspaceSharedChannels(workspaceId).catch((error) => {
+          console.error("[desktop] shared channel sync:", error);
+        });
       },
       // Signed-in reactions are journaled workspace mutations, so the owner's
       // cloud workspace is nudged too. Signed-out sync attempts are no-ops.
