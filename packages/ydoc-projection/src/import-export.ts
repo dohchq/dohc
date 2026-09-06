@@ -33,8 +33,8 @@ import {
   DohcTaskItem,
   dohcMarkdownExtensions,
   escapeHighlightMarkdown,
-  sanitizeImageSrc,
 } from './dohc-markdown-extensions.js'
+import { sanitizeImageSrc } from './image-src.js'
 import { backtickFence } from './markdown-fence.js'
 
 const BODY_FIELD = 'body'

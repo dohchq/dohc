@@ -14,6 +14,7 @@ import {
 } from "@dohc/security-contract/share-discussion";
 import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
+import { sha256Hex } from "@dohc/workspace-core/hash";
 import {
   conflictResolveBlobShas,
   type ConflictResolveEnvelopeContext,
@@ -2646,7 +2647,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     updatedAtMs: number;
     expectedSha256: string | null;
   }): { sha256: string } {
-    const nextSha256 = sha256HexUtf8(input.envelopeJson);
+    const nextSha256 = sha256Hex(input.envelopeJson);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const current = this.db
@@ -2684,7 +2685,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
         this.db.exec("COMMIT");
         return { sha256: nextSha256 };
       }
-      const currentSha256 = sha256HexUtf8(currentJson);
+      const currentSha256 = sha256Hex(currentJson);
       if (input.expectedSha256 === null) {
         throw new SyncRelayConflictError(
           "key envelope already exists; replacing it requires If-Match with the current sha256",
@@ -2735,7 +2736,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     if (typeof row?.envelope_json !== "string") return null;
     return {
       envelopeJson: row.envelope_json,
-      sha256: sha256HexUtf8(row.envelope_json),
+      sha256: sha256Hex(row.envelope_json),
       updatedAtMs: Number(row.updated_at_ms),
     };
   }
@@ -5769,10 +5770,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       .get(input.workspaceId, input.originId, input.originSeq);
     return row ? rowToLogRow(row) : null;
   }
-}
-
-function sha256HexUtf8(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 function workspaceIdentityFromRow(
