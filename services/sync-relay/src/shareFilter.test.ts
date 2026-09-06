@@ -8,6 +8,7 @@ import {
   MAX_SHARE_PATHS,
   MAX_SHARE_PATH_CHARS,
   filterOpForShare,
+  isLiveEditShareSelector,
   parseChatThreadTopic,
   parseStoredShareSelectorJson,
   presenceTopicAllowedForShare,
@@ -15,6 +16,7 @@ import {
   validateChatShareAccess,
   validateFileShareAccess,
   validateShareSelector,
+  visibleSharePath,
   type ChatChannelShareSelector,
   type ChatShareThreadResolver,
   type ShareFileChatResolver,
@@ -51,6 +53,32 @@ function momentPayload(overrides: Record<string, unknown> = {}): string {
 const pathShare: ShareSelector = { paths: ["docs"], versionId: null, access: "view" };
 
 describe("share selector validation", () => {
+  it("returns only the normalized tracked path inside the selector", () => {
+    for (const [path, expected] of [
+      ["docs", "docs"], ["docs/a.md", "docs/a.md"], ["docs//a.md", "docs/a.md"],
+      ["docs-other/a.md", null], ["other/a.md", null], ["../docs/a.md", null],
+      ["docs/../../private.md", null], ["docs/.env", null], ["docs/.git/config", null],
+    ] as const) {
+      expect(visibleSharePath(pathShare, path), path).toBe(expected);
+    }
+    expect(visibleSharePath({ ...pathShare, paths: [], versionId: "v1" }, "docs//a.md"))
+      .toBe("docs/a.md");
+    expect(visibleSharePath({ ...pathShare, paths: [], versionId: null }, "docs//a.md"))
+      .toBeNull();
+  });
+
+  it("requires a nonempty main-version file selector at exact Edit access", () => {
+    expect(isLiveEditShareSelector({ ...pathShare, access: "edit" })).toBe(true);
+    for (const selector of [
+      pathShare, { ...pathShare, access: "comment" as const },
+      { ...pathShare, access: "edit" as const, versionId: "pinned-version" },
+      { ...pathShare, access: "edit" as const, paths: [] },
+      { kind: "chat-channel" as const, channelWireId: "channel-1", access: "read-write" as const },
+    ]) {
+      expect(isLiveEditShareSelector(selector), JSON.stringify(selector)).toBe(false);
+    }
+  });
+
   it("accepts explicit tracked paths and normalizes/dedupes them", () => {
     const result = validateShareSelector({
       paths: ["docs/notes.md", "docs//notes.md", "src"],

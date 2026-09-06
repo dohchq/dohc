@@ -64,6 +64,9 @@ importers:
       '@dohc/collection-views':
         specifier: workspace:*
         version: link:../../packages/collection-views
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../../packages/live-session-contract
       '@dohc/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
@@ -461,6 +464,25 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11))
 
+  packages/live-session-contract:
+    dependencies:
+      '@dohc/security-contract':
+        specifier: workspace:*
+        version: link:../security-contract
+      '@dohc/workspace-core':
+        specifier: workspace:*
+        version: link:../workspace-core
+    devDependencies:
+      '@types/node':
+        specifier: ^24.13.3
+        version: 24.13.3
+      typescript:
+        specifier: ^7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11))
+
   packages/mcp:
     dependencies:
       '@dohc/cli':
@@ -594,6 +616,9 @@ importers:
 
   packages/workspace-engine-client:
     dependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../live-session-contract
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../security-contract
@@ -662,6 +687,9 @@ importers:
 
   packages/ydoc-projection:
     dependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../live-session-contract
       '@tiptap/core':
         specifier: 3.29.2
         version: 3.29.2(@tiptap/pm@3.29.2)
@@ -683,6 +711,9 @@ importers:
       js-yaml:
         specifier: ^5.2.3
         version: 5.2.3
+      lib0:
+        specifier: 0.2.117
+        version: 0.2.117
       y-prosemirror:
         specifier: ^1.3.7
         version: 1.3.7(prosemirror-model@1.25.11)(prosemirror-state@1.4.4)(prosemirror-view@1.42.2)(y-protocols@1.0.7(yjs@13.6.30))(yjs@13.6.30)
@@ -711,6 +742,9 @@ importers:
       '@excalidraw/excalidraw':
         specifier: 0.18.1
         version: 0.18.1(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)
+      better-auth:
+        specifier: ^1.6.26
+        version: 1.6.26(@opentelemetry/api@1.9.1)(@tanstack/react-start@1.168.9(crossws@0.4.5(srvx@0.11.15))(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)))(drizzle-orm@0.45.2(@opentelemetry/api@1.9.1)(@types/pg@8.20.4)(kysely@0.29.4)(pg@8.22.0))(pg@8.22.0)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(vitest@4.1.10(@edge-runtime/vm@4.0.4)(@opentelemetry/api@1.9.1)(@types/node@24.13.3)(jsdom@30.0.1(@noble/hashes@2.3.0))(vite@8.2.1(@types/node@24.13.3)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.11)))
       dompurify:
         specifier: 3.4.13
         version: 3.4.13
@@ -724,15 +758,24 @@ importers:
         specifier: ^19.2.8
         version: 19.2.8(react@19.2.8)
     devDependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../../packages/live-session-contract
       '@dohc/sync-relay':
         specifier: workspace:*
         version: link:../sync-relay
+      '@dohc/workspace-auth':
+        specifier: workspace:*
+        version: link:../../packages/workspace-auth
       '@playwright/test':
         specifier: ^1.62.1
         version: 1.62.1
       '@types/node':
         specifier: ^24.13.3
         version: 24.13.3
+      '@types/pg':
+        specifier: ^8.20.4
+        version: 8.20.4
       '@types/react':
         specifier: ^19.2.18
         version: 19.2.18
@@ -748,6 +791,9 @@ importers:
       jsdom:
         specifier: ^30.0.1
         version: 30.0.1(@noble/hashes@2.3.0)
+      pg:
+        specifier: ^8.22.0
+        version: 8.22.0
       tsx:
         specifier: ^4.23.11
         version: 4.23.11
@@ -775,6 +821,9 @@ importers:
 
   services/sync-relay:
     dependencies:
+      '@dohc/live-session-contract':
+        specifier: workspace:*
+        version: link:../../packages/live-session-contract
       '@dohc/security-contract':
         specifier: workspace:*
         version: link:../../packages/security-contract

@@ -93,3 +93,12 @@ export {
   type SearchResult,
   type WatcherStatusResult,
 } from "./workspace/workspaceWireContract";
+
+export {
+  OwnerYDocOutbox,
+  OwnerYDocOutboxReadChangedError,
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+  type OwnerYDocOutboxEntry,
+  type OwnerYDocOutboxLimits,
+} from "./ydoc/ownerYDocOutbox";
