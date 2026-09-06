@@ -1,3 +1,4 @@
+import { createKeyedSerializer } from "../keyedSerializer";
 import {
   RelayConflictError,
   RelayKeyEnvelopeMissingError,
@@ -161,22 +162,10 @@ export class RelayTransportRouteGuard {
 }
 
 class RelayConfiguredDaemonClient implements EngineDaemonClient {
-  // Only workspace.open needs decorating; every other capability of the inner
-  // client must survive the wrap. These are optional on EngineDaemonClient, so
-  // forward conditionally — a wrapper that swallows onEvent reads as "no event
-  // delivery" and permanently pins the renderer to the non-engine editor.
+  // Preserve the optional request and event capabilities used by workspace sessions.
   readonly cancelRequest?: EngineDaemonClient["cancelRequest"];
   readonly onBlob?: EngineDaemonClient["onBlob"];
   readonly onEvent?: EngineDaemonClient["onEvent"];
-  // These two are forwarded for completeness, not because anything reaches
-  // them through this wrapper today: the supervisor probes and kills the
-  // client it launched itself, never this one. Deleting them would break
-  // nothing now, which is exactly why the reason has to be written down —
-  // a wrapper that quietly models less than the client it wraps is how the
-  // next caller gets a silent downgrade instead of the real behaviour.
-  readonly closeUnresponsive?: EngineDaemonClient["closeUnresponsive"];
-  readonly inboundActivity?: EngineDaemonClient["inboundActivity"];
-  readonly waitForExit?: EngineDaemonClient["waitForExit"];
 
   get helloAck(): EngineDaemonClient["helloAck"] {
     return this.client.helloAck;
@@ -189,13 +178,6 @@ class RelayConfiguredDaemonClient implements EngineDaemonClient {
     if (client.cancelRequest) this.cancelRequest = client.cancelRequest.bind(client);
     if (client.onBlob) this.onBlob = client.onBlob.bind(client);
     if (client.onEvent) this.onEvent = client.onEvent.bind(client);
-    if (client.closeUnresponsive) {
-      this.closeUnresponsive = client.closeUnresponsive.bind(client);
-    }
-    if (client.inboundActivity) {
-      this.inboundActivity = client.inboundActivity.bind(client);
-    }
-    if (client.waitForExit) this.waitForExit = client.waitForExit.bind(client);
   }
 
   async sendRequest(request: Request): Promise<Response> {
@@ -594,10 +576,7 @@ export class EngineRelayClient {
   private readonly requestDeadlineMs: number;
   private readonly activeLocations = new Map<string | symbol, string>();
   private readonly boundWorkspaces = new Map<string | symbol, EngineWorkspace>();
-  private readonly workspaceTails = new Map<
-    string | symbol,
-    Promise<void>
-  >();
+  private readonly serialize = createKeyedSerializer<string | symbol>();
 
   constructor(options: EngineRelayClientOptions) {
     this.sessions = options.sessions;
@@ -1202,25 +1181,6 @@ export class EngineRelayClient {
         "Rust engine relay sessions did not all close.",
       );
     }
-  }
-
-  private serialize<T>(
-    workspaceKey: string | symbol,
-    run: () => Promise<T>,
-  ): Promise<T> {
-    const previous = this.workspaceTails.get(workspaceKey) ?? Promise.resolve();
-    const result = previous.then(run, run);
-    const settled = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.workspaceTails.set(workspaceKey, settled);
-    void settled.then(() => {
-      if (this.workspaceTails.get(workspaceKey) === settled) {
-        this.workspaceTails.delete(workspaceKey);
-      }
-    });
-    return result;
   }
 
   private workspaceKey(workspace: string | EngineWorkspace): string | symbol {
