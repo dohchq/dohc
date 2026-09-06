@@ -61,8 +61,6 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
-  ImportToDatabasePayload,
-  ImportToDatabaseResult,
   PluginPanelSdkEvent,
   PluginStatusChangedEvent,
   PluginPanelInvalidatedEvent,
@@ -377,13 +375,12 @@ import {
 } from "./workspaces/shareViewFilesTarget";
 import { createOwnedProjectionRepairer } from "./workspaces/ownedProjectionRepair";
 import { createOwnedWorkspaceFileReader } from "./workspaces/ownedWorkspaceFileReader";
-import { importOwnedWorkspaceDatabase } from "./workspaces/ownedWorkspaceDatabaseImport";
 import {
   workspaceDatabaseWorker,
   type DatabaseEdit,
 } from "./workspaces/workspaceDatabase";
 import type { OwnedWorkspaceDatabaseReader } from "./workspaces/ownedWorkspaceFileReader";
-import { registerWorkspaceDatabaseIpcHandlers } from "./ipc/workspaceDatabaseIpc";
+import { registerDesktopDatabaseIpcHandlers } from "./ipc/desktopDatabaseIpc";
 import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
@@ -5798,71 +5795,14 @@ function registerIpcHandlers(): void {
     commands: shareMountCommands,
   });
 
-  registerWorkspaceDatabaseIpcHandlers<
+  registerDesktopDatabaseIpcHandlers<
+    WebContents,
     IpcMainInvokeEvent,
     DesktopWorkspaceOperation["workspace"]
   >({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
-    assertTrustedSender,
-    withWorkspaceOperation: (
-      event,
-      workspaceId,
-      inactiveMessage,
-      work,
-    ) =>
-      withRendererWorkspaceOperation(
-        event.sender,
-        workspaceId,
-        inactiveMessage,
-        work,
-      ),
-    assertWritableWorkspace,
-    read: (operation, relativePath) =>
-      createOwnedWorkspaceFileReader({
-        workspace: operation.workspace,
-        files: shareViewFiles,
-        databaseReader: workerDatabaseReader(operation.signal),
-      }).readDatabase(relativePath),
-    readPage: (operation, input) =>
-      createOwnedWorkspaceFileReader({
-        workspace: operation.workspace,
-        files: shareViewFiles,
-        databaseReader: workerDatabaseReader(operation.signal),
-      }).readDatabasePage(input.relativePath, input.table, input.offset),
-    edit: (operation, input) =>
-      editWorkspaceDatabaseInWorker({
-        rootPath: operation.workspace.rootPath,
-        relativePath: input.relativePath,
-        edit: input.edit,
-        author: { kind: "user", userId: "local" },
-        nowMs: input.nowMs,
-        operationId: input.operationId,
-        signal: operation.signal,
-      }),
-    now: () => Date.now(),
-    createId: randomUUID,
-  });
-
-  ipcMain.handle(CHANNELS.importToDatabase, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ImportToDatabasePayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Database import stopped because this window changed workspaces.",
-      async (operation) => {
-        assertWritableWorkspace(operation.workspace);
-        return ImportToDatabaseResult.parse(
-          await importOwnedWorkspaceDatabase({
-            workspace: operation.workspace,
-            files: shareViewFiles,
-            sourcePath: input.sourceRelativePath,
-            databasePath: input.databaseRelativePath,
-            tableName: input.tableName,
-          }),
-        );
-      },
-    );
+    assertTrustedSender, withRendererWorkspaceOperation, assertWritableWorkspace,
+    shareViewFiles, workerDatabaseReader, editWorkspaceDatabaseInWorker,
   });
 
   const siteIpcHandlers = createSitesIpcHandlers({
