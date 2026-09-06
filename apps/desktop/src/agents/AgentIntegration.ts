@@ -26,7 +26,7 @@ export interface AgentRunRecord {
   status: "running" | "complete" | "failed";
 }
 
-export interface AgentRunStatus {
+interface AgentRunStatus {
   mcpEnabled: boolean;
   activeRun: AgentRunRecord | null;
   lastRun: AgentRunRecord | null;
@@ -44,7 +44,7 @@ export class AgentIntegrationState {
   chain: Promise<unknown> = Promise.resolve();
 }
 
-export interface AgentIntegrationAuthority {
+interface AgentIntegrationAuthority {
   readonly attachmentId: symbol;
   readonly workspaceId: string;
   readonly rootPath: string;

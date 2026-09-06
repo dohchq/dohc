@@ -12,7 +12,7 @@ import {
 } from "./pluginShared";
 import { EXCLUDED_SOURCE_NAMES, hashPluginSourceFiles } from "./pluginSourceSnapshot";
 
-export interface OfferedPluginSource {
+interface OfferedPluginSource {
   directoryName: (typeof BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES)[number];
   displayName: string | null;
   description: string | null;
@@ -444,7 +444,7 @@ export async function addOfferedPlugin(params: {
 
 /** Device + inode: the filesystem's own answer to "is this the same
  * directory entry", independent of what the path currently resolves to. */
-export interface OfferedPluginIdentity {
+interface OfferedPluginIdentity {
   dev: bigint;
   ino: bigint;
 }

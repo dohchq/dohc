@@ -12,7 +12,7 @@ export interface OwnedPluginHost {
   stopAll(): Promise<void>;
 }
 
-export interface PluginHostOwnershipOptions {
+interface PluginHostOwnershipOptions {
   drainTimeoutMs?: number;
   onCleanupError?: (pluginId: string, error: unknown) => void;
 }
@@ -26,7 +26,7 @@ export class PluginHostOwnershipClosedError extends Error {
   }
 }
 
-export type PluginHostAdmissionRefusal = {
+type PluginHostAdmissionRefusal = {
   kind: "refused";
   reason: "change-in-progress" | "closed";
 };
@@ -43,17 +43,17 @@ export type PluginHostCommandRunOutcome<T> =
   | { kind: "completed"; value: T }
   | PluginHostAdmissionRefusal;
 
-export type PluginHostChangeStopOutcome =
+type PluginHostChangeStopOutcome =
   | { kind: "stopped"; drained: boolean; stopError?: unknown }
   | { kind: "refused"; reason: "self-drain" }
   | { kind: "superseded"; drained: boolean };
 
-export type PluginHostChangeStopCheck =
+type PluginHostChangeStopCheck =
   | { kind: "ready" }
   | { kind: "refused"; reason: "self-drain" }
   | { kind: "superseded" };
 
-export interface PluginHostChangeStopOptions {
+interface PluginHostChangeStopOptions {
   /**
    * Runs after admission and drain checks prove this change still owns the
    * exact host stop, immediately before that stop starts.
@@ -106,7 +106,7 @@ export interface PluginHostSurfaceLease {
   release(): Promise<void>;
 }
 
-export interface PluginHostSurfaceStartAuthority
+interface PluginHostSurfaceStartAuthority
   extends PluginHostChangeScope {
   readonly [surfaceStartAuthorityBrand]: true;
 }
@@ -131,7 +131,7 @@ export interface PluginHostChangeAuthority {
   preserve<T>(result: PluginHostStartResult<T>): PluginHostChangeCompletion<T>;
 }
 
-export interface PluginHostChangeCompletion<T> {
+interface PluginHostChangeCompletion<T> {
   readonly [changeCompletionBrand]: true;
   readonly value: T;
 }

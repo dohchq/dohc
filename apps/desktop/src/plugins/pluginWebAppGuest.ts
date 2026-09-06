@@ -149,7 +149,7 @@ export interface GuestViewLike {
   setVisible(visible: boolean): void;
 }
 
-export interface PluginWebAppGuest<V extends GuestViewLike> {
+interface PluginWebAppGuest<V extends GuestViewLike> {
   view: V;
   /** The credential-free origin. This — never the start URL — is what the
    * renderer and the view registry are told about. */
@@ -210,7 +210,7 @@ export function createPluginWebAppGuest<V extends GuestViewLike>(input: {
   return { view, origin, partition };
 }
 
-export interface GuestPartitionSessionLike {
+interface GuestPartitionSessionLike {
   clearStorageData(): Promise<void>;
 }
 

@@ -21,7 +21,7 @@ export function asString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-export type ClaudeMode = "approval-required" | "auto-accept-edits" | "full-access";
+type ClaudeMode = "approval-required" | "auto-accept-edits" | "full-access";
 
 /**
  * dohc's three modes as `claude --permission-mode` values.
@@ -39,7 +39,7 @@ export function claudePermissionMode(mode: ClaudeMode): string {
   return "manual";
 }
 
-export interface ClaudeMcpServer {
+interface ClaudeMcpServer {
   command: string;
   args: string[];
   env?: Record<string, string>;
@@ -58,7 +58,7 @@ export function mcpConfigJson(mcp: ClaudeMcpServer): string {
   });
 }
 
-export interface ClaudeSessionSpec {
+interface ClaudeSessionSpec {
   /** A UUID dohc minted for a new session, or the cursor of one to continue. */
   sessionId: string;
   resume: boolean;
@@ -182,7 +182,7 @@ export function permissionTypeForTool(toolName: string): RequestType {
 }
 
 /** The paths a tool call names, for dohc to show beside the request. */
-export function toolLocations(input: unknown): string[] {
+function toolLocations(input: unknown): string[] {
   if (!isRecord(input)) return [];
   const path = asString(input.file_path) ?? asString(input.path) ?? asString(input.notebook_path);
   return path ? [path] : [];
@@ -244,7 +244,7 @@ export function sessionAllowRules(request: unknown): unknown[] {
     .map((suggestion) => ({ ...suggestion, destination: "session" }));
 }
 
-export interface ClaudeControlResponse {
+interface ClaudeControlResponse {
   type: "control_response";
   response: {
     subtype: "success";
@@ -296,7 +296,7 @@ export function permissionControlResponse(
   };
 }
 
-export interface StreamMapContext {
+interface StreamMapContext {
   /** The turn dohc is waiting on, which Claude's own stream never names. */
   turnId: string;
   cancelled: boolean;

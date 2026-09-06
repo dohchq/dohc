@@ -31,7 +31,7 @@ export const PROBE_TIMEOUT_MS = 5000;
  * and `DOHC_AGENT_CLAUDE_CODE_READY_TIMEOUT_MS` moves it for a machine where
  * that is still not enough.
  */
-export const READY_TIMEOUT_MS = 20_000;
+const READY_TIMEOUT_MS = 20_000;
 
 /** The handshake deadline this machine wants, in milliseconds. */
 export function readyTimeoutMs(env: Record<string, string | undefined>): number {
@@ -45,7 +45,7 @@ const MAX_PROBE_ERROR_CHARS = 300;
 /** The id dohc's readiness handshake carries, which is never a Claude id. */
 const HANDSHAKE_ID = "dohc-initialize";
 
-export interface ClaudeCommandSpec {
+interface ClaudeCommandSpec {
   command: string;
   args: string[];
 }

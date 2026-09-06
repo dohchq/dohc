@@ -59,7 +59,7 @@ export type AgentEvent =
     }
   | { kind: "error"; message: string; fatal: boolean };
 
-export interface AgentModel {
+interface AgentModel {
   id: string;
   name: string;
   planIncluded: boolean;

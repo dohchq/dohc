@@ -32,7 +32,7 @@ interface SenderState {
   byScopeTopic: Map<string, PollEntry>;
 }
 
-export interface PresencePollHandle {
+interface PresencePollHandle {
   readonly signal: AbortSignal;
   // Abort this poll (safety timeout / caller-driven stop).
   abort(): void;
@@ -41,7 +41,7 @@ export interface PresencePollHandle {
   release(): void;
 }
 
-export interface PresencePollRegistry {
+interface PresencePollRegistry {
   begin(senderId: number, pollId: string, scopeTopicKey: string): PresencePollHandle;
   cancel(senderId: number, pollId: string): void;
   disposeSender(senderId: number): void;

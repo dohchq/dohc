@@ -14,7 +14,7 @@ import type {
 } from "./PluginPipeline";
 import type { PluginWorkspaceEvents } from "./pluginWorkspaceEvents";
 
-export interface PluginWorkspaceIdentity {
+interface PluginWorkspaceIdentity {
   readonly workspaceId: string;
   readonly rootPath: string;
 }
@@ -26,7 +26,7 @@ export interface PluginWorkspaceRuntimeParts {
   readonly automations: PluginAutomations;
 }
 
-export interface PluginWorkspaceRuntime {
+interface PluginWorkspaceRuntime {
   readonly pipeline: PluginPipeline;
   readonly agentDrivers: PluginAgentDrivers;
   readonly workspaceEvents: PluginWorkspaceEvents;
@@ -45,7 +45,7 @@ interface PluginWorkspaceRuntimeHooks {
   onPipelineStatus(event: PluginPipelineStatusEvent): void;
 }
 
-export interface PluginWorkspaceRuntimesDependencies<
+interface PluginWorkspaceRuntimesDependencies<
   TWorkspace extends PluginWorkspaceIdentity,
 > {
   assertWritable(workspace: TWorkspace): void;

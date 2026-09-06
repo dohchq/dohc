@@ -36,7 +36,6 @@ import {
   type DoorWrittenDelta,
   overlayDoorWrittenSourceDeltas,
   PluginPipeline,
-  type PluginPipelineRuntimeStopHooks,
   type PluginPipelineStatusEvent,
 } from "./PluginPipeline";
 import {
@@ -95,7 +94,7 @@ interface PluginPipelineQueueInternals {
     cleanupIds: ReadonlyArray<string>,
     primaryPluginId: string,
     reservations: ReadonlyMap<string, unknown>,
-    hooks: PluginPipelineRuntimeStopHooks,
+    hooks: Parameters<PluginPipeline["disable"]>[1],
   ): TestUninstallQueueClaim[];
 }
 
