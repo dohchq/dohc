@@ -4,7 +4,8 @@
   "type": "module",
   "exports": {
     ".": "./src/server.ts",
-    "./storage": "./src/storage.ts"
+    "./storage": "./src/storage.ts",
+    "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -16,6 +17,7 @@
   "dependencies": {
     "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
+    "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "better-auth": "^1.6.26",

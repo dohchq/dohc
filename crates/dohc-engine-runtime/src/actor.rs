@@ -16306,7 +16306,8 @@ mod capture_secret_root_guard_tests {
                 let store_scratch = ScratchDir::new().expect("store scratch");
                 let root_scratch = ScratchDir::new().expect("root scratch");
                 let root = root_scratch.path().to_path_buf();
-                let db = store_scratch.engine_db_path().expect("database path");
+                let db =
+                    dohc_engine_testkit::engine_db_path(&store_scratch).expect("database path");
                 let mut store = EngineStore::open(&db, 1).expect("seed store");
                 VersionedTextStore::new(&mut store)
                     .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)

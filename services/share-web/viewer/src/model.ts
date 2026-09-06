@@ -1,3 +1,4 @@
+import { asRecord } from "@dohc/workspace-core/records";
 export type ShareAccess = "view" | "comment";
 
 export interface ViewMeta {
@@ -88,12 +89,6 @@ export type DiscussionWriteState =
 
 export type FileAccumulator = Map<string, SharedFile>;
 
-function record(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value).sort();
   const expected = [...keys].sort();
@@ -102,7 +97,7 @@ function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): 
 }
 
 function discussionAuthor(value: unknown): NamedDiscussionAuthor | LinkDiscussionAuthor | null {
-  const author = record(value);
+  const author = asRecord(value);
   if (!author || typeof author.displayName !== "string" || author.displayName.length === 0) {
     return null;
   }
@@ -120,7 +115,7 @@ function discussionAuthor(value: unknown): NamedDiscussionAuthor | LinkDiscussio
 }
 
 function discussionMessage(value: unknown): PublicDiscussionMessage | null {
-  const message = record(value);
+  const message = asRecord(value);
   if (
     !message ||
     typeof message.messageId !== "string" ||
@@ -178,7 +173,7 @@ export function parseDiscussionPage(
   value: unknown,
   direction: "oldest-first" | "newest-first" = "oldest-first",
 ): PublicDiscussionPage | null {
-  const page = record(value);
+  const page = asRecord(value);
   if (
     !page ||
     !hasExactKeys(page, [
@@ -223,7 +218,7 @@ function isRevision(value: unknown): value is number {
 }
 
 export function parseDiscussionActivity(value: unknown): PublicDiscussionActivity | null {
-  const activity = record(value);
+  const activity = asRecord(value);
   if (
     !activity ||
     !hasExactKeys(activity, [
@@ -274,7 +269,7 @@ export function parseDiscussionActivity(value: unknown): PublicDiscussionActivit
 }
 
 export function parseDiscussionAppendResult(value: unknown): DiscussionAppendResult | null {
-  const result = record(value);
+  const result = asRecord(value);
   if (!result || result.ok !== true || !hasExactKeys(result, ["ok", "message"])) {
     return null;
   }
@@ -288,7 +283,7 @@ export function parseDiscussionAppendResult(value: unknown): DiscussionAppendRes
 export function parseDiscussionWriteState(
   value: unknown,
 ): DiscussionWriteState | null {
-  const result = record(value);
+  const result = asRecord(value);
   if (!result || result.ok !== false) return null;
   if (result.state === "limit-reached") {
     return hasExactKeys(result, ["ok", "state"])
@@ -389,7 +384,7 @@ export function mergeDiscussionWindowMessages(
 }
 
 function storedFile(value: unknown): SharedFile | null {
-  const payload = record(value);
+  const payload = asRecord(value);
   if (!payload) return null;
   const path = payload.path;
   const blobSha256 = payload.blobSha256;
@@ -434,7 +429,7 @@ export function foldLogOps(
   ops: readonly RelayOp[],
 ): void {
   for (const op of ops) {
-    const payload = record(op.payload);
+    const payload = asRecord(op.payload);
     if (!payload) continue;
     if (op.opKind === "version.create" && Array.isArray(payload.forkSnapshots)) {
       for (const snapshot of payload.forkSnapshots) {
