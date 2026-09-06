@@ -6,6 +6,8 @@
     ".": "./src/index.ts",
     "./paths": "./src/paths.ts",
     "./realPath": "./src/realPath.ts",
+    "./hash": "./src/hash.ts",
+    "./records": "./src/records.ts",
     "./mergeMarkdown": "./src/mergeMarkdown.ts",
     "./versionCompare": "./src/versionCompare.ts"
   },

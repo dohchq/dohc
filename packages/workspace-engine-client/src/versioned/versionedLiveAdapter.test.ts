@@ -1,3 +1,4 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
@@ -9,7 +10,6 @@ import {
 } from "../live/daemonLiveAdapter";
 import {
   WORKSPACE_METHOD,
-  WorkspaceProtocolShapeError,
   decodeWorkspaceResult,
   type ConflictRecord,
   type WorkspaceMethod,
@@ -17,7 +17,6 @@ import {
 } from "../workspace/workspaceWireContract";
 import {
   VERSIONED_METHOD,
-  VersionedProtocolShapeError,
   decodeVersionedResult,
   type VersionedMethod,
   type VersionedMethodParamsMap,
@@ -1672,7 +1671,7 @@ describe("VersionedLiveAdapter", () => {
       expect(() => decodeWorkspaceResult(method as never, valid)).not.toThrow();
       expect(() =>
         decodeWorkspaceResult(method as never, { unexpected: true }),
-      ).toThrow(WorkspaceProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     },
   );
 
@@ -1717,7 +1716,7 @@ describe("VersionedLiveAdapter", () => {
         ],
         nextAfterConflictId: null,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("keeps the daemon's provenance fields on decoded conflict snapshots", () => {
@@ -1779,15 +1778,15 @@ describe("VersionedLiveAdapter", () => {
         nextAfterPath: null,
         unknown: true,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeVersionedResult(VERSIONED_METHOD.versionsCompare, {
         status: "same",
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeVersionedResult(VERSIONED_METHOD.secretsFork, { accepted: true }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("maps daemon refusals through the shared retryability contract", async () => {

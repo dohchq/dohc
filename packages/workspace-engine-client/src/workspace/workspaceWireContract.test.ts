@@ -1,3 +1,4 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
 import { validateFieldValue } from "@dohc/workspace-contracts/collection-values";
 import type { CollectionValue } from "@dohc/workspace-contracts/collection";
@@ -6,7 +7,6 @@ import pipelineFixture from "../../../../crates/dohc-engine-domain/tests/fixture
 import reasonCodes from "../../../../crates/dohc-engine-domain/tests/fixtures/collection-reason-codes.json";
 import {
   WORKSPACE_METHOD,
-  WorkspaceProtocolShapeError,
   decodeCollectionValue,
   decodeConflictRecord,
   decodeWorkspaceResult,
@@ -106,7 +106,7 @@ describe("workspace wire schemas", () => {
         ...conflict,
         metadata: { ...conflict.metadata, unexpected: true },
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("rejects unsafe integers", () => {
@@ -129,7 +129,7 @@ describe("workspace wire schemas", () => {
         versionId: "main",
         restartRequired: false,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("omits a null in-band limit", () => {
@@ -177,7 +177,7 @@ describe("workspace wire schemas", () => {
         ],
         groups: null,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("accepts the shared full collection reason-code set", () => {
@@ -456,9 +456,9 @@ describe("workspace wire schemas", () => {
     (integer, decimal) => {
       expect(() =>
         decodeCollectionValue({ $dohcInt64: decimal }),
-      ).toThrow(WorkspaceProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
       expect(() => encodeCollectionValue(integer)).toThrow(
-        WorkspaceProtocolShapeError,
+        ProtocolShapeError,
       );
     },
   );
@@ -466,7 +466,7 @@ describe("workspace wire schemas", () => {
   it("enforces safe-range collection integer marker rules", () => {
     expect(() =>
       decodeCollectionValue({ $dohcInt64: "9007199254740991" }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(encodeCollectionValue(9007199254740991n)).toBe(
       Number.MAX_SAFE_INTEGER,
     );
@@ -497,7 +497,7 @@ describe("workspace wire schemas", () => {
         groups: null,
         nextCursor: null,
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it.each([
@@ -507,7 +507,7 @@ describe("workspace wire schemas", () => {
   ])("rejects malformed collection float marker %s", (decimal) => {
     expect(() =>
       decodeCollectionValue({ $dohcFloat64: decimal }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it.each([
@@ -538,7 +538,7 @@ describe("workspace wire schemas", () => {
           matched: true,
           [field]: field === "deferred" ? false : null,
         }),
-      ).toThrow(WorkspaceProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     },
   );
 });
@@ -615,7 +615,7 @@ describe("automations wire schemas", () => {
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsFailures, {
         failures: [{ automationId: "hello-plugin/triage", error: "x" }],
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("refuses a claim with an unknown state or a malformed trigger", () => {
@@ -624,12 +624,12 @@ describe("automations wire schemas", () => {
         ...claim,
         state: "paused",
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
     expect(() =>
       decodeWorkspaceResult(WORKSPACE_METHOD.automationsSettle, {
         ...claim,
         trigger: { originId: "origin-a" },
       }),
-    ).toThrow(WorkspaceProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 });
