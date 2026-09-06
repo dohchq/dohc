@@ -1033,7 +1033,7 @@ function configureGripDrag(
   cellPos: number,
 ): void {
   button.draggable = false;
-  const hostWindow = ownerWindow(button);
+  const hostWindow = ownerWindow(view.dom);
 
   let pointerSession:
     | {
@@ -1230,7 +1230,7 @@ function configureRowResize(
   rowPos: number,
   rowIndex: number,
 ): void {
-  const hostWindow = ownerWindow(button);
+  const hostWindow = ownerWindow(view.dom);
 
   const detach = () => {
     hostWindow.removeEventListener("pointermove", onPointerMove, true);

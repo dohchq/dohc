@@ -892,7 +892,9 @@ function PluginDetailsHeader(props: {
                   key={webApp.id}
                   data-testid="plugin-open-web-app"
                   data-web-app-id={webApp.id}
-                  disabled={disabled || catalog.openingWebApp !== null}
+                  disabled={
+                    disabled || catalog.openingWebApp !== null || catalog.webAppRootPending(plugin)
+                  }
                   onClick={() => catalog.openWebApp(plugin, webApp.id)}
                 >
                   {catalog.openingWebApp === key
