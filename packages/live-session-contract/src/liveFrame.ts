@@ -420,6 +420,8 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
     maxControlBytes: integer(raw.maxControlBytes, true), maxControlFrames: integer(raw.maxControlFrames, true), maxAssemblyBytes: integer(raw.maxAssemblyBytes, true),
   };
   requireFrame(limits.maxControlBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES && limits.maxQueuedBytes >= LIVE_FRAME_MINIMUM_MAX_BYTES);
+  requireFrame(limits.maxAssemblyBytes >= Math.max(limits.receive.maxUpdateBytes,
+    role === "client" ? limits.receive.maxSyncBytes : limits.receive.maxStateVectorBytes));
   const sides = { client: direction(), server: direction() };
   let terminal = false, vectorDone = false, syncDone = false, live = false, syncCursor = 0, assemblyBytes = 0;
   let pending: { deliveryId: string; updateDigest: string; complete: boolean } | undefined;

@@ -37,17 +37,17 @@ function consume(sender: Session, receiver: Session, frame: LiveFrame) {
   const received = deliver(sender, receiver, frame);
   received.value.transfer?.release(); received.release();
 }
-function pair(serverLimits = limits) {
+function pair(serverLimits = limits, hostEpoch = 1) {
   const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", serverLimits);
-  consume(server, client, { kind: "welcome", hostEpoch: parseHostEpoch(1), receivePolicy: serverLimits.receive });
+  consume(server, client, { kind: "welcome", hostEpoch: parseHostEpoch(hostEpoch), receivePolicy: serverLimits.receive });
   consume(client, server, { kind: "hello", receivePolicy: limits.receive });
   return { client, server };
 }
 function grant(sender: Session, receiver: Session, bytesGranted = 586, framesGranted = 2) {
   consume(sender, receiver, { kind: "credit", grantedBytes: bytesGranted, grantedFrames: framesGranted });
 }
-function makeLive() {
-  const { client, server } = pair();
+function makeLive(serverLimits = limits, hostEpoch = 1) {
+  const { client, server } = pair(serverLimits, hostEpoch);
   grant(server, client);
   consume(client, server, begin("client-vector"));
   consume(client, server, { kind: "chunk", transferId: 1, offset: 0, bytes: new Uint8Array([0, 0]) });
@@ -168,6 +168,19 @@ describe("initial sync container", () => {
 });
 
 describe("live frame route ownership", () => {
+  it.each([
+    ["client", "maxSyncBytes", "maxStateVectorBytes"],
+    ["client", "maxUpdateBytes", "maxStateVectorBytes"],
+    ["server", "maxStateVectorBytes", "maxSyncBytes"],
+    ["server", "maxUpdateBytes", "maxSyncBytes"],
+  ] as const)("backs %s inbound %s with static assembly capacity", (role, field, outboundOnly) => {
+    const receive = { maxFrameBytes: 586, maxStateVectorBytes: 512, maxUpdateBytes: 512, maxSyncBytes: 512,
+      [field]: 1024, [outboundOnly]: 8192 };
+    expect(() => createLiveFrameSession(role, { ...limits, receive, maxAssemblyBytes: 1023 })).toThrow();
+    const exact = createLiveFrameSession(role, { ...limits, receive, maxAssemblyBytes: 1024 });
+    expect(exact.usage()).toMatchObject({ closed: false, assemblyBytes: 0 });
+    exact.close();
+  });
   it("accepts server CREDIT before client HELLO and gates each direction independently", () => {
     const client = createLiveFrameSession("client", limits), server = createLiveFrameSession("server", limits);
     consume(server, client, { kind: "welcome", hostEpoch: parseHostEpoch(1), receivePolicy });
@@ -277,7 +290,7 @@ describe("live frame route ownership", () => {
     } finally { spy.mockRestore(); client.close(); server.close(); }
   });
   it("completes a transfer larger than its queue window and retains consumer storage", () => {
-    const { client, server } = pair({ ...limits, maxQueuedFrames: 1, maxAssemblyBytes: 1300 });
+    const { client, server } = pair({ ...limits, receive: { ...receivePolicy, maxStateVectorBytes: 1300, maxUpdateBytes: 1300 }, maxQueuedFrames: 1, maxAssemblyBytes: 1300 });
     let grantedBytes = 586, grantedFrames = 1, chargedBytes = 0, chargedFrames = 0;
     grant(server, client, grantedBytes, grantedFrames);
     consume(client, server, begin("client-vector", 1, 1200)); chargedBytes += 61; chargedFrames++;
@@ -337,6 +350,32 @@ describe("live frame route ownership", () => {
     expect(() => client.receive(stale)).toThrow();
     expect(client.usage().closed).toBe(true);
     server.close();
+  });
+  it("preserves the original accepting epoch when a later host returns a durable receipt", () => {
+    const { client, server } = makeLive(limits, 2);
+    consume(client, server, begin("submit-update", 2));
+    consume(client, server, { kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0]) });
+    const ack = { deliveryId: "d", updateDigest: digest, journalCursor: 19, acceptingHostEpoch: parseHostEpoch(1), localYDocSequence: 3, applicationReplayed: true };
+    const received = deliver(server, client, { kind: "result", result: "success", ack });
+    expect(received.value.frame).toEqual({ kind: "result", result: "success", ack });
+    expect(client.usage()).toMatchObject({ closed: false, live: true });
+    received.release(); client.close(); server.close();
+  });
+  it("keeps consumer-held assembly charged even when the static policy is sufficient", () => {
+    const { client, server } = makeLive({ ...limits,
+      receive: { ...receivePolicy, maxStateVectorBytes: 2, maxUpdateBytes: 2 }, maxAssemblyBytes: 2 });
+    consume(client, server, begin("submit-update", 2));
+    const received = deliver(client, server, { kind: "chunk", transferId: 2, offset: 0, bytes: new Uint8Array([0, 0]) });
+    const transfer = received.value.transfer!; received.release();
+    expect(server.usage().assemblyBytes).toBe(2);
+    consume(server, client, { kind: "result", result: "success", ack: { deliveryId: "d", updateDigest: digest,
+      journalCursor: 19, acceptingHostEpoch: parseHostEpoch(1), localYDocSequence: 3, applicationReplayed: false } });
+    grant(server, client, 773, 6);
+    const next = client.send({ ...begin("submit-update", 3), deliveryId: "e" } as LiveFrame);
+    expect(() => server.receive(next.value)).toThrow(); next.release();
+    expect(server.usage()).toMatchObject({ closed: true, assemblyBytes: 2 });
+    transfer.release(); transfer.release();
+    expect(server.usage().assemblyBytes).toBe(0); client.close();
   });
   it("cannot pass a submission predecessor or accept a forged identity", () => {
     for (const operation of ["next", "result"] as const) {
