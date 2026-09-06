@@ -59,7 +59,7 @@ type RefreshAttempt =
   | { status: "invalid" }
   | { status: "unavailable" };
 
-export interface CreateShareWebHandlerOptions {
+export interface CreateShareWebApplicationOptions {
   relayUrl: string;
   publicRelayUrl: string;
   relayExchangeKey?: string;
@@ -73,6 +73,19 @@ export interface CreateShareWebHandlerOptions {
   handoffRelayTimeoutMs?: number;
   accountAuth?: AccountAuthConfig;
   fetchAuth?: RelayFetch;
+}
+
+export type LinkBrowserMaterial =
+  | { ok: true; capabilityToken: string; profileSecret: string; setCookie: string | null }
+  | { ok: false; status: 404 | 503 };
+
+export interface ShareWebApplication {
+  handle(request: Request): Promise<Response>;
+  resolveLinkBrowserMaterial(
+    discriminator: string,
+    cookie: string | null,
+    signal: AbortSignal,
+  ): Promise<LinkBrowserMaterial>;
 }
 
 class ShareWebSessionStore {
@@ -731,7 +744,7 @@ async function streamingBlobResponse(
   });
 }
 
-export function createShareWebHandler({
+export function createShareWebApplication({
   relayUrl,
   publicRelayUrl,
   relayExchangeKey,
@@ -745,7 +758,7 @@ export function createShareWebHandler({
   handoffRelayTimeoutMs = DEFAULT_RELAY_REQUEST_TIMEOUT_MS,
   accountAuth,
   fetchAuth,
-}: CreateShareWebHandlerOptions): (request: Request) => Promise<Response> {
+}: CreateShareWebApplicationOptions): ShareWebApplication {
   const accountHandler = accountAuth ? createAccountAuthHandler({
     ...accountAuth,
     fetchAuth,
@@ -769,20 +782,24 @@ export function createShareWebHandler({
   );
   const refreshes = new Map<string, Promise<RefreshAttempt>>();
 
-  async function readSession(request: Request): Promise<{
+  function readBrowserSession(discriminator: string, cookies: Map<string, string>): {
     discriminator: string;
     token: string;
     session: ShareWebSession;
-  } | null> {
-    const discriminator =
-      request.headers.get(LINK_SESSION_HEADER) ??
-      new URL(request.url).searchParams.get("session") ??
-      "";
+  } | null {
     if (!isSessionDiscriminator(discriminator)) return null;
-    const token = parseCookies(request.headers.get("cookie")).get(cookieName(discriminator));
+    const token = cookies.get(cookieName(discriminator));
     if (!token) return null;
     const session = sessions.get(discriminator, token, nowMs());
     return session ? { discriminator, token, session } : null;
+  }
+
+  function readSession(request: Request) {
+    return readBrowserSession(
+      request.headers.get(LINK_SESSION_HEADER) ??
+        new URL(request.url).searchParams.get("session") ?? "",
+      parseCookies(request.headers.get("cookie")),
+    );
   }
 
   async function serveViewer(pathname: string): Promise<Response> {
@@ -900,7 +917,38 @@ export function createShareWebHandler({
     };
   }
 
-  return async (request: Request): Promise<Response> => {
+  async function resolveLinkBrowserMaterial(
+    discriminator: string,
+    cookie: string | null,
+    signal: AbortSignal,
+  ): Promise<LinkBrowserMaterial> {
+    signal.throwIfAborted();
+    const cookies = parseCookies(cookie);
+    const authenticated = readBrowserSession(discriminator, cookies);
+    const profileSecret = cookies.get(profileCookieName(discriminator));
+    if (!authenticated || !profileSecret || !LINK_SECRET_PATTERN.test(profileSecret)) {
+      return { ok: false, status: 404 };
+    }
+    let abort = (): void => {};
+    const cancelled = new Promise<never>((_, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      const refreshed = await Promise.race([refreshSession(authenticated), cancelled]);
+      signal.throwIfAborted();
+      if (!refreshed.ok) return refreshed;
+      const capabilityToken = authenticated.session.capabilityToken;
+      if (!sessions.isCurrent(discriminator, authenticated.token, capabilityToken, nowMs())) {
+        return { ok: false, status: 404 };
+      }
+      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.setCookie };
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
+
+  const handle = async (request: Request): Promise<Response> => {
     if (!publicHosts.has((request.headers.get("host") ?? "").toLowerCase())) return refused();
     const { pathname, search } = new URL(request.url);
 
@@ -1301,6 +1349,7 @@ export function createShareWebHandler({
 
     return refused();
   };
+  return { handle, resolveLinkBrowserMaterial };
 }
 
 export const shareWebRefusalBody = REFUSAL_BODY;

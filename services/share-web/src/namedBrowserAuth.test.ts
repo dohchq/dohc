@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { createShareWebHandler } from "./server";
+import { createShareWebApplication } from "./server";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
 import { closeTestStorages, testStorage } from "../../sync-relay/src/linkTestHelpers";
 
@@ -58,7 +58,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
   it("signs in on the viewer host, resolves real accounts server-side, and invalidates sign-out", async () => {
     const alice = await auth.api.signUpEmail({ body: { email: "alice@example.test", password, name: "Alice" } });
     const bob = await auth.api.signUpEmail({ body: { email: "bob@example.test", password, name: "Bob" } });
-    const serve = createShareWebHandler({
+    const { handle: serve } = createShareWebApplication({
       relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test", publicHosts: new Set(["share.example.test"]),
       accountAuth: { upstreamUrl: "http://workspace-api:1786", publicOrigin: origin },
       fetchAuth: (request) => auth.handler(request),
@@ -143,7 +143,7 @@ describe.skipIf(!available)("named browser production auth lifecycle", () => {
     const limitedAuth = betterAuth({ ...auth.options, rateLimit: { enabled: true } });
     expect((await limitedAuth.$context).rateLimit.enabled).toBe(true);
     await limitedAuth.api.signUpEmail({ body: { email: "limited@example.test", password, name: "Limited" } });
-    const serve = createShareWebHandler({
+    const { handle: serve } = createShareWebApplication({
       relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test", publicHosts: new Set(["share.example.test"]),
       accountAuth: { upstreamUrl: "http://workspace-api:1786", publicOrigin: origin },
       fetchAuth: (request) => limitedAuth.handler(request),
