@@ -9,7 +9,7 @@ import {
   type SyncRelayStorage,
 } from "@dohc/sync-relay/storage";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createShareWebHandler } from "./server";
+import { createShareWebApplication } from "./server";
 
 const RELAY_EXCHANGE_KEY = "e2e-share-web-relay-exchange-key";
 const servers: Server[] = [];
@@ -167,7 +167,7 @@ describe("share-web e2e-lite", () => {
     const link = await body(linkResponse);
 
     const publicHosts = new Set<string>();
-    const shareWebHandler = createShareWebHandler({
+    const { handle: shareWebHandler } = createShareWebApplication({
       relayUrl,
       publicRelayUrl: relayUrl,
       relayExchangeKey: RELAY_EXCHANGE_KEY,

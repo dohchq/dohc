@@ -19,7 +19,7 @@ import {
 } from "react";
 import {
   DEFAULT_USER_SETTINGS,
-  DesktopUserSettingsResult,
+  type DesktopUserSettingsResult,
   MAX_ZOOM_LEVEL,
   MIN_ZOOM_LEVEL,
   type DesktopUserSettings,
@@ -177,15 +177,13 @@ export function SettingsDialog(props: {
   useEffect(
     () =>
       bridge().onUserSettingsChanged((result) => {
-        const parsed = DesktopUserSettingsResult.safeParse(result);
-        if (!parsed.success) return;
         settingsEventFiredRef.current = true;
         // A broadcast is newer than any request still in flight: bumping the
         // request counter drops those pending responses, so an older save's
         // answer cannot overwrite this result. The write behind the broadcast
         // already succeeded, so the saved state is honest.
         userSaveRequestRef.next();
-        setUserResult(parsed.data);
+        setUserResult(result);
         markSaved();
       }),
     [markSaved],
