@@ -3415,7 +3415,7 @@ export function requireExactSiteRoot(
   requestedRoot: string,
 ): SitePackageInfo {
   if (!site || site.root !== requestedRoot) {
-    throw new Error(`Not a detected site: ${requestedRoot}`);
+    throw new Error(`Not a detected app: ${requestedRoot}`);
   }
   return site;
 }

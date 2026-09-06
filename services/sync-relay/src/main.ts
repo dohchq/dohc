@@ -319,7 +319,10 @@ installShutdown(server, {
   gracePeriodMs: SHUTDOWN_GRACE_PERIOD_MS,
   onClosed: async () => {
     storage.close();
-    await pool?.end();
-    process.exit(0);
+    try {
+      await pool?.end();
+    } finally {
+      process.exit(0);
+    }
   },
 });
