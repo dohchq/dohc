@@ -15,7 +15,7 @@ import {
   WORKSPACE_METHOD,
   decodeWorkspaceResult,
 } from "../workspace/workspaceWireContract";
-import type { WorkspaceHandle } from "../ydoc/generated/WorkspaceHandle";
+import type { WorkspaceHandle } from "../protocol";
 import { YdocOpenTimedOutError } from "../ydoc/ydocLiveAdapter";
 import {
   DOHC_ENGINE_GUARD,

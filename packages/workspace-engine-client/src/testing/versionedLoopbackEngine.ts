@@ -1,27 +1,25 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserWritePath } from "@dohc/workspace-core/paths";
-import type { ErrorCode } from "../ydoc/generated/ErrorCode";
-import type { Event } from "../ydoc/generated/Event";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
-import type { WireError } from "../ydoc/generated/WireError";
+import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
+import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
 import {
   CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-} from "./engineTextLimits";
+} from "../versioned/engineTextLimits";
 import {
   VERSIONED_METHOD,
+  type AgentAuthor,
   type MomentRecord,
+  type MomentsListResult,
   type SecretMomentRecord,
   type VersionChangeStatus,
   type VersionedContentKind,
   type VersionedMethod,
   type VersionedOrigin,
-} from "./versionedWireContract";
+} from "../versioned/versionedWireContract";
 
 // A refusal the real engine reports as an internal failure rather than a
 // caller mistake (`map_runtime` in crates/dohc-workspace-engine/src/lib.rs).
@@ -49,15 +47,6 @@ function refusalFrom(error: unknown): unknown {
 }
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
-
-// The limits live in a leaf module (no imports) so a renderer can read them
-// without pulling this fixture's `node:crypto` into a browser bundle.
-export {
-  CONFLICT_ROW_HARD_CAP_BYTES,
-  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  RESOLVE_REQUEST_FRAME_BYTES,
-  jsonStringEncodedLength,
-} from "./engineTextLimits";
 
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;
@@ -466,19 +455,6 @@ interface SeedSecretInput {
   origin?: VersionedOrigin;
 }
 
-function asObject(value: JsonValue, label: string): JsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-
-function requiredString(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
-  return value;
-}
-
 function rejectUnknownFields(object: JsonObject, allowed: ReadonlySet<string>): void {
   if (Object.keys(object).some((key) => !allowed.has(key))) {
     throw new Error("invalid parameters");
@@ -628,13 +604,6 @@ function validatePreWorkspaceSemantics(method: string, params: JsonObject): void
       }
       break;
   }
-}
-
-function optionalString(object: JsonObject, key: string): string | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new Error(`${key} is invalid.`);
-  return value;
 }
 
 function serdeOptionalString(object: JsonObject, key: string): string | undefined {
@@ -876,22 +845,6 @@ function stableJsonStringify(value: JsonValue): string {
   return JSON.stringify(stableValue(value));
 }
 
-function sha256(value: string | number[]): string {
-  return createHash("sha256")
-    .update(typeof value === "string" ? value : Uint8Array.from(value))
-    .digest("hex");
-}
-
-function encodeBase64(bytes: number[]): string {
-  return Buffer.from(bytes).toString("base64");
-}
-
-function decodeBase64(value: string): number[] {
-  const bytes = [...Buffer.from(value, "base64")];
-  if (encodeBase64(bytes) !== value) throw new Error("invalid-input");
-  return bytes;
-}
-
 function comparePaths(left: string, right: string): number {
   return left === right ? 0 : left > right ? 1 : -1;
 }
@@ -1112,11 +1065,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
       input.origin ?? "local-file",
     );
     state.secretMoments.set(momentId, { wire, before, after: input.text });
-  }
-
-  secretValue(workspace: string, versionId: string, path: string): string | undefined {
-    const normalizedPath = normalizedSecretPath(path);
-    return this.version(this.workspace(workspace), versionId).secrets.get(normalizedPath);
   }
 
   async sendRequest(request: Request): Promise<Response> {
@@ -1501,7 +1449,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     if (Array.isArray(rawBytes) && rawBase64 === undefined) {
       bytes = [...rawBytes];
     } else if (typeof rawBase64 === "string" && rawBytes === undefined) {
-      bytes = decodeBase64(rawBase64);
+      bytes = [...decodeBase64(rawBase64)];
     } else {
       throw new Error("invalid-input");
     }
@@ -1644,17 +1592,13 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // validated_author, then the decode), the opposite order from
     // versionedBinary.write, which decodes first. So a request wrong in both ways
     // answers for the metadata or author here and for the bytes there.
-    //
-    // All three, not two: an earlier version of this comment claimed author was
-    // validated here while only origin and metadata were, so a malformed author
-    // plus a missing blob still answered `file-not-found`. binaryWrite re-derives
-    // all of them; these calls exist purely for the refusal order.
+    // binaryWrite re-derives all three; these calls exist for the refusal order.
     requiredOrigin(params);
     this.momentMetadataFields(params);
     const bytes =
       encoded === undefined
         ? state.blobs.get(expectedSha)
-        : decodeBase64(encoded);
+        : [...decodeBase64(encoded)];
     if (bytes === undefined) throw new Error("file-not-found");
     if (encoded !== undefined && bytes.length > MAX_CAPTURE_BINARY_FILE_BYTES) {
       throw new Error("content-exceeds-capture-cap");
@@ -2583,7 +2527,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     return state.secretMoments.get(requiredString(params, "momentId", "secret moment get"))?.wire ?? null;
   }
 
-  private momentsList(state: WorkspaceState, params: JsonObject): JsonValue {
+  private momentsList(state: WorkspaceState, params: JsonObject): MomentsListResult {
     const versionId = optionalString(params, "versionId");
     const objectId = optionalString(params, "objectId");
     const before = optionalNumber(params, "beforeMomentOrder");
@@ -2628,8 +2572,8 @@ export class VersionedLoopbackEngine implements EngineTransport {
       ...(params.beforeMomentOrder !== undefined
         ? { beforeMomentOrder: params.beforeMomentOrder }
         : {}),
-    }) as JsonObject;
-    const textMoments = textMomentPage.moments as unknown as MomentRecord[];
+    });
+    const textMoments = textMomentPage.moments;
     const beforeMomentOrder = optionalNumber(params, "beforeMomentOrder");
     const upperRecordedAtMs =
       beforeMomentOrder === undefined
@@ -2997,37 +2941,30 @@ export class VersionedLoopbackEngine implements EngineTransport {
    * so on its snapshots. This loopback does not, because nothing reads it here
    * yet — the history row is what moments.list serves.
    */
-  // Mirrors the daemon's `validated_author` (lib.rs), which is the write path:
-  // a malformed author is refused with `invalid-metadata` before any mutation.
-  // An earlier draft mirrored `parsed_moment_author` instead and recorded
-  // `{ corrupt: true }` — but that marker exists for reading malformed
-  // historical rows, so recording it here let the fake accept writes production
-  // refuses. Same class as copying the author raw: permissive where the daemon
-  // is strict.
-  //
-  // Returns the normalized author to store. `agentRunId` is OPTIONAL in the
-  // contract and never nullable, so it is omitted rather than nulled.
-  private validatedAuthorValue(params: JsonObject): JsonValue | undefined {
+  // Mirrors the daemon's `validated_author` (lib.rs): a malformed author is
+  // refused with `invalid-metadata` before any mutation, and only the
+  // recognized fields are stored. `agentRunId` is omitted, never nulled.
+  private validatedAuthorValue(params: JsonObject): AgentAuthor | undefined {
     const value = params.author;
-    const refuse = (): never => {
-      throw new Error("invalid-metadata");
-    };
     if (value === undefined || value === null) return undefined;
-    if (typeof value !== "object" || value === null || Array.isArray(value)) refuse();
-    const object = value as JsonObject;
-    const nonEmpty = (key: string): boolean =>
-      typeof object[key] === "string" && (object[key] as string).length > 0;
-    const runId = object.agentRunId;
-    const runOk = runId === undefined || (typeof runId === "string" && runId.length > 0);
-    if (object.kind !== "agent" || !nonEmpty("agentId") || !nonEmpty("onBehalfOf") || !runOk) {
-      refuse();
+    if (typeof value !== "object" || Array.isArray(value)) throw new Error("invalid-metadata");
+    const { kind, agentId, onBehalfOf, agentRunId } = value;
+    if (
+      kind !== "agent" ||
+      typeof agentId !== "string" ||
+      agentId.length === 0 ||
+      typeof onBehalfOf !== "string" ||
+      onBehalfOf.length === 0 ||
+      (agentRunId !== undefined && (typeof agentRunId !== "string" || agentRunId.length === 0))
+    ) {
+      throw new Error("invalid-metadata");
     }
     return {
       kind: "agent",
-      agentId: object.agentId,
-      onBehalfOf: object.onBehalfOf,
-      ...(runId === undefined ? {} : { agentRunId: runId }),
-    } as unknown as JsonValue;
+      agentId,
+      onBehalfOf,
+      ...(agentRunId === undefined ? {} : { agentRunId }),
+    };
   }
 
   private momentMetadataFields(params: JsonObject): JsonObject {

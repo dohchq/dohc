@@ -8,11 +8,11 @@ import type {
 } from "@dohc/workspace-contracts/relay";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type JsonValue,
   type Request as EngineRequest,
   type Response as EngineResponse,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   EngineRequestError,
   EngineWorkspaceSessions,

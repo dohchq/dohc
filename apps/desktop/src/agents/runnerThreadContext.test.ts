@@ -1,5 +1,6 @@
 import { renderShowMarkdown, type ShowResult } from "@dohc/cli/render";
-import { CHATS_METHOD, ChatsLoopbackEngine } from "@dohc/workspace-engine-client";
+import { CHATS_METHOD } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { rm } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";

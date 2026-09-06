@@ -4,12 +4,12 @@ import { resolveEffectivePolicy } from "@dohc/security-contract/effective-policy
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type EngineTransport,
   type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { scanWorkspaceFilesTolerant } from "@dohc/workspace-fs";
 import { readDiskContent } from "../workspaces/workspaceEngineCapture";
 import { readWorkspaceEnginePolicy } from "../workspaces/workspaceEnginePolicyFile";

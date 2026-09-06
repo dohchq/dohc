@@ -1,24 +1,95 @@
-export * from "./ydoc/generated/Cancel";
-export * from "./ydoc/generated/Envelope";
-export * from "./ydoc/generated/ErrorCode";
-export * from "./ydoc/generated/ErrorEnvelope";
-export * from "./ydoc/generated/Event";
-export * from "./ydoc/generated/Request";
-export * from "./ydoc/generated/Response";
-export * from "./ydoc/generated/Retryability";
-export * from "./ydoc/generated/WireError";
-export * from "./ydoc/generated/WorkspaceHandle";
-export * from "./ydoc/generated/serde_json/JsonValue";
-export * from "./ydoc/ydocLiveAdapter";
-export * from "./ydoc/ydocLoopbackEngine";
-export * from "./ydoc/ydocProviderSession";
-export * from "./ydoc/ydocWireContract";
-export * from "./chats/chatsLoopbackEngine";
-export * from "./chats/chatsLiveAdapter";
-export * from "./chats/chatsWireContract";
-export * from "./live/daemonLiveAdapter";
-export * from "./relay/keyEnvelopeWireContract";
-export * from "./versioned/versionedLoopbackEngine";
-export * from "./versioned/versionedLiveAdapter";
-export * from "./versioned/versionedWireContract";
-export * from "./workspace/workspaceWireContract";
+// The daemon client surface the desktop app, CLI, and tools import. Test
+// fakes and fixture helpers live under `@dohc/workspace-engine-client/testing`.
+export type { Event, JsonValue, Request, Response, Retryability } from "./protocol";
+
+export {
+  DaemonRefusalError,
+  WorkspaceDaemonRequester,
+  engineStoreRefusalOf,
+  isConflictStaleTargetRefusal,
+  isEngineStoreBusyRefusal,
+  isFileLockedRefusal,
+  isTransientEngineRefusal,
+  isWorkspaceUpdatingRefusal,
+  isYdocArtifactAssetsInvalidRefusal,
+  isYdocRemoteUpdatesPendingRefusal,
+  isYdocUnsettledCloseRefusal,
+  type CompletedDaemonBlob,
+  type DaemonErrorCode,
+  type EngineStoreRefusal,
+} from "./live/daemonLiveAdapter";
+
+export {
+  YDOC_OPEN_DEADLINE_MS,
+  YdocAdapterError,
+  YdocLiveAdapter,
+  YdocOpenTimedOutError,
+  type EngineTransport,
+} from "./ydoc/ydocLiveAdapter";
+export {
+  YdocReleasedWithSettleFailureError,
+  openEngineYdocProviderSession,
+  type EngineYdocProviderSession,
+  type EngineYdocProviderSessionOptions,
+} from "./ydoc/ydocProviderSession";
+export {
+  YDOC_METHOD,
+  type ArtifactAssetDescriptor,
+  type ChangeAttributionWire,
+  type JsonObject,
+  type YdocContentKind,
+} from "./ydoc/ydocWireContract";
+
+export { ChatsLiveAdapter } from "./chats/chatsLiveAdapter";
+export {
+  CHATS_METHOD,
+  ChatsProtocolShapeError,
+  decodeUnreadFileThreads,
+  type ChatChannel,
+  type ChatChannelSummary,
+  type ChatDispatch,
+  type ChatDispatchClaim,
+  type ChatFileMention,
+  type ChatRecoveriesPage,
+  type ChatRunMessagesPage,
+  type ChatUnreadFileThread,
+} from "./chats/chatsWireContract";
+
+export { VersionedLiveAdapter } from "./versioned/versionedLiveAdapter";
+export {
+  VERSIONED_METHOD,
+  type AgentAuthor,
+  type MomentRecord,
+  type SecretMomentRecord,
+  type VersionedComparisonRecord,
+  type VersionedTextListEntry,
+  type VersionedTextReadValue,
+} from "./versioned/versionedWireContract";
+
+export {
+  KEY_ENVELOPE_METHOD,
+  decodeKeyEnvelopeResult,
+  type KeyEnvelopeDownloadResult,
+  type KeyEnvelopeUploadResult,
+} from "./relay/keyEnvelopeWireContract";
+
+export {
+  AUTOMATION_CLAIMED_EVENT,
+  MAX_GRANULAR_CHAT_QUERY_CHARS,
+  WORKSPACE_METHOD,
+  WorkspaceProtocolShapeError,
+  decodeCollectionValue,
+  decodeGranularChatMessageSearchResponse,
+  decodeSearchQueryPageResult,
+  encodeCollectionValue,
+  type AutomationClaim,
+  type CollectionPendingAdoptionCursor,
+  type CollectionPendingAdoptionsPage,
+  type ConflictFileState,
+  type ConflictRecord,
+  type GranularChatMessageSearchResponse,
+  type GranularChatMessageSearchResult,
+  type SearchQueryPageParams,
+  type SearchResult,
+  type WatcherStatusResult,
+} from "./workspace/workspaceWireContract";

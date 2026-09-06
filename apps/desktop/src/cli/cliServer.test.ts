@@ -17,10 +17,10 @@ import type {
 } from "@dohc/workspace-contracts/engine";
 import {
   CHATS_METHOD,
-  ChatsLoopbackEngine,
   DaemonRefusalError,
   type Request,
 } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AwaitableAgentDispatchStore } from "../agents/awaitableAgentDispatchStore";

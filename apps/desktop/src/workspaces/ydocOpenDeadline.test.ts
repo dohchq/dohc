@@ -5,12 +5,12 @@ import { describe, expect, it, vi } from "vitest";
 import * as Y from "yjs";
 import {
   DaemonRefusalError,
-  VersionedLoopbackEngine,
   YDOC_OPEN_DEADLINE_MS,
   YdocOpenTimedOutError,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import {
   EngineRequestDeadlineError,
   EngineRequestError,

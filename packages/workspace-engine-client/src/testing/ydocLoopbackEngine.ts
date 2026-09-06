@@ -1,18 +1,15 @@
-import { createHash } from "node:crypto";
 import * as Y from "yjs";
 import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents";
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
-import type { Event } from "./generated/Event";
-import type { JsonValue } from "./generated/serde_json/JsonValue";
-import type { Request } from "./generated/Request";
-import type { Response } from "./generated/Response";
-import type { EngineTransport } from "./ydocLiveAdapter";
+import type { Event, JsonValue, Request, Response } from "../protocol";
+import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
+import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
   type JsonObject,
   type YdocContentKind,
-} from "./ydocWireContract";
+} from "../ydoc/ydocWireContract";
 
 interface LoopbackFile {
   // Object ids are only unique within a scope, matching the daemon's
@@ -170,43 +167,11 @@ function seedNotFirstUpdateRefusal(): Error {
   });
 }
 
-function asObject(value: JsonValue, label: string): JsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`${label} must be an object.`);
-  }
-  return value;
-}
-
-function requiredString(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
-  return value;
-}
-
-function optionalString(object: JsonObject, key: string): string | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new Error(`${key} is invalid.`);
-  return value;
-}
-
 function optionalBoolean(object: JsonObject, key: string): boolean | undefined {
   const value = object[key];
   if (value === undefined) return undefined;
   if (typeof value !== "boolean") throw new Error(`${key} is invalid.`);
   return value;
-}
-
-function decodeBase64(value: string): Uint8Array {
-  return new Uint8Array(Buffer.from(value, "base64"));
-}
-
-function encodeBase64(value: Uint8Array): string {
-  return Buffer.from(value).toString("base64");
-}
-
-function sha256(value: Uint8Array | string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function declaredDoc(contentKind?: YdocContentKind): Y.Doc {
@@ -436,10 +401,6 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   sessionText(sessionId: string): string {
     return project(this.requireSession(sessionId));
-  }
-
-  sessionStateUpdate(sessionId: string): Uint8Array {
-    return Y.encodeStateAsUpdate(this.requireSession(sessionId).doc);
   }
 
   applyRemoteUpdate(

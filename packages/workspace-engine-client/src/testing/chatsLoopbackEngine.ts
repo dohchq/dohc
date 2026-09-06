@@ -1,11 +1,9 @@
 import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import type { Event } from "../ydoc/generated/Event";
-import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
+import { asObject, optionalString } from "./json";
 import {
   CHATS_METHOD,
   type ChatActor,
@@ -29,7 +27,7 @@ import {
   type ChatThread,
   type ChatThreadPause,
   type ChatThreadReadState,
-} from "./chatsWireContract";
+} from "../chats/chatsWireContract";
 
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 const MAX_PAGE_LIMIT = 500;
@@ -68,61 +66,7 @@ type SeedChannelInput = {
   createdAtMs?: number;
 };
 
-type SeedBookmarkInput = {
-  bookmarkId: string;
-  workspaceId: string;
-  ownerUserId: string;
-  targetKind: "message" | "thread";
-  targetId: string;
-  threadId: string;
-  messageId?: string;
-  mode: "live" | "snapshot";
-  destinationPath: string;
-  state: "active" | "archived";
-  createdAtMs?: number;
-  updatedAtMs?: number;
-  generation?: number;
-  projectedGeneration?: number;
-  projectionState?: ChatBookmark["projectionState"];
-  projectionObjectId?: string;
-  lastProjectedAtMs?: number;
-  failureReason?: string;
-};
-
-type SeedDispatchInput = {
-  workspaceId: string;
-  triggerMessageId: string;
-  threadId: string;
-  state: "pending" | "running" | "done" | "failed";
-  runId?: string;
-  failureReason?: string;
-  createdAtMs?: number;
-  updatedAtMs?: number;
-  attemptCount?: number;
-};
-
-type SeedRunInput = {
-  workspaceId: string;
-  runId: string;
-  threadId: string;
-  triggerMessageId: string;
-  command: string;
-  startedAtMs?: number;
-  endedAtMs?: number;
-  exitCode?: number;
-  failureReason?: string;
-  logPath?: string;
-  failureNotePosted?: boolean;
-};
-
 type LedgerEntry = { fingerprint: string; result: JsonValue };
-
-function asObject(value: JsonValue, label: string): ChatsJsonObject {
-  if (value === null || Array.isArray(value) || typeof value !== "object") {
-    throw new Error(`${label} must be an object`);
-  }
-  return value;
-}
 
 function strictObject(
   value: JsonValue,
@@ -139,13 +83,6 @@ function strictObject(
 function requiredString(object: ChatsJsonObject, key: string, code = "invalid-input"): string {
   const value = object[key];
   if (typeof value !== "string") throw new Error(code);
-  return value;
-}
-
-function optionalString(object: ChatsJsonObject, key: string): string | undefined {
-  const value = object[key];
-  if (value === undefined) return undefined;
-  if (typeof value !== "string") throw new Error("invalid-parameters");
   return value;
 }
 
@@ -375,10 +312,6 @@ function bookmarkId(
     .digest()
     .subarray(0, 16);
   return `bookmark_${base32LowercaseNoPadding(digest)}`;
-}
-
-function runLinkKey(messageId: string): string {
-  return messageId;
 }
 
 function threadMessages(state: WorkspaceState, threadId: string): ChatMessage[] {
@@ -755,70 +688,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
     return jsonClone(channel);
   }
 
-  seedFollow(
-    workspace: string,
-    ownerUserId: string,
-    targetKind: "person" | "agent" | "channel" | "thread",
-    targetId: string,
-  ): void {
-    const state = this.workspace(workspace);
-    state.followRecords.set(`${ownerUserId}\0${targetKind}\0${targetId}`, {
-      workspaceId: workspace,
-      ownerUserId,
-      targetKind,
-      targetId,
-      state: "following",
-      updatedAtMs: 0,
-    });
-  }
-
-  seedThreadRead(workspace: string, threadId: string, lastReadSequence: number): void {
-    if (!Number.isSafeInteger(lastReadSequence) || lastReadSequence < 0) {
-      throw new Error("invalid-read-cursor");
-    }
-    this.workspace(workspace).humanReads.set(threadId, lastReadSequence);
-  }
-
-  seedBookmark(input: SeedBookmarkInput): ChatBookmark {
-    const state = this.workspace(input.workspaceId);
-    const key = bookmarkKey(input.ownerUserId, input.bookmarkId);
-    if (state.bookmarks.has(key)) throw new Error("target-exists");
-    if (
-      [...state.bookmarks.values()].some(
-        (bookmark) =>
-          bookmark.ownerUserId === input.ownerUserId &&
-          bookmark.destinationPath === input.destinationPath,
-      )
-    ) {
-      throw new Error("target-exists");
-    }
-    const createdAtMs = this.tick(input.createdAtMs);
-    const bookmark: ChatBookmark = {
-      ...jsonClone(input),
-      createdAtMs,
-      updatedAtMs: input.updatedAtMs ?? createdAtMs,
-      generation: input.generation ?? 1,
-      projectedGeneration: input.projectedGeneration ?? 0,
-      projectionState: input.projectionState ?? "pending",
-    };
-    state.bookmarks.set(key, bookmark);
-    return jsonClone(bookmark);
-  }
-
-  seedDispatch(input: SeedDispatchInput): ChatDispatch {
-    const state = this.workspace(input.workspaceId);
-    if (state.dispatches.has(input.triggerMessageId)) return jsonClone(state.dispatches.get(input.triggerMessageId)!);
-    const createdAtMs = this.tick(input.createdAtMs);
-    const dispatch: ChatDispatch = {
-      ...jsonClone(input),
-      attemptCount: input.attemptCount ?? 0,
-      createdAtMs,
-      updatedAtMs: input.updatedAtMs ?? createdAtMs,
-    };
-    state.dispatches.set(dispatch.triggerMessageId, dispatch);
-    return jsonClone(dispatch);
-  }
-
   readDispatch(workspace: string, triggerMessageId: string): ChatDispatch | undefined {
     const dispatch = this.workspaces.get(workspace)?.dispatches.get(triggerMessageId);
     return dispatch === undefined ? undefined : jsonClone(dispatch);
@@ -858,18 +727,6 @@ export class ChatsLoopbackEngine implements EngineTransport {
       dispatch.updatedAtMs = atMs;
     }
     return requeued;
-  }
-
-  seedRun(input: SeedRunInput): ChatRun {
-    const state = this.workspace(input.workspaceId);
-    if (state.runs.has(input.runId)) throw new Error("target-exists");
-    const run: ChatRun = {
-      ...jsonClone(input),
-      startedAtMs: this.tick(input.startedAtMs),
-      failureNotePosted: input.failureNotePosted ?? false,
-    };
-    state.runs.set(run.runId, run);
-    return jsonClone(run);
   }
 
   async sendRequest(request: Request): Promise<Response> {
@@ -2842,11 +2699,10 @@ export class ChatsLoopbackEngine implements EngineTransport {
     const runId = requiredString(params, "runId");
     const run = state.runs.get(runId);
     if (!run || run.workspaceId !== workspace) throw new Error("run-not-found");
-    const key = runLinkKey(messageId);
-    const prior = state.runLinks.get(key);
+    const prior = state.runLinks.get(messageId);
     if (prior === runId) return jsonResult(false);
     if (prior !== undefined) throw new Error("state-corrupt");
-    state.runLinks.set(key, runId);
+    state.runLinks.set(messageId, runId);
     return jsonResult(true);
   }
 

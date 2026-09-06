@@ -2,12 +2,12 @@ import { rm } from "node:fs/promises";
 import { delimiter, join, resolve } from "node:path";
 import {
   CHATS_METHOD,
-  ChatsLoopbackEngine,
   type ChatDispatch,
   type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import type {
   AgentDispatchClaim,
   LinkedChatStore,

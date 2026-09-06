@@ -2,8 +2,7 @@ import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Duplex, PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import type { Envelope } from "../ydoc/generated/Envelope";
-import type { Request } from "../ydoc/generated/Request";
+import type { Envelope, Request } from "../protocol";
 import { isDaemonReconnectError } from "../live/daemonLiveAdapter";
 import {
   EngineClient,

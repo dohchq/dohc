@@ -3,7 +3,7 @@ import type {
   SecretFileComparePage,
   SecretFileStore,
 } from "@dohc/workspace-contracts/engine";
-import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { mockLiveSessions } from "../testing/liveEngineSessions";
 import {
   createWorkspaceEngineCapture,

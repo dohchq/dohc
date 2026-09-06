@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { EngineRequestError } from "../daemon/engineClient";
-import type { Request } from "../ydoc/generated/Request";
-import type { Response } from "../ydoc/generated/Response";
+import type { Request, Response } from "../protocol";
 import {
   DaemonProtocolError,
   DaemonRefusalError,
@@ -27,7 +26,7 @@ import {
   VersionedAdapterCapabilityError,
   VersionedLiveAdapter,
 } from "./versionedLiveAdapter";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");

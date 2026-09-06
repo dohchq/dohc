@@ -5,9 +5,7 @@ import { afterEach, beforeEach, expect, it } from "vitest";
 import * as Y from "yjs";
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   YDOC_METHOD,
-  YdocLoopbackEngine,
   openEngineYdocProviderSession,
   type EngineTransport,
   type Event,
@@ -15,6 +13,10 @@ import {
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import {
+  VersionedLoopbackEngine,
+  YdocLoopbackEngine,
+} from "@dohc/workspace-engine-client/testing";
 import {
   createEngineYDocSaveSeqState,
   noteLocalEdit,
