@@ -3,7 +3,7 @@ import { EXCALIDRAW_SCENE_ROOTS } from "@dohc/workspace-contracts/live-documents
 import type { CompletedDaemonBlob } from "../live/daemonLiveAdapter";
 import type { Event, JsonValue, Request, Response } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
-import { asObject, decodeBase64, encodeBase64, optionalString, sha256 } from "./json";
+import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
 import {
   YDOC_EVENT,
   YDOC_METHOD,
@@ -165,12 +165,6 @@ function seedNotFirstUpdateRefusal(): Error {
       retry: "no",
     },
   });
-}
-
-function requiredString(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
-  return value;
 }
 
 function optionalBoolean(object: JsonObject, key: string): boolean | undefined {
@@ -407,10 +401,6 @@ export class YdocLoopbackEngine implements EngineTransport {
 
   sessionText(sessionId: string): string {
     return project(this.requireSession(sessionId));
-  }
-
-  sessionStateUpdate(sessionId: string): Uint8Array {
-    return Y.encodeStateAsUpdate(this.requireSession(sessionId).doc);
   }
 
   applyRemoteUpdate(

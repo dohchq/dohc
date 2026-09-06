@@ -10,6 +10,12 @@ export function asObject(value: JsonValue, label: string): JsonObject {
   return value;
 }
 
+export function requiredString(object: JsonObject, key: string, label: string): string {
+  const value = object[key];
+  if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
+  return value;
+}
+
 export function optionalString(object: JsonObject, key: string): string | undefined {
   const value = object[key];
   if (value === undefined) return undefined;

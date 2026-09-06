@@ -4,7 +4,7 @@ import { validateUserWritePath } from "@dohc/workspace-core/paths";
 import type { ErrorCode, Event, JsonValue, Request, Response, WireError } from "../protocol";
 import type { EngineTransport } from "../ydoc/ydocLiveAdapter";
 import type { JsonObject } from "../ydoc/ydocWireContract";
-import { asObject, decodeBase64, encodeBase64, optionalString, sha256 } from "./json";
+import { asObject, decodeBase64, encodeBase64, optionalString, requiredString, sha256 } from "./json";
 import {
   CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
@@ -453,12 +453,6 @@ interface SeedSecretInput {
   text: string;
   momentId?: string;
   origin?: VersionedOrigin;
-}
-
-function requiredString(object: JsonObject, key: string, label: string): string {
-  const value = object[key];
-  if (typeof value !== "string") throw new Error(`${label}.${key} is invalid.`);
-  return value;
 }
 
 function rejectUnknownFields(object: JsonObject, allowed: ReadonlySet<string>): void {
@@ -1073,11 +1067,6 @@ export class VersionedLoopbackEngine implements EngineTransport {
     state.secretMoments.set(momentId, { wire, before, after: input.text });
   }
 
-  secretValue(workspace: string, versionId: string, path: string): string | undefined {
-    const normalizedPath = normalizedSecretPath(path);
-    return this.version(this.workspace(workspace), versionId).secrets.get(normalizedPath);
-  }
-
   async sendRequest(request: Request): Promise<Response> {
     this.requests.push(request);
     let result: JsonValue;
@@ -1603,11 +1592,7 @@ export class VersionedLoopbackEngine implements EngineTransport {
     // validated_author, then the decode), the opposite order from
     // versionedBinary.write, which decodes first. So a request wrong in both ways
     // answers for the metadata or author here and for the bytes there.
-    //
-    // All three, not two: an earlier version of this comment claimed author was
-    // validated here while only origin and metadata were, so a malformed author
-    // plus a missing blob still answered `file-not-found`. binaryWrite re-derives
-    // all of them; these calls exist purely for the refusal order.
+    // binaryWrite re-derives all three; these calls exist for the refusal order.
     requiredOrigin(params);
     this.momentMetadataFields(params);
     const bytes =
