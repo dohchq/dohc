@@ -1856,7 +1856,7 @@ export function makeTableControlsPlugin(
           runtime.activeDrag = null;
           runtime.activeRowResize = null;
           removeTableDragStatus(view);
-            hovered = null;
+          hovered = null;
         },
       };
     },
