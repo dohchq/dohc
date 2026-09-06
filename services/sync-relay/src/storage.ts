@@ -18,7 +18,8 @@ import {
   conflictResolveBlobShas,
   type ConflictResolveEnvelopeContext,
 } from "./conflictResolve";
-import { RELAY_ERRORS } from "./errorCodes";
+import { asRecord } from "@dohc/workspace-core";
+import { RelayError } from "./errors";
 import {
   constantTimeHashEqual,
   LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
@@ -1624,7 +1625,7 @@ export function objectPathFromMomentPayload(
   } catch {
     return null;
   }
-  const record = asObject(parsed);
+  const record = asRecord(parsed);
   if (!record) return null;
   const objectId = record.objectId;
   if (typeof objectId !== "string" || objectId.length === 0) return null;
@@ -1663,7 +1664,7 @@ export function objectMomentFromMomentPayload(
   } catch {
     return null;
   }
-  const record = asObject(parsed);
+  const record = asRecord(parsed);
   if (!record) return null;
   const objectId = record.objectId;
   const momentId = record.momentId;
@@ -1773,14 +1774,14 @@ function applyCurrentFileOp(
   } catch {
     return;
   }
-  const payload = asObject(parsed);
+  const payload = asRecord(parsed);
   if (!payload) return;
 
   if (opKind === "version.create") {
     const versionId = readableString(payload.versionId);
     if (!versionId || !Array.isArray(payload.forkSnapshots)) return;
     for (const rawSnapshot of payload.forkSnapshots) {
-      const snapshot = asObject(rawSnapshot);
+      const snapshot = asRecord(rawSnapshot);
       if (!snapshot) continue;
       const path = trackedPath(snapshot.path);
       const blobSha256 = digest(snapshot.blobSha256);
@@ -5342,7 +5343,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {
         continue;
       }
-      const record = asObject(payload);
+      const record = asRecord(payload);
       if (!record || record.threadId !== threadId) continue;
       // The earliest matching op is authoritative, whatever it says: a string
       // channelWireId with no linked-file owner is the binding; anything else
@@ -5384,7 +5385,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {
         continue;
       }
-      const record = asObject(payload);
+      const record = asRecord(payload);
       if (!record || record.wireId !== channelWireId) continue;
       // The earliest exact create is authoritative even when malformed; do not
       // skip forward to a later op that could forge a shareable kind. Require
@@ -5422,7 +5423,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
       } catch {
         continue;
       }
-      const record = asObject(payload);
+      const record = asRecord(payload);
       if (!record || record.threadId !== threadId) continue;
       // The earliest matching op is authoritative, whatever it says. Exactly
       // one binding shape may be present: an op claiming both is malformed,
@@ -5893,11 +5894,6 @@ function workspaceIdentityFromRow(
   return { replicationEpoch, streamIdentity };
 }
 
-function asObject(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
 function versionIdFromVersionCreatePayload(payloadJson: string): string | null {
   let parsed: unknown;
   try {
@@ -5905,7 +5901,7 @@ function versionIdFromVersionCreatePayload(payloadJson: string): string | null {
   } catch {
     return null;
   }
-  const record = asObject(parsed);
+  const record = asRecord(parsed);
   return record ? readableString(record.versionId) : null;
 }
 
@@ -5946,7 +5942,7 @@ export function referencedBlobShas(
   } catch {
     return [];
   }
-  const record = asObject(parsed);
+  const record = asRecord(parsed);
   if (!record) return [];
   const shas: string[] = [];
   const push = (value: unknown): void => {
@@ -5958,7 +5954,7 @@ export function referencedBlobShas(
     push(record.beforeBlobSha256);
   } else if (opKind === "conflict.open") {
     for (const key of ["base", "current", "incoming"] as const) {
-      const state = asObject(record[key]);
+      const state = asRecord(record[key]);
       if (state && state.exists === true && state.contentKind === "binary") {
         push(state.sha256);
       }
@@ -5966,7 +5962,7 @@ export function referencedBlobShas(
   } else if (opKind === "version.create") {
     const snapshots = Array.isArray(record.forkSnapshots) ? record.forkSnapshots : [];
     for (const raw of snapshots) {
-      const snapshot = asObject(raw);
+      const snapshot = asRecord(raw);
       if (snapshot) push(snapshot.blobSha256);
     }
   } else if (opKind === "ydoc.update") {
@@ -5981,7 +5977,7 @@ export function referencedBlobShas(
   } else if (opKind === "secret.version.fork") {
     const rows = Array.isArray(record.rows) ? record.rows : [];
     for (const raw of rows) {
-      const row = asObject(raw);
+      const row = asRecord(raw);
       if (row) push(row.ciphertextSha256);
     }
   }
@@ -6181,14 +6177,16 @@ function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
   };
 }
 
-export class SyncRelayConflictError extends Error {
-  readonly statusCode = RELAY_ERRORS.conflict.status;
-  readonly code = RELAY_ERRORS.conflict.code;
+export class SyncRelayConflictError extends RelayError {
+  constructor(message: string) {
+    super("conflict", message);
+  }
 }
 
-export class SyncRelayQuotaExceededError extends Error {
-  readonly statusCode = RELAY_ERRORS.quota_exceeded.status;
-  readonly code = RELAY_ERRORS.quota_exceeded.code;
+export class SyncRelayQuotaExceededError extends RelayError {
+  constructor(message: string) {
+    super("quota_exceeded", message);
+  }
 }
 
 // A log append referenced a blob the relay does not hold. 422 (not 409): the
@@ -6196,7 +6194,8 @@ export class SyncRelayQuotaExceededError extends Error {
 // recovery), so a blob-missing rejection must use a distinct retryable status
 // the client surfaces as a generic failure and retries -- its next push
 // re-uploads the missing blob (via /blobs/have) before re-posting the batch.
-export class SyncRelayBlobMissingError extends Error {
-  readonly statusCode = RELAY_ERRORS.blob_missing.status;
-  readonly code = RELAY_ERRORS.blob_missing.code;
+export class SyncRelayBlobMissingError extends RelayError {
+  constructor(message: string) {
+    super("blob_missing", message);
+  }
 }

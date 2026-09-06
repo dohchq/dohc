@@ -3372,6 +3372,16 @@ describe("share-web protected discussion proxy", () => {
           {
             ok: false,
             code: "link_discussion_blocked",
+            error: "link discussion writes are paused",
+            activityRevision: 11,
+          },
+          { status: 403 },
+        ),
+      () =>
+        Response.json(
+          {
+            ok: false,
+            code: "link_discussion_blocked",
             error: "link discussion writes are blocked",
           },
           { status: 403 },
@@ -3414,16 +3424,6 @@ describe("share-web protected discussion proxy", () => {
             error: "link discussion writes are blocked",
             activityRevision: 10,
             principal,
-          },
-          { status: 403 },
-        ),
-      () =>
-        Response.json(
-          {
-            ok: false,
-            code: "link_discussion_blocked",
-            error: "link discussion writes are paused",
-            activityRevision: 11,
           },
           { status: 403 },
         ),
@@ -3499,23 +3499,14 @@ describe("share-web protected discussion proxy", () => {
       status: 403,
       body: { ok: false, state: "paused", activityRevision: 9 },
     });
-    const genericStatuses = [
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      404,
-      429,
-      404,
-      503,
-    ];
+    // The code is the contract; the relay message text is not.
+    expect({ status: responses[2]!.status, body: await responses[2]!.json() }).toEqual({
+      status: 403,
+      body: { ok: false, state: "blocked", activityRevision: 11 },
+    });
+    const genericStatuses = [404, 404, 404, 404, 404, 404, 404, 404, 404, 429, 404, 503];
     for (const [index, status] of genericStatuses.entries()) {
-      const response = responses[index + 2]!;
+      const response = responses[index + 3]!;
       expect({ status: response.status, body: await response.text() }).toEqual({
         status,
         body: shareWebRefusalBody,

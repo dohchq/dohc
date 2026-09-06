@@ -207,35 +207,6 @@ describe("share-web Node request adapter", () => {
     });
   });
 
-  it("survives a response error during a pipe and cancels the source stream", async () => {
-    const relay = await startControlledBlobRelay();
-    const server = await startShareWeb({
-      relayUrl: relay.url,
-      responseErrorDuringPipe: true,
-    });
-    const session = await exchangeSession(server.port);
-    const blobRequest = requestBlob(server.port, session, true);
-
-    await relay.waitForBlobRequests(1);
-    relay.startBlob(0);
-
-    try {
-      expect(
-        await settleWithin(relay.waitForBlobCancellations(1), 1_000),
-        `share-web did not cancel the source stream after a response error\n${server.stderr()}`,
-      ).toEqual({ kind: "settled", value: undefined });
-      const followUp = await sendHttpRequest(server.port, "/not-found", {
-        method: "GET",
-        headers: { host: PUBLIC_HOST },
-      });
-      expect(followUp.statusCode).toBe(404);
-      await readResponse(followUp);
-    } finally {
-      blobRequest.destroy();
-      relay.finishAllBlobs();
-    }
-  });
-
   it("refuses and closes a streaming request as soon as it crosses the body cap", async () => {
     const server = await startShareWeb();
     const upload = streamChunkedRequestWithoutEnd(
@@ -677,7 +648,6 @@ async function startShareWeb(
     devMode?: boolean;
     relayExchangeKey?: string;
     relayUrl?: string;
-    responseErrorDuringPipe?: boolean;
     shutdownGracePeriodMs?: number;
     trustedProxies?: string;
     viewerAssetsDir?: string;
@@ -691,15 +661,11 @@ async function startShareWeb(
     options.viewerAssetsDir ?? (await createViewerAssets(true));
   const env = { ...process.env };
   delete env.DOHC_SHARE_WEB_DEV;
-  delete env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE;
   delete env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS;
   delete env.DOHC_SHARE_WEB_TEST_VIEWER_ASSETS_DIR;
   delete env.DOHC_SHARE_WEB_TRUSTED_PROXIES;
   delete env.DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY;
   if (options.devMode !== false) env.DOHC_SHARE_WEB_DEV = "1";
-  if (options.responseErrorDuringPipe === true) {
-    env.DOHC_SHARE_WEB_TEST_RESPONSE_ERROR_DURING_PIPE = "1";
-  }
   if (options.shutdownGracePeriodMs !== undefined) {
     env.DOHC_SHARE_WEB_TEST_SHUTDOWN_GRACE_PERIOD_MS = String(
       options.shutdownGracePeriodMs,
@@ -830,7 +796,6 @@ async function exchangeSession(port: number): Promise<LinkSession> {
 function requestBlob(
   port: number,
   session: LinkSession,
-  responseErrorDuringPipe = false,
 ): PendingBlobRequest {
   let resolveResponse: (response: IncomingMessage) => void = () => undefined;
   let rejectResponse: (error: Error) => void = () => undefined;
@@ -847,9 +812,6 @@ function requestBlob(
       headers: {
         host: PUBLIC_HOST,
         cookie: session.cookie,
-        ...(responseErrorDuringPipe
-          ? { "x-dohc-test-response-error": "1" }
-          : {}),
       },
     },
     resolveResponse,

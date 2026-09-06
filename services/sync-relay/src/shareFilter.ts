@@ -13,7 +13,9 @@ import {
   isValidShareVersionId,
 } from "@dohc/security-contract/share-selector";
 import { validateUserWritePath } from "@dohc/workspace-core";
-import { RELAY_ERRORS } from "./errorCodes";
+import { asRecord } from "@dohc/workspace-core";
+import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
+import { RELAY_ERRORS } from "./errors";
 
 // PR 18 share grants: the server-side filter that decides which replicated
 // ops (and which blobs) a share RECIPIENT may see. This module is the
@@ -517,11 +519,6 @@ export type ShareOpDecision =
       blobSha256s: string[];
     };
 
-function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
-}
-
 function collectString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
@@ -535,7 +532,6 @@ function collectReferencedMomentPaths(record: Record<string, unknown>): string[]
   ].filter((path): path is string => path !== null);
 }
 
-const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
 
 function isSha256(value: unknown): value is string {
   return typeof value === "string" && SHA256_HEX_PATTERN.test(value);

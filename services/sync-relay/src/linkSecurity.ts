@@ -5,6 +5,7 @@ import {
   timingSafeEqual,
   type BinaryLike,
 } from "node:crypto";
+import { TokenBucketLimiter } from "@dohc/service-http";
 import { authorizeLinkShareAction } from "./shareAuthorization";
 import type { ShareSelector } from "./shareFilter";
 import type {
@@ -99,56 +100,19 @@ type Bucket = {
   updatedAtMs: number;
 };
 
-export class LinkExchangeRateLimiter {
-  private readonly buckets = new Map<string, Bucket>();
-
+// One bucket per client address for link exchanges and refreshes.
+export class LinkExchangeRateLimiter extends TokenBucketLimiter {
   constructor(
-    private readonly capacity = LINK_EXCHANGE_BUCKET_CAPACITY,
-    private readonly refillPerSecond = LINK_EXCHANGE_REFILL_PER_SECOND,
-    private readonly maxIps = LINK_EXCHANGE_MAX_IPS,
+    capacity = LINK_EXCHANGE_BUCKET_CAPACITY,
+    refillPerSecond = LINK_EXCHANGE_REFILL_PER_SECOND,
+    maxIps = LINK_EXCHANGE_MAX_IPS,
   ) {
-    if (capacity <= 0 || refillPerSecond <= 0 || maxIps <= 0) {
-      throw new Error("link exchange rate limits must be positive");
-    }
-  }
-
-  allow(ip: string, nowMs: number): boolean {
-    const key = ip || "unknown";
-    let bucket = this.buckets.get(key);
-    if (!bucket) {
-      if (this.buckets.size >= this.maxIps) this.evictOldest();
-      bucket = { tokens: this.capacity, updatedAtMs: nowMs };
-      this.buckets.set(key, bucket);
-    }
-    const elapsedSeconds = Math.max(0, nowMs - bucket.updatedAtMs) / 1_000;
-    bucket.tokens = Math.min(
-      this.capacity,
-      bucket.tokens + elapsedSeconds * this.refillPerSecond,
-    );
-    bucket.updatedAtMs = nowMs;
-    if (bucket.tokens < 1) return false;
-    bucket.tokens -= 1;
-    return true;
-  }
-
-  get size(): number {
-    return this.buckets.size;
-  }
-
-  private evictOldest(): void {
-    let oldestKey: string | null = null;
-    let oldestMs = Number.POSITIVE_INFINITY;
-    for (const [key, bucket] of this.buckets) {
-      if (bucket.updatedAtMs < oldestMs) {
-        oldestKey = key;
-        oldestMs = bucket.updatedAtMs;
-      }
-    }
-    if (oldestKey !== null) this.buckets.delete(oldestKey);
+    super(capacity, refillPerSecond, maxIps);
   }
 }
 
-export class LinkReadRateLimiter extends LinkExchangeRateLimiter {
+// One bucket per capability or grant for accountless reads.
+export class LinkReadRateLimiter extends TokenBucketLimiter {
   constructor(
     capacity = LINK_READ_BUCKET_CAPACITY,
     refillPerSecond = LINK_READ_REFILL_PER_SECOND,
