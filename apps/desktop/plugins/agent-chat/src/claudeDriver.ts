@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type {
-  PluginActivateContext,
   PluginAgentDriver,
   PluginAgentProbe,
   PluginAgentSession,
@@ -15,7 +14,16 @@ import {
   permissionControlResponse,
   permissionRequestEvent,
 } from "./claudeProtocol.ts";
-import { absent, asString, commandSpec, isRecord, type CommandSpec } from "./shared.ts";
+import {
+  absent,
+  asString,
+  commandSpec,
+  isRecord,
+  runProbeCommand,
+  type CommandSpec,
+  type ProbeCommandResult,
+  type SpawnCommand,
+} from "./shared.ts";
 import { ClaudeStream } from "./streamJson.ts";
 
 /** How long a one-shot `claude` command has to answer a probe. */
@@ -48,8 +56,6 @@ const HANDSHAKE_ID = "dohc-initialize";
 export function claudeCommandSpec(env: Record<string, string | undefined>): CommandSpec {
   return commandSpec(env, "CLAUDE_CODE", "claude");
 }
-
-type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
 
 interface PendingPermission {
   request: unknown;
@@ -180,38 +186,11 @@ export function createClaudeDriver(
   spec: CommandSpec,
   readyTimeout: number = READY_TIMEOUT_MS,
 ): PluginAgentDriver {
-  interface CommandResult {
-    code: number | null;
-    stdout: string;
-    stderr: string;
-  }
-
-  /** Runs one short `claude` command and reads what it printed. */
-  async function runCommand(args: string[]): Promise<CommandResult | { timedOut: true }> {
-    const child = await spawnCommand({
-      command: spec.command,
-      args: [...spec.args, ...args],
-      cwd: { workspaceRoot: true },
-    });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), PROBE_TIMEOUT_MS);
-    });
-    try {
-      const result = await Promise.race([child.wait(), timedOut]);
-      if (result === "timeout") return { timedOut: true };
-      const logs = await child.logs();
-      const read = (stream: "stdout" | "stderr"): string =>
-        logs.filter((line) => line.stream === stream).map((line) => line.text).join("");
-      return { code: result.code, stdout: read("stdout"), stderr: read("stderr") };
-    } finally {
-      if (timer) clearTimeout(timer);
-      await child.terminate().catch(() => undefined);
-    }
-  }
+  const runCommand = (args: string[]) =>
+    runProbeCommand(spawnCommand, spec, args, PROBE_TIMEOUT_MS);
 
   async function probe(): Promise<PluginAgentProbe> {
-    let version: CommandResult | { timedOut: true };
+    let version: ProbeCommandResult | { timedOut: true };
     try {
       version = await runCommand(["--version"]);
     } catch (error) {

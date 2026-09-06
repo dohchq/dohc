@@ -1,4 +1,4 @@
-import type { PluginAgentProbe } from "@dohc/sdk/node";
+import type { PluginActivateContext, PluginAgentProbe } from "@dohc/sdk/node";
 
 /** What both drivers need and neither owns: line framing, the command
  * override, and the shape of a probe that found nothing. */
@@ -56,6 +56,48 @@ export function commandSpec(
     return { command, args };
   } catch {
     return { command, args: raw.split(" ").filter(Boolean) };
+  }
+}
+
+export type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
+
+export interface ProbeCommandResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Runs one short harness command for a probe and reads what it printed, or
+ * reports that it did not finish within `timeoutMs`. The child is always
+ * terminated on the way out. A spawn failure rejects; the caller decides
+ * what that means for its probe.
+ */
+export async function runProbeCommand(
+  spawnCommand: SpawnCommand,
+  spec: CommandSpec,
+  args: string[],
+  timeoutMs: number,
+): Promise<ProbeCommandResult | { timedOut: true }> {
+  const child = await spawnCommand({
+    command: spec.command,
+    args: [...spec.args, ...args],
+    cwd: { workspaceRoot: true },
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
+  try {
+    const result = await Promise.race([child.wait(), timedOut]);
+    if (result === "timeout") return { timedOut: true };
+    const logs = await child.logs();
+    const read = (stream: "stdout" | "stderr"): string =>
+      logs.filter((line) => line.stream === stream).map((line) => line.text).join("");
+    return { code: result.code, stdout: read("stdout"), stderr: read("stderr") };
+  } finally {
+    if (timer) clearTimeout(timer);
+    await child.terminate().catch(() => undefined);
   }
 }
 

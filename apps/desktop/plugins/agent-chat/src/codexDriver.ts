@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import type {
-  PluginActivateContext,
   PluginAgentDriver,
   PluginAgentProbe,
   PluginAgentSession,
@@ -18,7 +17,15 @@ import {
   mapNotification,
 } from "./codexProtocol.ts";
 import { CommandJsonRpc, JsonRpcError } from "./jsonRpc.ts";
-import { absent, asString, commandSpec, isRecord, type CommandSpec } from "./shared.ts";
+import {
+  absent,
+  asString,
+  commandSpec,
+  isRecord,
+  runProbeCommand,
+  type CommandSpec,
+  type SpawnCommand,
+} from "./shared.ts";
 
 /** How long `codex --version` has to answer before the probe calls it absent. */
 export const PROBE_TIMEOUT_MS = 3000;
@@ -30,8 +37,6 @@ const MAX_PROBE_ERROR_CHARS = 300;
 export function codexCommandSpec(env: Record<string, string | undefined>): CommandSpec {
   return commandSpec(env, "CODEX", "codex");
 }
-
-type SpawnCommand = PluginActivateContext["childProcesses"]["spawnCommand"];
 
 class CodexSession implements PluginAgentSession {
   readonly sessionId: string;
@@ -117,39 +122,23 @@ export function createCodexDriver(
   spec: CommandSpec,
 ): PluginAgentDriver {
   async function probe(): Promise<PluginAgentProbe> {
-    let child: Awaited<ReturnType<SpawnCommand>>;
+    let version: Awaited<ReturnType<typeof runProbeCommand>>;
     try {
-      child = await spawnCommand({
-        command: spec.command,
-        args: [...spec.args, "--version"],
-        cwd: { workspaceRoot: true },
-      });
+      version = await runProbeCommand(spawnCommand, spec, ["--version"], PROBE_TIMEOUT_MS);
     } catch (error) {
       return absent(error instanceof Error ? error.message : "Probe failed.");
     }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timedOut = new Promise<"timeout">((resolve) => {
-      timer = setTimeout(() => resolve("timeout"), PROBE_TIMEOUT_MS);
-    });
-    try {
-      const result = await Promise.race([child.wait(), timedOut]);
-      if (result === "timeout") return absent("Probe timed out.");
-      const logs = await child.logs();
-      const stdout = logs.filter((line) => line.stream === "stdout").map((line) => line.text).join("");
-      const stderr = logs.filter((line) => line.stream === "stderr").map((line) => line.text).join("");
-      if (result.code !== 0) {
-        return absent((stderr || stdout).trim().slice(0, MAX_PROBE_ERROR_CHARS) || "Probe failed.");
-      }
-      return {
-        installed: true,
-        version: (stdout || stderr).trim().split(/\r?\n/)[0] || undefined,
-        auth: { status: "unknown", label: "CLI login" },
-        models: [{ id: "default", name: "Default", planIncluded: true }],
-      };
-    } finally {
-      if (timer) clearTimeout(timer);
-      await child.terminate().catch(() => undefined);
+    if ("timedOut" in version) return absent("Probe timed out.");
+    const { code, stdout, stderr } = version;
+    if (code !== 0) {
+      return absent((stderr || stdout).trim().slice(0, MAX_PROBE_ERROR_CHARS) || "Probe failed.");
     }
+    return {
+      installed: true,
+      version: (stdout || stderr).trim().split(/\r?\n/)[0] || undefined,
+      auth: { status: "unknown", label: "CLI login" },
+      models: [{ id: "default", name: "Default", planIncluded: true }],
+    };
   }
 
   async function startSession(input: PluginAgentSessionStartInput): Promise<PluginAgentSession> {

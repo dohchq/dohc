@@ -334,13 +334,12 @@ async function start(
 ): Promise<{ app: ChatWebApp; url: string; token: string }> {
   const app = createChatWebApp({
     agent: "Claude Code",
-    webAppId: "claude-code-chat",
     driver: fake.driver,
     workspaceRoot: "C:\\workspace",
     uiRoot,
   });
   runningApps.push(app);
-  const started = await app.startWebApp("claude-code-chat", null);
+  const started = await app.startWebApp();
   return { app, url: started.url, token: tokenFromUrl(started.url) };
 }
 
@@ -867,7 +866,7 @@ describe("agent chat web app", () => {
     expect(await reattached.next()).toEqual(ready);
     expect(await reattached.next()).toEqual(text);
 
-    const restarted = await app.startWebApp("claude-code-chat", null);
+    const restarted = await app.startWebApp();
     expect(restarted.url).toBe(url);
     expect(fake.startInputs).toHaveLength(1);
     await reattached.close();
@@ -1551,21 +1550,17 @@ describe("agent chat web app", () => {
     await reattached.close();
   });
 
-  it("renders the page for whichever agent it was created for, and answers only its own id", async () => {
+  it("renders the page for whichever agent it was created for", async () => {
     const fake = fakeDriver();
     const app = createChatWebApp({
       agent: "Codex",
-      webAppId: "codex-chat",
       driver: fake.driver,
       workspaceRoot: "C:\\workspace",
       uiRoot: PLUGIN_UI_ROOT,
     });
     runningApps.push(app);
 
-    await expect(app.startWebApp("claude-code-chat", null)).rejects.toThrow(
-      'This chat serves only the singleton "codex-chat" web app.',
-    );
-    const { url } = await app.startWebApp("codex-chat", null);
+    const { url } = await app.startWebApp();
     const html = await (await fetch(new URL("/", url))).text();
     expect(html).toContain('<html lang="en" data-agent="Codex">');
     expect(html).toContain("<title>Codex Chat</title>");
@@ -1614,7 +1609,7 @@ describe("agent chat web app", () => {
     // included -- the guest can navigate back to it and still authenticate.
     const app = runningApps.at(-1);
     if (!app) throw new Error("No running app to reattach to.");
-    const again = await app.startWebApp("claude-code-chat", null);
+    const again = await app.startWebApp();
     expect(again.url).toBe(url);
   });
 
@@ -2129,7 +2124,7 @@ describe("agent chat web app", () => {
       // the abandoned prompt() call above eventually settles on its own.
       await app.deactivate();
 
-      const restarted = await app.startWebApp("claude-code-chat", null);
+      const restarted = await app.startWebApp();
       const restartedToken = tokenFromUrl(restarted.url);
       const freshResponse = await post(
         restarted.url,
@@ -2202,12 +2197,12 @@ describe("agent chat web app", () => {
 
       // The host dispatches this on failed-guest-load recovery, not on an
       // ordinary tab close -- see the comment on stopWebApp itself.
-      await app.stopWebApp("claude-code-chat", null);
+      await app.stopWebApp();
 
       // The old server is really gone: nothing to reattach to.
       await expect(fetch(new URL("/", url))).rejects.toThrow();
 
-      const restarted = await app.startWebApp("claude-code-chat", null);
+      const restarted = await app.startWebApp();
       expect(restarted.url).not.toBe(url);
       const freshToken = tokenFromUrl(restarted.url);
       expect(freshToken).not.toBe(token);
@@ -2280,8 +2275,7 @@ describe("agent chat web app", () => {
     let triggered = false;
     const app = createChatWebApp({
       agent: "Claude Code",
-      webAppId: "claude-code-chat",
-      driver: fake.driver,
+        driver: fake.driver,
       workspaceRoot: "C:\\workspace",
       uiRoot: PLUGIN_UI_ROOT,
       testHooks: {
@@ -2295,7 +2289,7 @@ describe("agent chat web app", () => {
     ref.app = app;
     runningApps.push(app);
 
-    const started = await app.startWebApp("claude-code-chat", null).then(
+    const started = await app.startWebApp().then(
       (result) => ({ ok: true as const, url: result.url }),
       (error: unknown) => ({ ok: false as const, error }),
     );
@@ -2310,7 +2304,7 @@ describe("agent chat web app", () => {
 
     // Either way, a fresh start afterward must produce a real, working
     // server: the race must not leave the app permanently wedged.
-    const restarted = await app.startWebApp("claude-code-chat", null);
+    const restarted = await app.startWebApp();
     const page = await fetch(new URL("/", restarted.url));
     expect(page.status).toBe(200);
   }, 10_000);

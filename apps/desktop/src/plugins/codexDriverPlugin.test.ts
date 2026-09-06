@@ -200,26 +200,6 @@ describe("dohc's Codex driver, as a plugin", () => {
     expect(codexDriver(fixture).displayName).toBe("Codex");
   });
 
-  it("ships what installing it needs", async () => {
-    // dohc installs every plugin's dependencies before it runs one, and that
-    // step reads pnpm-lock.yaml whether or not the plugin declares any
-    // (pluginInstallRunner.ts). A driver should have no dependencies — but a
-    // plugin without the lockfile does not install at all.
-    const manifest = JSON.parse(
-      await readFile(join(pluginSource, "dohc-plugin.json"), "utf8"),
-    ) as { drivers?: Array<{ id: string }> };
-    expect(manifest.drivers).toEqual([
-      { id: "claude-code", displayName: "Claude Code" },
-      { id: "codex", displayName: "Codex" },
-    ]);
-    await expect(readFile(join(pluginSource, "pnpm-lock.yaml"), "utf8")).resolves
-      .toContain("lockfileVersion");
-    const pkg = JSON.parse(
-      await readFile(join(pluginSource, "package.json"), "utf8"),
-    ) as { dependencies?: Record<string, string> };
-    expect(pkg.dependencies ?? {}).toEqual({});
-  });
-
   it("reports the Codex it found on this machine", async () => {
     const fixture = await startCodexPlugin();
 

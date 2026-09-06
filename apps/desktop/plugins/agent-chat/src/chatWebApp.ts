@@ -83,8 +83,8 @@ interface EventLogEntry {
 }
 
 export interface ChatWebApp {
-  startWebApp(webAppId: string, instanceKey: string | null): Promise<PluginWebAppStart>;
-  stopWebApp(webAppId: string, instanceKey: string | null): Promise<void>;
+  startWebApp(): Promise<PluginWebAppStart>;
+  stopWebApp(): Promise<void>;
   deactivate(): Promise<void>;
 }
 
@@ -257,8 +257,6 @@ export interface ChatWebAppOptions {
   /** What the page calls the agent: its title, its empty state, and the
    * author of every card the driver's events become. */
   agent: string;
-  /** The manifest web app id this chat answers to; any other id is refused. */
-  webAppId: string;
   driver: PluginAgentDriver;
   workspaceRoot: string;
   uiRoot: string;
@@ -1126,12 +1124,7 @@ export function createChatWebApp(options: ChatWebAppOptions): ChatWebApp {
   }
 
   return {
-    async startWebApp(webAppId, instanceKey) {
-      if (webAppId !== options.webAppId || instanceKey !== null) {
-        throw new Error(
-          'This chat serves only the singleton "' + options.webAppId + '" web app.',
-        );
-      }
+    async startWebApp() {
       if (serverUrl) return { url: urlWithToken() };
       serverStart ??= startServer().finally(() => {
         serverStart = null;
@@ -1139,12 +1132,7 @@ export function createChatWebApp(options: ChatWebAppOptions): ChatWebApp {
       await serverStart;
       return { url: urlWithToken() };
     },
-    async stopWebApp(webAppId, instanceKey) {
-      if (webAppId !== options.webAppId || instanceKey !== null) {
-        throw new Error(
-          'This chat serves only the singleton "' + options.webAppId + '" web app.',
-        );
-      }
+    async stopWebApp() {
       // The host calls this to retire a pairing whose guest failed to load
       // (recovery after a bad start) so the next start pairs completely
       // fresh -- not on an ordinary tab close, which never dispatches this
