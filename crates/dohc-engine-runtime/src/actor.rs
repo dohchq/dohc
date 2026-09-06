@@ -111,8 +111,10 @@ impl LifecycleState {
     }
 }
 
+type ActorWork = Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>;
+
 enum Command {
-    Run(Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>),
+    Run(ActorWork),
     Relay {
         transport: DeferredRelayTransport,
         operation: RelayOperation,
