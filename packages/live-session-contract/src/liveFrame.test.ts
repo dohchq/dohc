@@ -194,6 +194,48 @@ describe("live frame route ownership", () => {
     expect(() => beforeGreeting.receive(encodeLiveFrame({ kind: "credit", grantedBytes: 1, grantedFrames: 1 }, 586))).toThrow();
     expect(beforeGreeting.usage().closed).toBe(true);
   });
+  describe.each([
+    ["client", "send", "hello", "welcome"],
+    ["client", "receive", "welcome", "hello"],
+    ["server", "send", "welcome", "hello"],
+    ["server", "receive", "hello", "welcome"],
+  ] as const)("%s %s greeting boundary", (role, operation, validKind, wrongKind) => {
+    const greeting = (kind: "hello" | "welcome"): LiveFrame => kind === "hello"
+      ? { kind, receivePolicy }
+      : { kind, hostEpoch: parseHostEpoch(1), receivePolicy };
+    const apply = (session: Session, frame: LiveFrame) => operation === "send"
+      ? session.send(frame) : session.receive(encodeLiveFrame(frame, 586));
+    const direction = operation === "send" ? "outgoing" : "incoming";
+    it("retires a wrong-direction greeting without retaining frame charges", () => {
+      const session = createLiveFrameSession(role, limits), before = session.usage();
+      expect(() => apply(session, greeting(wrongKind))).toThrow(LiveFrameError);
+      expect(session.usage()).toEqual({ ...before, closed: true });
+      expect(() => apply(session, greeting(validKind))).toThrow(LiveFrameError);
+      expect(session.usage()).toEqual({ ...before, closed: true });
+    });
+    it("retires a duplicate greeting while preserving the first held frame", () => {
+      const session = createLiveFrameSession(role, limits);
+      const held = apply(session, greeting(validKind)), before = session.usage();
+      expect(before.closed).toBe(false);
+      expect(before[direction]).toMatchObject({ controlBytes: encodeLiveFrame(greeting(validKind), 586).length, controlFrames: 1 });
+      expect(() => apply(session, greeting(validKind))).toThrow(LiveFrameError);
+      expect(session.usage()).toEqual({ ...before, closed: true });
+      expect(() => apply(session, { kind: "credit", grantedBytes: 1, grantedFrames: 1 })).toThrow(LiveFrameError);
+      expect(session.usage()).toEqual({ ...before, closed: true });
+      held.release();
+      expect(session.usage()).toEqual({ ...before, closed: true,
+        [direction]: { ...before[direction], controlBytes: 0, controlFrames: 0 } });
+    });
+    it("accepts its directional greeting followed by CREDIT", () => {
+      const session = createLiveFrameSession(role, limits);
+      apply(session, greeting(validKind)).release();
+      apply(session, { kind: "credit", grantedBytes: 1, grantedFrames: 1 }).release();
+      expect(session.usage()).toMatchObject({ closed: false, assemblyBytes: 0,
+        [direction]: { controlBytes: 0, controlFrames: 0 },
+        [operation === "send" ? "incoming" : "outgoing"]: { promisedBytes: 1, promisedFrames: 1 } });
+      session.close();
+    });
+  });
   it("pauses at zero credit, then resumes without losing the connection", () => {
     const { client, server } = pair();
     expect(() => client.send(begin("client-vector"))).toThrow(LiveFrameError);

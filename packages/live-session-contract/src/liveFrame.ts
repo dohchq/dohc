@@ -555,7 +555,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       try {
         const bytes = byteView(value);
         requireFrame(bytes.length >= 12 && bytes.length <= limits.receive.maxFrameBytes, "limit");
-        const data = bytes[5] === 3 || bytes[5] === 4;
+        const data = bytes[5] === kindCodes.begin || bytes[5] === kindCodes.chunk;
         release = holdFrame(opposite(role), data, bytes.length);
         const borrowed = decodeFrame(bytes, limits.receive.maxFrameBytes, false);
         const transfer = transition(opposite(role), borrowed, bytes.length);
