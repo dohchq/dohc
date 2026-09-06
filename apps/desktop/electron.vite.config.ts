@@ -11,6 +11,7 @@ const electronRendererTarget = "chrome150";
 
 export const mainBundledWorkspaceDeps = [
   "@dohc/cli",
+  "@dohc/live-session-contract",
   "@dohc/sdk",
   "@dohc/security-contract",
   "@dohc/workspace-core",
@@ -23,6 +24,7 @@ export const mainBundledWorkspaceDeps = [
 
 export const preloadBundledRuntimeDeps = [
   // Sandboxed preloads cannot resolve app/workspace packages at runtime.
+  "@dohc/live-session-contract",
   "@dohc/workspace-contracts",
   "@dohc/workspace-core",
   // The bridge contract reads the share access levels from the one place both

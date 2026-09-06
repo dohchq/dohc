@@ -43,6 +43,18 @@ test('share-web waits for the relay to answer HTTP, not only to start', () => {
   assert.ok(relay.healthcheck?.test, 'the relay declares a healthcheck')
 })
 
+test('browser sign-in uses the shared auth base and exact viewer origin', () => {
+  const api = compose.services['workspace-api']
+  assert.match(api.environment.WORKSPACE_API_BASE_URL, required('WORKSPACE_API_BASE_URL'))
+  assert.equal(relay.environment.SYNC_RELAY_AUTH_BASE_URL, api.environment.WORKSPACE_API_BASE_URL)
+  assert.equal(api.environment.DOHC_WEB_ORIGIN, shareWeb.environment.DOHC_SHARE_WEB_PUBLIC_ORIGIN)
+  assert.match(api.environment.DOHC_WEB_ORIGIN, required('DOHC_SHARE_WEB_PUBLIC_ORIGIN'))
+  assert.equal(shareWeb.environment.DOHC_SHARE_WEB_AUTH_URL, 'http://workspace-api:1786')
+  assert.equal(shareWeb.depends_on['workspace-api'].condition, 'service_healthy')
+  assert.ok(api.healthcheck?.test, 'the auth service declares a healthcheck')
+  assert.equal(new URL(envExample.WORKSPACE_API_BASE_URL).protocol, 'https:')
+})
+
 test('share-web reaches the relay over the compose network and publishes one origin', () => {
   assert.equal(shareWeb.environment.DOHC_SHARE_WEB_RELAY_URL, 'http://sync-relay:1788')
   assert.match(
