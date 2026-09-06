@@ -18,7 +18,7 @@ const WS: &str = "ws-automations";
 const NO_FAULTS: NoFaults = NoFaults;
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     EngineStore::open(&db, 1).expect("open store")
 }
 

@@ -1772,7 +1772,7 @@ mod tests {
         scratch: &ScratchDir,
         supervisor: &WorkspaceSupervisor,
     ) -> (PathBuf, StoreCaptureSink) {
-        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(scratch).expect("engine db path");
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         (
             db,

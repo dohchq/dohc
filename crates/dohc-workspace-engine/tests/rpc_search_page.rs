@@ -66,7 +66,7 @@ async fn write(
 
 fn seed_short_query_scan_rows(scratch: &ScratchDir, workspace_id: &str, nonmatching_rows: usize) {
     write_root_binding(scratch.path(), TOKEN).expect("root binding");
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let faults = NoFaults;
     let mut store = EngineStore::open(&db, 1).expect("seed store");
     assert!(

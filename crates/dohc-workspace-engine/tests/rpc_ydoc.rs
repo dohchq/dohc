@@ -2259,7 +2259,7 @@ struct SettleFingerprint(Vec<TableFingerprint>);
 
 fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerprint {
     let connection =
-        rusqlite::Connection::open(engine_db_path(&scratch).expect("engine database path"))
+        rusqlite::Connection::open(engine_db_path(scratch).expect("engine database path"))
             .expect("open engine database");
     let rows = |table: &'static str, workspace_scoped: bool| {
         let sql = if workspace_scoped {

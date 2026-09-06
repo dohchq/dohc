@@ -40,7 +40,7 @@ fn write(object: &str, moment: &str) -> WriteText {
 }
 
 fn open(scratch: &ScratchDir) -> EngineStore {
-    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("db"), 1).expect("open");
+    let mut store = EngineStore::open(&engine_db_path(scratch).expect("db"), 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NO_FAULTS)
         .expect("ensure main");

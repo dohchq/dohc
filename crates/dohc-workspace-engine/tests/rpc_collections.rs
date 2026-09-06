@@ -56,7 +56,7 @@ fn seed_text(store: &mut EngineStore, path: &str, text: &str, sequence: i64) {
 }
 
 fn seed_collection_state(scratch: &ScratchDir) {
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -79,7 +79,7 @@ fn seed_collection_state(scratch: &ScratchDir) {
 }
 
 fn seed_schema(scratch: &ScratchDir, schema: &str) {
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     store.bind_root_token(TOKEN, &NoFaults).expect("bind token");
     VersionedTextStore::new(&mut store)
@@ -2643,7 +2643,7 @@ fn assert_parked_drain_events(notices: &[EngineEventNotice]) {
 }
 
 fn assert_no_automation_claims(scratch: &ScratchDir) {
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let store = EngineStore::open(&db, 9).expect("open claim probe store");
     let claims: i64 = store
         .read_with(|conn| {
@@ -2785,7 +2785,7 @@ async fn a_parked_update_drained_on_settle_fires_record_events_with_the_refusal(
 }
 
 fn deferred_update_rows(scratch: &ScratchDir) -> i64 {
-    let db = engine_db_path(&scratch).expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     let store = EngineStore::open(&db, 8).expect("open deferred probe store");
     store
         .read_with(|conn| {
