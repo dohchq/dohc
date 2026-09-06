@@ -1537,8 +1537,8 @@ fn record_identity(
 }
 
 /// The pre-validator [`crate::durable::validate_update_bytes`] (the shared
-/// choke point for both the local edit path — `record_local_update` /
-/// `record_local_update_creating_marker` — and the remote replication path —
+/// choke point for both the local edit path, `record_local_update`,
+/// and the remote replication path,
 /// `apply_remote_update` / `apply_remote_update_in_transaction_with_projection`)
 /// runs before
 /// any call that can reach yrs 0.27.3's uncatchable `Update::decode_v1`
