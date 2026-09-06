@@ -32,6 +32,11 @@ import {
   YDocUncapturedArtifactError,
 } from "./workspaceEngineCapture";
 import { createTestScratch } from "./testTemp";
+import {
+  createFakeDaemonCapture,
+  type FakeDaemonCapture,
+} from "../testing/fakeDaemonCapture";
+import { daemonCaptureLifecycleAnswer } from "../testing/liveEngineSessions";
 
 const WORKSPACE_ID = "engine-ydoc-session-test";
 const ATTACHMENT_ID = Symbol("test-workspace-attachment");
@@ -58,6 +63,9 @@ let closeRefusal: unknown = null;
 let captureErrors: string[] = [];
 let versioned: VersionedLoopbackEngine;
 let ydoc: YdocLoopbackEngine;
+// The daemon's disk side: ingests the folder on `capture.flush`, rewrites it
+// on a version switch, and skips a path while a `ydoc.open` lease holds it.
+let daemon: FakeDaemonCapture;
 let sessions: EngineWorkspaceSessions;
 let capture: ReturnType<typeof createWorkspaceEngineCapture>;
 
@@ -85,38 +93,24 @@ function daemonSessions(): EngineWorkspaceSessions {
       if (request.method === "workspace.close") {
         return { id: request.id, result: { closed: true } };
       }
-      if (request.method === "capture.flush") {
-        return {
-          id: request.id,
-          result: { settled: true, running: true, degraded: false },
-        };
-      }
-      if (request.method === "capture.setAuthor") {
-        return { id: request.id, result: { updated: true } };
-      }
-      if (request.method === "watcher.status") {
-        return {
-          id: request.id,
-          result: { running: true, degraded: false, terminal: false },
-        };
-      }
       if (request.method === "ydoc.settle" && settleRefusal !== null) {
         throw settleRefusal;
       }
       if (request.method === "ydoc.close" && closeRefusal !== null) {
         throw closeRefusal;
       }
-      if (request.method.startsWith("ydoc.")) {
-        if (
-          recordUpdateDelayMs > 0 &&
-          request.method === YDOC_METHOD.recordUpdate
-        ) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, recordUpdateDelayMs),
-          );
-        }
-        return await ydoc.sendRequest(request);
+      if (
+        recordUpdateDelayMs > 0 &&
+        request.method === YDOC_METHOD.recordUpdate
+      ) {
+        await new Promise((resolve) =>
+          setTimeout(resolve, recordUpdateDelayMs),
+        );
       }
+      const answered = await daemon.sendRequest(request);
+      if (answered) return answered;
+      const lifecycle = daemonCaptureLifecycleAnswer(request);
+      if (lifecycle) return lifecycle;
       return await versioned.sendRequest(request);
     },
   };
@@ -160,6 +154,14 @@ function methodCount(method: string): number {
   return requests.filter((request) => request.method === method).length;
 }
 
+// Writes the daemon's own capture made into its store. They never cross the
+// desktop transport, so `requests` cannot see them.
+function daemonWriteCount(): number {
+  return versioned.requests.filter(
+    (request) => request.method === VERSIONED_METHOD.textWrite,
+  ).length;
+}
+
 
 // The envelope EngineClient rejects a refused request with. DaemonLiveAdapter
 // re-throws it as DaemonRefusalError, which is the shape the close path's
@@ -198,6 +200,12 @@ beforeEach(async () => {
       writeFileSync(join(root, path), content, "utf8"),
   });
   seedYdoc("main");
+  daemon = createFakeDaemonCapture({
+    rootPath: root,
+    workspaceId: WORKSPACE_ID,
+    loopback: versioned,
+    ydoc,
+  });
   sessions = daemonSessions();
   capture = createWorkspaceEngineCapture({
     workspaceId: WORKSPACE_ID,
@@ -231,12 +239,12 @@ it("journals a live editor update through the Rust Y.Doc provider and suppresses
   expect(await readFile(join(root, PATH), "utf8")).toContain(
     "Typed with no collaboration server.",
   );
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
 
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
 
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
+  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
   await session.close({ settle: false });
 });
 
@@ -319,49 +327,6 @@ it("keeps a completed delete absent after a live-session race and closes its rem
   await reopened.close({ settle: false });
 });
 
-it("captures a different disk edit while the Rust Y.Doc session is live", async () => {
-  const session = await capture.openYDocSession({
-    path: PATH,
-    onRemoteUpdate: () => undefined,
-  });
-  const editor = mirrorEditor(session);
-  typeIntoBody(editor, "Owner edit.");
-  await session.settleNow();
-  const writesBeforeExternalEdit = methodCount(VERSIONED_METHOD.textWrite);
-  const beforeExternalEdit = await capture.listMoments({ limit: 100 });
-  const priorMomentIds = new Set(
-    beforeExternalEdit.moments.map((moment) => moment.id),
-  );
-  const externalMarkdown =
-    "# Solo\n\nAn external agent changed this file.\n";
-
-  await writeFile(join(root, PATH), externalMarkdown, "utf8");
-  capture.captureBatch([{ path: PATH, operation: "update" }]);
-  await capture.flush();
-
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
-    writesBeforeExternalEdit,
-  );
-  const afterExternalEdit = await capture.listMoments({ limit: 100 });
-  const externalMoment = afterExternalEdit.moments.find(
-    (moment) => moment.path === PATH && !priorMomentIds.has(moment.id),
-  );
-  if (!externalMoment) {
-    throw new Error("Expected the external disk edit to record a new moment.");
-  }
-  expect(await capture.readMoment(externalMoment.id)).toMatchObject({
-    protected: false,
-    moment: {
-      payload: {
-        after: {
-          text: externalMarkdown,
-        },
-      },
-    },
-  });
-  await session.close({ settle: false });
-});
-
 it("settles and closes the Rust Y.Doc session before a version switch", async () => {
   const draft = await capture.createVersion("Draft");
   seedYdoc(draft.activeVersionId);
@@ -426,16 +391,14 @@ it("closes clean and reports changed-on-disk when the close settle meets a moved
   // The daemon session was released exactly as a clean close releases it.
   expect(methodCount("ydoc.close")).toBe(1);
 
-  // And the path's guard lifted with it: a watcher event on this path is
-  // captured, not deferred behind a retained failing-close entry.
+  // And the path's lease lifted with it: the daemon captures the next disk
+  // edit instead of deferring it behind a session it still holds.
   settleRefusal = null;
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBeGreaterThan(
-    writesBeforeWatcher,
-  );
+  expect(daemonWriteCount()).toBeGreaterThan(writesBeforeWatcher);
 });
 
 // The narrowness guard for the downgrade above. Any other refusal means the
@@ -673,15 +636,15 @@ it("keeps a stale-target close loud when the release fails too", async () => {
   // Loud, and it stays loud: no correction may follow a release that failed.
   expect(states).toEqual(["settling", "error"]);
   expect(captureErrors).toContain(`ydoc settle of ${PATH}`);
-  // And the path keeps its guard, because the reservation was never released:
-  // a watcher event stays deferred behind the failing-close entry.
+  // And the path keeps its lease, because the reservation was never
+  // released: the daemon defers the next disk edit behind the session.
   settleRefusal = null;
   closeRefusal = null;
-  const writesBeforeWatcher = methodCount(VERSIONED_METHOD.textWrite);
+  const writesBeforeWatcher = daemonWriteCount();
   await writeFile(join(root, PATH), "# Solo\n\nWritten outside dohc.\n", "utf8");
   capture.captureBatch([{ path: PATH, operation: "update" }]);
   await capture.flush();
-  expect(methodCount(VERSIONED_METHOD.textWrite)).toBe(writesBeforeWatcher);
+  expect(daemonWriteCount()).toBe(writesBeforeWatcher);
 });
 
 // AUDIT-SILENTSAVE. The save indicator's whole job is to not lie, and

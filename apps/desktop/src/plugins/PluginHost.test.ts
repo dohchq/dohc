@@ -1885,8 +1885,11 @@ describe("PluginHost", () => {
       attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
-    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
-    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    const blocker = engine.writeAuthoredTextFile(
+      join(root, "queue-blocker.txt"),
+      "block\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+    );
     await entered.promise;
 
     const registry = createPluginPanelSdkAuthorityRegistry();
@@ -1963,6 +1966,7 @@ describe("PluginHost", () => {
     release.resolve();
 
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await blocker;
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "cancelled.txt"))).toBe(false);
     await engine.stop();
@@ -1996,8 +2000,11 @@ describe("PluginHost", () => {
       attachmentId: Symbol("test-workspace-attachment"),
       rustEngineSessions: mockLiveSessions(loopback),
     });
-    await writeFile(join(root, "queue-blocker.txt"), "block\n", "utf8");
-    engine.captureBatch([{ path: "queue-blocker.txt", operation: "update" }]);
+    const blocker = engine.writeAuthoredTextFile(
+      join(root, "queue-blocker.txt"),
+      "block\n",
+      { kind: "agent", agentId: "plugin:test", onBehalfOf: "local", agentRunId: "spawn" },
+    );
     await entered.promise;
 
     const registry = createPluginPanelSdkAuthorityRegistry();
@@ -2084,6 +2091,7 @@ describe("PluginHost", () => {
     expect(stopOutcome).toMatchObject({ kind: "stopped" });
     expect(steps).toEqual(["revoke", "host-stop"]);
     await expect(pending).rejects.toThrow("Plugin panel is no longer active.");
+    await blocker;
     expect(grant.signal.aborted).toBe(true);
     expect(existsSync(join(root, "disabled.txt"))).toBe(false);
     await engine.stop();
