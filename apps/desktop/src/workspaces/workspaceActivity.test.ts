@@ -26,7 +26,7 @@ const engineUnreachableSessions = new Proxy({} as EngineWorkspaceSessions, {
 // The legacy change-set read surface
 // (listChangeSets/readChangeSet) is gone from this layer — engine moments
 // are the only history. These tests cover what remains: the capture hooks
-// and the honest no-recorder status for opted-out workspaces.
+// and the honest no-recorder status for a workspace without a capture.
 
 let root: string;
 
@@ -176,13 +176,11 @@ describe("workspaceActivity capture hooks", () => {
 });
 
 describe("workspaceActivity history-off status", () => {
-  it("reports historyRecordingOff when captureFor yields no capture", async () => {
+  it("reports no cause when captureFor yields no capture and names none", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: () => ({ capture: null, shareView: false }),
     });
     const status = await activity.open(workspace());
-    expect(status.historyRecordingOff).toBe(true);
-    expect(activity.getStatus("activity-test").historyRecordingOff).toBe(true);
     expect(status.historyRecordingUnavailable).toBe(false);
     expect(status.historyShareView).toBe(false);
     // No capture also means no versions surface.
@@ -195,7 +193,7 @@ describe("workspaceActivity history-off status", () => {
   // status, the notice blames a Settings toggle nobody touched. Wired
   // through the real gate, so the share rule and the status thread are
   // pinned together: deleting either breaks this test.
-  it("separates a shared view's null capture from the engine opt-out", async () => {
+  it("separates a shared view's null capture from a failed build", async () => {
     const activity = createWorkspaceActivity(() => {}, {
       captureFor: (w, hooks) =>
         captureForWorkspace(
@@ -210,7 +208,6 @@ describe("workspaceActivity history-off status", () => {
         ),
     });
     const status = await activity.open(workspace());
-    expect(status.historyRecordingOff).toBe(true);
     expect(status.historyShareView).toBe(true);
     expect(activity.getStatus("activity-test").historyShareView).toBe(true);
     // A capability, not a failure.
@@ -228,7 +225,6 @@ describe("workspaceActivity history-off status", () => {
       },
     });
     const status = await activity.open(workspace());
-    expect(status.historyRecordingOff).toBe(true);
     expect(status.historyRecordingUnavailable).toBe(true);
     expect(
       activity.getStatus("activity-test").historyRecordingUnavailable,
@@ -244,10 +240,9 @@ describe("workspaceActivity history-off status", () => {
     const activity = createWorkspaceActivity(() => {});
     // Unknown/unopened workspace: status is derivable but never claims
     // history is off (nothing is known yet).
-    expect(activity.getStatus("activity-test").historyRecordingOff).toBe(false);
+    expect(activity.getStatus("activity-test").historyRecordingUnavailable).toBe(false);
     const status = await activity.open(workspace());
     // No captureFor option at all (test/legacy wiring): stays false.
-    expect(status.historyRecordingOff).toBe(false);
     expect(status.historyRecordingUnavailable).toBe(false);
     await activity.stopAll();
   });

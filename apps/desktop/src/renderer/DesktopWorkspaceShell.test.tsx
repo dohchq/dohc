@@ -1017,7 +1017,6 @@ describe("direct message workspace picker", () => {
 // the workspace identity that rides the capture decision.
 const SHARE_STATUS = {
   ...SYNC_STATUS,
-  historyRecordingOff: true,
   historyShareView: true,
 };
 const SHARE_VIEW: Workspace = {
@@ -10658,7 +10657,6 @@ describe("history page", () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     bridge.openWorkspace = vi.fn(async () => failedStatus);
@@ -10722,7 +10720,6 @@ describe("history page", () => {
   it("asks for no history before main's capture decision lands", async () => {
     const FAILED_HISTORY_STATUS = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     const decision = deferred<typeof FAILED_HISTORY_STATUS>();
@@ -10782,13 +10779,12 @@ describe("history page", () => {
     expect(screen.queryByTestId("history-off-placeholder")).toBeNull();
   });
 
-  // #505 on this surface: the recorder failed to build. Nothing records, but
-  // the cause is a failure — the opt-out's Settings copy would be false.
+  // The recorder failed to build. Nothing records, and the cause is a
+  // failure.
   it("names the failure, not Settings, when main says the recorder could not be built", async () => {
     const bridge = makeBridge(Promise.resolve(null));
     const failedStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     };
     bridge.openWorkspace = vi.fn(async () => failedStatus);
@@ -10806,9 +10802,9 @@ describe("history page", () => {
   });
 
   // the class on this surface: a shared view records no history BY
-  // DESIGN — a capability, not an opt-out, so no Settings blame. The status
-  // is the one main really produces for a shared view (capture === null sets
-  // historyRecordingOff, and the decision carries historyShareView): with a
+  // DESIGN — a capability, not a failure, so no Settings blame. The status
+  // is the one main really produces for a shared view (the decision carries
+  // historyShareView): with a
   // causeless fixture the share branch would be reached through a status no
   // real share view has, and demoting it below the status checks — the #540
   // bug reborn as Settings copy — would survive this suite.
@@ -10816,7 +10812,6 @@ describe("history page", () => {
     const bridge = makeBridge(Promise.resolve(null));
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -10849,7 +10844,6 @@ describe("history page", () => {
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -10878,8 +10872,8 @@ describe("history page", () => {
     // The Next works on this surface: the share banner's Refresh control,
     // pinned to exist alongside the instruction that names it.
     expect(screen.getByTestId("shared-view-refresh")).toBeTruthy();
-    // The false cause this pins against: the opt-out's Settings copy, about
-    // a toggle nobody touched.
+    // The false cause this pins against: a Settings copy about a toggle
+    // nobody touched.
     expect(placeholder.textContent).not.toContain("Settings");
 
     // Activity pushes take the no-engine refresh path too — this is the pin
@@ -10899,7 +10893,6 @@ describe("history page", () => {
     // The status a real share view carries (capture === null, share cause).
     const shareStatus = {
       ...SYNC_STATUS,
-      historyRecordingOff: true,
       historyShareView: true,
     };
     bridge.openWorkspace = vi.fn(async () => shareStatus);
@@ -13837,14 +13830,14 @@ describe("history page", () => {
     expect(screen.getByTestId("agent-run-indicator")).toBeTruthy();
   });
 
-  // The opted-out refresh wrote both of its lanes with no request token
+  // The no-history refresh wrote both of its lanes with no request token
   // at all. Nothing else in the shell writes a lane untimed, so the rule read
   // as held everywhere — but these two lanes are shared, and an untimed write
   // is ranked by ARRIVAL. A refresh issued before the run started could land
   // after the refresh that saw it and turn the indicator back off, with
   // nothing to correct it: the write moved no watermark, so the lane still
   // believed nothing had answered.
-  it("keeps an older opted-out refresh from undoing a newer agent answer", async () => {
+  it("keeps an older no-history refresh from undoing a newer agent answer", async () => {
     const idle: AgentRunStatusResult = {
       mcpEnabled: false,
       activeRun: null,
@@ -13958,7 +13951,7 @@ describe("history page", () => {
     });
   });
 
-  it("does not report an older opted-out refresh after a newer one succeeds", async () => {
+  it("does not report an older no-history refresh after a newer one succeeds", async () => {
     let failOlderRead!: (error: Error) => void;
     let holdNextRead = false;
     const bridge = makeBridge(Promise.resolve(null));
@@ -13993,7 +13986,7 @@ describe("history page", () => {
     expect(screen.queryByTestId("workspace-shell-error")).toBeNull();
   });
 
-  it("commits an older opted-out refresh when the newer one fails", async () => {
+  it("commits an older no-history refresh when the newer one fails", async () => {
     const syncingStatus = { ...SYNC_STATUS, state: "syncing" as const };
     const heldStatus = deferred<typeof SYNC_STATUS | typeof syncingStatus>();
     let holdNextRead = false;
@@ -14112,10 +14105,9 @@ describe("shared view versions surface", () => {
   // A shared view in the pre-status window. This test was written to isolate
   // the share clause, and it no longer can: once the versions gate required
   // an answered status, that clause stopped being the only thing that
-  // answers here, and main gives a shared view `capture: null` — hence
-  // `historyRecordingOff: true` — for the whole of its life
-  // (`workspaceActivity.ts`: `entry.historyRecordingOff = entry.capture ===
-  // null`). So `!isShareView` inside `versionsEnabled` is now redundant with
+  // answers here, and main gives a shared view `historyShareView: true` for
+  // the whole of its life. So `!isShareView` inside `versionsEnabled` is now
+  // redundant with
   // the status clause and survives deletion. It is kept, and declared
   // unpinned, because it is the SYNCHRONOUS registry fact the review
   // asked for: it does not depend on main's status shape staying this way.
@@ -14189,7 +14181,6 @@ describe("shared view versions surface", () => {
 describe("versions surface after a failed capture build", () => {
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
@@ -14279,7 +14270,7 @@ describe("versions surface after a failed capture build", () => {
   //
   // `workspaceActivity.open` registers that entry before the build — it must,
   // so a batch settling during the build finds a slot — and until the build
-  // answers it holds `historyRecordingOff: false` and
+  // answers it holds `historyRecordingUnavailable: false` and
   // `historyRecordingUnavailable: false`. Any workspace's activity event
   // makes this shell refresh, so the refresh is what used to read those
   // defaults and commit them as a status. Reading that as "there is a
@@ -14413,11 +14404,9 @@ describe("version-compare off copy", () => {
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
-    // the cause. `historyRecordingOff` rides with it, and reading that
-    // first would turn a startup failure into a claim about durable data.
+    // the cause.
     const copy = versionCompareOffCopy({
       ...base,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     });
     expect(copy).toBe(
@@ -14449,11 +14438,9 @@ describe("chats off copy", () => {
   };
 
   it("calls a failed capture build unavailable, never empty", () => {
-    // the cause. `historyRecordingOff` rides with it, and reading that
-    // first would turn a startup failure into a claim about durable data.
+    // the cause.
     const copy = chatsOffCopy({
       ...base,
-      historyRecordingOff: true,
       historyRecordingUnavailable: true,
     });
     expect(copy).toBe(
@@ -14770,7 +14757,6 @@ describe("shared view chats surface", () => {
 describe("chats surface after a failed capture build", () => {
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
@@ -14977,7 +14963,6 @@ describe("moment-diff tab after a failed capture build", () => {
   const MOMENT_TAB = momentDiffTabPath("m-1");
   const FAILED_STATUS = {
     ...SYNC_STATUS,
-    historyRecordingOff: true,
     historyRecordingUnavailable: true,
   };
 
@@ -16036,7 +16021,7 @@ describe("unavailable MCP launcher settings", () => {
 describe("runner note reaches the card through the shell's own wiring", () => {
   it("carries a recorder-less status into the restart note", async () => {
     const bridge = makeEngineBridge(Promise.resolve(null));
-    const offStatus = { ...SYNC_STATUS, historyRecordingOff: true };
+    const offStatus = { ...SYNC_STATUS, historyRecordingUnavailable: true };
     bridge.openWorkspace = vi.fn(async () => offStatus);
     bridge.getSyncStatus = vi.fn(async () => offStatus);
     const user = userEvent.setup();

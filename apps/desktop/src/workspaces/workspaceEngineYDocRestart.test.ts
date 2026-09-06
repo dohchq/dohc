@@ -3812,7 +3812,7 @@ it("a late-registering debt's cancellation trace names dohc's own removal, not a
   // observes it — the same sequence materialize() uses for a version
   // switch's own delete operation.
   capture.registerExpectedEngineEvents([
-    { path: "note.md", operation: "delete" },
+    { path: "note.md" },
   ]);
   capture.captureBatch([{ path: "note.md", operation: "delete" }]);
   await capture.flush();
@@ -3829,6 +3829,64 @@ it("a late-registering debt's cancellation trace names dohc's own removal, not a
     state.errorMessages.some((message) =>
       message.includes("dohc's own removal of note.md removed the path"),
     ),
+  ).toBe(true);
+  state.locked = false;
+  await capture.stop();
+}, 15_000);
+
+it("expires an expected removal and honors its cancellation", async () => {
+  // The delete-side registry outlives the JS capture path: the detached-debt
+  // cleanup reads it to tell dohc's own removal from an external delete. An
+  // expired or cancelled registration must read as external again, or a
+  // stale entry could mislabel a real external delete for good.
+  let nowMs = 1_000_000;
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-expected-expiry-",
+    { now: () => nowMs },
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+
+  capture.registerExpectedEngineEvents([{ path: "note.md" }]);
+  nowMs += EXPECTED_ENGINE_EVENT_EXPIRY_MS + 1;
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+    "keep an expired registration -> this cancellation names dohc's own removal for a delete dohc never made.",
+  ).toBe(true);
+  state.locked = false;
+  await capture.stop();
+}, 15_000);
+
+it("a cancelled expected removal reads as an external delete again", async () => {
+  const { capture, state } = await lockedRebindCapture(
+    "dohc-ydoc-expected-cancel-",
+  );
+  const { session } = await openWithOneEdit(capture, "would resurrect this");
+
+  const cancel = capture.registerExpectedEngineEvents([{ path: "note.md" }]);
+  cancel();
+  capture.captureBatch([{ path: "note.md", operation: "delete" }]);
+  await capture.flush();
+
+  state.locked = true;
+  state.replicated = true;
+  await expect(session.close()).rejects.toThrow(
+    /released, but its pre-close settle failed/,
+  );
+  expect(
+    state.errorMessages.some((message) =>
+      message.includes("an external delete of note.md removed the path"),
+    ),
+    "ignore the cancel -> this cancellation names dohc's own removal for a registration the caller withdrew.",
   ).toBe(true);
   state.locked = false;
   await capture.stop();
@@ -6123,7 +6181,7 @@ it("an engine-materialized delete of a stood-down path also cancels its debt", a
   // `materialize()` does for a delete operation during a version switch —
   // then the watcher observes the disk change that follows.
   capture.registerExpectedEngineEvents([
-    { path: "note.md", operation: "delete" },
+    { path: "note.md" },
   ]);
   await rm(join(rootPath, "note.md"));
   capture.captureBatch([{ path: "note.md", operation: "delete" }]);

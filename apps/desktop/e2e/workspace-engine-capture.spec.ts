@@ -6,7 +6,6 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -16,7 +15,6 @@ test("captures live edits and reconciles closed-period edits into the engine", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
 
     // Session 1: edit a file on disk while the app is running — the daemon
     // watcher must land the batch in the engine store.

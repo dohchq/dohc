@@ -122,11 +122,6 @@ export interface ChatDispatchServiceOptions {
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
-  // When it resolves false, a scan is a no-op: merely resolving the
-  // chat/dispatch stores opens the workspace in the engine daemon.
-  scanEligible?(
-    workspace: ChatDispatchWorkspace,
-  ): boolean | Promise<boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
   ): Promise<void | (() => Promise<void>)>;
@@ -1560,7 +1555,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         return;
       }
       scannedWorkspace = workspace;
-      if ((await options.scanEligible?.(workspace)) === false) return;
       await scanAndDrain(workspace);
     });
     void scan.catch(() => {

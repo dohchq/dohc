@@ -1128,13 +1128,9 @@ const SYNC_STATUS_BASE_FIELDS = {
   // one does. Fed from the sync-engine snapshot in workspaceActivity —
   // optional so older producers/fixtures keep parsing.
   conflictCount: z.number().int().nonnegative().optional(),
-  // True when this workspace records NO history at all: no capture was built
-  // at open. Optional so older producers/fixtures keep parsing.
-  historyRecordingOff: z.boolean().optional(),
-  // True when the recorder could not be built at workspace open.
-  // `historyRecordingOff` is true as well. Required: an omitted boolean
-  // reads as false, and a producer that cannot say which cause it means must
-  // not compile.
+  // True when the recorder could not be built at workspace open. Required:
+  // an omitted boolean reads as false, and a producer that cannot say which
+  // cause it means must not compile.
   historyRecordingUnavailable: z.boolean(),
   // True when this workspace is a shared view, fed by the share's pull
   // and never a recorder of its own. A capability, not a failure. Required
@@ -1231,10 +1227,8 @@ export const RebuildEngineStoreResult = z.object({
 });
 export type RebuildEngineStoreResult = z.infer<typeof RebuildEngineStoreResult>;
 
-// Engine history (PR 0M-5, workspace-engine alpha): flagged workspaces read
-// their timeline from ENGINE moments instead of legacy change sets. Every
-// handler is gated in main on the workspace's engine capture — unflagged
-// workspaces reject.
+// Engine history: the timeline reads engine moments. Every handler is gated
+// in main on the workspace's engine capture.
 const MOMENT_ID = z.string().min(1).max(200);
 
 const MOMENT_TEXT = engineStoredText("moment body");
@@ -1736,7 +1730,7 @@ export type ChatReactionRecord = z.infer<typeof ChatReactionRecord>;
 
 // Chats channels (PR 12/13, WS-E): workspace-wide Chats organized in
 // channels, plus per-thread monotonic read cursors. Same gate as the file
-// rail — every handler rejects for unflagged workspaces.
+// rail: every handler needs the workspace's engine capture.
 const CHAT_CHANNEL_ID = z.string().min(1).max(200);
 const CHAT_CHANNEL_NAME_MAX = 80;
 
@@ -2237,7 +2231,7 @@ export type PresenceResult = z.infer<typeof PresenceResult>;
 // Named versions (PR 0M-4, workspace-engine alpha). Product vocabulary only:
 // a Version is a live parallel line of work; Main is the default one. All of
 // these handlers are gated in main on the workspace's engine capture being
-// attached (flag on) — for unflagged workspaces they reject.
+// attached.
 const VERSION_ID = z.string().min(1).max(200);
 const WORKSPACE_VERSION_NAME_MAX = 80;
 // Conflict and compare sides are the same hydrated stored bodies the timeline
@@ -6120,8 +6114,7 @@ export interface DohcDesktopBridge {
   ): Promise<RefreshShareMountsResult>;
   unmountShare(payload: UnmountSharePayload): Promise<UnmountShareResult>;
   openWorkspace(payload: OpenWorkspacePayload): Promise<SyncStatusResult>;
-  // Named versions (PR 0M-4). Gated in main on the workspace-engine alpha
-  // flag: for unflagged workspaces every call rejects.
+  // Named versions. Gated in main on the workspace's engine capture.
   listWorkspaceVersions(
     payload: WorkspaceIdPayload,
   ): Promise<ListWorkspaceVersionsResult>;
@@ -6152,8 +6145,8 @@ export interface DohcDesktopBridge {
     payload: WorkspaceIdPayload,
   ): Promise<TryInVersionStateResult>;
   dismissTryInVersionReview(payload: WorkspaceIdPayload): Promise<void>;
-  // Engine history + linked Chats (PR 0M-5). Gated in main on the
-  // workspace-engine alpha flag: for unflagged workspaces every call rejects.
+  // Engine history + linked Chats. Gated in main on the workspace's engine
+  // capture.
   listEngineMoments(
     payload: ListEngineMomentsPayload,
   ): Promise<ListEngineMomentsResponse>;
@@ -6352,7 +6345,7 @@ export interface DohcDesktopBridge {
   // opens a live engine Y.Doc session for a supported live file; main constructs the
   // node-only session through the workspace's engine capture (reusing its
   // store). available:false => not engine-backed
-  // (unflagged workspace, secret path, missing file, or already live) — the
+  // (shared view, secret path, missing file, or already live) — the
   // caller falls back to the plain local autosave editor. On success
   // initialUpdate seeds the renderer's mirror doc.
   openEngineYDocSession(

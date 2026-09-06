@@ -167,7 +167,7 @@ describe("desktop workspace secret enrollment state", () => {
     await sessions.closeAll();
   });
 
-  it("does not open the daemon or create engine.db for an opted-out workspace", async () => {
+  it("does not open the daemon or create engine.db for a workspace with no secret state", async () => {
     const root = await createTestScratch("dohc-secret-enrollment-");
     const daemon = new SecretStateDaemon();
     const sessions = new EngineWorkspaceSessions({

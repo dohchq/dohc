@@ -201,10 +201,10 @@ describe("workspace settings file store", () => {
   });
 
   it("refuses to save over an unreadable file, and reset still replaces it", async () => {
-    // Over an unreadable file the caller's resolved settings carry the
-    // fail-closed opt-out, so saving any control would record a deliberate
-    // opt-out the user never chose and the warning would disappear with it.
-    // The file must survive the save byte for byte.
+    // Over an unreadable file the caller's resolved settings are the
+    // defaults, so saving any control would write them over the file and
+    // the warning would disappear with it. The file must survive the save
+    // byte for byte.
     const root = await createTestScratch("dohc-workspace-settings-");
     const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);
@@ -233,8 +233,7 @@ describe("workspace settings file store", () => {
   it("applies a save to the file as it is now, not to the caller's copy", async () => {
     // The recovery path the refusal prescribes: the user repairs the file
     // while the Settings dialog still holds the resolved copy from before the
-    // repair — a copy carrying the fail-closed opt-out. The next save must not
-    // write that copy back over the repair.
+    // repair. The next save must not write that copy back over the repair.
     const root = await createTestScratch("dohc-workspace-settings-");
     const path = join(root, ".dohc", WORKSPACE_SETTINGS_FILE);
     await writeWorkspaceSettingsFile(root, DEFAULT_WORKSPACE_SETTINGS);

@@ -7,7 +7,6 @@ import {
   openWorkspaceFromFirstRun,
   seedPluginSource,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 const pluginSource = fileURLToPath(new URL("../plugins/claude-code/", import.meta.url));
@@ -77,7 +76,6 @@ test("the Claude Code plugin serves its chat and answers a tool permission", asy
 
   try {
     await seedWorkspaceManifest(temp, "claude-code-chat-plugin-e2e");
-    await seedWorkspaceSettings(temp);
     await seedPluginSource(temp, { fixtureRoot: pluginSource, pluginId: "claude-code" });
 
     desktop = await launchDesktopApp({

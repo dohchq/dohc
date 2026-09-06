@@ -8,22 +8,18 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
-// PR 0M-5 history flip E2E: the flagged workspace's history timeline shows
-// ENGINE moments (real summaries), the diff page restores through the engine
-// with a forward moment and an undo, and unflagged workspaces keep the
-// legacy timeline byte-for-byte.
+// The history timeline shows engine moments (real summaries) and the diff
+// page restores through the engine with a forward moment and an undo.
 
 test("flagged workspace shows engine moments and restores a file end-to-end", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     const page = desktop.page;

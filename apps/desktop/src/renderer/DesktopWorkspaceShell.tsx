@@ -1536,7 +1536,7 @@ export function DesktopWorkspaceShell(props: {
   // whatever the renderer's own capability read said.
   const statusSaysNoRecorder = (status: SyncStatusResult | null) =>
     Boolean(
-      status?.historyRecordingOff ||
+      status?.historyShareView ||
         status?.historyRecordingUnavailable ||
         status?.engineStoreRefused,
     );
@@ -2797,21 +2797,12 @@ export function DesktopWorkspaceShell(props: {
   // that has not happened. A read for another workspace is discarded here
   // rather than retracted by an effect, so switching away and back cannot
   // leave the previous workspace's answer standing over a pending one.
-  const [engineRead, setEngineRead] = useState<{
-    workspaceId: string;
-    enabled: boolean;
-  } | null>(null);
-  const engineReadForWorkspace =
-    engineRead?.workspaceId === workspaceId ? engineRead : null;
-  const engineEnabled = engineReadForWorkspace?.enabled ?? false;
-  // A shared view has no engine history surface regardless of that read:
-  // it materializes no settings file, so the default flag reads ON —
-  // but the share's open deliberately installed no capture, and every
-  // engine-moments call could only error. Capability identity comes from
-  // main's registry summary. This gates the HISTORY surface and, below, the
-  // versions surface and CHATS, for the same reason and from
-  // the same fact.
+  // A shared view has no engine history surface: the share's open installs
+  // no capture, and every engine-moments call could only error. Capability
+  // identity comes from main's registry summary. This gates the history
+  // surface and, below, the versions surface and chats, from the same fact.
   const isShareView = Boolean(props.workspace.shareView);
+  const engineEnabled = !isShareView;
   // Collection folders: the engine's collections.list result,
   // cached as the set of folder paths so the Explorer can route a click on a
   // collection folder to its views. Latest-wins request watermark, same as
@@ -3215,8 +3206,7 @@ export function DesktopWorkspaceShell(props: {
       commit();
       return "ready" as const;
     }
-    // Opted-out workspace (retirement Phase C): no history source exists —
-    // only status and agent state refresh. They ride the same issue order as
+    // No history source exists: only status and agent state refresh. They ride the same issue order as
     // the engine branch's reads: this refresh answers the very lanes the
     // settings panel and a second refresh also write, and an untimed write
     // ranked by arrival undid both — a run the user had just started, and a
@@ -3347,10 +3337,8 @@ export function DesktopWorkspaceShell(props: {
     }
   }, [engineHistory, engineHistoryLoadingMore, reportShellError, workspaceId]);
 
-  // Whether this workspace has engine-backed surfaces AT ALL — history,
-  // versions and chats (PR 0M-4). Unflagged workspaces render none of them,
-  // and neither does a shared view: it materializes no
-  // settings file, so the read below returns the default ON while its open
+  // Whether this workspace has engine-backed surfaces at all: history,
+  // versions and chats. A shared view renders none of them: its open
   // deliberately installed no capture. Both halves are synchronous registry
   // facts, so this value never waits on anything.
   const engineSurfacesExist = engineEnabled && !isShareView;
@@ -3378,60 +3366,15 @@ export function DesktopWorkspaceShell(props: {
   // decided once. A surface that re-derives it drifts, which is exactly how
   // the compare tab kept mounting after #614 gated the selector.
   //
-  // Both reads, because a surface that states a capability must have both
-  // answers. Main's open resolves immediately for a workspace it already
-  // retains, so a healthy workspace re-entered mid-session reaches the
-  // decision while the settings read is still in flight — `engineEnabled`
-  // still holds its "no answer" false, and every branch below would state an
-  // unavailability that main never reported.
-  const captureDecided =
-    captureDecidedFor === workspaceId && engineReadForWorkspace !== null;
+  const captureDecided = captureDecidedFor === workspaceId;
   const captureAvailable =
     engineSurfacesExist && captureDecided && !statusSaysNoRecorder(syncStatus);
-  // This read only drives when the shell offers its engine surfaces
-  // (versions and chats); main's status says whether they can be served.
-  useAsyncResponseEffect(
-    async () => {
-      try {
-        return await bridge().getWorkspaceSettings({ workspaceId });
-      } catch (error) {
-        await workspaceAdmission.promise;
-        if (workspaceAdmission.superseded) throw error;
-        return bridge().getWorkspaceSettings({ workspaceId });
-      }
-    },
-    {
-      onSuccess: (result) => {
-        void result;
-        setEngineRead({ workspaceId, enabled: true });
-      },
-      onError: () => {
-        // Settings unavailable hides the engine surfaces, never a broken
-        // shell. Capability only, fail-closed: what the placeholder then
-        // says comes from main's status.
-        //
-        // It is still an ANSWER. Recording it is what releases the surfaces
-        // below from their load state; a failure held as "pending" would
-        // leave a persisted tab spinning for the rest of the session.
-        setEngineRead({ workspaceId, enabled: false });
-      },
-    },
-    [workspaceAdmission, workspaceId, workspaceSelectionGeneration],
-  );
-  // History needs both main's capture decision and the renderer's settings
-  // answer. This used to happen accidentally because the settings answer
-  // changed `refreshHistory` and re-ran the whole workspace-open effect.
   useEffect(() => {
-    if (!workspaceIsReady || engineReadForWorkspace === null) return;
+    if (!workspaceIsReady) return;
     void refreshHistory().catch((error) =>
       reportShellError("Could not refresh history.", error),
     );
-  }, [
-    engineReadForWorkspace,
-    refreshHistory,
-    reportShellError,
-    workspaceIsReady,
-  ]);
+  }, [refreshHistory, reportShellError, workspaceIsReady]);
   // Conflict review (0P-C): opened from the notice center's conflict notice.
   // Lists every open conflict — two machines editing apart, or a merge left
   // with "Finish later" — with the same side-by-side cards as the merge flow.
@@ -5881,8 +5824,8 @@ export function DesktopWorkspaceShell(props: {
   // Open-file refresh: history growth re-reads the active file. The floor
   // keeps the counter monotonic within the session even when the timeline is
   // dropped and re-fetched — a cache-buster that revisits a value can
-  // suppress a needed re-read. Opted-out workspaces have no history growth
-  // to react to. (Max-tracking a ref during render is idempotent, so a
+  // suppress a needed re-read. A shared view has no history growth to
+  // react to. (Max-tracking a ref during render is idempotent, so a
   // repeated render commits the same value.)
   const historyRefreshFloor = useRef(0);
   historyRefreshFloor.current = Math.max(

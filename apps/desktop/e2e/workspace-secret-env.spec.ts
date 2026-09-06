@@ -8,7 +8,6 @@ import {
   createTempWorkspace,
   openHistoryView,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -123,7 +122,6 @@ test("a .env is versioned protected: locked history, versions carry it, search f
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "ordinary findable prose\n" },
     ]);

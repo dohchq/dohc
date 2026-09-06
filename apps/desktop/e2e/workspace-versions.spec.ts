@@ -7,7 +7,6 @@ import {
   cleanupDesktopWorkspace,
   createTempWorkspace,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -146,7 +145,6 @@ test("the wedge: create a version, edit in it, switch, and merge back to Main", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [{ path: "plan.md", contents: "v1 text\n" }]);
 
     desktop = await launchDesktopApp({ workspace: temp });
@@ -223,7 +221,6 @@ test("conflicting edits surface a calm conflict panel and keep-this-side resolve
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "base line\n" },
     ]);
@@ -310,7 +307,6 @@ test("binary assets switch byte-exactly and binary conflicts resolve by side", a
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     const mainBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01]);
     const draftBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff, 0x02]);
     const mainConflictBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xaa]);

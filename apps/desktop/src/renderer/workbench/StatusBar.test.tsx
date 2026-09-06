@@ -407,7 +407,6 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
-        historyRecordingOff: true,
         historyRecordingUnavailable: true,
         historyShareView: false,
       },
@@ -421,15 +420,10 @@ describe("notice center", () => {
     // The Next: main builds the recorder once per app session, so a reopen
     // retries nothing.
     expect(notice.textContent).toContain("Restart dohc to try again.");
-    // Never the opt-out's cause, and never both notices at once.
-    expect(notice.textContent).not.toContain("turned off in Settings");
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
   });
 
-  // A shared view records no history BY DESIGN — a capability, not an
-  // opt-out and not a failure. Every history-off notice states a cause that
-  // is false for a shared view, so the share banner speaks and this surface
-  // stays quiet.
+  // A shared view records no history by design, a capability, not a
+  // failure. The share banner speaks and this surface stays quiet.
   it("raises no history-off notice for a shared view", async () => {
     renderBar({
       syncStatus: {
@@ -437,7 +431,6 @@ describe("notice center", () => {
         pendingChangeCount: 0,
         lastSyncedAtMs: null,
         liveSessionsGeneration: 0,
-        historyRecordingOff: true,
         historyRecordingUnavailable: false,
         historyShareView: true,
       },
@@ -446,10 +439,7 @@ describe("notice center", () => {
     // The panel opened, so a missing notice means no notice — not a missed
     // render.
     expect(screen.getByTestId("notice-center")).toBeTruthy();
-    // The opt-out's copy would blame a Settings toggle nobody touched.
-    expect(screen.queryByTestId("notice-history-recording-off")).toBeNull();
     expect(screen.queryByTestId("notice-history-recording-unavailable")).toBeNull();
-    expect(screen.queryByTestId("notice-workspace-settings-unreadable")).toBeNull();
   });
 
   it("shows all clear when there are no notices", async () => {

@@ -907,7 +907,7 @@ struct OpenWorkspace {
     handle_kind: WorkspaceHandleKind,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
-    /// loop), spawned only after the shadow binding succeeded. Shared so the
+    /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
@@ -2219,24 +2219,36 @@ impl EngineService {
             // store is fresh too: an existing engine.db under an unbound root
             // was copied or moved here, and adopting it would let one
             // database serve two roots.
+            //
+            // A fresh store whose binding cannot be read or written is
+            // deleted again before the refusal returns. Leaving it would
+            // make the next open find an existing engine.db under an unbound
+            // root and refuse it as a mismatch, for good.
             let opened = opened.and_then(|open| {
                 if !open.created_actor {
-                    return Ok((open, None));
+                    return Ok((open, Ok(())));
                 }
-                let bound = match root_binding::read_root_binding(&binding_root) {
-                    Ok(Some(token)) => {
-                        tokio::runtime::Handle::current().block_on(open.actor.bind_root(token))?
-                    }
+                let binding = match root_binding::read_root_binding(&binding_root) {
+                    Ok(Some(token)) => Ok(token),
                     Ok(None) if open.store_freshly_created => {
-                        match root_binding::write_new_root_binding(&binding_root) {
-                            Ok(token) => tokio::runtime::Handle::current()
-                                .block_on(open.actor.bind_root(token))?,
-                            Err(_) => false,
+                        root_binding::write_new_root_binding(&binding_root)
+                    }
+                    Ok(None) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                    Err(error) => Err(error),
+                };
+                let bound = match binding {
+                    Ok(token) => {
+                        let matched = tokio::runtime::Handle::current()
+                            .block_on(open.actor.bind_root(token))?;
+                        if matched {
+                            Ok(())
+                        } else {
+                            Err(root_binding::RootBindingError::DatabaseMismatch)
                         }
                     }
-                    Ok(None) | Err(_) => false,
+                    Err(error) => Err(error),
                 };
-                Ok((open, Some(bound)))
+                Ok((open, bound))
             });
             #[cfg(test)]
             if open_guard.db_path.is_some()
@@ -2275,10 +2287,23 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
-        if bound != Some(true) {
-            return Err(map_root_binding(
-                root_binding::RootBindingError::DatabaseMismatch,
-            ));
+        if let Err(error) = bound {
+            if actor_open.store_freshly_created {
+                // The guard's close finishes on a blocking task; the delete
+                // has to wait for it, or SQLite still holds the file.
+                drop(actor);
+                let removed = supervisor.begin_close(&db_path);
+                if let Ok(Some(closing)) = removed {
+                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
+                }
+                open_guard.disarm();
+                for suffix in ["", "-wal", "-shm"] {
+                    let mut path = db_path.clone().into_os_string();
+                    path.push(suffix);
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            return Err(map_root_binding(error));
         }
         let sequence = self
             .next_handle
@@ -2308,9 +2333,9 @@ impl EngineService {
                 .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
-            // The files layer spawns only here — after the shadow binding
-            // succeeded — so an unmarked or mismatched root can never grow a
-            // watcher or files actor (the shadow-scope dormancy invariant).
+            // The files layer spawns only here, after the root binding
+            // succeeded, so an unbound or mismatched root can never grow a
+            // watcher or files actor.
             let capture = capture_enabled.then(|| {
                 capture_driver::CaptureDriver::spawn(
                     root.clone(),
@@ -13521,15 +13546,7 @@ fn map_search_code(error: SearchError) -> ErrorCode {
 }
 
 fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
-    match error {
-        root_binding::RootBindingError::RootUnavailable => {
-            wire(ErrorCode::InvalidParams, "workspace root is unavailable")
-        }
-        _ => wire(
-            ErrorCode::InvalidParams,
-            "engine database is bound to another root",
-        ),
-    }
+    WireError::new(ErrorCode::InvalidParams, error.to_string())
 }
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
@@ -14607,7 +14624,7 @@ mod tests {
         assert!(
             store
                 .bind_root_token(BINDING_TOKEN)
-                .expect("bind shadow token")
+                .expect("bind root token")
         );
         drop(store);
 
@@ -14664,7 +14681,7 @@ mod tests {
         assert!(
             store
                 .bind_root_token(BINDING_TOKEN)
-                .expect("bind shadow token")
+                .expect("bind root token")
         );
         drop(store);
 
@@ -15628,7 +15645,7 @@ mod tests {
         assert!(
             store
                 .bind_root_token(BINDING_TOKEN)
-                .expect("bind shadow token")
+                .expect("bind root token")
         );
         drop(store);
         let supervisor: &'static WorkspaceSupervisor =

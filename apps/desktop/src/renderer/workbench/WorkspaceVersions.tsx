@@ -27,10 +27,9 @@ import {
 } from "./conflictPane";
 import { UnifiedDiffLines, buildUnifiedDiffLines, computeTextDiff } from "./unifiedDiff";
 
-// Named versions surface (PR 0M-4, workspace-engine alpha). Product
-// vocabulary only: Version, Main, compare, merge, keep — never git terms.
-// The whole surface is flag-gated by the shell (unflagged workspaces never
-// mount it), and every async response is gated by a liveness token before it
+// Named versions surface. Product vocabulary only: Version, Main, compare,
+// merge, keep — never git terms. The shell mounts it only for a workspace
+// with a capture, and every async response is gated by a liveness token before it
 // touches state (plan-level non-negotiable: a slow response for one
 // workspace must never repaint another).
 

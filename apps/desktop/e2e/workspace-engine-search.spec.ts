@@ -11,7 +11,6 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -21,7 +20,7 @@ import {
 // and returns FILES and CHAT MESSAGES in one result list; a chat hit renders
 // a distinguishable row and opens the Chats panel on its thread. The `.env`
 // family (including `.env.local`) is never findable and never present in the
-// raw FTS tables. Unflagged workspaces keep the streamed ripgrep path.
+// raw FTS tables.
 
 const SECRET_VALUE = "E2E_INDEX_SECRET_z9y8x7w6";
 
@@ -84,7 +83,6 @@ test("flagged: search finds file content and a chat message; .env.local content 
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp);
     // Disk state: one ordinary tracked file plus a `.env.local` (the family
     // member that originally fell through the secret classifier).
     await writeWorkspaceFiles(temp, [
@@ -171,7 +169,6 @@ test("flagged: a newly saved editor change is searchable before relaunch", async
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes/live.md", contents: "# Live search\n\nBefore the edit.\n" },
     ]);
@@ -218,13 +215,11 @@ test("flagged: a newly saved editor change is searchable before relaunch", async
   }
 });
 
-test("unflagged: search stays on the streamed ripgrep path and still excludes .env content", async () => {
+test("search excludes .env content from a workspace with no engine index yet", async () => {
   const temp = await createTempWorkspace();
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    // No engine flag: the workspace never attaches an engine capture, so the
-    // searchWorkspace handler takes the ripgrep branch unchanged.
     await writeWorkspaceFiles(temp, [
       { path: "docs/guide.md", contents: "plainly-findable-needle in prose\n" },
       { path: ".env", contents: `API_TOKEN=${SECRET_VALUE}\n` },

@@ -26,7 +26,6 @@ function scope(overrides: Partial<ExplorerMenuScope> = {}): ExplorerMenuScope {
     isMountPath: false,
     hasMountRecord: false,
     canShare: false,
-    engineEnabled: true,
     shareView: null,
     ...overrides,
   };
@@ -67,15 +66,6 @@ describe("an ordinary workspace", () => {
       "export-zip",
       "open-externally",
     ]);
-  });
-
-  it("offers no collection creation without the workspace engine", () => {
-    expect(commands({ kind: "root", engineEnabled: false })).not.toContain(
-      "new-collection",
-    );
-    expect(commands({ kind: "folder", engineEnabled: false })).not.toContain(
-      "new-collection",
-    );
   });
 
   it("offers Share… only where the workspace can grant one", () => {

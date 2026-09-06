@@ -7,7 +7,6 @@ import {
   explorerRow,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -16,8 +15,7 @@ import {
 // composer starts a chat with one Enter and no title prompt (untitled chats
 // display their first-message snippet), messages persist across relaunch,
 // agent messages create unread badges that mark-read clears, and engine
-// search (WS-D) finds channel messages. Unflagged workspaces have no Chats
-// entry and every channel handler rejects.
+// search finds channel messages.
 
 test("flagged: general channel, composer-first chats, relaunch persistence, unread, search", async () => {
   const temp = await createTempWorkspace();
@@ -26,7 +24,6 @@ test("flagged: general channel, composer-first chats, relaunch persistence, unre
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp);
     desktop = await launchDesktopApp({ workspace: temp });
     await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -178,7 +175,6 @@ test("flagged: the persistent chats navigator opens conversations in the editor"
 
   try {
     await seedWorkspaceManifest(temp, "chats-expand-e2e");
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "notes.md", contents: "# Notes\n" },
     ]);
@@ -257,7 +253,6 @@ test("performance: channel-list first paint and composer send latency", async ()
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp);
     // 50 channels x 10 threads = 500 threads (each with one message), seeded
     // through the engine daemon over RPC (post-cutover the retired TS
     // in-process store cannot create a daemon-acceptable store).

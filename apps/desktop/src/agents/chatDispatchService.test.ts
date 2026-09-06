@@ -131,9 +131,6 @@ interface FixtureOptions {
   ambiguousClaimOnce?: boolean;
   deferClaim?: boolean;
   hasPendingRunMessageLink?: (workspaceId: string, runId: string) => boolean;
-  scanEligible?: (
-    workspace: ChatDispatchWorkspace,
-  ) => boolean | Promise<boolean>;
 }
 
 interface Fixture {
@@ -164,8 +161,7 @@ interface Fixture {
     runId: string;
   }>;
   runActivity: { acquires: number; releases: number };
-  // How often a scan resolved the stores — for an opted-out workspace even
-  // one resolution would open the daemon workspace and create engine.db.
+  // How often a scan resolved the stores.
   storeResolves: { chat: number; dispatch: number };
   now: { value: number };
   readDispatch(triggerMessageId: string, threadId: string): ChatDispatch;
@@ -484,7 +480,6 @@ async function createFixture(options: FixtureOptions = {}): Promise<Fixture> {
       syncRequests.push(dispatchWorkspace.workspaceId);
       return options.onQueueSync?.(dispatchWorkspace.workspaceId, chat);
     },
-    ...(options.scanEligible ? { scanEligible: options.scanEligible } : {}),
     ...(options.temporaryRunActivity || options.prepareRunWorkspaceFailures
       ? {
           prepareRunWorkspace: async () => {
@@ -683,47 +678,6 @@ describe("chatDispatchService", () => {
         (channel) => channel.kind === "agent",
       ),
     ).toHaveLength(1);
-  });
-
-  it("never resolves a store when the workspace is scan-ineligible", async () => {
-    // Resolving the chat/dispatch stores opens the workspace in the engine
-    // daemon, so an ineligible scan must be a no-op.
-    vi.useFakeTimers();
-    const gated: string[] = [];
-    const fixture = await createFixture({
-      pumpWorkspace: true,
-      scanEligible: async (workspace) => {
-        gated.push(workspace.workspaceId);
-        return false;
-      },
-    });
-    await createAgentThread(fixture, {
-      body: "Please review the launch.",
-      authorUserId: "user_local",
-    });
-
-    fixture.service.start();
-    await fixture.service.scanWorkspace(WORKSPACE_ID);
-    await vi.advanceTimersByTimeAsync(CHAT_DISPATCH_PUMP_MS);
-    await flushMicrotasks(50);
-
-    expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
-    expect(gated).toEqual([WORKSPACE_ID, WORKSPACE_ID]);
-    expect(fixture.spawnCalls).toHaveLength(0);
-    expect(fixture.errors).toEqual([]);
-  });
-
-  it("scans normally when the workspace is scan-eligible", async () => {
-    const fixture = await createFixture({
-      runner: { enabled: false },
-      scanEligible: async () => true,
-    });
-
-    fixture.service.setPaused(true);
-    await activate(fixture);
-
-    expect(fixture.storeResolves.chat).toBeGreaterThan(0);
-    expect(fixture.storeResolves.dispatch).toBeGreaterThan(0);
   });
 
   it("records only owner human UI triggers and deduplicates repeated scans", async () => {
@@ -1339,7 +1293,6 @@ describe("chatDispatchService", () => {
     const replacementAttachmentId = Symbol("replacement attachment");
     const syncStarted = Promise.withResolvers<void>();
     const allowSync = Promise.withResolvers<void>();
-    const scannedAttachments: Array<symbol | undefined> = [];
     const fixture = await createFixture({
       workspaceAttachmentId: replacementAttachmentId,
       pumpWorkspaces: [
@@ -1353,10 +1306,6 @@ describe("chatDispatchService", () => {
         syncStarted.resolve();
         await allowSync.promise;
       },
-      scanEligible: (workspace) => {
-        scannedAttachments.push(workspace.attachmentId);
-        return false;
-      },
     });
 
     fixture.service.start();
@@ -1366,7 +1315,7 @@ describe("chatDispatchService", () => {
     await flushMicrotasks();
 
     expect(fixture.syncWorkspaces[0]?.attachmentId).toBe(originalAttachmentId);
-    expect(scannedAttachments).toEqual([]);
+    expect(fixture.storeResolves).toEqual({ chat: 0, dispatch: 0 });
   });
 
   it("starts workspace pump syncs concurrently", async () => {

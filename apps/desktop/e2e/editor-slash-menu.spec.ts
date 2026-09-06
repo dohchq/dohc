@@ -5,7 +5,6 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -40,7 +39,6 @@ test("@slash-menu slash menu neither remounts nor detaches while filtering", asy
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     const longBody = Array.from(
       { length: 60 },
       (_, i) => `Paragraph ${i + 1} with a fair amount of running text in it.`,

@@ -3379,7 +3379,7 @@ const agentIntegration = createAgentIntegration({
 // — fork-and-switch on the engine capture chain, then a dohc-tracked run —
 // and a review state when the run ends. Resolution of the capture mirrors
 // requireEngineCapture (workspace identity from the registry, engine flag
-// gate); unflagged workspaces reject with the same product message.
+// gate); a workspace without a capture rejects with the same product message.
 function createTryInVersionSessionsFor(
   binding: WorkspaceAuthorityBinding<RegistryEntry>,
 ) {
@@ -6761,8 +6761,8 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.deleteWorkspacePath, workspaceFileMutations.deletePath);
 
   // Collections: read-only engine index queries. list answers
-  // "no collections" when the daemon has no sessions, so unflagged workspaces
-  // stay quiet; get/query name the missing capability instead, because their
+  // "no collections" when the daemon has no sessions, so a shared view stays
+  // quiet; get/query name the missing capability instead, because their
   // caller is an open collection tab that must show a cause.
   ipcMain.handle(CHANNELS.listCollections, async (event, payload) => {
     assertTrustedSender(event);
@@ -6969,7 +6969,6 @@ function registerIpcHandlers(
         const registryEntry = operation.workspace;
         const shareView = sharedViewOf(registryEntry.workspaceId);
         const isSharedView = shareView !== null;
-        const engineEnabled = !isSharedView;
         const isMountPath =
           !isSharedView && !!input.path && isSharedWithMePath(input.path);
         const mountForPath = isMountPath
@@ -6986,7 +6985,6 @@ function registerIpcHandlers(
           shareView,
           isMountPath,
           hasMountRecord: mountForPath !== undefined,
-          engineEnabled,
           canShare:
             !isSharedView &&
             !isMountPath &&
@@ -7034,7 +7032,6 @@ function registerIpcHandlers(
         // someone else's files are not this account's to grant, and a share
         // needs a relay-side workspace to grant from.
         canShare: menuContext.canShare,
-        engineEnabled: menuContext.engineEnabled,
         shareView: menuContext.shareView,
       }).map((entry) =>
         entry.kind === "separator" ? { type: "separator" as const } : item(entry.label, entry.id),
@@ -10793,9 +10790,9 @@ function registerIpcHandlers(
     },
   );
 
-  // "Try it in a version" (PR 0N-2). The gesture handler double-gates on the
-  // engine flag (requireVersionOperations here, and the manager's own
-  // operationsFor) so an unflagged workspace rejects before anything runs.
+  // "Try it in a version". The gesture handler double-gates on the engine
+  // capture (requireVersionOperations here, and the manager's own
+  // operationsFor) so a workspace without one rejects before anything runs.
   ipcMain.handle(CHANNELS.tryInWorkspaceVersion, async (event, payload) => {
     assertTrustedSender(event);
     const input = TryInWorkspaceVersionPayload.parse(payload);

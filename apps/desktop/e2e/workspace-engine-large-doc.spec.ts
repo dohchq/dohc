@@ -8,7 +8,6 @@ import {
   createTempWorkspace,
   explorerRow,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -63,7 +62,6 @@ test("a document past the in-band cap reaches disk, and the editor never claims 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: "load/big.md", contents: "# Load\n\nStart small.\n" },
     ]);

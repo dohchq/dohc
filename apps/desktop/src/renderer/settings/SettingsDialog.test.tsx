@@ -1305,10 +1305,10 @@ describe("SettingsDialog", () => {
     });
   });
 
-  // Over a settings file dohc cannot read, the dialog's resolved copy
-  // carries the fail-closed opt-out, so saving one unrelated control would
-  // land that opt-out on disk and the workspace would look opted out forever.
-  // main refuses; the dialog must say so and must not claim a save happened.
+  // Over a settings file dohc cannot read, the dialog's resolved copy is the
+  // defaults, so saving one unrelated control would write them over the
+  // file. main refuses; the dialog must say so and must not claim a save
+  // happened.
   it("shows the refusal when the settings file cannot be read, and never says Saved", async () => {
     const warning =
       "Workspace settings could not be read. dohc records no history for this workspace. Fix /x/.dohc/settings.local.json. Then restart dohc.";

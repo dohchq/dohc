@@ -93,7 +93,6 @@ interface CaptureOptions {
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   onCaptureOutcome?: (failure: WorkspaceEngineCaptureFailure) => void;
-  activeAgentRun?: () => { agentId: string; onBehalfOf: string; agentRunId: string } | null;
   rustEngineSessions?: EngineWorkspaceSessions;
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -2048,7 +2047,7 @@ describe("workspaceEngineCapture recorder", () => {
   it("records nothing without an engine capture", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const workspace: CreatedWorkspace = {
-      workspaceId: "opted-out-no-recorder",
+      workspaceId: "no-recorder",
       rootPath: root,
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
@@ -2110,7 +2109,7 @@ describe("workspaceEngineCapture capture-failure notice", () => {
   it("keeps a workspace without a capture unaffected", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const workspace: CreatedWorkspace = {
-      workspaceId: "engine-capture-unflagged-notice",
+      workspaceId: "engine-capture-no-capture-notice",
       rootPath: root,
       kind: "personal",
       mode: defaultWorkspaceMode("personal"),
@@ -2149,7 +2148,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
     });
     await activity.open(workspace);
     const cancel = activity.registerExpectedEngineEvents(workspace.workspaceId, [
-      { path: "a.md", operation: "delete" },
+      { path: "a.md" },
     ]);
     expect(typeof cancel).toBe("function");
     cancel?.();
@@ -2157,7 +2156,7 @@ describe("workspaceEngineCapture lifecycle via workspaceActivity", () => {
 
     expect(() =>
       activity.registerExpectedEngineEvents("not-open", [
-        { path: "a.md", operation: "delete" },
+        { path: "a.md" },
       ]),
     ).toThrow(/not open/i);
   }, 15_000);
@@ -2222,17 +2221,17 @@ describe("createDefaultDiskWriter symlink containment", () => {
   });
 });
 
-// PR 0N-1 agent-attributed capture: a batch settled while a dohc-tracked
-// agent run is active carries agent authorship into its engine moments;
-// everything else stays actor-neutral (the raw external-CLI principle is
-// unchanged — an absent run means an absent author).
+// Agent-attributed capture: while a dohc-tracked agent run is active the
+// daemon stamps its captures with that author; a plugin write carries its
+// own author instead.
 describe("workspaceEngineCapture agent attribution", () => {
   const run = { agentId: "dohc-mcp", onBehalfOf: "local", agentRunId: "run-1" };
 
   it("routes plugin files.write with an explicit plugin author, not the ambient run", async () => {
     const root = await createTestScratch("dohc-engine-capture-");
     const loopback = new VersionedLoopbackEngine();
-    const engine = liveCapture(root, loopback, { activeAgentRun: () => run });
+    const engine = liveCapture(root, loopback);
+    await engine.setActiveAgentRun(run);
     const spawnId = "plugin-spawn-123";
 
     await invokePluginSdkHost(

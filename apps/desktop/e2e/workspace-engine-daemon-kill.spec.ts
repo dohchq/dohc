@@ -13,7 +13,6 @@ import {
   explorerRow,
   openWorkspaceFromFirstRun,
   revealExplorerPath,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -155,7 +154,6 @@ test("a hard daemon kill keeps the outage text when the user never types again",
   const docPath = "abuse/kill.md";
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);
@@ -200,7 +198,6 @@ test("a hard daemon kill leaves the editor writable and lands the outage text", 
   const docPath = "abuse/kill.md";
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);
@@ -250,7 +247,6 @@ test("an outage longer than the retry window still persists the text at quit", a
   const restartBackoffMs = 4_000;
 
   try {
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [
       { path: docPath, contents: "# Kill\n\nAnchor paragraph.\n" },
     ]);

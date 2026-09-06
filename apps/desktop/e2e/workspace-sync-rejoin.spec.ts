@@ -30,7 +30,6 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   waitForWorkspaceReady,
   activeWorkspace,
@@ -693,7 +692,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp);
     await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "local draft\n" }]);
 
     // A real relay is the only cloud service. The workspace is not pre-claimed:

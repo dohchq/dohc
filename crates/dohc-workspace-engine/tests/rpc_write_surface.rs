@@ -5211,9 +5211,8 @@ fn seed_versions(root: &Path, workspace_id: &str) {
 
     std::fs::create_dir_all(root.join(".dohc/engine")).expect("engine dir");
     let mut store = EngineStore::open(&root.join(".dohc/engine/engine.db"), 1).expect("store");
-    // The seed creates the engine db, so the shadow token must bind here —
-    // a pre-existing unbound db is exactly what the fence refuses at
-    // workspace.open.
+    // The seed creates the engine db, so the binding token must bind here:
+    // a pre-existing unbound db is exactly what workspace.open refuses.
     store.bind_root_token(TOKEN).expect("bind token");
     let faults = NoFaults;
     let mut versioned = VersionedTextStore::new(&mut store);

@@ -138,10 +138,12 @@ export async function probeEngineStoreRefusal(
 //   - `.dohc/files.toml` and `.dohc/visibility.toml` are re-read at the top
 //     of every serialized task.
 //
-// Engine-originated disk writes (restore flows, merge and relay
-// materialization, coordinated renames) register expected events via
-// registerExpectedEngineEvents and the matching watcher observation skips
-// re-capture (consume-once with expiry).
+// The daemon owns capture: it watches the folder, ingests it, and recognizes
+// its own writes. The chain still writes the folder for restore, merge and
+// relay materialization, and coordinated renames. A removal it makes is
+// registered as an expected engine event, with expiry, so the detached-debt
+// cleanup and a failing-close session can tell dohc's own removal from an
+// external delete.
 //
 // All engine work runs on one internal promise chain in the main process,
 // off the IPC hot path. A failed background task logs through onError and
@@ -168,12 +170,11 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
+// An engine-originated removal the chain is about to make on disk. The
+// detached-debt cleanup reads it to tell dohc's own removal from an external
+// delete; a failing-close session reads it to arm its removal suppression.
 export interface ExpectedEngineEvent {
   path: string;
-  operation: "write" | "delete";
-  // sha256 of the written UTF-8 text or raw binary bytes; required for writes so a later user
-  // edit to the same path can never be swallowed by a stale registration.
-  sha256?: string;
 }
 
 export interface WorkspaceVersionsSnapshot {
@@ -2513,42 +2514,11 @@ export function createWorkspaceEngineCapture(
     return await engine.listTextFileMetadata({ workspaceId, versionId });
   }
 
-  function consumeExpectedEvent(
-    operation: "write" | "delete",
-    path: string,
-    sha256?: string,
-  ): boolean {
+  // Whether an engine-originated removal of `path` is registered and unexpired.
+  function peekExpectedEvent(path: string): boolean {
     const nowMs = now();
     expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
-    const index = expectedEvents.findIndex(
-      (event) =>
-        event.path === path &&
-        event.operation === operation &&
-        (operation === "delete" || event.sha256 === sha256),
-    );
-    if (index < 0) return false;
-    expectedEvents.splice(index, 1);
-    return true;
-  }
-
-  // Same verdict as `consumeExpectedEvent`, without spending the token: a
-  // caller that only needs to know whether an event is expected — not to be
-  // the one downstream gate that acts on it — must not steal the answer
-  // from whichever gate consumes it for real (#681 round 5, CodeRabbit
-  // Major). The single consumption stays at each branch's original site.
-  function peekExpectedEvent(
-    operation: "write" | "delete",
-    path: string,
-    sha256?: string,
-  ): boolean {
-    const nowMs = now();
-    return expectedEvents.some(
-      (event) =>
-        event.expiresAtMs > nowMs &&
-        event.path === path &&
-        event.operation === operation &&
-        (operation === "delete" || event.sha256 === sha256),
-    );
+    return expectedEvents.some((event) => event.path === path);
   }
 
   function registerExpectedEngineEvents(
@@ -2666,7 +2636,7 @@ export function createWorkspaceEngineCapture(
       return;
     }
     if (event.operation === "delete") {
-      const isExternalDelete = !peekExpectedEvent("delete", event.path);
+      const isExternalDelete = !peekExpectedEvent(event.path);
       cancelSuspendedDebts(
         suspendDetachedDebts((path) => path === event.path),
         isExternalDelete
@@ -2677,7 +2647,7 @@ export function createWorkspaceEngineCapture(
     }
     const peeked = await readDiskTextState(rootPath, event.path);
     if (peeked.kind !== "absent") return;
-    const isExternalAbsence = !peekExpectedEvent("delete", event.path);
+    const isExternalAbsence = !peekExpectedEvent(event.path);
     cancelSuspendedDebts(
       suspendDetachedDebts((path) => path === event.path),
       isExternalAbsence
@@ -2701,20 +2671,9 @@ export function createWorkspaceEngineCapture(
       });
       const absolute = join(rootPath, operation.path);
       const cancel =
-        operation.kind === "write" || operation.kind === "write-binary"
-          ? registerExpectedEngineEvents([
-              {
-                path: operation.path,
-                operation: "write",
-                sha256:
-                  operation.kind === "write"
-                    ? sha256Utf8(operation.text)
-                    : sha256Bytes(operation.bytes),
-              },
-            ])
-          : registerExpectedEngineEvents([
-              { path: operation.path, operation: "delete" },
-            ]);
+        operation.kind === "delete"
+          ? registerExpectedEngineEvents([{ path: operation.path }])
+          : () => undefined;
       try {
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
@@ -3004,7 +2963,7 @@ export function createWorkspaceEngineCapture(
       // nothing here can expire, because nothing here is a map entry.
       for (const event of batch) {
         if (event.operation !== "delete") continue;
-        const expected = peekExpectedEvent("delete", event.path);
+        const expected = peekExpectedEvent(event.path);
         if (!detachedLockedDebts.has(event.path)) {
           noteExternalDeleteWithNoDebt(event.path, expected);
         }
@@ -3385,15 +3344,6 @@ export function createWorkspaceEngineCapture(
             reportSaveState("changed-on-disk", token);
             return;
           }
-          // The file holds the settled bytes, so the ENGINE's write of them is
-          // ours: register it, and a watcher event that lands after the
-          // live-path guard lifts on close is recognized instead of re-journaled
-          // as an external edit. Registering on the drift path instead would arm
-          // a suppression for bytes nobody wrote, which could swallow a later
-          // genuine event carrying that same sha.
-          registerExpectedEngineEvents([
-            { path: input.path, operation: "write", sha256: result.sha256 },
-          ]);
           reportSaveState("saved", token);
         };
         // Claim exactly what this settle can carry. The daemon serves one
@@ -5771,10 +5721,7 @@ export function createWorkspaceEngineCapture(
           onError(`prepare rename of ${fromPath}`, error);
           return finishWithoutRollback;
         }
-        const cancel = registerExpectedEngineEvents([
-          { path: fromPath, operation: "delete" },
-          { path: toPath, operation: "write", sha256: disk.sha256 },
-        ]);
+        const cancel = registerExpectedEngineEvents([{ path: fromPath }]);
         return async (ok: boolean) => {
           // A move that landed has nothing to undo, so it ends exactly like
           // one the engine never recorded.

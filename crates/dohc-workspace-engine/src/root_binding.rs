@@ -15,13 +15,11 @@ const TOKEN_HEX_LEN: usize = 64;
 pub enum RootBindingError {
     #[error("workspace root is unavailable")]
     RootUnavailable,
-    #[error("workspace root has no engine binding")]
-    Unbound,
-    #[error("root binding is malformed")]
+    #[error("workspace root binding is unreadable")]
     Malformed,
-    #[error("root binding could not be read")]
+    #[error("workspace root binding is unreadable")]
     Unreadable,
-    #[error("root binding could not be written")]
+    #[error("workspace root binding could not be written")]
     Unwritable,
     #[error("engine database is bound to another root")]
     DatabaseMismatch,
@@ -48,7 +46,9 @@ pub fn read_root_binding(root: &Path) -> Result<Option<String>, RootBindingError
         .map_err(|_| RootBindingError::Malformed)
 }
 
-/// Mint and record a binding for a root that has none.
+/// Mint and record a binding for a root that has none. Two opens racing on
+/// one fresh root both reach here; `create_new` lets exactly one write, and
+/// the other binds to the token it finds.
 pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(|_| RootBindingError::Unwritable)?;
@@ -56,17 +56,38 @@ pub fn write_new_root_binding(root: &Path) -> Result<String, RootBindingError> {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    write_root_binding(root, &token)?;
+    let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
+    create_binding_dir(&marker)?;
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return read_root_binding(root)?.ok_or(RootBindingError::Unreadable);
+        }
+        Err(_) => return Err(RootBindingError::Unwritable),
+    };
+    use std::io::Write as _;
+    file.write_all(token.as_bytes())
+        .map_err(|_| RootBindingError::Unwritable)?;
     Ok(token)
 }
 
 /// Record `token` as the root's binding. A test that hand-builds a store
 /// before the first open uses this so the open finds a matching binding.
+#[cfg(any(test, feature = "harness"))]
 pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingError> {
     if !valid_token(token.as_bytes()) {
         return Err(RootBindingError::Malformed);
     }
     let marker = root.join(ROOT_BINDING_RELATIVE_PATH);
+    create_binding_dir(&marker)?;
+    std::fs::write(marker, token).map_err(|_| RootBindingError::Unwritable)
+}
+
+fn create_binding_dir(marker: &Path) -> Result<(), RootBindingError> {
     let parent = marker.parent().ok_or(RootBindingError::Unwritable)?;
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
@@ -77,8 +98,7 @@ pub fn write_root_binding(root: &Path, token: &str) -> Result<(), RootBindingErr
     }
     builder
         .create(parent)
-        .map_err(|_| RootBindingError::Unwritable)?;
-    std::fs::write(marker, token).map_err(|_| RootBindingError::Unwritable)
+        .map_err(|_| RootBindingError::Unwritable)
 }
 
 fn valid_token(token: &[u8]) -> bool {
@@ -115,5 +135,37 @@ mod tests {
             read_root_binding(scratch.path()),
             Err(RootBindingError::Malformed)
         ));
+    }
+
+    #[test]
+    fn a_second_mint_binds_to_the_token_already_on_disk() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let first = write_new_root_binding(scratch.path()).expect("first mint");
+        let second = write_new_root_binding(scratch.path()).expect("second mint");
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn each_variant_has_its_own_message() {
+        assert_eq!(
+            RootBindingError::RootUnavailable.to_string(),
+            "workspace root is unavailable"
+        );
+        assert_eq!(
+            RootBindingError::Malformed.to_string(),
+            "workspace root binding is unreadable"
+        );
+        assert_eq!(
+            RootBindingError::Unreadable.to_string(),
+            "workspace root binding is unreadable"
+        );
+        assert_eq!(
+            RootBindingError::Unwritable.to_string(),
+            "workspace root binding could not be written"
+        );
+        assert_eq!(
+            RootBindingError::DatabaseMismatch.to_string(),
+            "engine database is bound to another root"
+        );
     }
 }

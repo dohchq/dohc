@@ -113,7 +113,6 @@ const TRANSPORT_REBIND_INITIAL_BACKOFF_MS = 100;
 export const TRANSPORT_REBIND_MAX_BACKOFF_MS = 1_000;
 export const WORKSPACE_OPEN_DEADLINE_MS = 2_000;
 
-
 export class EngineWorkspaceRebindError extends Error {
   readonly workspaceId: string;
 

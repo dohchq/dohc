@@ -1428,8 +1428,8 @@ export async function workspaceStatus(ctx: ToolContext) {
 
 // --- dohc_list_changes / dohc_read_change ----------------------------------
 
-// The workspace engine is the sole recorder of history, but desktop main is
-// the sole owner of its database. These tools read moments through the CLI
+// The workspace engine records history, and desktop main is the sole owner
+// of its database. These tools read moments through the CLI
 // transport. The pre-flip legacy `.dohc/history` change-set relic was retired;
 // a moment carries path/operation/versionId (the legacy kind,
 // boundaryCrossings, and provenance fields no longer exist and are never

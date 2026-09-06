@@ -35,9 +35,6 @@ interface WatchedWorkspace {
   // after the watcher stops so the final settled batch is captured before
   // shutdown completes.
   capture: WorkspaceEngineCapture | null;
-  // True once captureFor resolved and produced NO capture: this workspace
-  // records no history at all (a shared view, or a failed capture build).
-  historyRecordingOff: boolean;
   // True when building the recorder threw: the cause is a failure,
   // not a capability, and the notice states which.
   historyRecordingUnavailable: boolean;
@@ -174,7 +171,6 @@ export function createWorkspaceActivity(
     const baseStatus = {
       ...status,
       conflictCount,
-      historyRecordingOff: w?.historyRecordingOff ?? false,
       historyRecordingUnavailable: w?.historyRecordingUnavailable ?? false,
       historyShareView: w?.historyShareView ?? false,
       sharingDeclined: snap?.sharingDeclined ?? [],
@@ -210,7 +206,6 @@ export function createWorkspaceActivity(
         handle: { stop: async () => {}, ready: Promise.resolve() },
         engine: null,
         capture: null,
-        historyRecordingOff: false,
         historyRecordingUnavailable: false,
         historyShareView: false,
         historyCaptureFailure: null,
@@ -254,8 +249,6 @@ export function createWorkspaceActivity(
           // the notice owes the user a state and a next step, not a stack.
           entry.historyRecordingUnavailable = true;
         }
-        // No capture means no recorder of any kind. Make that visible.
-        entry.historyRecordingOff = entry.capture === null;
       }
       // stopAll may have raced the capture build; do not start a watcher no
       // one will ever stop.
