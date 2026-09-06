@@ -887,12 +887,11 @@ fn validate_identifier(value: &str, reason: &'static str) -> Result<(), OwnerOut
 }
 
 fn validate_digest(value: &str) -> Result<(), OwnerOutboxError> {
-    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(OwnerOutboxError::InvalidInput(
-            "update digest must be lowercase hexadecimal SHA-256",
-        ));
-    }
-    if value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
         return Err(OwnerOutboxError::InvalidInput(
             "update digest must be lowercase hexadecimal SHA-256",
         ));

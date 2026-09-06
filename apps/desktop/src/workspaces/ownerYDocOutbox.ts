@@ -73,7 +73,7 @@ function assertLimits(limits: OwnerYDocOutboxLimits): void {
 }
 
 function envelopeFor(
-  pending: Awaited<ReturnType<OwnerYDocOutbox["readPending"]>>,
+  pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>,
   entry: OwnerYDocOutboxEntry,
 ): OwnerYDocDeliveryEnvelope {
   return {
@@ -112,17 +112,17 @@ export class OwnerYDocOutboxDrainer {
 
   async drainOnce(): Promise<OwnerYDocDrainResult> {
     if (this.disposed) return "retry";
-    let pending: Awaited<ReturnType<OwnerYDocOutbox["readPending"]>>;
+    let pending: Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>;
     try {
-      pending = await this.outbox.readPending(this.outboxId);
+      pending = await this.outbox.readHead(this.outboxId);
     } catch (error) {
       if (error instanceof OwnerYDocOutboxReadChangedError) return "retry";
       throw error;
     }
     if (this.disposed) return "retry";
     if (pending.state !== "active") return "frozen";
-    const entry = pending.entries[0];
-    if (entry === undefined) return "empty";
+    const entry = pending.entry;
+    if (entry === null) return "empty";
 
     const ageMs = Math.max(0, this.now() - entry.createdAtMs);
     if (

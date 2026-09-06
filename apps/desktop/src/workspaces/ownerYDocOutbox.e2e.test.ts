@@ -76,7 +76,7 @@ it.each([
     }
   };
   class TestOutbox extends OwnerYDocOutbox {
-    override async readPending(): Promise<Awaited<ReturnType<OwnerYDocOutbox["readPending"]>>> {
+    override async readHead(): Promise<Awaited<ReturnType<OwnerYDocOutbox["readHead"]>>> {
       await boundary("read");
       return {
         outboxId: "outbox-1",
@@ -88,8 +88,8 @@ it.each([
         baseUpdate: new Uint8Array([0, 0]), baseUpdateDigest: "a".repeat(64),
         state: "active", pendingBytes: 1, oldestEntryAtMs: 0,
         quarantineReason: null, observedBinding: null,
-        entries: [{ sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
-          update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 }],
+        entry: { sequence: 1, appendKey: "append-1", deliveryId: "delivery-1",
+          update: new Uint8Array([1]), updateDigest: "b".repeat(64), byteLength: 1, createdAtMs: 0 },
       };
     }
 
@@ -221,6 +221,36 @@ it.skipIf(engine.missing)("reads an owner queue larger than a daemon control fra
         const wireSizes = pageResponses.map((response) => Buffer.byteLength(JSON.stringify({ type: "response", ...response })));
         expect(Math.max(...wireSizes)).toBeLessThanOrEqual(8 * 1_048_576);
         expect(wireSizes.reduce((sum, length) => sum + length, 0)).toBeGreaterThan(8 * 1_048_576);
+
+        pageResponses.length = 0;
+        const delivered: number[] = [];
+        const drainer = new OwnerYDocOutboxDrainer(outbox, outboxId,
+          { maxPendingBytes: update.length * 8, maxPendingAgeMs: 86_400_000 }, {
+            async freshOwnerAuthority() {
+              return { kind: "authority", authority: { value: {}, hostEpoch: parseHostEpoch(1) } };
+            },
+            async deliver(_authority, envelope) {
+              delivered.push(envelope.sequence);
+              return { kind: "receipt", receipt: {
+                deliveryId: envelope.deliveryId, updateDigest: envelope.updateDigest,
+                journalCursor: envelope.sequence, acceptingHostEpoch: parseHostEpoch(1),
+              } };
+            },
+          });
+        try {
+          for (let index = 0; index < 7; index += 1) {
+            await expect(drainer.drainOnce()).resolves.toBe("acknowledged");
+          }
+          await expect(drainer.drainOnce()).resolves.toBe("empty");
+          expect(delivered).toEqual([1, 2, 3, 4, 5, 6, 7]);
+          const updateBytes = pageResponses.reduce((total, response) => {
+            const page = response.result as { part?: string; bytesBase64?: string } | undefined;
+            return total + (page?.part === "update" ? Buffer.from(page.bytesBase64!, "base64").length : 0);
+          }, 0);
+          expect(updateBytes).toBe(update.length * 7);
+        } finally {
+          drainer.dispose();
+        }
       } finally {
         outbox.dispose();
       }

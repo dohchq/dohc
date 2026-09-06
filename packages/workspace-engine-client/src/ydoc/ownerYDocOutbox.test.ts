@@ -232,7 +232,11 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
         return { id: request.id, result };
       },
     });
-    return { read: () => client.readPending("outbox-1"), requests };
+    return {
+      read: () => client.readPending("outbox-1"),
+      readHead: () => client.readHead("outbox-1"),
+      requests,
+    };
   }
 
   function read(result: ReturnType<typeof pendingResult>) {
@@ -293,6 +297,45 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     expect(run.requests).toHaveLength(last + 1);
   });
 
+  it("reads a complete delivery head without downloading the queued suffix", async () => {
+    const result = pendingResult();
+    result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });
+    result.pendingBytes = 6;
+    const responses = pages(result, 1);
+    const headPages = responses.findIndex((page) => page.part === "entryHeader" && page.sequence === 3);
+    const run = reader(responses);
+    const head = await run.readHead();
+    expect(head.baseUpdate).toEqual(new Uint8Array([0, 1]));
+    expect(head.entry).toMatchObject({ sequence: 1, update: new Uint8Array([2, 3, 4]) });
+    expect(head.pendingBytes).toBe(6);
+    expect(head).not.toHaveProperty("entries");
+    expect(run.requests).toHaveLength(headPages);
+  });
+
+  it.each(["changed", "corrupt", "truncated", "bad-suffix"] as const)(
+    "refuses a %s delivery head before exposing bytes",
+    async (damage) => {
+      const result = pendingResult();
+      result.entries.push({ ...result.entries[0]!, sequence: 3, deliveryId: "delivery-3", appendKey: "append-3" });
+      result.pendingBytes = 6;
+      const responses = pages(result, 1);
+      const lastHeadPage = responses.findIndex((page) => page.part === "entryHeader" && page.sequence === 3) - 1;
+      const page = responses[lastHeadPage]!;
+      if (damage === "corrupt") page.bytesBase64 = "BQ==";
+      if (damage === "truncated") responses[lastHeadPage - 1]!.nextCursor = null;
+      if (damage === "bad-suffix") page.nextCursor!.sequence = 1;
+      const run = reader(responses, damage === "changed" ? lastHeadPage : undefined);
+      await expect(run.readHead()).rejects.toThrow();
+      expect(run.requests.length).toBeLessThanOrEqual(lastHeadPage + 1);
+    },
+  );
+
+  it("requires exact accounting when the delivery head is the final entry", async () => {
+    const result = pendingResult();
+    result.pendingBytes += 1;
+    await expect(reader(pages(result)).readHead()).rejects.toThrow("snapshot is incomplete");
+  });
+
   it.each(["empty", "rewind", "offset", "snapshot", "digest", "truncated", "extra"] as const)(
     "refuses a %s page before returning a snapshot",
     async (damage) => {
@@ -306,6 +349,7 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
       if (damage === "truncated") page.nextCursor = null;
       if (damage === "extra") responses.at(-1)!.nextCursor = { snapshot: page.snapshot, part: "entryHeader", sequence: 2, offset: 0 };
       await expect(reader(responses).read()).rejects.toThrow();
+      await expect(reader(responses).readHead()).rejects.toThrow();
     },
   );
 
@@ -314,5 +358,6 @@ describe("OwnerYDocOutbox pending byte boundary", () => {
     const update = responses.find((page) => page.part === "update")!;
     update.bytesBase64 = "BQYH";
     await expect(reader(responses).read()).rejects.toThrow("digest does not match");
+    await expect(reader(responses).readHead()).rejects.toThrow("digest does not match");
   });
 });

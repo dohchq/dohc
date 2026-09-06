@@ -65,6 +65,10 @@ export interface OwnerYDocOutboxPending {
   readonly observedBinding: LiveObjectBinding | null;
 }
 
+export interface OwnerYDocOutboxHead extends Omit<OwnerYDocOutboxPending, "entries"> {
+  readonly entry: OwnerYDocOutboxEntry | null;
+}
+
 export class OwnerYDocOutboxReadChangedError extends Error {
   constructor() {
     super("Owner outbox changed during read. Retry from the beginning.");
@@ -236,6 +240,16 @@ export class OwnerYDocOutbox {
   }
 
   async readPending(outboxId: string): Promise<OwnerYDocOutboxPending> {
+    return this.readSnapshot(outboxId, false);
+  }
+
+  /** Reads the complete base and first pending update, with queue-wide admission metadata. */
+  async readHead(outboxId: string): Promise<OwnerYDocOutboxHead> {
+    const { entries, ...pending } = await this.readSnapshot(outboxId, true);
+    return { ...pending, entry: entries[0] ?? null };
+  }
+
+  private async readSnapshot(outboxId: string, headOnly: boolean): Promise<OwnerYDocOutboxPending> {
     this.assertLive();
     let next: ReadCursor | null | undefined;
     let snapshot: string | undefined;
@@ -308,7 +322,8 @@ export class OwnerYDocOutbox {
     const entries: OwnerYDocOutboxEntry[] = [];
     let lastSequence = 0;
     let remaining = pendingBytes;
-    for (let index = 0; index < count; index += 1) {
+    const readCount = headOnly ? Math.min(count, 1) : count;
+    for (let index = 0; index < readCount; index += 1) {
       // readPart updates the cursor after each awaited page, including when
       // the next entry skips an already acknowledged sequence.
       const cursor = next as ReadCursor | null | undefined;
@@ -333,7 +348,16 @@ export class OwnerYDocOutbox {
       remaining -= byteLength;
       lastSequence = sequence;
     }
-    if (remaining !== 0 || next !== null) throw new TypeError("Owner outbox snapshot is incomplete.");
+    if (readCount === count) {
+      if (remaining !== 0 || next !== null) throw new TypeError("Owner outbox snapshot is incomplete.");
+    } else {
+      const cursor = next as ReadCursor | null | undefined;
+      if (remaining < count - readCount || cursor == null || cursor.snapshot !== snapshot
+        || cursor.part !== "entryHeader" || cursor.offset !== 0
+        || cursor.sequence <= lastSequence || cursor.sequence >= nextSequence) {
+        throw new TypeError("Owner outbox suffix does not match its header.");
+      }
+    }
     const observed = raw.observedBinding;
     return {
       outboxId: stringField(raw, "outboxId"),
