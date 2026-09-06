@@ -1792,7 +1792,6 @@ export function RelayShareDialog(props: {
                 type="button"
                 data-testid="share-done"
                 onClick={closeDialog}
-
               >
                 Done
               </SecondaryButton>
