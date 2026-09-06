@@ -261,20 +261,59 @@ test("source fingerprints follow the host's environment key casing", () => {
       const mixed='Cargo_Profile_Dev_Opt_Level';
       delete process.env[upper]; delete process.env[mixed];
       process.env[mixed]='0';
-      const before=sourceFingerprint('desktop',root);
+      const before=sourceFingerprint('engine',root);
       process.env[mixed]='1';
-      const after=sourceFingerprint('desktop',root);
+      const after=sourceFingerprint('engine',root);
       if(process.platform==='win32') {
         assert.equal(process.env[upper],'1');
         assert.notEqual(before,after);
         delete process.env[mixed]; process.env[upper]='1';
-        assert.equal(sourceFingerprint('desktop',root),after);
+        assert.equal(sourceFingerprint('engine',root),after);
       } else {
         assert.equal(before,after);
         process.env[upper]='1';
-        assert.notEqual(sourceFingerprint('desktop',root),after);
+        assert.notEqual(sourceFingerprint('engine',root),after);
       }
     `, root], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const kind of ["engine", "desktop"]) test(`${kind} source identity scopes environment settings to its build`, () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-env-kind-"));
+  try {
+    execFileSync("git", ["init"], { cwd: root, stdio: "ignore" });
+    const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+      import assert from 'node:assert/strict';
+      import {sourceFingerprint} from ${JSON.stringify(new URL("./build.mjs", import.meta.url).href)};
+      const root=process.argv[1];
+      const kind=process.argv[2];
+      const settings={
+        engine:['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CARGO_BUILD_JOBS','CARGO_PROFILE_DEV_DEBUG',
+          'CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS','CARGO_INCREMENTAL','RUSTC_WRAPPER','RUSTDOCFLAGS',
+          'CC','CXX','AR','CFLAGS','CXXFLAGS'],
+        desktop:['VITE_FIXTURE','NODE_ENV'],
+      };
+      for(const [owner,names] of Object.entries(settings)) for(const name of names) {
+        delete process.env[name];
+        const absent=sourceFingerprint(kind,root);
+        process.env[name]='fixture-one';
+        const created=sourceFingerprint(kind,root);
+        assert.equal(created!==absent,kind===owner,name+' creation for '+kind);
+        process.env[name]='fixture-two';
+        const edited=sourceFingerprint(kind,root);
+        assert.equal(edited!==created,kind===owner,name+' edit for '+kind);
+        delete process.env[name];
+        assert.equal(sourceFingerprint(kind,root),absent,name+' removal for '+kind);
+        if(process.platform==='win32' && ['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS'].includes(name)) {
+          const mixed=name.toLowerCase();
+          process.env[mixed]='fixture-one';
+          assert.equal(sourceFingerprint(kind,root),created,mixed+' normalized casing');
+          delete process.env[mixed];
+        }
+      }
+    `, root, kind], { encoding: "utf8", timeout: 30_000 });
     assert.equal(result.error, undefined);
     assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(root, { recursive: true, force: true }); }
@@ -301,15 +340,15 @@ test("source identity changes for dirty, untracked, deleted, and ignored build c
     const configured = sourceFingerprint("desktop", root);
     writeFileSync(join(root, "apps/desktop/.env.local"), "VITE_FIXTURE=two");
     assert.notEqual(sourceFingerprint("desktop", root), configured);
-    const previousDebug = process.env.CARGO_PROFILE_DEV_DEBUG;
+    const previousDebug = process.env.VITE_FIXTURE_DEBUG;
     try {
-      process.env.CARGO_PROFILE_DEV_DEBUG = "0";
+      process.env.VITE_FIXTURE_DEBUG = "0";
       const withoutDebug = sourceFingerprint("desktop", root);
-      process.env.CARGO_PROFILE_DEV_DEBUG = "2";
+      process.env.VITE_FIXTURE_DEBUG = "2";
       assert.notEqual(sourceFingerprint("desktop", root), withoutDebug);
     } finally {
-      if (previousDebug === undefined) delete process.env.CARGO_PROFILE_DEV_DEBUG;
-      else process.env.CARGO_PROFILE_DEV_DEBUG = previousDebug;
+      if (previousDebug === undefined) delete process.env.VITE_FIXTURE_DEBUG;
+      else process.env.VITE_FIXTURE_DEBUG = previousDebug;
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

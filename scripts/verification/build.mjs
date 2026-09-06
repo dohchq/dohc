@@ -23,6 +23,10 @@ const inputPaths = {
   engine: ["crates", "fuzz", "fixtures", ".cargo", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "packages/ydoc-projection", "pnpm-lock.yaml", "scripts/verification", ".gitignore"],
   desktop: ["apps/desktop", "packages", "services", "scripts", "tools", "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml", "tsconfig.base.json", ".gitignore", ...configFiles.desktop],
 };
+const environmentInputs = {
+  engine: /^(CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$|ENCODED_RUSTFLAGS$)|RUST(?:FLAGS|UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$))/,
+  desktop: /^(VITE_|NODE_ENV$)/,
+};
 
 export function hashFile(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
@@ -54,15 +58,14 @@ export function sourceFingerprint(kind, root = repoRoot) {
   const paths = git(["ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ...inputPaths[kind]], root).split("\0").filter(Boolean);
   paths.push(...configFiles[kind]);
   const hash = createHash("sha256");
-  hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version,
-    rustflags: process.env.RUSTFLAGS ?? "", encodedRustflags: process.env.CARGO_ENCODED_RUSTFLAGS ?? "" }));
+  hash.update(JSON.stringify({ platform: process.platform, arch: process.arch, node: process.version }));
   const environmentKeys = new Set();
   const environment = Object.keys(process.env).sort().flatMap((name) => {
     const key = process.platform === "win32" ? name.toUpperCase() : name;
     if (environmentKeys.has(key)) return [];
     environmentKeys.add(key);
     return [[key, process.env[name]]];
-  }).filter(([key]) => /^(VITE_|CARGO_(BUILD_|PROFILE_|TARGET_|INCREMENTAL$)|RUST(?:UP_TOOLCHAIN|C|C_WRAPPER|C_WORKSPACE_WRAPPER|DOC|DOCFLAGS)$|(?:CC|CXX|AR|CFLAGS|CXXFLAGS)(?:_|$)|NODE_ENV$)/.test(key)).sort(([a], [b]) => a.localeCompare(b));
+  }).filter(([key]) => environmentInputs[kind].test(key)).sort(([a], [b]) => a.localeCompare(b));
   hash.update(JSON.stringify(environment));
   if (kind === "engine") {
     hash.update(execFileSync("rustc", ["-vV"], { cwd: root, env: { ...process.env, RUSTUP_AUTO_INSTALL: "0" } }));
