@@ -308,7 +308,7 @@ import {
   UpdateStateEvent,
   AcceptShareHandoffPayload,
   DismissShareHandoffPayload,
-  ShareHandoffStatus as ShareHandoffStatusContract,
+  ShareHandoffStatus,
 } from "./ipc/bridgeContract";
 import { CHANNELS } from "./ipc/channels";
 import { createSitesIpcHandlers } from "./ipc/sitesIpc";
@@ -817,10 +817,7 @@ import {
   receiveShareHandoffArguments,
   registerShareHandoffProtocol,
 } from "./shareHandoffIngress";
-import {
-  createShareHandoffRedemptionCoordinator,
-  type ShareHandoffStatus,
-} from "./shareHandoffRedemption";
+import { createShareHandoffRedemptionCoordinator } from "./shareHandoffRedemption";
 
 // A launcher that exited leaves main's stdout/stderr a pipe with no reader, and
 // a pipe write throws synchronously. Diagnostics must never be able to crash the
@@ -1832,7 +1829,7 @@ function clearCachedCredentials(): void {
 }
 
 function publishShareHandoffStatus(status: ShareHandoffStatus): void {
-  const publicStatus = ShareHandoffStatusContract.parse(status);
+  const publicStatus = ShareHandoffStatus.parse(status);
   if (!app.isReady()) return;
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(CHANNELS.shareHandoffStatus, publicStatus);
@@ -7588,7 +7585,7 @@ function registerIpcHandlers(
   ipcMain.handle(CHANNELS.getShareHandoffStatus, (event, ...args: unknown[]) => {
     assertTrustedSender(event);
     assertNoShareHandoffArguments(args);
-    return ShareHandoffStatusContract.parse(shareHandoffRedemption.status());
+    return ShareHandoffStatus.parse(shareHandoffRedemption.status());
   });
 
   ipcMain.handle(CHANNELS.acceptShareHandoff, (event, ...args: unknown[]) => {

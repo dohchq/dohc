@@ -76,17 +76,15 @@ import type {
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
+  EngineYDocSaveStateEvent,
+  MenuCommand,
+  SearchResultsEvent,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
-import type {
-  EngineYDocSaveStateEvent,
-  MenuCommandId,
-  SearchResultsEvent,
-} from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -346,7 +344,7 @@ function makeBaseBridge(
     (event: { workspaceId: string }) => void
   >();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
-  let menuCallback: ((command: MenuCommandId) => void) | null = null;
+  let menuCallback: ((command: MenuCommand) => void) | null = null;
   let pluginPanelOpenedCallback:
     | ((event: PluginPanelOpenedEvent) => void)
     | null = null;
@@ -621,7 +619,7 @@ function makeBaseBridge(
       },
     ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
+    onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
         menuCallback = null;
@@ -682,7 +680,7 @@ function makeBaseBridge(
     ),
     stopPluginWebApp: vi.fn(async () => undefined),
     onPluginWebAppFailed: vi.fn(() => () => undefined),
-    emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
+    emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {

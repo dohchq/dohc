@@ -69,7 +69,7 @@ import {
   shareSkipNoticeLines,
 } from "./shareSkipNotice";
 import { buildChatCollaboration } from "./collab/chatCollaboration";
-import type { SearchResultsEventEntry } from "../ipc/channels";
+import type { SearchResultsEventEntry } from "../ipc/bridgeContract";
 import {
   fileOpenStartMark,
   rendererMarks,

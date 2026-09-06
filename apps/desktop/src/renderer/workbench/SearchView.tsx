@@ -10,7 +10,7 @@ import {
   WholeWord,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import type { SearchResultsEventEntry } from "../../ipc/channels";
+import type { SearchResultsEventEntry } from "../../ipc/bridgeContract";
 import { rendererMarks } from "../../performance/rendererMarks";
 import { SectionLabel } from "../ui/controls";
 import {
