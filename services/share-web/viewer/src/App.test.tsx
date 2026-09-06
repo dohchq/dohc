@@ -3484,7 +3484,7 @@ describe("App", () => {
       if (path === "/api/view/current") return currentPage([file], 1, 0, commentMeta);
       if (path === "/api/view/log?since=1&limit=500") return logOpsPage([], 1);
       if (path === "/api/view/discussion" && init?.method === "POST") {
-        return jsonResponse({ ok: false, state: writeState }, 403);
+        return jsonResponse({ ok: false, state: writeState, activityRevision: 7 }, 403);
       }
       if (path === "/api/view/discussion?direction=newest-first") {
         return jsonResponse({

@@ -718,7 +718,7 @@ describe("CommentsPanel", () => {
               body: "Retry draft",
             },
           }
-        : { ok: false, state: outcome });
+        : { ok: false, state: outcome, activityRevision: 7 });
       if (outcome === "success") {
         await settle(() => container.textContent?.includes("Retry draft") === true);
         expect(container.textContent).not.toContain("The comment didn't post. Try again.");
@@ -923,7 +923,7 @@ describe("CommentsPanel", () => {
     ["paused", "The owner paused comments. You can still read everything."],
   ] as const)("learns %s only from POST and keeps the timeline", async (state, copy) => {
     vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
-      if (init?.method === "POST") return jsonResponse({ ok: false, state }, 403);
+      if (init?.method === "POST") return jsonResponse({ ok: false, state, activityRevision: 7 }, 403);
       const path = requestPath(input);
       if (path.includes("/activity?")) {
         if (path.includes("hold=0")) return availableActivityAt(7);
@@ -1106,12 +1106,12 @@ describe("CommentsPanel", () => {
   });
 
   it.each([
-    [403, "limit-reached"],
-    [413, "blocked"],
-    [413, "paused"],
+    [403, "limit-reached", { ok: false, state: "limit-reached" }],
+    [413, "blocked", { ok: false, state: "blocked", activityRevision: 7 }],
+    [413, "paused", { ok: false, state: "paused", activityRevision: 7 }],
   ] as const)(
     "keeps the %i and %s write-state cross-pair retryable",
-    async (status, state) => {
+    async (status, _state, refusal) => {
       let posts = 0;
       vi.stubGlobal("fetch", vi.fn<typeof fetch>(async (input, init) => {
         if (init?.method !== "POST") {
@@ -1123,7 +1123,7 @@ describe("CommentsPanel", () => {
           return discussionPage([NAMED_MESSAGE]);
         }
         posts += 1;
-        return jsonResponse({ ok: false, state }, status);
+        return jsonResponse(refusal, status);
       }));
 
       await render("comment");
@@ -2592,7 +2592,7 @@ describe("CommentsPanel", () => {
             ok: true,
             message: { ...LINK_MESSAGE, body: "Old committed body" },
           }
-        : { ok: false, state: outcome });
+        : { ok: false, state: outcome, activityRevision: 7 });
       await settle(() => oldSignal?.aborted === true);
       await act(async () => {
         await Promise.resolve();
