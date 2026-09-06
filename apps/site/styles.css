@@ -341,10 +341,6 @@ body {
 .hero-engine-view canvas:active { cursor: grabbing; }
 .hero-engine-view canvas:focus-visible { outline: 1px solid var(--muted); outline-offset: 3px; border-radius: 8px; }
 .engine-loaded .hero-engine-poster { visibility: hidden; }
-.engine-actions { display: flex; justify-content: center; gap: 20px; margin-top: 8px; }
-.engine-actions[hidden] { display: none; }
-.engine-actions button { border: 0; padding: 5px 0; background: transparent; color: var(--subtle); font: 400 11px/1.6 var(--font-mono); cursor: pointer; }
-.engine-actions button:hover { color: var(--ink); }
 @media (max-width: 780px) {
   .hero-with-engine { grid-template-columns: 1fr; text-align: center; gap: 28px; }
   .hero-with-engine h1 { margin-inline: auto; }

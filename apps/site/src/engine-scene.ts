@@ -107,31 +107,29 @@ export function mountEngine(host: HTMLElement) {
   renderer.shadowMap.autoUpdate = false;
   renderer.shadowMap.needsUpdate = true;
   const motion = matchMedia("(prefers-reduced-motion: reduce)");
-  let spinning = !motion.matches;
+  let hovered = host.matches(":hover");
+  let dragging = false;
   let visible = true;
   let frame = 0;
   let last = 0;
   let disposed = false;
-  const figure = host.closest(".hero-engine")!;
-  const actions = figure.querySelector<HTMLElement>(".engine-actions")!;
-  const play = figure.querySelector<HTMLButtonElement>("[data-engine-play]")!;
-  const reset = figure.querySelector<HTMLButtonElement>("[data-engine-reset]")!;
-  function syncButton() {
-    play.textContent = spinning ? "Pause rotation" : "Rotate model";
+  function syncRotation() {
+    controls.autoRotate = !motion.matches && !hovered && !dragging &&
+      !renderer.domElement.matches(":focus-visible");
+    requestDraw();
   }
   function draw(time: number) {
     frame = 0;
-    if (disposed) return;
+    if (disposed || !visible || document.hidden) return;
     const dt = Math.min((time - last) / 1000, 0.05);
     last = time;
-    controls.autoRotate = spinning;
     controls.update(dt);
     renderer.render(scene, camera);
-    if (spinning && visible && !document.hidden)
+    if (controls.autoRotate)
       frame = requestAnimationFrame(draw);
   }
   function requestDraw() {
-    if (!frame && !disposed) {
+    if (!frame && !disposed && visible && !document.hidden) {
       last = performance.now();
       frame = requestAnimationFrame(draw);
     }
@@ -178,46 +176,34 @@ export function mountEngine(host: HTMLElement) {
     },
     { signal },
   );
-  motion.addEventListener(
-    "change",
-    () => {
-      if (motion.matches) spinning = false;
-      syncButton();
-      requestDraw();
-    },
-    { signal },
-  );
+  motion.addEventListener("change", syncRotation, { signal });
+  renderer.domElement.addEventListener("pointerenter", (event) => {
+    if (event.pointerType === "touch") return;
+    hovered = true;
+    syncRotation();
+  }, { signal });
+  renderer.domElement.addEventListener("pointerleave", () => {
+    hovered = false;
+    syncRotation();
+  }, { signal });
+  renderer.domElement.addEventListener("focus", syncRotation, { signal });
+  renderer.domElement.addEventListener("blur", syncRotation, { signal });
   controls.addEventListener("start", () => {
-    spinning = false;
-    syncButton();
+    dragging = true;
+    syncRotation();
+  });
+  controls.addEventListener("end", () => {
+    dragging = false;
+    syncRotation();
   });
   controls.addEventListener("change", () => {
     if (!controls.autoRotate) requestDraw();
   });
-  play.addEventListener(
-    "click",
-    () => {
-      spinning = !spinning;
-      syncButton();
-      requestDraw();
-    },
-    { signal },
-  );
-  reset.addEventListener(
-    "click",
-    () => {
-      spinning = false;
-      syncButton();
-      camera.position.copy(center).addScaledVector(cameraDirection, 14);
-      fit();
-    },
-    { signal },
-  );
   renderer.domElement.tabIndex = 0;
   renderer.domElement.setAttribute("role", "img");
   renderer.domElement.setAttribute(
     "aria-label",
-    "DOHC inline-six engine model. Drag or use arrow keys to rotate.",
+    "DOHC inline-six engine model. Hover or focus to pause. Drag or use arrow keys to rotate.",
   );
   renderer.domElement.addEventListener(
     "keydown",
@@ -227,8 +213,6 @@ export function mountEngine(host: HTMLElement) {
       )
         return;
       event.preventDefault();
-      spinning = false;
-      syncButton();
       const spherical = new THREE.Spherical().setFromVector3(
         camera.position.clone().sub(center),
       );
@@ -255,8 +239,7 @@ export function mountEngine(host: HTMLElement) {
     },
     { once: true, signal },
   );
-  syncButton();
-  actions.hidden = false;
+  syncRotation();
   host.classList.add("engine-loaded");
   fit();
   function dispose() {
@@ -272,7 +255,6 @@ export function mountEngine(host: HTMLElement) {
     renderer.dispose();
     renderer.domElement.remove();
     host.classList.remove("engine-loaded");
-    actions.hidden = true;
   }
   if (import.meta.hot) import.meta.hot.dispose(dispose);
 }
