@@ -12,4 +12,3 @@ export function formatChatTime(createdAtMs: number): { label: string; iso: strin
     iso: createdAt.toISOString(),
   };
 }
-
