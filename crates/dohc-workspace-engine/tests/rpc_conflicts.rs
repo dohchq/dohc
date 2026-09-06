@@ -1,26 +1,18 @@
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     error::ErrorCode,
     limits::WireLimits,
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Envelope, Request, Response, WorkspaceHandle, encode_control},
+    wire::{Envelope, Response, WorkspaceHandle, encode_control},
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
 use std::sync::Arc;
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn fixture(
     name: &str,

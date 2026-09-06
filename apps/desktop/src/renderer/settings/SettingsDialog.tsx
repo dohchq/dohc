@@ -682,8 +682,8 @@ export function SettingsDialog(props: {
         return (
           <div data-testid="settings-section-workbench">
             <SettingRow
-              title="Site previews"
-              description="Choose the mode Sites tries first when a site has no preview mode of its own."
+              title="App previews"
+              description="Choose the mode Apps tries first when an app has no preview mode of its own."
               modified={isModified(
                 workspaceSettings.sites.defaultPreviewMode,
                 DEFAULT_WORKSPACE_SETTINGS.sites.defaultPreviewMode,
@@ -699,7 +699,7 @@ export function SettingsDialog(props: {
               testId="settings-row-site-preview-mode"
             >
               <select
-                aria-label="Default site preview mode"
+                aria-label="Default app preview mode"
                 data-testid="site-preview-mode-select"
                 value={workspaceSettings.sites.defaultPreviewMode}
                 onChange={(event) =>

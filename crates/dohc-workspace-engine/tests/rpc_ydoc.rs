@@ -1,7 +1,10 @@
 //! RPC-C acceptance: daemon-owned Y.Doc sessions over the in-process
 //! transport, with real domain writes, materialization, capture, and leases.
 
+mod common;
+
 use base64::Engine as _;
+use common::*;
 use dohc_engine_collab::{
     BaseRelayCoordinate, ClaimOutcome, ContentKind, DocKey, Regime, Ydoc, ensure_marker,
 };
@@ -11,42 +14,14 @@ use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
-use dohc_engine_sync::{LeaseProbe, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_sync::{AlwaysLive, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use dohc_workspace_engine::EngineService;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
-
-async fn call(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_or_else(|error| panic!("{method} failed: {error:?}"))
-        .result
-}
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 async fn call_ydoc_with_blob(
     service: &EngineService,
@@ -123,14 +98,6 @@ async fn open_workspace(
         );
         tokio::task::yield_now().await;
     }
-}
-
-fn write_file(root: &Path, path: &str, bytes: &[u8]) {
-    let absolute = root.join(path);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    std::fs::write(absolute, bytes).expect("write file");
 }
 
 fn plaintext_update(text: &str) -> String {
@@ -244,22 +211,6 @@ fn image_scene_revision_update(asset_id: &str, version: u64, is_deleted: bool) -
     dohc_engine_collab::import_portable_scene(&portable)
         .expect("scene revision import")
         .initial_update
-}
-
-async fn call_error(
-    transport: &InProcessTransport<EngineService>,
-    handle: &WorkspaceHandle,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> dohc_engine_protocol::error::WireError {
-    transport
-        .call(
-            RequestContext::unbounded(),
-            request(id, method, Some(handle.clone()), params),
-        )
-        .await
-        .unwrap_err()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -757,7 +708,7 @@ async fn deleting_a_scene_retires_only_its_owned_assets_and_rollback_restores_th
         "main",
         "drawings/delete.excalidraw",
     );
-    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 2)
         .expect("open marker store");
     ensure_marker(
         &mut store,
@@ -917,7 +868,7 @@ async fn scene_delete_rollback_stays_closed_over_foreign_disk_bytes_then_recover
     let handle = open_workspace(&transport, &scratch, WORKSPACE, 1).await;
     call(&transport, &handle, 2, "capture.flush", json!({})).await;
     let object_id = dohc_engine_domain::derive_capture_object_id(WORKSPACE, "main", PATH);
-    let mut store = EngineStore::open(&scratch.engine_db_path().expect("engine database"), 2)
+    let mut store = EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 2)
         .expect("open marker store");
     ensure_marker(
         &mut store,
@@ -1335,7 +1286,7 @@ async fn deleting_a_forked_scene_retires_inherited_asset_heads_without_touching_
     .await;
     assert_eq!(restored["sha256"], opened["artifactAssets"][0]["sha256"]);
     let pending_restore_jobs: i64 =
-        EngineStore::open(&scratch.engine_db_path().expect("engine database"), 10)
+        EngineStore::open(&engine_db_path(&scratch).expect("engine database"), 10)
             .expect("open job store")
             .read_with(|conn| {
                 conn.query_row(
@@ -2308,7 +2259,7 @@ struct SettleFingerprint(Vec<TableFingerprint>);
 
 fn settle_fingerprint(scratch: &ScratchDir, workspace_id: &str) -> SettleFingerprint {
     let connection =
-        rusqlite::Connection::open(scratch.engine_db_path().expect("engine database path"))
+        rusqlite::Connection::open(engine_db_path(scratch).expect("engine database path"))
             .expect("open engine database");
     let rows = |table: &'static str, workspace_scoped: bool| {
         let sql = if workspace_scoped {
@@ -2644,17 +2595,47 @@ async fn daemon_ydoc_sessions_settle_suppress_capture_and_roundtrip() {
     .await;
     assert_eq!(fetched["afterText"], json!("settled text"));
 
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let flushed = call(&transport, &handle, 9, "capture.flush", json!({})).await;
+    // Keep the watcher's pre-settle manifest so it observes the Changed write.
+    write_file(
+        scratch.path(),
+        "notes/scan-confirmed.md",
+        b"capture barrier",
+    );
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut id = 2_000_000;
+    let flushed = loop {
+        id += 1;
+        let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
+        id += 1;
+        let listed = call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.list",
+            json!({ "versionId": "main" }),
+        )
+        .await;
+        if listed["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|file| file["path"] == json!("notes/scan-confirmed.md"))
+            && flushed["settled"] == json!(true)
+        {
+            break flushed;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture never settled after observing the post-settle sibling"
+        );
+        tokio::task::yield_now().await;
+    };
     assert_eq!(flushed["settled"], json!(true));
     let after_moments = moment_count_for_object(&transport, &handle, 10, object_id).await;
     assert_eq!(after_moments, before_moments + 1);
-    // Mutation check: disable the SelfWriteSuppression::record call after
-    // settlement to restore the bug. Identical-content ingest is a deduped
-    // no-op moment-wise, so the count above stays +1 either way — the real
-    // damage is the claimed dedupe transferring ownership: capture's Changed
-    // observation flips the settled head's metadata origin from "ydoc" to the
-    // capture origin. This assertion fails under that mutation.
+    // Without settlement's suppression registration, the live lease defers
+    // the Changed ingest and capture cannot settle at the barrier above.
+    // Successful suppression must also preserve the Y.Doc's ownership.
     let head = call(
         &transport,
         &handle,
@@ -3229,8 +3210,8 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     // the one ydoc.close performs by default — then sees a changed target and
     // fails ConflictStaleTarget.
     //
-    // Driven deterministically here (sleep past the debounce + capture.flush)
-    // rather than by hoping the scheduler interleaves.
+    // A captured sibling proves the watcher scan ran after the settle.
+    // Rebuilding the manifest would seed the settled head and skip its ingest.
     let scratch = ScratchDir::new().expect("scratch");
 
     let service = Arc::new(EngineService::new());
@@ -3257,7 +3238,7 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
         json!({ "sessionId": session_id, "updateBase64": plaintext_update(&huge) }),
     )
     .await;
-    call(
+    let settled = call(
         &transport,
         &handle,
         4,
@@ -3266,23 +3247,49 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     )
     .await;
 
-    // Let the watcher observe the settle's own materialized write and settle
-    // its batch — exactly what happens under load between settle and close.
-    tokio::time::sleep(Duration::from_millis(800)).await;
-    let flushed = call(&transport, &handle, 5, "capture.flush", json!({})).await;
+    write_file(scratch.path(), "load/scan-confirmed.md", b"capture barrier");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut id = 2_000_000;
+    loop {
+        id += 1;
+        call(&transport, &handle, id, "capture.flush", json!({})).await;
+        id += 1;
+        let listed = call(
+            &transport,
+            &handle,
+            id,
+            "versionedText.list",
+            json!({ "versionId": "main" }),
+        )
+        .await;
+        if listed["files"]
+            .as_array()
+            .expect("files")
+            .iter()
+            .any(|file| file["path"] == json!("load/scan-confirmed.md"))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "capture never observed the sibling"
+        );
+        tokio::task::yield_now().await;
+    }
+    id += 1;
+    let flushed = call(&transport, &handle, id, "capture.flush", json!({})).await;
     assert_eq!(
         flushed["settled"],
         json!(false),
-        "the settle's self-write is suppressed instead of becoming capture work"
+        "capture must defer the new path while its Y.Doc session holds the lease"
     );
 
-    // The load-bearing assertion: the head survived, still owned by the
-    // Y.Doc. Before the fix this listing came back empty — capture had
-    // retired the record for a document the user had just saved.
+    // The same scan must leave the settled head owned by the Y.Doc.
+    id += 1;
     let listed = call(
         &transport,
         &handle,
-        6,
+        id,
         "versionedText.list",
         json!({ "versionId": "main" }),
     )
@@ -3300,6 +3307,16 @@ async fn capture_must_not_retire_the_settled_head_at_the_capture_cap() {
     let head = head.expect("head");
     assert_eq!(head["metadataOrigin"], json!("ydoc"));
     assert_eq!(head["byteLength"], json!(MAX_CAPTURE_TEXT_BYTES));
+    assert_eq!(head["latestMomentId"], settled["momentId"]);
+    assert_eq!(head["sha256"], settled["sha256"]);
+    assert_eq!(
+        head["sha256"],
+        json!(dohc_engine_storage::hex_sha256(huge.as_bytes()))
+    );
+    assert_eq!(
+        std::fs::read(scratch.path().join("load/big.md")).expect("settled bytes"),
+        huge.as_bytes()
+    );
 
     // And the close — which settles by default — succeeds instead of failing
     // ConflictStaleTarget against a head capture moved underneath it.
@@ -4756,7 +4773,7 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
-    let db_path = scratch.engine_db_path().expect("engine database path");
+    let db_path = engine_db_path(&scratch).expect("engine database path");
     let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
     connection
         .execute(
@@ -4820,15 +4837,6 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
     assert_eq!(opened["lineageClaimId"], json!(first_claim.clone()));
     let session_id = opened["sessionId"].as_str().expect("session id");
 
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
-
     let object_id = opened["objectId"].as_str().expect("object id");
     let foreign_doc = Ydoc::wire();
     foreign_doc.plaintext_insert(0, "foreign base");
@@ -4863,8 +4871,14 @@ async fn record_update_refuses_a_replaced_lineage_until_resync_refreshes_the_ses
         recorded_at_ms: 2,
     };
     let mut store = EngineStore::open(&db_path, 3).expect("reopen fixture store");
-    apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
-        .expect("queue foreign base behind live session");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &foreign,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue foreign base behind live session");
     drop(store);
     let deferred_count = || {
         connection
@@ -4969,7 +4983,7 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
     let service = Arc::new(EngineService::new());
     let transport = InProcessTransport::new(service);
     let handle = open_workspace(&transport, &scratch, WORKSPACE_ID, 1).await;
-    let db_path = scratch.engine_db_path().expect("engine database path");
+    let db_path = engine_db_path(&scratch).expect("engine database path");
     let connection = rusqlite::Connection::open(&db_path).expect("open engine database");
     connection
         .execute(
@@ -5021,15 +5035,6 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
         "loser from B"
     );
 
-    #[derive(Debug, Clone, Copy)]
-    struct AlwaysLive;
-
-    impl LeaseProbe for AlwaysLive {
-        fn is_live(&self, _key: &DocKey) -> bool {
-            true
-        }
-    }
-
     let key = DocKey::new(WORKSPACE_ID, "main", object_id).expect("document key");
     let mut store = EngineStore::open(&db_path, 2).expect("open fixture store");
     let persisted = dohc_engine_collab::load_persisted(&store, &key)
@@ -5075,8 +5080,14 @@ async fn close_materializes_a_deferred_winning_lineage_before_returning() {
         }),
         recorded_at_ms: 30,
     };
-    let applied = apply_ydoc_envelope(&mut store, &foreign, &NoFaults, &AlwaysLive)
-        .expect("queue winning base behind live session");
+    let applied = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &foreign,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("queue winning base behind live session");
     assert!(
         matches!(applied, dohc_engine_sync::ApplyOutcome::Applied(result) if result.deferred),
         "the winning base must start deferred behind the live session"

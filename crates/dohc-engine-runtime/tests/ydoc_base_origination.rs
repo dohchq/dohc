@@ -19,27 +19,19 @@ use dohc_engine_domain::{
     reconcile_collections_in_tx,
 };
 use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, SelfWriteRecorder,
-    WorkspaceSupervisor,
+    CancellationToken, CaptureIngest, CaptureRetire, NoFaults, RuntimeError, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
 use dohc_engine_sync::{
-    LeaseProbe, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
+    AlwaysLive, NoLiveLeases, RelayCursor, ReplicationEnvelope, SyncError,
     apply_replication_envelope, apply_ydoc_envelope, commit_relay_cursor,
     drain_deferred_ydoc_for_key,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 use yrs::types::Attrs;
 use yrs::{Any, Doc, OffsetKind, Options, ReadTxn, Text, Transact};
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 /// A locally-originated relay-visible op, shaped as a peer receives it.
 #[derive(Debug, Clone)]
@@ -367,7 +359,7 @@ fn replay_into_clean_peer(
     path: &str,
 ) -> String {
     let scratch = ScratchDir::new().expect("peer scratch");
-    let db = scratch.engine_db_path().expect("peer db");
+    let db = engine_db_path(&scratch).expect("peer db");
     let mut peer = EngineStore::open(&db, 9_200).expect("open peer store");
     VersionedTextStore::new(&mut peer)
         .ensure_main_version(workspace_id, "main", 1_000, &NoFaults)
@@ -396,8 +388,14 @@ fn replay_into_clean_peer(
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("the clean peer applies every originated op");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the clean peer applies every originated op");
     }
 
     peer.read_with(|conn| {
@@ -454,9 +452,9 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
     let initial = format!("---\nid: {RECORD}\nstatus: open\n---\n\nAlpha");
     let edited = format!("---\nid: {RECORD}\nstatus: done\n---\n\nAlpha");
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     seed_collection_replica(&source_db, WS, OBJECT, PATH, &initial);
     seed_collection_replica(&peer_db, WS, OBJECT, PATH, &initial);
     enable_sync(&source_db, WS);
@@ -541,8 +539,14 @@ async fn capture_authored_edit_keeps_actor_in_receiving_store_history() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_ydoc_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("peer applies replicated collection edit");
+        apply_ydoc_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("peer applies replicated collection edit");
     }
 
     let details = peer
@@ -699,7 +703,7 @@ async fn a_first_edit_on_a_synced_workspace_originates_one_base_then_deltas() {
     const WS: &str = "ws-originate-fresh";
     const PATH: &str = "notes/rich.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -790,7 +794,7 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
     const WS: &str = "ws-journal-blob-sha";
     const PATH: &str = "notes/journal-sha.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -881,15 +885,6 @@ async fn a_journaled_delta_names_the_exact_stored_update_blob() {
     );
 }
 
-#[derive(Debug, Clone, Copy)]
-struct AlwaysLiveLease;
-
-impl LeaseProbe for AlwaysLiveLease {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
-
 /// A deferred delta cannot enter an unclaimed local lineage. The relay must
 /// deliver and authenticate the immutable base claim before the drain retries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -897,7 +892,7 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     const WS: &str = "ws-originate-after-drain";
     const PATH: &str = "notes/deferred.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -961,8 +956,14 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
         }),
         recorded_at_ms: 300,
     };
-    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
-        .expect("park predecessor behind the live lease");
+    let parked = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park predecessor behind the live lease");
     assert!(
         matches!(
             parked,
@@ -972,7 +973,12 @@ async fn draining_a_delta_without_a_verified_base_keeps_it_parked() {
     );
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity"
         })
@@ -998,7 +1004,7 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-drain-decline";
     const PATH: &str = "notes/oversized-drain.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1010,15 +1016,26 @@ async fn draining_an_unverified_edit_does_not_report_a_base_size_decline() {
 
     let mut store = EngineStore::open(&db, 9_501).expect("open store");
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
-    let parked = apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLiveLease)
-        .expect("park remote edit behind the live lease");
+    let parked = apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park remote edit behind the live lease");
     assert!(matches!(
         parked,
         dohc_engine_sync::ApplyOutcome::Applied(ref result) if result.deferred
     ));
 
     assert!(matches!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults),
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        ),
         Err(SyncError::RetryableState {
             reason: "parked Y.Doc delta is waiting for a verified base identity"
         })
@@ -1034,7 +1051,7 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
     const WS: &str = "ws-originate-after-ordinary-apply";
     const PATH: &str = "notes/ordinary.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1089,7 +1106,13 @@ async fn applying_a_delta_without_a_verified_base_stays_retryable() {
         recorded_at_ms: 300,
     };
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update delta is waiting for a verified base identity"
         })
@@ -1114,7 +1137,7 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
     const WS: &str = "ws-oversized-apply-decline";
     const PATH: &str = "notes/oversized-apply.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1127,7 +1150,13 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
     let mut store = EngineStore::open(&db, 9_511).expect("open store");
     let envelope = remote_edit_envelope(&mut store, &key, PATH, 300);
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Err(SyncError::RetryableState {
             reason: "ydoc.update delta is waiting for a verified base identity"
         })
@@ -1139,7 +1168,7 @@ async fn applying_an_unverified_edit_does_not_report_a_base_size_decline() {
 /// stayed private: no replication op, and a prunable local-only marker.
 async fn two_edits_originate_nothing(ws: &str, path: &str, prepare: fn(&Path, &str)) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     prepare(&db, ws);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1231,7 +1260,7 @@ async fn promotion_publishes_the_rows_the_lineage_already_held() {
     const WS: &str = "ws-originate-promote";
     const PATH: &str = "notes/promoted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     // Private workspace, one durable edit, no close.
     let supervisor = WorkspaceSupervisor::new();
@@ -1371,7 +1400,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
     const WS: &str = "ws-originate-delete-before-enrollment";
     const PATH: &str = "notes/deleted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     seed_identity(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1427,7 +1456,7 @@ async fn deleting_a_crash_left_ydoc_before_enrollment_retires_the_lineage() {
                 now_ms: 300,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1495,7 +1524,7 @@ async fn capture_retiring_a_closed_ydoc_head_retires_the_lineage() {
     const WS: &str = "ws-originate-capture-retire";
     const PATH: &str = "notes/capture-retired.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
@@ -1556,7 +1585,7 @@ async fn live_lease_blocks_capture_retire_until_retry_and_rolls_back_every_row()
     const WS: &str = "ws-originate-capture-live-lease";
     const PATH: &str = "notes/live-capture-retire.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1754,7 +1783,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
     const WS: &str = "ws-originate-merge-delete";
     const PATH: &str = "notes/merge-deleted.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let object_id = capture_seed(&handle, WS, PATH, 100).await;
@@ -1811,7 +1840,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
                 now_ms: 250,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1837,7 +1866,7 @@ async fn merge_fast_forward_delete_retires_the_target_ydoc_lineage() {
                 now_ms: 300,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1865,7 +1894,7 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
     const WS: &str = "ws-originate-race";
     const PATH: &str = "notes/raced.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -1900,8 +1929,14 @@ async fn a_peer_base_that_lands_first_leaves_the_local_edit_a_delta() {
             }),
             recorded_at_ms: 300,
         };
-        apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("the peer base applies");
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("the peer base applies");
     }
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
 
@@ -1950,7 +1985,7 @@ async fn redelivering_an_originated_base_is_idempotent() {
     const WS: &str = "ws-originate-redeliver";
     const PATH: &str = "notes/redelivered.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -2005,8 +2040,14 @@ async fn redelivering_an_originated_base_is_idempotent() {
         }),
         recorded_at_ms: 500,
     };
-    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &NoLiveLeases)
-        .expect("a redelivered identical base resumes instead of failing");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("a redelivered identical base resumes instead of failing");
     drop(store);
 
     assert_eq!(marker_state(&db, &key), (Regime::Replicated, true));
@@ -2031,7 +2072,7 @@ async fn closing_a_session_that_originated_mid_flight_keeps_the_base() {
     const WS: &str = "ws-originate-close";
     const PATH: &str = "notes/closed.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     enable_sync(&db, WS);
 
     let supervisor = WorkspaceSupervisor::new();
@@ -2110,7 +2151,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
     const BEFORE: &str = "seed\n";
     const AFTER: &str = "seed\nafter\n";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     std::fs::create_dir_all(scratch.path().join("notes")).expect("notes directory");
     std::fs::write(scratch.path().join(PATH), BEFORE).expect("seed disk");
     enable_sync(&db, WS);
@@ -2168,7 +2209,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             append.lineage_claim_id,
             opened.head_blob_sha256,
             "rollback-source-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             250,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -2204,7 +2245,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2271,7 +2312,7 @@ async fn rollback_reconciles_a_closed_replicated_lineage_to_the_restored_text() 
             reopened.lineage_claim_id,
             reopened.head_blob_sha256,
             "rollback-follow-up-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             450,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -2293,9 +2334,9 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
     const BEFORE: &str = "before\n";
     const AFTER: &str = "after\n";
     let source_scratch = ScratchDir::new().expect("source scratch");
-    let source_db = source_scratch.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source_scratch).expect("source db");
     let peer_scratch = ScratchDir::new().expect("peer scratch");
-    let peer_db = peer_scratch.engine_db_path().expect("peer db");
+    let peer_db = engine_db_path(&peer_scratch).expect("peer db");
     let base_doc = Ydoc::wire();
     base_doc.plaintext_insert(0, BEFORE);
     let base = base_doc.encode_full_state();
@@ -2412,8 +2453,14 @@ async fn ordinary_text_write_sends_one_canonical_rewrite_before_its_moment() {
             payload: op.payload.clone(),
             recorded_at_ms: op.recorded_at_ms,
         };
-        apply_replication_envelope(&mut peer, &envelope, &NoFaults, &NoLiveLeases)
-            .expect("apply ordered operation");
+        apply_replication_envelope(
+            &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &envelope,
+            &NoFaults,
+            &NoLiveLeases,
+        )
+        .expect("apply ordered operation");
     }
     let peer_local_ydoc_ops: i64 = peer
         .read_with(|conn| {
@@ -2471,7 +2518,7 @@ async fn a_lineage_too_large_to_originate_still_accepts_the_edit() {
     const WS: &str = "ws-originate-oversize";
     const PATH: &str = "notes/oversize.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -2592,7 +2639,7 @@ async fn a_lineage_past_the_old_inherited_cap_originates() {
     const WS: &str = "ws-originate-past-old-cap";
     const PATH: &str = "notes/long-design-doc.md";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;

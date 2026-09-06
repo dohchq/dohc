@@ -367,17 +367,10 @@ mod tests {
         SecretWrite, VersionedTextStore, WriteText,
     };
     use dohc_engine_storage::{EngineStore, NoFaults};
-    use dohc_engine_testkit::ScratchDir;
+    use dohc_engine_testkit::open_store;
     use rusqlite::params;
 
     use super::*;
-
-    fn store() -> (ScratchDir, EngineStore) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
-        let store = EngineStore::open(&path, 1_000).expect("open store");
-        (scratch, store)
-    }
 
     fn seed_main(store: &mut EngineStore) {
         VersionedTextStore::new(store)
@@ -625,7 +618,7 @@ mod tests {
 
     #[test]
     fn pull_imported_moments_are_not_echoed_by_enrolment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -665,7 +658,7 @@ mod tests {
 
     #[test]
     fn refused_import_does_not_hide_a_local_moment_with_the_same_id() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -706,7 +699,7 @@ mod tests {
 
     #[test]
     fn cursor_commit_backfills_a_refused_import_collision_before_clearing_its_report() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -783,7 +776,7 @@ mod tests {
 
     #[test]
     fn first_position_interleaves_pending_conflict_bundle_with_moment_backfill() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
         write_text(
@@ -883,7 +876,7 @@ mod tests {
 
     #[test]
     fn same_cut_zero_effect_conflict_bundles_keep_bundle_order() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(&mut store, "main", "a", "moment-a", "A", "capture", 10);
         write_text(&mut store, "main", "c", "moment-c", "C", "capture", 30);
@@ -926,7 +919,7 @@ mod tests {
 
     #[test]
     fn malformed_pending_bundle_rolls_back_position_and_every_log_append() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         store
             .write_with(&NoFaults, |tx| {
@@ -1003,7 +996,7 @@ mod tests {
 
     #[test]
     fn refused_import_does_not_hide_a_local_version_with_the_same_id() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1057,7 +1050,7 @@ mod tests {
 
     #[test]
     fn ydoc_projection_moments_are_excluded_while_the_base_is_backfilled() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1112,7 +1105,7 @@ mod tests {
             .get_binary_blob(update_sha)
             .expect("read base blob")
             .expect("base blob exists");
-        let (_peer_scratch, mut peer) = self::store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         assert_eq!(
             peer.put_binary_blob(&update_bytes).expect("copy base blob"),
@@ -1120,6 +1113,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1152,7 +1146,7 @@ mod tests {
 
     #[test]
     fn closed_rename_backfills_the_ydoc_base_at_the_current_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1211,7 +1205,7 @@ mod tests {
     #[test]
     #[ignore = "known cross-shard first-pull Y.Doc origination race; item 5 is repro-only"]
     fn first_remote_base_claim_prevents_local_ydoc_origination() {
-        let (_source_scratch, mut source) = store();
+        let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);
         let key = DocKey::new("ws", "main", "same-coordinate").expect("key");
         let source_doc = Ydoc::wire();
@@ -1238,7 +1232,7 @@ mod tests {
             .expect("read remote base")
             .expect("remote base exists");
 
-        let (_local_scratch, mut local) = store();
+        let (_local_scratch, _, mut local) = open_store();
         seed_main(&mut local);
         let local_doc = Ydoc::wire();
         let local_update = local_doc.plaintext_insert(0, "local edit");
@@ -1257,6 +1251,7 @@ mod tests {
         );
         crate::apply_ydoc_envelope(
             &mut local,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1321,7 +1316,7 @@ mod tests {
 
     #[test]
     fn request_id_reuse_cannot_change_an_unsettled_ydoc_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-request").expect("key");
         let doc = Ydoc::wire();
@@ -1362,7 +1357,7 @@ mod tests {
 
     #[test]
     fn content_retry_repairs_a_legacy_unsettled_ydoc_path() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-content").expect("key");
         let doc = Ydoc::wire();
@@ -1402,7 +1397,7 @@ mod tests {
 
     #[test]
     fn enrolment_leaves_an_unclaimed_ydoc_without_a_path_for_a_later_retry() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = DocKey::new("ws", "main", "legacy-orphan").expect("key");
         let doc = Ydoc::wire();
@@ -1425,7 +1420,7 @@ mod tests {
 
     #[test]
     fn capture_history_is_superseded_when_the_same_object_gains_a_ydoc_lineage() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1465,7 +1460,7 @@ mod tests {
         enroll(&mut store).expect("enroll after settle");
 
         let ops = local_ops(&store);
-        let (_peer_scratch, mut peer) = self::store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         for (origin_seq, (kind, payload)) in ops.iter().enumerate() {
             if kind == "ydoc.update" {
@@ -1502,6 +1497,7 @@ mod tests {
             }
             crate::apply_replication_envelope(
                 &mut peer,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &crate::ReplicationEnvelope {
                     workspace_id: "ws".to_owned(),
                     origin_id: "source".to_owned(),
@@ -1544,7 +1540,7 @@ mod tests {
 
     #[test]
     fn secret_backfill_uses_each_moments_retained_ciphertext() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let first = b"historical secret";
         let latest = b"current secret";
@@ -1608,7 +1604,7 @@ mod tests {
 
     #[test]
     fn secret_write_then_delete_backfills_without_delete_ciphertext() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(&mut store, &key, "main", "moment-secret-put", "token", 10);
@@ -1640,7 +1636,7 @@ mod tests {
 
     #[test]
     fn named_version_is_backfilled_before_its_ydoc_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1703,7 +1699,7 @@ mod tests {
 
     #[test]
     fn forked_ydoc_base_fast_forwards_its_shipped_ancestor() {
-        let (_source_scratch, mut source) = store();
+        let (_source_scratch, _, mut source) = open_store();
         seed_main(&mut source);
         write_text(
             &mut source,
@@ -1774,7 +1770,7 @@ mod tests {
             .expect("read base")
             .expect("base exists");
 
-        let (_peer_scratch, mut peer) = store();
+        let (_peer_scratch, _, mut peer) = open_store();
         seed_main(&mut peer);
         let fork_sha = dohc_engine_storage::hex_sha256(b"base");
         peer.write_with(&NoFaults, |tx| {
@@ -1806,6 +1802,7 @@ mod tests {
         .expect("peer applies version.create");
         let outcome = crate::apply_ydoc_envelope(
             &mut peer,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &crate::ReplicationEnvelope {
                 workspace_id: "ws".to_owned(),
                 origin_id: "peer".to_owned(),
@@ -1834,7 +1831,7 @@ mod tests {
 
     #[test]
     fn named_version_parent_is_backfilled_before_same_time_child() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let mut versions = VersionedTextStore::new(&mut store);
         versions
@@ -1886,7 +1883,7 @@ mod tests {
 
     #[test]
     fn moment_backfill_follows_durable_moment_order() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store, "main", "first", "moment-z", "first", "capture", 10,
@@ -1907,7 +1904,7 @@ mod tests {
 
     #[test]
     fn delayed_version_backfill_uses_the_frozen_fork_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -1960,7 +1957,7 @@ mod tests {
 
     #[test]
     fn delayed_secret_fork_backfill_uses_the_frozen_fork_base() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(&mut store, &key, "main", "moment-secret-base", "base", 10);
@@ -2023,7 +2020,7 @@ mod tests {
 
     #[test]
     fn main_version_is_never_backfilled_as_a_named_fork() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -2048,7 +2045,7 @@ mod tests {
 
     #[test]
     fn already_journaled_named_version_is_not_backfilled_twice() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         write_text(
             &mut store,
@@ -2091,7 +2088,7 @@ mod tests {
 
     #[test]
     fn imported_secret_moments_are_not_echoed_by_enrolment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let imported = crate::ReplicationEnvelope {
             workspace_id: "ws".to_owned(),
@@ -2133,7 +2130,7 @@ mod tests {
 
     #[test]
     fn imported_secret_coordinates_cannot_hide_an_unrelated_local_moment() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(
@@ -2179,7 +2176,7 @@ mod tests {
 
     #[test]
     fn caller_chosen_secret_sync_prefix_does_not_hide_a_local_secret_write() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         let key = secret_key();
         write_secret(
@@ -2205,7 +2202,7 @@ mod tests {
 
     #[test]
     fn every_sync_pass_surfaces_a_declined_ydoc_base_until_it_is_claimed() {
-        let (_scratch, mut store) = store();
+        let (_scratch, _, mut store) = open_store();
         seed_main(&mut store);
         enroll(&mut store).expect("enroll before the local Y.Doc append");
         write_text(

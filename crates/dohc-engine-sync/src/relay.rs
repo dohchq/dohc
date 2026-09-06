@@ -1133,32 +1133,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
     pub fn pull_chat_workspace(
         &self,
         store: &mut EngineStore,
-        workspace_id: &str,
-        faults: &dyn FaultInjector,
-        leases: &dyn crate::LeaseProbe,
-        now_ms: i64,
-    ) -> Result<SyncPassOutcome, RelayError> {
-        self.pull_chat_workspace_inner(store, None, workspace_id, faults, leases, now_ms)
-    }
-
-    /// Actor pull path carrying the single-writer document cache to routed
-    /// PR3 consumers.
-    pub fn pull_chat_workspace_with_cache(
-        &self,
-        store: &mut EngineStore,
         cache: &mut dohc_engine_collab::WriterDocCache,
-        workspace_id: &str,
-        faults: &dyn FaultInjector,
-        leases: &dyn crate::LeaseProbe,
-        now_ms: i64,
-    ) -> Result<SyncPassOutcome, RelayError> {
-        self.pull_chat_workspace_inner(store, Some(cache), workspace_id, faults, leases, now_ms)
-    }
-
-    fn pull_chat_workspace_inner(
-        &self,
-        store: &mut EngineStore,
-        mut cache: Option<&mut dohc_engine_collab::WriterDocCache>,
         workspace_id: &str,
         faults: &dyn FaultInjector,
         leases: &dyn crate::LeaseProbe,
@@ -1225,11 +1200,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
         let mut retryable = Vec::new();
         let mut deferred_origins = BTreeSet::new();
         for op in &ordered {
-            let routed = if let Some(cache) = cache.as_deref_mut() {
-                crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
-            } else {
-                crate::apply_replication_envelope(store, op, faults, leases)
-            };
+            let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
             match routed {
                 Err(SyncError::RetryableState { .. }) => {
                     deferred_origins.insert(op.origin_id.clone());
@@ -1259,11 +1230,7 @@ impl<T: RelayTransport> RelaySyncClient<T> {
             let mut still_deferred_origins = BTreeSet::new();
             let mut made_progress = false;
             for op in retryable {
-                let routed = if let Some(cache) = cache.as_deref_mut() {
-                    crate::apply_replication_envelope_with_cache(store, cache, op, faults, leases)
-                } else {
-                    crate::apply_replication_envelope(store, op, faults, leases)
-                };
+                let routed = crate::apply_replication_envelope(store, cache, op, faults, leases);
                 match routed {
                     Err(SyncError::RetryableState { .. }) => {
                         still_deferred_origins.insert(op.origin_id.clone());

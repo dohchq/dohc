@@ -76,7 +76,7 @@ pub(crate) fn redelivered_conflicts_opened(
         return Ok(0);
     }
     let payload: OpenPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "conflict.open payload is malformed",
         })?;
     store.read_with(|conn| {
@@ -146,7 +146,7 @@ fn apply_open(
     envelope: &ReplicationEnvelope,
 ) -> Result<ConflictApplyResult, SyncError> {
     let payload: OpenPayload =
-        serde_json::from_value(envelope.payload.clone()).map_err(|_| SyncError::InvalidInput {
+        Deserialize::deserialize(&envelope.payload).map_err(|_| SyncError::InvalidInput {
             reason: "conflict.open payload is malformed",
         })?;
     if payload.workspace_id != envelope.workspace_id {
@@ -324,13 +324,11 @@ mod tests {
     use super::*;
     use dohc_engine_domain::VersionedTextStore;
     use dohc_engine_storage::NoFaults;
-    use dohc_engine_testkit::ScratchDir;
+    use dohc_engine_testkit::{ScratchDir, open_store};
     use serde_json::json;
 
     fn store() -> (ScratchDir, EngineStore) {
-        let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
-        let mut store = EngineStore::open(&path, 1_000).expect("open");
+        let (scratch, _, mut store) = open_store();
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");

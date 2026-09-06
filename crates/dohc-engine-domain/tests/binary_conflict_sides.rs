@@ -15,7 +15,7 @@ use dohc_engine_storage::blob::{binary_blob_count, get_binary_blob};
 use dohc_engine_storage::{
     MAX_BLOB_BYTES, Preimage, StorageError, has_binary_blob, hex_sha256, put_binary_blob,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 
 const WS: &str = "probe-ws";
@@ -38,7 +38,7 @@ fn assert_combined_text_refused(err: &DomainError) {
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&path, 1_000).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1_000, &NoFaults)
@@ -188,9 +188,11 @@ fn keep_current_on_binary_incoming_keeps_the_live_head() {
         .expect("open mixed conflict");
 
     let result = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("kc-binary-incoming", ResolveConflictKind::KeepCurrent),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("keeping the current side never touches the incoming bytes");
     assert_eq!(result.conflict.status, ConflictStatus::Resolved);
@@ -228,9 +230,11 @@ fn apply_incoming_over_a_binary_base_writes_the_incoming_text() {
         .expect("open binary-base conflict");
 
     let result = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("ai-binary-base", ResolveConflictKind::ApplyIncoming),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("a binary base does not block a text-to-text resolution");
     assert_eq!(
@@ -269,7 +273,7 @@ fn apply_merged_over_a_binary_base_writes_the_combined_text() {
         .expect("open binary-base conflict");
 
     let result = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input(
                 "am-binary-base",
                 ResolveConflictKind::ApplyMerged {
@@ -277,6 +281,8 @@ fn apply_merged_over_a_binary_base_writes_the_combined_text() {
                 },
             ),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("a binary base does not block combining two texts");
     assert_eq!(result.conflict.chosen_from, ConflictChoice::Merged);
@@ -309,9 +315,11 @@ fn keep_current_with_binary_base_writes_nothing() {
         .expect("open conflict");
 
     let result = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("kc-binary-base", ResolveConflictKind::KeepCurrent),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("a binary base does not block keeping the current side");
     assert_eq!(result.conflict.chosen_from, ConflictChoice::Current);
@@ -336,7 +344,7 @@ fn apply_merged_with_binary_side_fails_closed() {
         .expect("open conflict");
 
     let err = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input(
                 "am-binary",
                 ResolveConflictKind::ApplyMerged {
@@ -344,6 +352,8 @@ fn apply_merged_with_binary_side_fails_closed() {
                 },
             ),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect_err("ApplyMerged must reject binary sides");
     assert_combined_text_refused(&err);
@@ -375,7 +385,12 @@ fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
         ("apply-incoming", ResolveConflictKind::ApplyIncoming),
     ] {
         let err = VersionedTextStore::new(&mut store)
-            .resolve_text_conflict(&resolve_input("all-binary", kind), &NoFaults)
+            .resolve_text_conflict_with(
+                &resolve_input("all-binary", kind),
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| Ok(()),
+            )
             .expect_err("a stale all-binary resolve must fail closed");
         assert!(
             matches!(&err, DomainError::ConflictStaleTarget),
@@ -383,7 +398,7 @@ fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
         );
     }
     let err = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input(
                 "all-binary",
                 ResolveConflictKind::ApplyMerged {
@@ -391,6 +406,8 @@ fn all_binary_resolve_over_an_absent_live_head_fails_closed() {
                 },
             ),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect_err("combined text must never resolve bytes");
     assert_combined_text_refused(&err);
@@ -711,9 +728,11 @@ fn text_conflict_round_trip_unchanged() {
         .write_with(&NoFaults, |tx| insert_text_conflict_if_absent(tx, &c))
         .expect("open text conflict");
     let result = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("text-rt", ResolveConflictKind::ApplyIncoming),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("text resolve must still work");
     assert_eq!(result.conflict.status, ConflictStatus::Resolved);
@@ -757,7 +776,12 @@ fn binary_current_over_an_absent_live_head_blocks_resolve() {
         ResolveConflictKind::ApplyIncoming,
     ] {
         let err = VersionedTextStore::new(&mut store)
-            .resolve_text_conflict(&resolve_input("bin-current", kind), &NoFaults)
+            .resolve_text_conflict_with(
+                &resolve_input("bin-current", kind),
+                &NoFaults,
+                |_, _, _| Ok(()),
+                |_, _, ()| Ok(()),
+            )
             .expect_err("a stale binary current must block resolve");
         assert!(
             matches!(&err, DomainError::ConflictStaleTarget),
@@ -765,7 +789,7 @@ fn binary_current_over_an_absent_live_head_blocks_resolve() {
         );
     }
     let err = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input(
                 "bin-current",
                 ResolveConflictKind::ApplyMerged {
@@ -773,6 +797,8 @@ fn binary_current_over_an_absent_live_head_blocks_resolve() {
                 },
             ),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect_err("combined text must never resolve bytes");
     assert_combined_text_refused(&err);
@@ -905,9 +931,11 @@ fn text_resolve_over_now_binary_path_is_stale_not_clobber() {
     let binary_sha = write_binary_head(&mut store, "occupied-obj", "occupied.md", b"\x00pic\xff");
 
     let err = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("text-over-binary", ResolveConflictKind::ApplyIncoming),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect_err("a binary head at the path must make the resolve stale");
     assert_eq!(err.code(), "conflict-stale-target");
@@ -952,9 +980,11 @@ fn text_move_resolve_onto_binary_destination_is_occupied_not_clobber() {
     let binary_sha = write_binary_head(&mut store, "dst-obj", "dst.md", b"\x00dst\xff");
 
     let err = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve_input("text-move", ResolveConflictKind::ApplyIncoming),
             &NoFaults,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect_err("a binary head at the destination must be occupied");
     assert_eq!(err.code(), "target-path-exists");

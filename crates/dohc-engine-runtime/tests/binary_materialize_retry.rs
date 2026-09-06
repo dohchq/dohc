@@ -1,18 +1,11 @@
 use dohc_engine_domain::{CreateNamedVersion, RollbackTextFileMutation, WriteBinary};
 use dohc_engine_runtime::{
     ActiveVersionSwitch, CancellationToken, NoFaults, PostCommitMaterializeOutcome,
-    SelfWriteRecorder, WorkspaceSupervisor,
+    WorkspaceSupervisor,
 };
 use dohc_engine_storage::FaultPoint;
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn binary_input(request_id: &str) -> WriteBinary {
     WriteBinary {
@@ -34,7 +27,7 @@ fn binary_input(request_id: &str) -> WriteBinary {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_write_retries_its_original_pending_materialization() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     let input = binary_input("binary-materialize-request");
@@ -44,7 +37,7 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
         .versioned_binary_write(
             input.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -62,7 +55,7 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
         .versioned_binary_write(
             input,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -85,14 +78,14 @@ async fn deduped_binary_write_retries_its_original_pending_materialization() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deduped_binary_rollback_retries_its_pending_compensation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
         .versioned_binary_write(
             binary_input("binary-seed-request"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -114,7 +107,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         .versioned_text_rollback(
             rollback.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -132,7 +125,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
         .versioned_text_rollback(
             rollback,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -151,7 +144,7 @@ async fn deduped_binary_rollback_retries_its_pending_compensation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -184,7 +177,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
         .versioned_binary_write(
             binary_input("inactive-rollback-binary-write"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -203,7 +196,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
                 workspace_id: "ws-binary-materialize-retry".to_owned(),
                 version_id: "branch".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 10,
             },
             Arc::new(NoFaults),
@@ -223,7 +216,7 @@ async fn inactive_binary_rollback_cancels_the_original_pending_job_before_reopen
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

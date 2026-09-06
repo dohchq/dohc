@@ -5,11 +5,12 @@
 
 mod common;
 
-use common::{Scratch, sha256_hex};
+use common::Scratch;
 use dohc_engine_files::{
     CancellationToken, ManifestEntry, OverCapPolicy, ScanBounds, ScanIoFaultInjector,
     ScanIoOperation, ScanListing, ScanManifest, ScanOutcome, Scanner, SkipReason,
 };
+use dohc_engine_storage::hex_sha256;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
@@ -41,7 +42,7 @@ fn scan_produces_sorted_normalized_listing() {
     let a = &listing.files[0];
     assert_eq!(a.size, 4);
     assert_eq!(a.media_type, "text/markdown");
-    assert_eq!(a.sha256, sha256_hex(b"# A\n"));
+    assert_eq!(a.sha256, hex_sha256(b"# A\n"));
 }
 
 #[test]
@@ -278,7 +279,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
     // Learn the observed pairing from a full-hash scan.
     let baseline = scan(&scanner, ws.path());
     let observed = &baseline.files[0];
-    assert_eq!(observed.sha256, sha256_hex(b"content\n"));
+    assert_eq!(observed.sha256, hex_sha256(b"content\n"));
     assert_ne!(observed.mtime_ms, 0, "the scratch file must carry an mtime");
     let hashed_after_baseline = scanner.pool().gauge().hashed();
 
@@ -321,7 +322,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(hashed.files[0].sha256, sha256_hex(b"content\n"));
+    assert_eq!(hashed.files[0].sha256, hex_sha256(b"content\n"));
 
     // A size mismatch forces the hash even when the mtime matches.
     let wrong_size = ScanManifest::from_entries([(
@@ -339,7 +340,7 @@ fn scan_with_prior_reuses_the_recorded_hash_only_for_a_matching_pairing() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(rehashed.files[0].sha256, sha256_hex(b"content\n"));
+    assert_eq!(rehashed.files[0].sha256, hex_sha256(b"content\n"));
 }
 
 #[test]
@@ -502,7 +503,7 @@ fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
     let raced = scan(&scanner, ws.path());
     assert_eq!(
         raced.files[0].sha256,
-        sha256_hex(b"AAAAAAAA\n"),
+        hex_sha256(b"AAAAAAAA\n"),
         "the hash is of the bytes the pool actually read"
     );
     assert_eq!(
@@ -528,7 +529,7 @@ fn mid_scan_write_voids_the_mtime_pairing_and_the_next_scan_rehashes() {
         ScanOutcome::Completed(listing) => listing,
         ScanOutcome::Cancelled => panic!("unexpected cancellation"),
     };
-    assert_eq!(next.files[0].sha256, sha256_hex(b"BBBBBBBB\n"));
+    assert_eq!(next.files[0].sha256, hex_sha256(b"BBBBBBBB\n"));
     assert_eq!(
         scanner.pool().gauge().hashed(),
         hashed_before + 1,
@@ -558,7 +559,7 @@ fn mid_scan_replacement_with_matching_metadata_voids_the_mtime_pairing() {
         .iter()
         .find(|entry| entry.path == "doc.md")
         .expect("replacement path remains listed");
-    assert_eq!(doc.sha256, sha256_hex(b"AAAAAAAA\n"));
+    assert_eq!(doc.sha256, hex_sha256(b"AAAAAAAA\n"));
     assert_eq!(
         doc.mtime_ms, 0,
         "a different file identity must not borrow the opened file's pairing"
@@ -585,7 +586,7 @@ fn mid_scan_replacement_with_matching_metadata_voids_the_mtime_pairing() {
         .iter()
         .find(|entry| entry.path == "doc.md")
         .expect("replacement path remains listed");
-    assert_eq!(next_doc.sha256, sha256_hex(b"BBBBBBBB\n"));
+    assert_eq!(next_doc.sha256, hex_sha256(b"BBBBBBBB\n"));
     assert_eq!(
         scanner.pool().gauge().hashed(),
         hashed_before + 2,

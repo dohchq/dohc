@@ -2,8 +2,6 @@ use dohc_engine_collab::limits::DEFAULT_COMPACTION_THRESHOLD;
 use dohc_engine_collab::{
     CollabError, CompactOutcome, ContentKind, DocKey, RemoteAppendProbe, RemoteUpdate,
     ReplicationApplyOutcome, WriterDocCache, apply_remote_update,
-    apply_remote_update_for_deferred_drain,
-    apply_remote_update_in_transaction_cached_with_projection,
     apply_remote_update_in_transaction_with_projection, maybe_compact,
 };
 use dohc_engine_domain::{
@@ -115,6 +113,17 @@ pub struct NoLiveLeases;
 impl LeaseProbe for NoLiveLeases {
     fn is_live(&self, _key: &DocKey) -> bool {
         false
+    }
+}
+
+/// Probe that reports every document live, so a pull defers instead of
+/// applying. Tests use it to reach the deferred-drain path directly.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct AlwaysLive;
+
+impl LeaseProbe for AlwaysLive {
+    fn is_live(&self, _key: &DocKey) -> bool {
+        true
     }
 }
 
@@ -494,70 +503,60 @@ fn apply_deferred_base(
 /// are returned as well as persisted so the triggering caller can report them.
 pub fn drain_deferred_ydoc_for_key(
     store: &mut EngineStore,
-    key: &DocKey,
-    faults: &dyn FaultInjector,
-) -> Result<YdocDrainResult, SyncError> {
-    let (drained, cleanup) =
-        drain_deferred_ydoc(store, None, key, DeferredDrainMode::All, false, faults)?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
-}
-
-/// Cache-backed actor form of [`drain_deferred_ydoc_for_key`].
-pub fn drain_deferred_ydoc_for_key_cached(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
 ) -> Result<YdocDrainResult, SyncError> {
-    let (drained, cleanup) = drain_deferred_ydoc(
-        store,
-        Some(cache),
-        key,
-        DeferredDrainMode::All,
-        false,
-        faults,
-    )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
+    let (drained, cleanup) =
+        drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)?;
+    complete_drain(store, drained, cleanup, faults)
 }
 
-/// [`drain_deferred_ydoc_for_key_cached`], holding the final queue-row
-/// cleanup for the caller. The drained coordinates — and the record facts
-/// persisted on them — stay queued until the caller runs the returned
-/// [`YdocDrainCleanup`] through [`complete_deferred_ydoc_drain_cleanup`].
-/// A caller that fails between the drain and the cleanup leaves the rows in
-/// place, exactly like a crash before the cleanup transaction: the retry
-/// re-drains content-deduped and reads the facts back.
+/// [`drain_deferred_ydoc_for_key`], holding the final queue-row cleanup for
+/// the caller. The drained coordinates — and the record facts persisted on
+/// them — stay queued until the caller runs the returned [`YdocDrainCleanup`]
+/// through [`complete_deferred_ydoc_drain_cleanup`]. A caller that fails
+/// between the drain and the cleanup leaves the rows in place, exactly like a
+/// crash before the cleanup transaction: the retry re-drains content-deduped
+/// and reads the facts back.
 ///
 /// The pending projection refusal, if any, travels in the cleanup rather
 /// than in the result's `refusals`: it is persisted when the cleanup runs,
 /// so a caller reading `refusals` here sees one fewer refusal than the
 /// immediate drain would report.
-pub fn drain_deferred_ydoc_for_key_cached_holding_cleanup(
+pub fn drain_deferred_ydoc_for_key_holding_cleanup(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
     faults: &dyn FaultInjector,
-) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
-    drain_deferred_ydoc(
-        store,
-        Some(cache),
-        key,
-        DeferredDrainMode::All,
-        true,
-        faults,
-    )
+) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
+    drain_deferred_ydoc(store, cache, key, DeferredDrainMode::All, faults)
+}
+
+/// Run the cleanup an immediate drain owes and surface its projection refusal
+/// with the drain's own refusals.
+fn complete_drain(
+    store: &mut EngineStore,
+    mut drained: YdocDrainResult,
+    cleanup: YdocDrainCleanup,
+    faults: &dyn FaultInjector,
+) -> Result<YdocDrainResult, SyncError> {
+    let projection_refusal = complete_deferred_ydoc_drain_cleanup(store, cleanup, faults)?;
+    drained.refusals.extend(projection_refusal);
+    Ok(drained)
 }
 
 /// The final queue-row cleanup a held-cleanup drain still owes: persist the
 /// pending projection refusal, then delete the drained rows. Runs the same
-/// transaction the immediate drain would have run last.
+/// transaction the immediate drain would have run last. Returns the persisted refusal.
 pub fn complete_deferred_ydoc_drain_cleanup(
     store: &mut EngineStore,
     cleanup: YdocDrainCleanup,
     faults: &dyn FaultInjector,
-) -> Result<(), SyncError> {
+) -> Result<Option<crate::ReplicationRefusal>, SyncError> {
+    if cleanup.coordinates.is_empty() && cleanup.projection_refusal.is_none() {
+        return Ok(None);
+    }
     let cleared = store.write_with(faults, |tx| {
         if let Some(refusal) = cleanup.projection_refusal.as_ref() {
             crate::apply::persist_refusal(tx, refusal)?;
@@ -575,7 +574,7 @@ pub fn complete_deferred_ydoc_drain_cleanup(
     if matches!(cleared, TxnOutcome::Crashed { .. }) {
         return Err(SyncError::FaultCrash);
     }
-    Ok(())
+    Ok(cleanup.projection_refusal)
 }
 
 /// Drain only deferred coordinates that belong to the lineage an open editor
@@ -584,33 +583,6 @@ pub fn complete_deferred_ydoc_drain_cleanup(
 /// ordinary full drain can replace the lineage. This prevents settle/resync
 /// from changing the durable generation underneath a still-live editor.
 pub fn drain_deferred_ydoc_for_live_session(
-    store: &mut EngineStore,
-    key: &DocKey,
-    expected_lineage_claim_id: Option<&str>,
-    faults: &dyn FaultInjector,
-) -> Result<YdocDrainResult, SyncError> {
-    let observed = dohc_engine_collab::read_marker(store, key)
-        .map_err(map_collab_hard_error)?
-        .and_then(|marker| marker.lineage_claim_id);
-    if observed.as_deref() != expected_lineage_claim_id {
-        return Err(SyncError::RetryableState {
-            reason: "live Y.Doc session lineage changed before deferred drain",
-        });
-    }
-    let (drained, cleanup) = drain_deferred_ydoc(
-        store,
-        None,
-        key,
-        DeferredDrainMode::Live(expected_lineage_claim_id),
-        false,
-        faults,
-    )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
-}
-
-/// Cache-backed actor form of [`drain_deferred_ydoc_for_live_session`].
-pub fn drain_deferred_ydoc_for_live_session_cached(
     store: &mut EngineStore,
     cache: &mut WriterDocCache,
     key: &DocKey,
@@ -627,14 +599,12 @@ pub fn drain_deferred_ydoc_for_live_session_cached(
     }
     let (drained, cleanup) = drain_deferred_ydoc(
         store,
-        Some(cache),
+        cache,
         key,
         DeferredDrainMode::Live(expected_lineage_claim_id),
-        false,
         faults,
     )?;
-    debug_assert!(cleanup.is_none(), "immediate mode owes no cleanup");
-    Ok(drained)
+    complete_drain(store, drained, cleanup, faults)
 }
 
 #[derive(Clone, Copy)]
@@ -643,8 +613,8 @@ enum DeferredDrainMode<'a> {
     Live(Option<&'a str>),
 }
 
-/// The queue-row cleanup a held-cleanup drain still owes. See
-/// [`drain_deferred_ydoc_for_key_cached_holding_cleanup`].
+/// The queue-row cleanup a drain still owes. See
+/// [`drain_deferred_ydoc_for_key_holding_cleanup`].
 #[derive(Debug)]
 pub struct YdocDrainCleanup {
     workspace_id: String,
@@ -654,12 +624,11 @@ pub struct YdocDrainCleanup {
 
 fn drain_deferred_ydoc(
     store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
+    cache: &mut WriterDocCache,
     key: &DocKey,
     mode: DeferredDrainMode<'_>,
-    hold_cleanup: bool,
     faults: &dyn FaultInjector,
-) -> Result<(YdocDrainResult, Option<YdocDrainCleanup>), SyncError> {
+) -> Result<(YdocDrainResult, YdocDrainCleanup), SyncError> {
     let pending: Vec<(String, i64, i64, i64, String, YdocUpdatePayload)> =
         store.read_with(|conn| {
             let mut stmt = conn
@@ -724,7 +693,14 @@ fn drain_deferred_ydoc(
             Ok::<_, SyncError>(pending)
         })?;
     if pending.is_empty() {
-        return Ok((YdocDrainResult::default(), None));
+        return Ok((
+            YdocDrainResult::default(),
+            YdocDrainCleanup {
+                workspace_id: key.workspace_id.clone(),
+                coordinates: Vec::new(),
+                projection_refusal: None,
+            },
+        ));
     }
     let search_policy = search_policy_for_store(store);
     let mut applied = 0usize;
@@ -753,9 +729,7 @@ fn drain_deferred_ydoc(
             // A base can replace the lineage while reusing durable coordinates.
             // Evict before the transaction so a committed crash cannot leave an
             // ABA-valid entry behind.
-            if let Some(cache) = cache.as_deref_mut() {
-                cache.remove(key);
-            }
+            cache.remove(key);
             if lineage_claim_id != payload.update_blob_sha256 {
                 return Err(local_corruption(
                     "parked Y.Doc base claim does not match its full-state digest",
@@ -819,28 +793,16 @@ fn drain_deferred_ydoc(
             origin_seq,
             bytes,
         };
-        let apply_result = if let Some(cache) = cache.as_deref_mut() {
-            apply_remote_update_for_deferred_drain(
-                store,
-                cache,
-                key,
-                &remote,
-                payload.actor_origin_id.as_deref(),
-                payload.attribution.as_ref(),
-                faults,
-                recorded_at_ms,
-            )
-        } else {
-            apply_remote_update(
-                store,
-                key,
-                &remote,
-                payload.actor_origin_id.as_deref(),
-                payload.attribution.as_ref(),
-                faults,
-                recorded_at_ms,
-            )
-        };
+        let apply_result = apply_remote_update(
+            store,
+            cache,
+            key,
+            &remote,
+            payload.actor_origin_id.as_deref(),
+            payload.attribution.as_ref(),
+            faults,
+            recorded_at_ms,
+        );
         let (outcome, applied_facts) = match apply_result {
             Ok(applied) => (applied.outcome, applied.record_facts),
             Err(error) => {
@@ -909,7 +871,7 @@ fn drain_deferred_ydoc(
     if let Some(payload) = last_payload
         && let Some((projected, projected_kind)) = project_final_drained_doc(
             store,
-            cache.as_deref(),
+            cache,
             key,
             &payload,
             drain_origin,
@@ -964,35 +926,7 @@ fn drain_deferred_ydoc(
     // but nothing would ever project it. A held cleanup extends the same
     // contract past the drain: the caller clears the rows only after its own
     // fallible follow-up (close-time materialization) succeeded.
-    let mut held_cleanup = None;
-    if hold_cleanup {
-        held_cleanup = Some(YdocDrainCleanup {
-            workspace_id: key.workspace_id.clone(),
-            coordinates: drained_coordinates.clone(),
-            projection_refusal,
-        });
-    } else {
-        let cleared = store.write_with(faults, |tx| {
-            if let Some(refusal) = projection_refusal.as_ref() {
-                crate::apply::persist_refusal(tx, refusal)?;
-            }
-            for (origin_id, origin_seq) in &drained_coordinates {
-                tx.execute(
-                    "DELETE FROM ydoc_deferred_updates \
-                     WHERE workspace_id = ?1 AND origin_id = ?2 AND origin_seq = ?3",
-                    params![key.workspace_id, origin_id, origin_seq],
-                )
-                .map_err(SyncError::persist)?;
-            }
-            Ok::<_, SyncError>(())
-        })?;
-        if matches!(cleared, TxnOutcome::Crashed { .. }) {
-            return Err(SyncError::FaultCrash);
-        }
-        if let Some(refusal) = projection_refusal {
-            refusals.push(refusal);
-        }
-    }
+    //
     // The count is DRAINED COORDINATES, not newly-applied rows: a marker
     // surviving an earlier failed drain redelivers its row as a dedupe, and
     // callers (the settle's remote-updates-pending refusal) must still see
@@ -1006,7 +940,11 @@ fn drain_deferred_ydoc(
             lineage_replacements,
             record_facts,
         },
-        held_cleanup,
+        YdocDrainCleanup {
+            workspace_id: key.workspace_id.clone(),
+            coordinates: drained_coordinates,
+            projection_refusal,
+        },
     ))
 }
 
@@ -1043,7 +981,7 @@ type FinalDrainProjection = Result<TxnOutcome<crate::BaseOrigination>, SyncError
 #[allow(clippy::too_many_arguments)]
 fn project_final_drained_doc(
     store: &mut EngineStore,
-    cache: Option<&WriterDocCache>,
+    cache: &WriterDocCache,
     key: &DocKey,
     payload: &YdocUpdatePayload,
     drain_origin: &str,
@@ -1052,10 +990,9 @@ fn project_final_drained_doc(
     search_policy: Option<&SearchPolicySnapshot>,
     faults: &dyn FaultInjector,
 ) -> Result<Option<(FinalDrainProjection, ContentKind)>, SyncError> {
-    if let Some(cache) = cache
-        && let Some(doc) = store
-            .read_with(|conn| cache.doc_for_consumer(conn, key))
-            .map_err(map_collab_hard_error)?
+    if let Some(doc) = store
+        .read_with(|conn| cache.doc_for_consumer(conn, key))
+        .map_err(map_collab_hard_error)?
     {
         let marker = dohc_engine_collab::read_marker(store, key)
             .map_err(map_collab_hard_error)?
@@ -2169,29 +2106,7 @@ pub fn project_and_write_in_tx(
 
 pub fn apply_ydoc_envelope(
     store: &mut EngineStore,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_inner(store, None, envelope, faults, leases)
-}
-
-/// Actor pull path with access to the single-writer document cache. Only the
-/// PR3 defer-validation and drain consumers use it; ordinary remote admission
-/// and its scratch projection remain cold.
-pub fn apply_ydoc_envelope_cached(
-    store: &mut EngineStore,
     cache: &mut WriterDocCache,
-    envelope: &ReplicationEnvelope,
-    faults: &dyn FaultInjector,
-    leases: &dyn LeaseProbe,
-) -> Result<ApplyOutcome<YdocApplyResult>, SyncError> {
-    apply_ydoc_envelope_inner(store, Some(cache), envelope, faults, leases)
-}
-
-fn apply_ydoc_envelope_inner(
-    store: &mut EngineStore,
-    mut cache: Option<&mut WriterDocCache>,
     envelope: &ReplicationEnvelope,
     faults: &dyn FaultInjector,
     leases: &dyn LeaseProbe,
@@ -2199,7 +2114,7 @@ fn apply_ydoc_envelope_inner(
     if envelope.op_kind != "ydoc.update" {
         return Err(SyncError::UnsupportedOperation);
     }
-    let payload: YdocUpdatePayload = match serde_json::from_value(envelope.payload.clone()) {
+    let payload: YdocUpdatePayload = match Deserialize::deserialize(&envelope.payload) {
         Ok(payload) => payload,
         Err(_) => {
             return refuse_ydoc(store, envelope, faults, "ydoc.update payload is malformed");
@@ -2264,9 +2179,7 @@ fn apply_ydoc_envelope_inner(
             );
         }
     };
-    if payload.is_base_state
-        && let Some(cache) = cache.as_deref_mut()
-    {
+    if payload.is_base_state {
         // Claim/arbitration can replace a lineage with ABA-equal coordinates.
         // Invalidate before any transaction so a committed crash stays safe.
         cache.remove(&key);
@@ -2360,15 +2273,7 @@ fn apply_ydoc_envelope_inner(
             .map_err(map_collab_hard_error)?
             .and_then(|marker| marker.lineage_claim_id);
         let validation = if active_claim.as_deref() == Some(payload.lineage_claim_id.as_str()) {
-            if let Some(cache) = cache.as_deref() {
-                dohc_engine_collab::validate_remote_update_with_pending_cached(
-                    store, cache, &key, &queued, &bytes,
-                )
-            } else {
-                dohc_engine_collab::validate_remote_update_with_pending(
-                    store, &key, &queued, &bytes,
-                )
-            }
+            dohc_engine_collab::validate_remote_update(store, cache, &key, &queued, &bytes)
         } else {
             // A foreign queued lineage is validated only against its own
             // relay-ordered prefix. Replaying it on the active winner even in
@@ -2883,11 +2788,7 @@ fn apply_ydoc_envelope_inner(
                 .map_err(map_collab_hard_error)?
                 .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
         {
-            let drain = if let Some(cache) = cache.as_deref_mut() {
-                drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
-            } else {
-                drain_deferred_ydoc_for_key(store, &key, faults)?
-            };
+            let drain = drain_deferred_ydoc_for_key(store, cache, &key, faults)?;
             return Ok(merge_drained(
                 merge_lineage_replacements(outcome, drain.lineage_replacements),
                 drain.record_facts,
@@ -2905,11 +2806,7 @@ fn apply_ydoc_envelope_inner(
         .map_err(map_collab_hard_error)?
         .is_some_and(|marker| marker.regime == dohc_engine_collab::Regime::Replicated)
     {
-        if let Some(cache) = cache.as_deref_mut() {
-            drain_deferred_ydoc_for_key_cached(store, cache, &key, faults)?
-        } else {
-            drain_deferred_ydoc_for_key(store, &key, faults)?
-        }
+        drain_deferred_ydoc_for_key(store, cache, &key, faults)?
     } else {
         YdocDrainResult::default()
     };
@@ -3023,29 +2920,19 @@ fn apply_ydoc_envelope_inner(
     let mut sharing_declined = None;
     let mut record_facts = None;
     let mut cache_probe = RemoteAppendProbe::default();
+    let gate_cache: &WriterDocCache = cache;
     let outcome_result =
         crate::apply::apply_envelope_with_mutation_outcome(store, envelope, faults, |tx, op| {
-            let projected = if let Some(cache) = cache.as_deref() {
-                apply_remote_update_in_transaction_cached_with_projection(
-                    tx,
-                    cache,
-                    &mut cache_probe,
-                    &key,
-                    &remote,
-                    payload.actor_origin_id.as_deref(),
-                    payload.attribution.as_ref(),
-                    op.recorded_at_ms,
-                )
-            } else {
-                apply_remote_update_in_transaction_with_projection(
-                    tx,
-                    &key,
-                    &remote,
-                    payload.actor_origin_id.as_deref(),
-                    payload.attribution.as_ref(),
-                    op.recorded_at_ms,
-                )
-            }
+            let projected = apply_remote_update_in_transaction_with_projection(
+                tx,
+                gate_cache,
+                &mut cache_probe,
+                &key,
+                &remote,
+                payload.actor_origin_id.as_deref(),
+                payload.attribution.as_ref(),
+                op.recorded_at_ms,
+            )
             .map_err(|error| map_collab_payload_error(error, "ydoc.update could not be applied"))?;
             let applied = projected.outcome;
             let update_kind = projected.content_kind;
@@ -3125,23 +3012,19 @@ fn apply_ydoc_envelope_inner(
     let outcome = match outcome_result {
         Ok(outcome) => outcome,
         Err(error) => {
-            if let Some(cache) = cache.as_deref_mut() {
-                cache.finish_remote_gate_error(&key, &cache_probe);
-            }
+            cache.finish_remote_gate_error(&key, &cache_probe);
             return Err(error);
         }
     };
-    if let Some(cache) = cache.as_deref_mut() {
-        match &outcome {
-            ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
-                cache.finish_remote_append(&key, &remote.bytes, cache_probe);
-            }
-            ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
-            ApplyOutcome::Crashed { committed: false } => {
-                cache.finish_remote_gate_error(&key, &cache_probe);
-            }
-            ApplyOutcome::Skipped | ApplyOutcome::WithDiagnostics { .. } => {}
+    match &outcome {
+        ApplyOutcome::Applied(_) | ApplyOutcome::Refused(_) => {
+            cache.finish_remote_append(&key, &remote.bytes, cache_probe);
         }
+        ApplyOutcome::Crashed { committed: true } => cache.remove(&key),
+        ApplyOutcome::Crashed { committed: false } => {
+            cache.finish_remote_gate_error(&key, &cache_probe);
+        }
+        ApplyOutcome::Skipped | ApplyOutcome::WithDiagnostics { .. } => {}
     }
     if matches!(
         outcome,
@@ -3157,16 +3040,14 @@ fn apply_ydoc_envelope_inner(
         .map_err(|_| SyncError::InvalidInput {
             reason: "ydoc.update compaction failed",
         })?;
-        if let Some(cache) = cache {
-            match compacted {
-                TxnOutcome::Committed(CompactOutcome::Compacted {
-                    up_to_seq,
-                    snapshot_sha,
-                    ..
-                }) => cache.note_compacted(store, &key, up_to_seq, &snapshot_sha),
-                TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
-                TxnOutcome::Crashed { .. } => cache.remove(&key),
-            }
+        match compacted {
+            TxnOutcome::Committed(CompactOutcome::Compacted {
+                up_to_seq,
+                snapshot_sha,
+                ..
+            }) => cache.note_compacted(store, &key, up_to_seq, &snapshot_sha),
+            TxnOutcome::Committed(CompactOutcome::Skipped { .. }) => {}
+            TxnOutcome::Crashed { .. } => cache.remove(&key),
         }
     }
     // This path drained before the primary apply, so the drained facts

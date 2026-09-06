@@ -10,27 +10,19 @@ use dohc_engine_runtime::search::{ensure_search_index_for_version, search_worksp
 use dohc_engine_runtime::{CancellationToken, NoFaults, SearchResult, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256, put_binary_blob};
 use dohc_engine_sync::{
-    ApplyOutcome, LeaseProbe, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
+    AlwaysLive, ApplyOutcome, NoLiveLeases, ReplicationEnvelope, SyncError, apply_envelope_with,
     apply_ydoc_envelope, drain_deferred_ydoc_for_key,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 use serde_json::json;
 
 const WS: &str = "ws";
 const VERSION: &str = "main";
 
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &dohc_engine_collab::DocKey) -> bool {
-        true
-    }
-}
-
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db, 1_000).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, VERSION, 1_000, &NoFaults)
@@ -159,7 +151,13 @@ fn replicated_ydoc_base_projection_updates_certified_search_index() {
     );
 
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &operation,
+            &NoFaults,
+            &NoLiveLeases
+        ),
         Ok(ApplyOutcome::Applied(_))
     ));
     let hits = search_store(&store, scratch.path(), NEEDLE, 1_300);
@@ -213,7 +211,7 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_110,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &base_operation, &NoFaults, &NoLiveLeases),
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &base_operation, &NoFaults, &NoLiveLeases),
         Ok(ApplyOutcome::Applied(result)) if !result.deferred
     ));
     let update = dohc_engine_collab::Ydoc::wire().plaintext_insert(0, HISTORICAL);
@@ -234,13 +232,18 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         1_120,
     );
     assert!(matches!(
-        apply_ydoc_envelope(&mut store, &operation, &NoFaults, &AlwaysLive),
+        apply_ydoc_envelope(&mut store,&mut dohc_engine_collab::WriterDocCache::new(), &operation, &NoFaults, &AlwaysLive),
         Ok(ApplyOutcome::Applied(result)) if result.deferred
     ));
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("first drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("first drain")
+        .drained,
         1
     );
 
@@ -294,9 +297,14 @@ fn retained_ydoc_drain_replay_keeps_current_search_content() {
         .expect("activate replay version");
 
     assert_eq!(
-        drain_deferred_ydoc_for_key(&mut store, &key, &NoFaults)
-            .expect("historical replay drain")
-            .drained,
+        drain_deferred_ydoc_for_key(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &key,
+            &NoFaults
+        )
+        .expect("historical replay drain")
+        .drained,
         1
     );
     assert_eq!(
@@ -465,7 +473,7 @@ async fn local_conflict_resolution_actor_indexes_text_and_deletion() {
     const OLD: &str = "localconflictoldneedle";
     const NEW: &str = "localconflictnewneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -588,7 +596,7 @@ async fn named_version_creation_leaves_search_uncertified_for_lazy_first_build()
     const NEEDLE: &str = "namedversionlazysearchneedle";
     const NAMED: &str = "named-version";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1_000).expect("open actor").actor;
 
@@ -687,7 +695,7 @@ async fn resolving_onto_a_binary_side_drops_the_indexed_text() {
     const PATH: &str = "notes/becomes-binary.md";
     const OLD: &str = "becomesbinaryoldneedle";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     // The incoming side references bytes that are already hydrated -- the shape
     // a merge or a replicated open records. Seed the blob before the actor
