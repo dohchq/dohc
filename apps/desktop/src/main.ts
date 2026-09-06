@@ -110,11 +110,7 @@ import {
 } from "./quitGuard";
 import { decideNavigation } from "./security/electronSecurity";
 import { isInside } from "./security/pathContainment";
-import {
-  applyDesktopIconToPlatform,
-  resolveDesktopIconDirectory,
-  resolveSystemThemeIconPath,
-} from "./systemThemeIcon";
+import { createDesktopTray } from "./window/desktopTray";
 import { buildMenuTemplate } from "./window/applicationMenu";
 import {
   createUserSettingsWriteQueue,
@@ -4225,45 +4221,12 @@ function broadcastUpdateState(state: PublicUpdateState): void {
   }
 }
 
-let dispatchTray: Tray | null = null;
-
-function configuredRunnerEnabled(settings: DesktopUserSettingsResult["settings"]): boolean {
-  return settings.runner.enabled && settings.runner.command.trim().length > 0;
-}
-
-function desktopIconDirectory(): string {
-  const resourcesPath = (
-    process as NodeJS.Process & { resourcesPath?: string }
-  ).resourcesPath;
-  return resolveDesktopIconDirectory({
-    isPackaged: app.isPackaged,
-    resourcesPath,
-    moduleDirectory: import.meta.dirname,
-  });
-}
-
-function currentDesktopIconPath(): string | null {
-  return resolveSystemThemeIconPath(
-    desktopIconDirectory(),
-    nativeTheme.shouldUseDarkColors,
-  );
-}
-
-function dispatchTrayIcon() {
-  const resourcesPath = (
-    process as NodeJS.Process & { resourcesPath?: string }
-  ).resourcesPath;
-  const themedPath = currentDesktopIconPath();
-  const packagedFallback = resourcesPath
-    ? join(resourcesPath, "tray-icon.png")
-    : "";
-  let icon = nativeImage.createFromPath(themedPath ?? packagedFallback);
-  if (icon.isEmpty()) {
-    icon = nativeImage.createFromPath(join(app.getAppPath(), "build/icon.png"));
-  }
-  if (process.platform === "darwin") icon.setTemplateImage(true);
-  return icon;
-}
+const { refreshDispatchTray, refreshSystemThemeDesktopIcons } = createDesktopTray({
+  app, process, Menu, nativeImage, nativeTheme, Tray, BrowserWindow,
+  moduleDirectory: import.meta.dirname,
+  readCachedUserSettingsFile, stateDir, chatDispatchService, showOrCreateMainWindow,
+  get appLifecycle() { return appLifecycle; },
+});
 
 async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   const existing = targetWindow(undefined);
@@ -4276,70 +4239,6 @@ async function showOrCreateMainWindow(): Promise<BrowserWindow> {
   );
   focusShareHandoffWindowWhenReady(window);
   return window;
-}
-
-function rebuildDispatchTrayMenu(): void {
-  if (!dispatchTray) return;
-  dispatchTray.setContextMenu(
-    Menu.buildFromTemplate([
-      {
-        label: "Open dohc",
-        click: () => {
-          void showOrCreateMainWindow();
-        },
-      },
-      {
-        label: "Pause agent dispatch",
-        type: "checkbox",
-        checked: chatDispatchService.isPaused(),
-        click: (item) => {
-          chatDispatchService.setPaused(item.checked);
-          rebuildDispatchTrayMenu();
-        },
-      },
-      { type: "separator" },
-      {
-        label: "Quit dohc",
-        click: () => app.quit(),
-      },
-    ]),
-  );
-}
-
-function ensureDispatchTray(): void {
-  if (!dispatchTray) {
-    dispatchTray = new Tray(dispatchTrayIcon());
-    dispatchTray.setToolTip("dohc agent dispatch");
-    dispatchTray.on("double-click", () => {
-      void showOrCreateMainWindow();
-    });
-  }
-  rebuildDispatchTrayMenu();
-}
-
-function refreshSystemThemeDesktopIcons(): void {
-  const iconPath = currentDesktopIconPath();
-  if (iconPath) {
-    applyDesktopIconToPlatform({
-      platform: process.platform,
-      iconPath,
-      windows: BrowserWindow.getAllWindows(),
-      setDockIcon: (path) => app.dock?.setIcon(path),
-    });
-  }
-  if (dispatchTray) dispatchTray.setImage(dispatchTrayIcon());
-}
-
-async function refreshDispatchTray(): Promise<boolean> {
-  const { settings } = await readCachedUserSettingsFile(stateDir());
-  const enabled = configuredRunnerEnabled(settings);
-  if (enabled && !appLifecycle.isQuitting()) {
-    ensureDispatchTray();
-  } else if (dispatchTray) {
-    dispatchTray.destroy();
-    dispatchTray = null;
-  }
-  return enabled;
 }
 
 let rustEngineDaemon: EngineDaemonLifecycle | null = null;
