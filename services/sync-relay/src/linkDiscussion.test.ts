@@ -1,25 +1,30 @@
 import { createHash } from "node:crypto";
-import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { hashLinkBearer } from "./linkSecurity";
 import { DiscussionActivityHub } from "./discussionActivity";
 import {
-  createSyncRelayHandler,
   DISCUSSION_DISPLAY_NAME_LOOKUP_DEADLINE_MS,
   type SyncRelayHandler,
 } from "./server";
+import type { OpenSyncRelayStorageOptions, SyncRelayStorage } from "./storage";
 import {
-  type OpenSyncRelayStorageOptions,
-  type SyncRelayStorage,
-} from "./storage";
-import {
-  closeTestStorages,
-  jsonBody as jsonRequest,
+  seedDependentGrant,
+  linkWritesPausedAtMs,
   closeTestStorage,
+  closeTestStorages,
+  countRows as count,
+  inspect,
+  inspectDatabase,
+  json as body,
+  jsonBody as jsonRequest,
   reopenTestStorage,
+  request as rawRequest,
+  seedLinkGrant,
+  seedLinkSession,
   storagePath,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 const OWNER = "owner-account-sentinel";
 const NEW_OWNER = "new-owner-account-sentinel";
@@ -33,26 +38,6 @@ const LINK_KEY = "discussion-link-key-with-at-least-32-bytes";
 const RELAY_KEY = "discussion-relay-key-with-at-least-32-bytes";
 const PROFILE_A = "p".repeat(43);
 const PROFILE_B = "q".repeat(43);
-
-interface InspectionStatement {
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  run(...params: unknown[]): { changes?: number | bigint };
-}
-
-interface InspectionDatabase {
-  prepare(sql: string): InspectionStatement;
-  exec(sql: string): void;
-  close(): void;
-}
-
-const { DatabaseSync: InspectionDatabaseSync } = createRequire(import.meta.url)(
-  "node:sqlite",
-) as {
-  DatabaseSync: new (
-    path: string,
-    options?: { readOnly?: boolean },
-  ) => InspectionDatabase;
-};
 
 afterEach(closeTestStorages);
 
@@ -148,43 +133,20 @@ async function fixture(
     const grantId = `link-${suffix}-grant-sentinel`;
     const linkSecret = secret(secretCharacter);
     const capabilityToken = secret(capabilityCharacter);
-    expect(
-      storage.createLinkGrant({
-        grant: {
-          grantId,
-          shareId: SHARE,
-          principalKind: "link",
-          principalUserId: null,
-          principalEmail: null,
-          access,
-          generation: 1,
-          status: "active",
-          createdAtMs: 1_010,
-          revokedAtMs: null,
-          parentGrantId: null,
-        },
-        credential: {
-          credentialId: `credential-${suffix}-sentinel`,
-          grantId,
-          secretHash: hashLinkBearer(linkSecret, LINK_KEY),
-          generation: 1,
-          mintedAtMs: 1_010,
-          retiredAtMs: null,
-        },
-      }),
-    ).toBe(true);
-    expect(
-      storage.mintLinkSession({
-        session: {
-          sessionId: `session-${suffix}-sentinel`,
-          capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
-          grantId,
-          generation: 1,
-          mintedAtMs: 1_011,
-          expiresAtMs: 1_000_000,
-        },
-      }),
-    ).toBe(true);
+    seedLinkGrant(storage, {
+      grantId,
+      shareId: SHARE,
+      access,
+      createdAtMs: 1_010,
+      credentialId: `credential-${suffix}-sentinel`,
+      secretHash: hashLinkBearer(linkSecret, LINK_KEY),
+    });
+    seedLinkSession(storage, {
+      grantId,
+      capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+      sessionId: `session-${suffix}-sentinel`,
+      mintedAtMs: 1_011,
+    });
     return { access, grantId, secret: linkSecret, capabilityToken };
   };
 
@@ -192,7 +154,7 @@ async function fixture(
   const comment = addLink("comment", "comment", "b", "e");
   const edit = addLink("edit", "edit", "c", "f");
   expect(
-    storage.convertLinkGrant({
+    seedDependentGrant(storage, {
       shareId: SHARE,
       parentGrantId: view.grantId,
       grantId: "named-view-grant-sentinel",
@@ -201,7 +163,7 @@ async function fixture(
     }),
   ).toMatchObject({ ok: true, grant: { access: "view" } });
   expect(
-    storage.convertLinkGrant({
+    seedDependentGrant(storage, {
       shareId: SHARE,
       parentGrantId: edit.grantId,
       grantId: "named-edit-grant-sentinel",
@@ -221,18 +183,9 @@ async function fixture(
     [EDITOR]: "",
   };
   const makeHandler = (targetStorage: SyncRelayStorage): SyncRelayHandler =>
-    createSyncRelayHandler({
-      storage: targetStorage,
+    testHandler(targetStorage, {
       discussionActivity,
-      resolveActor(request: Request, workspaceId: string) {
-        const match = /^Bearer user:([^ ]+)$/u.exec(
-          request.headers.get("authorization") ?? "",
-        );
-        if (!match) {
-          throw Object.assign(new Error("unauthorized"), { statusCode: 401 });
-        }
-        return { userId: match[1]!, workspaceId };
-      },
+      resolveUserIdByEmail: undefined,
       lookupUserEmail: (userId) => `${userId}@email-sentinel.test`,
       lookupUserDisplayName:
         overrides.lookupUserDisplayName ?? ((userId) => names[userId] ?? null),
@@ -259,54 +212,21 @@ function addIndependentCommentLink(storage: SyncRelayStorage): LinkFixture {
   const grantId = "link-comment-peer-grant-sentinel";
   const linkSecret = secret("g");
   const capabilityToken = secret("h");
-  expect(
-    storage.createLinkGrant({
-      grant: {
-        grantId,
-        shareId: SHARE,
-        principalKind: "link",
-        principalUserId: null,
-        principalEmail: null,
-        access: "comment",
-        generation: 1,
-        status: "active",
-        createdAtMs: 1_012,
-        revokedAtMs: null,
-        parentGrantId: null,
-      },
-      credential: {
-        credentialId: "credential-comment-peer-sentinel",
-        grantId,
-        secretHash: hashLinkBearer(linkSecret, LINK_KEY),
-        generation: 1,
-        mintedAtMs: 1_012,
-        retiredAtMs: null,
-      },
-    }),
-  ).toBe(true);
-  expect(
-    storage.mintLinkSession({
-      session: {
-        sessionId: "session-comment-peer-sentinel",
-        capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
-        grantId,
-        generation: 1,
-        mintedAtMs: 1_013,
-        expiresAtMs: 1_000_000,
-      },
-    }),
-  ).toBe(true);
+  seedLinkGrant(storage, {
+    grantId,
+    shareId: SHARE,
+    access: "comment",
+    createdAtMs: 1_012,
+    credentialId: "credential-comment-peer-sentinel",
+    secretHash: hashLinkBearer(linkSecret, LINK_KEY),
+  });
+  seedLinkSession(storage, {
+    grantId,
+    capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+    sessionId: "session-comment-peer-sentinel",
+    mintedAtMs: 1_013,
+  });
   return { access: "comment", grantId, secret: linkSecret, capabilityToken };
-}
-
-function rawRequest(
-  userId: string | null,
-  path: string,
-  init: RequestInit = {},
-): Request {
-  const headers = new Headers(init.headers);
-  if (userId !== null) headers.set("authorization", `Bearer user:${userId}`);
-  return new Request(`http://relay.test${path}`, { ...init, headers });
 }
 
 function request(
@@ -397,24 +317,8 @@ async function exchangeLink(
   return String((await body(response)).capabilityToken);
 }
 
-async function body(response: Response): Promise<Record<string, unknown>> {
-  return (await response.json()) as Record<string, unknown>;
-}
-
-function count(dbPath: string, table: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
-    return Number(
-      db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()?.count ?? 0,
-    );
-  } finally {
-    db.close();
-  }
-}
-
 function discussionUsage(dbPath: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
+  return inspect(dbPath, (db) => {
     const messages = Number(
       db
         .prepare(
@@ -430,14 +334,11 @@ function discussionUsage(dbPath: string): number {
         .get()?.bytes ?? 0,
     );
     return messages + principals;
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function workspaceUsage(dbPath: string, workspaceId: string): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
+  return inspect(dbPath, (db) => {
     return Number(
       db
         .prepare(
@@ -445,9 +346,7 @@ function workspaceUsage(dbPath: string, workspaceId: string): number {
         )
         .get(workspaceId)?.usage_bytes ?? 0,
     );
-  } finally {
-    db.close();
-  }
+  });
 }
 
 function discussionIdempotencyRows(
@@ -455,9 +354,8 @@ function discussionIdempotencyRows(
   actorUserId: string,
   idempotencyKey: string,
 ): number {
-  const db = new InspectionDatabaseSync(dbPath, { readOnly: true });
-  try {
-    return Number(
+  return inspect(dbPath, (db) =>
+    Number(
       db
         .prepare(
           `SELECT COUNT(*) AS count
@@ -467,14 +365,12 @@ function discussionIdempotencyRows(
              AND idempotency_key = ?`,
         )
         .get(SHARE, actorUserId, idempotencyKey)?.count ?? 0,
-    );
-  } finally {
-    db.close();
-  }
+    ),
+  );
 }
 
 function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
-  const db = new InspectionDatabaseSync(dbPath);
+  const db = inspectDatabase(dbPath);
   try {
     db
       .prepare(
@@ -487,7 +383,7 @@ function updateWorkspaceOwner(dbPath: string, ownerUserId: string): void {
 }
 
 function updateShareWorkspace(dbPath: string, workspaceId: string): void {
-  const db = new InspectionDatabaseSync(dbPath);
+  const db = inspectDatabase(dbPath);
   try {
     db
       .prepare("UPDATE sync_relay_shares SET workspace_id = ? WHERE share_id = ?")
@@ -502,7 +398,7 @@ function transferShareOwnership(
   workspaceId: string,
   ownerUserId: string,
 ): void {
-  const db = new InspectionDatabaseSync(dbPath);
+  const db = inspectDatabase(dbPath);
   try {
     db.exec("BEGIN IMMEDIATE");
     db
@@ -644,43 +540,20 @@ function seedCrossShareHandles(storage: SyncRelayStorage): {
       parentGrantId: null,
     },
   });
-  expect(
-    storage.createLinkGrant({
-      grant: {
-        grantId,
-        shareId,
-        principalKind: "link",
-        principalUserId: null,
-        principalEmail: null,
-        access: "comment",
-        generation: 1,
-        status: "active",
-        createdAtMs: 2_001,
-        revokedAtMs: null,
-        parentGrantId: null,
-      },
-      credential: {
-        credentialId: "cross-share-credential-sentinel",
-        grantId,
-        secretHash: "cross-share-secret-hash",
-        generation: 1,
-        mintedAtMs: 2_001,
-        retiredAtMs: null,
-      },
-    }),
-  ).toBe(true);
-  expect(
-    storage.mintLinkSession({
-      session: {
-        sessionId: "cross-share-session-sentinel",
-        capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
-        grantId,
-        generation: 1,
-        mintedAtMs: 2_002,
-        expiresAtMs: 1_000_000,
-      },
-    }),
-  ).toBe(true);
+  seedLinkGrant(storage, {
+    grantId,
+    shareId,
+    access: "comment",
+    createdAtMs: 2_001,
+    credentialId: "cross-share-credential-sentinel",
+    secretHash: "cross-share-secret-hash",
+  });
+  seedLinkSession(storage, {
+    grantId,
+    capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
+    sessionId: "cross-share-session-sentinel",
+    mintedAtMs: 2_002,
+  });
   const appended = storage.appendLinkDiscussionMessage({
     capabilityHash: hashLinkBearer(capabilityToken, LINK_KEY),
     profileTokenHash: "cross-share-profile-hash",
@@ -3902,7 +3775,7 @@ describe("share discussion HTTP boundary", () => {
         userId === recipient ? "Narrowed Recipient" : null,
     });
     expect(
-      test.storage.convertLinkGrant({
+      seedDependentGrant(test.storage, {
         shareId: SHARE,
         parentGrantId: test.comment.grantId,
         grantId,
@@ -4382,7 +4255,7 @@ describe("share discussion HTTP boundary", () => {
       linkPrincipalId: principalId,
       blocked: true,
     });
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(test.storage.getLinkPrincipal(principalId)!.blockedAtMs).toBeNull();
   });
 
@@ -5341,7 +5214,7 @@ describe("share discussion HTTP boundary", () => {
     for (const response of await Promise.all(refusals)) {
       expect(await genericRefusal(response)).toBe(baseline);
     }
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
     expect(test.storage.getLinkPrincipal(crossShare.principalId)!.blockedAtMs).toBeNull();
     expect(count(test.dbPath, "sync_relay_share_discussion_messages")).toBe(beforeRows);
@@ -5357,7 +5230,7 @@ describe("share discussion HTTP boundary", () => {
         await test.handler(moderationRequest(OWNER, { action: "pause" })),
       ),
     ).toBe(baseline);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
     expect(
       await genericRefusal(
         await test.handler(
@@ -5579,7 +5452,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
 
     expect(
       await genericRefusal(
@@ -5592,7 +5465,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     ).toContain('"code":"not_found"');
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
 
     const paused = await test.handler(
       moderationRequest(OWNER, { action: "pause", workspaceId: WORKSPACE }),
@@ -5600,7 +5473,7 @@ describe("share discussion HTTP boundary", () => {
     expect(paused.status).toBe(200);
     await paused.arrayBuffer();
     expect(setPaused).toHaveBeenCalledTimes(1);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     setPaused.mockClear();
     await expectMissingWorkspace(
@@ -5609,7 +5482,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     );
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     expect(
       await genericRefusal(
@@ -5622,7 +5495,7 @@ describe("share discussion HTTP boundary", () => {
       ),
     ).toContain('"code":"not_found"');
     expect(setPaused).not.toHaveBeenCalled();
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).not.toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).not.toBeNull();
 
     const resumed = await test.handler(
       moderationRequest(OWNER, { action: "resume", workspaceId: WORKSPACE }),
@@ -5630,7 +5503,7 @@ describe("share discussion HTTP boundary", () => {
     expect(resumed.status).toBe(200);
     await resumed.arrayBuffer();
     expect(setPaused).toHaveBeenCalledTimes(1);
-    expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+    expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
   });
 
   it("rechecks current workspace ownership inside every moderation transaction", async () => {
@@ -5697,7 +5570,7 @@ describe("share discussion HTTP boundary", () => {
         linkPrincipalBlocked: false,
       });
       expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
-      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
       expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
     }
   });
@@ -5766,7 +5639,7 @@ describe("share discussion HTTP boundary", () => {
         linkPrincipalBlocked: false,
       });
       expect(test.storage.getLinkPrincipal(target.linkPrincipalId!)!.blockedAtMs).toBeNull();
-      expect(test.storage.getShareLinkWritesPausedAtMs(SHARE)).toBeNull();
+      expect(linkWritesPausedAtMs(storagePath(test.storage), SHARE)).toBeNull();
       expect(discussionUsage(test.dbPath)).toBe(beforeUsage);
     }
   });

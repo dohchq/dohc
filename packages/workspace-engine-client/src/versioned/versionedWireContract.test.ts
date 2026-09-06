@@ -1,13 +1,6 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
-import {
-  VersionedProtocolShapeError,
-  decodeVersionRecord,
-  decodeVersionedBinaryReadBlobResult,
-  decodeVersionedTextListResult,
-  decodeVersionedTextReadBlobResult,
-  decodeVersionedTextWriteResult,
-  decodeVersionsCompareFilesResult,
-} from "./versionedWireContract";
+import { decodeVersionedResult, VERSIONED_METHOD } from "./versionedWireContract";
 
 describe("versioned result decoder rejection", () => {
   it("reports the wrong-typed nested write field path", () => {
@@ -54,15 +47,15 @@ describe("versioned result decoder rejection", () => {
       beforeInbandLimitBytes: null,
     };
     expect(() =>
-      decodeVersionedTextWriteResult({
+      decodeVersionedResult(VERSIONED_METHOD.textWrite, {
         object: { id: "o", workspaceId: "w", createdAtMs: "wrong" },
         snapshot: validSnapshot,
         moment: validMoment,
         deduped: false,
       }),
     ).toThrowError(
-      expect.objectContaining<Partial<VersionedProtocolShapeError>>({
-        name: "VersionedProtocolShapeError",
+      expect.objectContaining<Partial<ProtocolShapeError>>({
+        name: "ProtocolShapeError",
         message: expect.stringContaining("versionedText.write result.object.createdAtMs"),
       }),
     );
@@ -70,13 +63,13 @@ describe("versioned result decoder rejection", () => {
 
   it("reports the wrong-typed compareFiles entry field path", () => {
     expect(() =>
-      decodeVersionsCompareFilesResult({
+      decodeVersionedResult(VERSIONED_METHOD.versionsCompareFiles, {
         entries: [{ path: 7, status: "added" }],
         nextCursor: null,
       }),
     ).toThrowError(
-      expect.objectContaining<Partial<VersionedProtocolShapeError>>({
-        name: "VersionedProtocolShapeError",
+      expect.objectContaining<Partial<ProtocolShapeError>>({
+        name: "ProtocolShapeError",
         message: expect.stringContaining("versions.compareFiles result.entries[0].path"),
       }),
     );
@@ -84,17 +77,17 @@ describe("versioned result decoder rejection", () => {
 
   it("rejects unsafe integers and excess nested fields", () => {
     expect(() =>
-      decodeVersionRecord({
+      decodeVersionedResult(VERSIONED_METHOD.versionsCreateNamed, {
         id: "draft",
         workspaceId: "w",
         kind: "named",
         name: "Draft",
         createdAtMs: Number.MAX_SAFE_INTEGER + 1,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
 
     expect(() =>
-      decodeVersionRecord({
+      decodeVersionedResult(VERSIONED_METHOD.versionsCreateNamed, {
         id: "draft",
         workspaceId: "w",
         kind: "named",
@@ -102,16 +95,16 @@ describe("versioned result decoder rejection", () => {
         forkPoint: { versionId: "main", unexpected: true },
         createdAtMs: 1,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("rejects invalid discriminants strictly", () => {
     expect(() =>
-      decodeVersionsCompareFilesResult({
+      decodeVersionedResult(VERSIONED_METHOD.versionsCompareFiles, {
         entries: [{ path: "x", status: "future" }],
         nextCursor: null,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("strips accepted over-cap metadata from in-band blob results", () => {
@@ -120,10 +113,10 @@ describe("versioned result decoder rejection", () => {
       byteLength: 3,
       inbandLimitBytes: 48 * 1024,
     };
-    expect(decodeVersionedBinaryReadBlobResult(result)).toEqual({
+    expect(decodeVersionedResult(VERSIONED_METHOD.binaryReadBlob, result)).toEqual({
       bytesBase64: "YWJj",
     });
-    expect(decodeVersionedTextReadBlobResult(result)).toEqual({
+    expect(decodeVersionedResult(VERSIONED_METHOD.textReadBlob, result)).toEqual({
       bytesBase64: "YWJj",
     });
   });
@@ -151,11 +144,11 @@ describe("versionedText.list hasYdocMarker", () => {
 
   it("carries the flag through, both ways", () => {
     expect(
-      decodeVersionedTextListResult({ files: [row()], nextAfterPath: null })
+      decodeVersionedResult(VERSIONED_METHOD.textList, { files: [row()], nextAfterPath: null })
         .files[0]!.hasYdocMarker,
     ).toBe(true);
     expect(
-      decodeVersionedTextListResult({
+      decodeVersionedResult(VERSIONED_METHOD.textList, {
         files: [row({ hasYdocMarker: false, metadataOrigin: "capture" })],
         nextAfterPath: null,
       }).files[0]!.hasYdocMarker,
@@ -165,16 +158,16 @@ describe("versionedText.list hasYdocMarker", () => {
   it("Rejects a row with no hasYdocMarker instead of assuming unowned", () => {
     const { hasYdocMarker: _omitted, ...withoutFlag } = row();
     expect(() =>
-      decodeVersionedTextListResult({ files: [withoutFlag], nextAfterPath: null }),
-    ).toThrow(VersionedProtocolShapeError);
+      decodeVersionedResult(VERSIONED_METHOD.textList, { files: [withoutFlag], nextAfterPath: null }),
+    ).toThrow(ProtocolShapeError);
   });
 
   it("rejects a non-boolean hasYdocMarker", () => {
     expect(() =>
-      decodeVersionedTextListResult({
+      decodeVersionedResult(VERSIONED_METHOD.textList, {
         files: [row({ hasYdocMarker: "yes" })],
         nextAfterPath: null,
       }),
-    ).toThrow(VersionedProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 });
