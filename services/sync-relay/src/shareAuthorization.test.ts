@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  authorizeLinkShareAction,
+  authorizeNamedLiveEditShareGrant,
   authorizeShareAction,
   resolveReceivedShareAuthority,
   type ShareAction,
@@ -87,6 +89,99 @@ function receivedAuthorityStorage(options: {
 }
 
 describe("share authorization", () => {
+  it("authorizes only the supplied named Edit grant for live-edit", () => {
+    const view = { ...grant, grantId: "view-grant", access: "view" };
+    const edit = { ...grant, grantId: "edit-grant", generation: 19 };
+    const storage = receivedAuthorityStorage({
+      grants: [view, edit],
+      onScan: () => { throw new Error("live Edit must not scan other grants"); },
+    });
+    const resolve = (grantId: string) => authorizeNamedLiveEditShareGrant({
+      storage, actorUserId: "recipient-1", grantId,
+    });
+    expect(resolve(view.grantId)).toEqual({ ok: false, reason: "stale-selector" });
+    expect(resolve("missing-grant")).toEqual({ ok: false, reason: "not-authorized" });
+    expect(resolve(edit.grantId)).toMatchObject({
+      ok: true, grant: { grantId: edit.grantId, generation: 19 },
+      effectiveSelector: { access: "edit", versionId: null, paths: ["docs"] },
+    });
+    edit.generation = 20;
+    expect(resolve(edit.grantId)).toMatchObject({ ok: true, grant: { generation: 20 } });
+  });
+
+  it("distinguishes lost named standing from an ineligible live Edit selector", () => {
+    const lostStanding: Array<Partial<SyncRelayShareGrantRow>> = [
+      { status: "revoked" }, { revokedAtMs: 2000 }, { generation: 0 }, { generation: 1.5 },
+      { principalUserId: "other-user" }, { principalUserId: null },
+      { principalEmail: "claimed@example.test" },
+      { principalKind: "link", principalUserId: null },
+      { principalKind: "email", principalUserId: null, principalEmail: "recipient@example.test" },
+    ];
+    for (const changed of lostStanding) {
+      expect(authorizeNamedLiveEditShareGrant({
+        storage: storageFixture({ grant: { ...grant, ...changed } }),
+        actorUserId: "recipient-1", grantId: grant.grantId,
+      }), JSON.stringify(changed)).toEqual({ ok: false, reason: "not-authorized" });
+    }
+    for (const storage of [
+      storageFixture({ grant: null }), storageFixture({ share: null }),
+      storageFixture({ ownerStanding: false }),
+    ]) {
+      expect(authorizeNamedLiveEditShareGrant({
+        storage, actorUserId: "recipient-1", grantId: grant.grantId,
+      })).toEqual({ ok: false, reason: "not-authorized" });
+    }
+    for (const selectorJson of [
+      "{", JSON.stringify({ paths: ["docs"], versionId: "pinned-version" }),
+      JSON.stringify({ paths: [], versionId: null }),
+      JSON.stringify({ kind: "chat-channel", channelWireId: "channel-1" }),
+    ]) {
+      expect(authorizeNamedLiveEditShareGrant({
+        storage: storageFixture({ share: { ...share, selectorJson } }),
+        actorUserId: "recipient-1", grantId: grant.grantId,
+      }), selectorJson).toEqual({ ok: false, reason: "stale-selector" });
+    }
+    for (const access of ["view", "comment"]) {
+      expect(authorizeNamedLiveEditShareGrant({
+        storage: storageFixture({ grant: { ...grant, access } }),
+        actorUserId: "recipient-1", grantId: grant.grantId,
+      }), access).toEqual({ ok: false, reason: "stale-selector" });
+    }
+    expect(authorizeNamedLiveEditShareGrant({
+      storage: storageFixture({ ownerStanding: false, share: { ...share, selectorJson: "{" } }),
+      actorUserId: "recipient-1", grantId: grant.grantId,
+    })).toEqual({ ok: false, reason: "not-authorized" });
+  });
+
+  it("keeps dependent live Edit contingent on its exact active parent", () => {
+    const parent: SyncRelayShareGrantRow = {
+      ...grant, grantId: "parent-link", principalKind: "link", principalUserId: null,
+    };
+    const dependent = { ...grant, parentGrantId: parent.grantId };
+    for (const currentParent of [
+      parent, null, { ...parent, status: "revoked" as const }, { ...parent, revokedAtMs: 2000 },
+      { ...parent, access: "view" }, { ...parent, access: "comment" },
+      { ...parent, shareId: "other-share" },
+      { ...parent, principalKind: "user" as const, principalUserId: "recipient-1" },
+    ]) {
+      const result = authorizeNamedLiveEditShareGrant({
+        storage: receivedAuthorityStorage({
+          grants: [dependent], otherGrants: currentParent ? [currentParent] : [],
+          onScan: () => { throw new Error("live Edit must not scan other grants"); },
+        }),
+        actorUserId: "recipient-1", grantId: dependent.grantId,
+      });
+      expect(result.ok, JSON.stringify(currentParent)).toBe(currentParent === parent);
+      if (currentParent !== parent) expect(result).toEqual({ ok: false, reason: "not-authorized" });
+    }
+    expect(authorize("live-edit", storageFixture())).toMatchObject({ ok: true });
+    expect(authorize("live-edit", storageFixture({ grant: { ...grant, access: "comment" } })))
+      .toEqual({ ok: false, reason: "denied" });
+    expect(authorizeLinkShareAction({
+      storage: storageFixture({ grant: parent }), grantId: parent.grantId, action: "live-edit",
+    })).toEqual({ ok: false, reason: "gauntlet" });
+  });
+
   it("derives received-share read selection and generic appendability from one grant pass", () => {
     const parent: SyncRelayShareGrantRow = {
       ...grant,
