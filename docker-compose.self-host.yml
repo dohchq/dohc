@@ -55,12 +55,19 @@ services:
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?Set BETTER_AUTH_SECRET in .env.self-host}
       POSTGRES_URL: postgres://${POSTGRES_USER:-dohc}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.self-host}@postgres:5432/${POSTGRES_DB:-dohc}
       WORKSPACE_API_PORT: "1786"
-      WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:-http://workspace-api:1786}
+      WORKSPACE_API_BASE_URL: ${WORKSPACE_API_BASE_URL:?Set WORKSPACE_API_BASE_URL in .env.self-host}
+      DOHC_WEB_ORIGIN: ${DOHC_SHARE_WEB_PUBLIC_ORIGIN:?Set DOHC_SHARE_WEB_PUBLIC_ORIGIN in .env.self-host}
     command: >
       sh -lc "corepack enable &&
       corepack prepare pnpm@11.20.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @dohc/workspace-api dev"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:1786/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 300s
     ports:
       - "${WORKSPACE_API_BIND:-127.0.0.1}:${WORKSPACE_API_PORT:-1786}:1786"
     volumes:
@@ -84,6 +91,7 @@ services:
       DOHC_RELAY_SHARE_WEB_ORIGIN: ${DOHC_SHARE_WEB_PUBLIC_ORIGIN:?Set DOHC_SHARE_WEB_PUBLIC_ORIGIN in .env.self-host}
       SYNC_RELAY_BIND: "0.0.0.0"
       SYNC_RELAY_PORT: "1788"
+      SYNC_RELAY_AUTH_BASE_URL: ${WORKSPACE_API_BASE_URL:?Set WORKSPACE_API_BASE_URL in .env.self-host}
       SYNC_RELAY_DB_PATH: /data/sync-relay.sqlite
     command: >
       sh -lc "corepack enable &&
@@ -108,8 +116,12 @@ services:
     depends_on:
       sync-relay:
         condition: service_healthy
+      workspace-api:
+        condition: service_healthy
     environment:
       DOHC_SHARE_WEB_RELAY_URL: http://sync-relay:1788
+      DOHC_SHARE_WEB_AUTH_URL: http://workspace-api:1786
+      DOHC_SHARE_WEB_PUBLIC_ORIGIN: ${DOHC_SHARE_WEB_PUBLIC_ORIGIN:?Set DOHC_SHARE_WEB_PUBLIC_ORIGIN in .env.self-host}
       DOHC_SHARE_WEB_PUBLIC_RELAY_URL: ${DOHC_SHARE_WEB_PUBLIC_RELAY_URL:?Set DOHC_SHARE_WEB_PUBLIC_RELAY_URL in .env.self-host}
       DOHC_SHARE_WEB_RELAY_EXCHANGE_KEY: ${DOHC_RELAY_EXCHANGE_KEY:?Set DOHC_RELAY_EXCHANGE_KEY in .env.self-host}
       DOHC_SHARE_WEB_PUBLIC_HOSTS: ${DOHC_SHARE_WEB_PUBLIC_HOST:?Set DOHC_SHARE_WEB_PUBLIC_HOST in .env.self-host}

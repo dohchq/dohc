@@ -62,3 +62,12 @@ export {
 } from "./relay/keyEnvelopeWireContract";
 
 export { AUTOMATION_CLAIMED_EVENT, MAX_GRANULAR_CHAT_QUERY_CHARS, WORKSPACE_METHOD, decodeCollectionValue, decodeGranularChatMessageSearchResponse, decodeSearchQueryPageResult, encodeCollectionValue, type AutomationClaim, type CollectionPendingAdoptionCursor, type CollectionPendingAdoptionsPage, type ConflictFileState, type ConflictRecord, type GranularChatMessageSearchResponse, type GranularChatMessageSearchResult, type SearchQueryPageParams, type SearchResult, type WatcherStatusResult } from "./workspace/workspaceWireContract";
+
+export {
+  OwnerYDocOutbox,
+  OwnerYDocOutboxReadChangedError,
+  parseLiveObjectBinding,
+  type LiveObjectBinding,
+  type OwnerYDocOutboxEntry,
+  type OwnerYDocOutboxLimits,
+} from "./ydoc/ownerYDocOutbox";
