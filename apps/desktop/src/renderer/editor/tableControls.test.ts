@@ -290,10 +290,10 @@ describe("table controls grips", () => {
     cells[4]?.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
 
     const visibleRows = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--row.is-visible",
+      ".dohc-table-grip--row.is-active",
     );
     const visibleColumns = editor.view.dom.querySelectorAll(
-      ".dohc-table-grip--col.is-visible",
+      ".dohc-table-grip--col.is-active",
     );
     expect(visibleRows).toHaveLength(1);
     expect(visibleRows[0]?.getAttribute("data-table-row")).toBe("1");
@@ -317,7 +317,7 @@ describe("table controls grips", () => {
     expect(activeCols[0]?.dataset.col).toBe("1");
     expect(activeRows[0]?.dataset.row).toBe("1");
     const visibleResize = dom.querySelectorAll<HTMLElement>(
-      ".dohc-table-row-resize.is-visible",
+      ".dohc-table-row-resize.is-active",
     );
     expect(visibleResize).toHaveLength(1);
     expect(visibleResize[0]?.dataset.tableRowResize).toBe("1");
@@ -1271,6 +1271,47 @@ describe("table controls grips", () => {
 
     expect(colStrip.style.height).toBe("0px");
     expect(rowStrip.style.width).toBe("0px");
+  });
+
+  it("refreshes edge hit areas after layout changes while the same cell stays hovered", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const table = dom.querySelector("table")!;
+    const cells = [...table.querySelectorAll<HTMLElement>("td, th")];
+    const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col")!;
+    const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row")!;
+    const resizeHandles = [...table.querySelectorAll<HTMLElement>(".dohc-table-row-resize")];
+    let width = 200;
+    let height = 100;
+    Object.defineProperty(table, "getBoundingClientRect", {
+      value: () => new DOMRect(20, 30, width, height),
+    });
+    cells.forEach((cell, index) => {
+      Object.defineProperty(cell, "getBoundingClientRect", {
+        value: () => new DOMRect(
+          20 + (index % 2) * width / 2,
+          30 + Math.floor(index / 2) * height / 2,
+          width / 2,
+          height / 2,
+        ),
+      });
+    });
+    dom.dispatchEvent(new MouseEvent("mouseenter"));
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(colStrip.style.height).toBe("100px");
+    expect(rowStrip.style.width).toBe("200px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["200px", "200px"]);
+
+    const unchangedDocument = editor.state.doc;
+    width = 340;
+    height = 180;
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    expect(editor.state.doc).toBe(unchangedDocument);
+    expect(colStrip.style.height).toBe("180px");
+    expect(rowStrip.style.width).toBe("340px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["340px", "340px"]);
+    expect(table.querySelectorAll(".dohc-table-row-resize.is-active")).toHaveLength(1);
   });
 
   it("append-row button adds a row at the bottom edge", () => {

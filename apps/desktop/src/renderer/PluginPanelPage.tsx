@@ -1,3 +1,4 @@
+import { useRequestSequence } from "./useRequestSequence";
 import {
   DOHC_SDK_PROTOCOL,
   DOHC_THEME_PROTOCOL,
@@ -51,8 +52,8 @@ export function PluginPanelPage(props: {
   const panelRef = useRef<
     Extract<StartPluginPanelResult, { status: "ok" }> | null
   >(null);
-  const startRequestRef = useRef(0);
-  const sdkGenerationRef = useRef(0);
+  const startRequestRef = useRequestSequence();
+  const sdkGenerationRef = useRequestSequence();
   const sdkContextRef = useRef("");
   const stoppingRef = useRef(false);
   const invalidatedSurfaceIdsRef = useRef(new Set<number>());
@@ -61,8 +62,8 @@ export function PluginPanelPage(props: {
 
   useEffect(() => {
     return () => {
-      startRequestRef.current += 1;
-      sdkGenerationRef.current += 1;
+      startRequestRef.next();
+      sdkGenerationRef.next();
       stoppingRef.current = true;
       panelRef.current = null;
       invalidatedSurfaceIdsRef.current.clear();
@@ -77,9 +78,9 @@ export function PluginPanelPage(props: {
   }, [props.panelId, props.placement, props.pluginId, props.workspaceId]);
 
   useEffect(() => {
-    const request = ++startRequestRef.current;
+    const request = startRequestRef.next();
     const requestContext = sdkContext;
-    sdkGenerationRef.current += 1;
+    sdkGenerationRef.next();
     stoppingRef.current = false;
     panelRef.current = null;
     setLoad({ status: "loading" });
@@ -93,7 +94,7 @@ export function PluginPanelPage(props: {
       })
       .then((result) => {
         if (
-          request !== startRequestRef.current ||
+          !startRequestRef.isCurrent(request) ||
           requestContext !== sdkContextRef.current ||
           stoppingRef.current
         ) {
@@ -107,13 +108,13 @@ export function PluginPanelPage(props: {
           setRestart((value) => value + 1);
           return;
         }
-        sdkGenerationRef.current += 1;
+        sdkGenerationRef.next();
         panelRef.current = result;
         setLoad({ status: "ready", panel: result });
       })
       .catch((error: unknown) => {
         if (
-          request !== startRequestRef.current ||
+          !startRequestRef.isCurrent(request) ||
           requestContext !== sdkContextRef.current ||
           stoppingRef.current
         ) {
@@ -129,8 +130,8 @@ export function PluginPanelPage(props: {
       });
 
     return () => {
-      startRequestRef.current += 1;
-      sdkGenerationRef.current += 1;
+      startRequestRef.next();
+      sdkGenerationRef.next();
       panelRef.current = null;
     };
   }, [
@@ -157,8 +158,8 @@ export function PluginPanelPage(props: {
         return;
       }
       if (event.surfaceId !== panel.surfaceId) return;
-      startRequestRef.current += 1;
-      sdkGenerationRef.current += 1;
+      startRequestRef.next();
+      sdkGenerationRef.next();
       panelRef.current = null;
       setLoad({ status: "loading" });
       setRestart((value) => value + 1);
@@ -192,7 +193,7 @@ export function PluginPanelPage(props: {
         );
         return;
       }
-      const requestGeneration = sdkGenerationRef.current;
+      const requestGeneration = sdkGenerationRef.current();
       const requestContext = sdkContext;
       let response: DohcSdkResponseMessage;
       // What this request asks dohc to open, held until the liveness guard
@@ -237,7 +238,7 @@ export function PluginPanelPage(props: {
 
       const currentPanel = panelRef.current;
       if (
-        requestGeneration === sdkGenerationRef.current &&
+        sdkGenerationRef.isCurrent(requestGeneration) &&
         requestContext === sdkContextRef.current &&
         !stoppingRef.current &&
         currentPanel &&

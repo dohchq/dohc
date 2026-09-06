@@ -6,7 +6,7 @@ import type {
   WorkspaceSearchPayload,
   WorkspaceSearchStartResult,
 } from "../../ipc/bridgeContract";
-import type { SearchResultsEvent } from "../../ipc/channels";
+import type { SearchResultsEvent } from "../../ipc/bridgeContract";
 import {
   useWorkspaceSearch,
   type SearchRunOptions,

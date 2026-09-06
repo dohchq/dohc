@@ -76,17 +76,15 @@ import type {
   ShowExplorerMenuResult,
   ShowWorkbenchMenuResult,
   UpdateStateEvent,
+  EngineYDocSaveStateEvent,
+  MenuCommand,
+  SearchResultsEvent,
   WriteWorkspaceTextPayload,
   WriteWorkspaceTextResult,
   WorkspaceActivityEvent,
   WorkspaceSearchPayload,
   WorkspaceUiState,
 } from "../ipc/bridgeContract";
-import type {
-  EngineYDocSaveStateEvent,
-  MenuCommandId,
-  SearchResultsEvent,
-} from "../ipc/channels";
 import { DEFAULT_USER_SETTINGS } from "../settings/userSettings";
 import {
   DEFAULT_WORKSPACE_SETTINGS,
@@ -146,15 +144,15 @@ import {
 import { resetSharedLocalDocumentsForTests } from "./sharedLocalDocument";
 import { RecoveryList } from "./RecoveryList";
 import { documentVersionKey } from "./documentVersionKey";
-import { leafOf } from "./workbench/path-tree";
+import { basenameOf } from "./path";
 import { deferred } from "../testing/deferred";
 
 // Real implementations, spied (the chatFileMentions precedent): FileInspector
 // derives its document key on every render, and every explorer surface names
-// its rows through leafOf — so these call counts show whether the inspector
+// its rows through basenameOf — so these call counts show whether the inspector
 // and the tree actually re-rendered across a shell render.
 vi.mock("./documentVersionKey", { spy: true });
-vi.mock("./workbench/path-tree", { spy: true });
+vi.mock("./path", { spy: true });
 
 // The close dialog's list, standing on its own: the guard subscribes and hands
 // the rows down, so a test of the LIST needs the same one-line subscriber.
@@ -346,7 +344,7 @@ function makeBaseBridge(
     (event: { workspaceId: string }) => void
   >();
   let searchCallback: ((batch: SearchResultsEvent) => void) | null = null;
-  let menuCallback: ((command: MenuCommandId) => void) | null = null;
+  let menuCallback: ((command: MenuCommand) => void) | null = null;
   let pluginPanelOpenedCallback:
     | ((event: PluginPanelOpenedEvent) => void)
     | null = null;
@@ -621,7 +619,7 @@ function makeBaseBridge(
       },
     ),
     onCloudSessionChanged: vi.fn((_callback: () => void) => () => {}),
-    onMenuCommand: vi.fn((callback: (command: MenuCommandId) => void) => {
+    onMenuCommand: vi.fn((callback: (command: MenuCommand) => void) => {
       menuCallback = callback;
       return () => {
         menuCallback = null;
@@ -682,7 +680,7 @@ function makeBaseBridge(
     ),
     stopPluginWebApp: vi.fn(async () => undefined),
     onPluginWebAppFailed: vi.fn(() => () => undefined),
-    emitMenuCommand: (command: MenuCommandId) => menuCallback?.(command),
+    emitMenuCommand: (command: MenuCommand) => menuCallback?.(command),
     onUpdateState: vi.fn(() => () => {}),
     // Content search (E5.0): the shell subscribes on mount.
     onSearchResults: vi.fn((callback: (batch: SearchResultsEvent) => void) => {
@@ -813,7 +811,6 @@ function makeBridge(
     ),
   });
 }
-
 
 function renderShell(
   bridge: ReturnType<typeof makeBridge>,
@@ -16430,10 +16427,10 @@ describe("workbench render cost", () => {
     // still in flight cannot inflate them: nothing async can interleave
     // between the capture, the rerender, and the assertions.
     const keyCalls = vi.mocked(documentVersionKey).mock.calls.length;
-    const leafCalls = vi.mocked(leafOf).mock.calls.length;
+    const leafCalls = vi.mocked(basenameOf).mock.calls.length;
     view.rerender(shellElement());
     expect(vi.mocked(documentVersionKey).mock.calls.length).toBe(keyCalls);
-    expect(vi.mocked(leafOf).mock.calls.length).toBe(leafCalls);
+    expect(vi.mocked(basenameOf).mock.calls.length).toBe(leafCalls);
   });
 
   it("caps a sustained activity burst and keeps its trailing refresh", async () => {

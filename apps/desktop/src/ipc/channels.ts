@@ -1,7 +1,7 @@
-// The closed application-menu command set. Lives here (not bridgeContract)
-// because the SANDBOXED preload validates against it as a value, and this
-// module must stay dependency-free — bridgeContract pulls zod/workspace-core,
-// which a sandboxed preload cannot require at runtime.
+// Closed tuples and channel names shared by main, the bridge contract, and the
+// preload. This module imports nothing so main-side modules can read a tuple
+// without loading the whole contract.
+
 export const MENU_COMMANDS = [
   "new-file",
   "new-folder",
@@ -21,25 +21,9 @@ export const MENU_COMMANDS = [
   "close-tab",
 ] as const;
 
-export type MenuCommandId = (typeof MENU_COMMANDS)[number];
-
-// The preload boundary check for menu events: only an exact primitive string
-// from the closed tuple passes — String objects, toString tricks, case
-// variants, and unknown ids are all dropped. Exported so the boundary itself
-// is unit-tested (not just the renderer-side registry lookup behind it).
-export function isMenuCommand(value: unknown): value is MenuCommandId {
-  return (
-    typeof value === "string" &&
-    (MENU_COMMANDS as readonly string[]).includes(value)
-  );
-}
-
-// The closed explorer context-menu command set. Same pattern as
-// MENU_COMMANDS: the renderer asks main to pop a native menu built from
-// MAIN-owned labels over this closed set, and the chosen id comes back over
-// the same invoke. Lives here (dependency-free) so the sandboxed preload can
-// validate the RESULT against it as a plain value before renderer code sees
-// it — the renderer never supplies labels or item structure.
+// Explorer context menu: the renderer names what was right-clicked, main pops
+// a native menu built from main-owned labels over this closed set, and the
+// chosen id comes back over the same invoke.
 export const EXPLORER_MENU_COMMANDS = [
   "new-file",
   "new-folder",
@@ -56,25 +40,7 @@ export const EXPLORER_MENU_COMMANDS = [
   "unmount-share",
 ] as const;
 
-type ExplorerMenuCommandId = (typeof EXPLORER_MENU_COMMANDS)[number];
-
-// The preload boundary check for the explorer-menu invoke result: only an
-// exact primitive string from the closed tuple passes (String objects,
-// toString tricks, case variants, unknown ids drop to null = "dismissed").
-export function isExplorerMenuCommand(
-  value: unknown,
-): value is ExplorerMenuCommandId {
-  return (
-    typeof value === "string" &&
-    (EXPLORER_MENU_COMMANDS as readonly string[]).includes(value)
-  );
-}
-
-// Closed native workbench context-menu command set. Explorer kept
-// its richer file-tree menu; this generic menu covers tabs, editor surfaces,
-// and the status bar. Labels/roles live in main. Renderer receives only the
-// selected command id, validated here before it can route to existing shell
-// actions.
+// Generic workbench context menu for tabs, editor surfaces, and the status bar.
 export const WORKBENCH_MENU_COMMANDS = [
   "move-tab-to-new-group",
   "close-editor-group",
@@ -90,20 +56,6 @@ export const WORKBENCH_MENU_COMMANDS = [
   "toggle-theme",
 ] as const;
 
-type WorkbenchMenuCommandId = (typeof WORKBENCH_MENU_COMMANDS)[number];
-
-export function isWorkbenchMenuCommand(
-  value: unknown,
-): value is WorkbenchMenuCommandId {
-  return (
-    typeof value === "string" &&
-    (WORKBENCH_MENU_COMMANDS as readonly string[]).includes(value)
-  );
-}
-
-// Closed plugin pipeline states shared by main, the zod bridge contract, and
-// the sandboxed preload event parser. Keep these dependency-free like the
-// other main-to-renderer event tuples in this module.
 export const PLUGIN_PIPELINE_STATUSES = [
   "discovered",
   "queued",
@@ -140,482 +92,28 @@ export const BUILTIN_DRIVER_PLUGIN_DIRECTORY_NAMES = ["agent-chat"] as const;
 // tree can hold thousands, and the whole inventory stays in main.
 export const PLUGIN_UNINSTALL_PATH_SAMPLE_LIMIT = 20;
 
-// Closed main→renderer update-state event shape. Like
-// MENU_COMMANDS this lives here, not bridgeContract, because the SANDBOXED
-// preload validates against it as a plain value and must stay dependency-free.
-// The tuple mirrors updateMachine's UpdateState["status"] — channels.test.ts
-// holds the compile-time both-ways check so the two can never drift.
-export const UPDATE_STATUSES = [
-  "idle",
-  "checking",
-  "up-to-date",
-  "available",
-  "downloading",
-  "ready",
-  "offline",
-  "error",
-] as const;
-
-type UpdateStatusId = (typeof UPDATE_STATUSES)[number];
-
-export const SHARE_HANDOFF_STATUSES = [
-  "idle",
-  "waiting-for-sign-in",
-  "waiting-for-acceptance",
-  "redeeming",
-  "failed-wrong-server",
-  "failed-refused",
-  "failed-busy",
-  "failed-network",
-  "done",
-] as const;
-
-type ShareHandoffStatusEvent =
-  | { status: "idle" }
-  | {
-      status: Exclude<
-        (typeof SHARE_HANDOFF_STATUSES)[number],
-        "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
-      >;
-      statusId: string;
-    }
-  | { status: "waiting-for-acceptance"; statusId: string; email: string }
-  | { status: "failed-wrong-server"; statusId: string; linkRelayUrl: string }
-  | { status: "done"; statusId: string; shareId: string };
-
-export function parseShareHandoffStatus(
-  value: unknown,
-): ShareHandoffStatusEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return null;
-  }
-  if (!Object.hasOwn(value, "status")) return null;
-  const raw = value as Record<string, unknown>;
-  const status = raw.status;
-  if (
-    typeof status !== "string" ||
-    !(SHARE_HANDOFF_STATUSES as readonly string[]).includes(status)
-  ) {
-    return null;
-  }
-  if (status === "idle") {
-    return Reflect.ownKeys(value).length === 1 ? { status } : null;
-  }
-  if (
-    !Object.hasOwn(value, "statusId") ||
-    typeof raw.statusId !== "string" ||
-    raw.statusId.length === 0 ||
-    raw.statusId.length > 200
-  ) {
-    return null;
-  }
-  if (status === "done") {
-    if (
-      Reflect.ownKeys(value).length !== 3 ||
-      !Object.hasOwn(value, "shareId") ||
-      typeof raw.shareId !== "string" ||
-      raw.shareId.length === 0 ||
-      raw.shareId.length > 200
-    ) {
-      return null;
-    }
-    return { status, statusId: raw.statusId, shareId: raw.shareId };
-  }
-  if (status === "waiting-for-acceptance") {
-    if (
-      Reflect.ownKeys(value).length !== 3 ||
-      !Object.hasOwn(value, "email") ||
-      typeof raw.email !== "string" ||
-      raw.email.length === 0 ||
-      raw.email.length > 320
-    ) {
-      return null;
-    }
-    return { status, statusId: raw.statusId, email: raw.email };
-  }
-  if (status === "failed-wrong-server") {
-    if (
-      Reflect.ownKeys(value).length !== 3 ||
-      !Object.hasOwn(value, "linkRelayUrl") ||
-      typeof raw.linkRelayUrl !== "string" ||
-      raw.linkRelayUrl.length === 0 ||
-      raw.linkRelayUrl.length > 2048
-    ) {
-      return null;
-    }
-    return { status, statusId: raw.statusId, linkRelayUrl: raw.linkRelayUrl };
-  }
-  if (Reflect.ownKeys(value).length !== 2) return null;
-  return {
-    status: status as Exclude<
-      (typeof SHARE_HANDOFF_STATUSES)[number],
-      "idle" | "done" | "waiting-for-acceptance" | "failed-wrong-server"
-    >,
-    statusId: raw.statusId,
-  };
-}
-
-export const UPDATE_CHANNELS = ["latest", "nightly"] as const;
-type UpdateChannelId = (typeof UPDATE_CHANNELS)[number];
-
-function isUpdateChannel(value: unknown): value is UpdateChannelId {
-  return (
-    typeof value === "string" &&
-    (UPDATE_CHANNELS as readonly string[]).includes(value)
-  );
-}
-
-function optionalBoundedString(
-  value: unknown,
-  max: number,
-): string | undefined | null {
-  if (value === undefined) return undefined;
-  return typeof value === "string" && value.length > 0 && value.length <= max
-    ? value
-    : null;
-}
-
-function optionalBoolean(value: unknown): boolean | undefined | null {
-  if (value === undefined) return undefined;
-  return typeof value === "boolean" ? value : null;
-}
-
-function optionalPercent(value: unknown): number | undefined | null {
-  if (value === undefined) return undefined;
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100
-    ? value
-    : null;
-}
-
-// The preload boundary check for update events: only a plain object whose
-// status is an exact primitive member of the closed tuple, whose message is a
-// bounded primitive string, and whose optional public update metadata is
-// primitive and bounded can cross. Unknown fields are dropped, and String
-// objects/toString tricks fail the typeof checks. Unit-tested like
-// isMenuCommand.
-export function parseUpdateStateEvent(
-  value: unknown,
-): {
-  status: UpdateStatusId;
-  message: string;
-  currentVersion?: string;
-  channel?: UpdateChannelId;
-  canCheck?: boolean;
-  canInstall?: boolean;
-  version?: string;
-  percent?: number;
-} | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  // Own properties only: an object inheriting status/message from a crafted
-  // prototype must not pass a check that promises "plain object".
-  if (!Object.hasOwn(value, "status") || !Object.hasOwn(value, "message")) {
-    return null;
-  }
-  const { status, message } = value as { status?: unknown; message?: unknown };
-  if (
-    typeof status !== "string" ||
-    !(UPDATE_STATUSES as readonly string[]).includes(status)
-  ) {
-    return null;
-  }
-  if (typeof message !== "string" || message.length === 0 || message.length > 500) {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const currentVersion = optionalBoundedString(raw.currentVersion, 200);
-  const version = optionalBoundedString(raw.version, 200);
-  const canCheck = optionalBoolean(raw.canCheck);
-  const canInstall = optionalBoolean(raw.canInstall);
-  const percent = optionalPercent(raw.percent);
-  if (
-    currentVersion === null ||
-    version === null ||
-    canCheck === null ||
-    canInstall === null ||
-    percent === null
-  ) {
-    return null;
-  }
-  if (raw.channel !== undefined && !isUpdateChannel(raw.channel)) return null;
-  return {
-    status: status as UpdateStatusId,
-    message,
-    ...(currentVersion ? { currentVersion } : {}),
-    ...(raw.channel ? { channel: raw.channel as UpdateChannelId } : {}),
-    ...(canCheck !== undefined ? { canCheck } : {}),
-    ...(canInstall !== undefined ? { canInstall } : {}),
-    ...(version ? { version } : {}),
-    ...(percent !== undefined ? { percent } : {}),
-  };
-}
-
-// Closed main→renderer search-results event shape. Like
-// parseUpdateStateEvent this lives here, not bridgeContract, because the
-// SANDBOXED preload validates every batch against it as a plain value and
-// must stay dependency-free. The bounds mirror workspaceSearch.ts (the main-
-// side producer) and bridgeContract's zod schema derives from the same
-// limits — channels.test.ts pins them so the three can never drift.
+// Workspace content search streams batches main→renderer. The bounds mirror
+// workspaceSearch.ts (the producer); bridgeContract's SearchResultsEvent
+// schema enforces them at both ends of the channel.
 export const SEARCH_EVENT_MAX_ENTRIES = 50;
-const SEARCH_EVENT_MAX_PREVIEW_CHARS = 250;
+export const SEARCH_EVENT_MAX_PREVIEW_CHARS = 250;
 export const SEARCH_EVENT_MAX_ID_CHARS = 64;
-const SEARCH_EVENT_MAX_PATH_CHARS = 4096;
-
-export interface SearchResultsEventEntry {
-  path: string;
-  line: number;
-  column: number;
-  preview: string;
-  matchStart: number;
-  matchEnd: number;
-  surface?: "file" | "chat";
-  threadId?: string;
-  objectId?: string;
-  title?: string;
-}
-
 // A search that is fail-closed by a broken policy file (or otherwise paused)
 // carries a short human-readable notice so the panel can explain the empty
 // result instead of silently showing nothing.
-const SEARCH_EVENT_MAX_NOTICE_CHARS = 500;
+export const SEARCH_EVENT_MAX_NOTICE_CHARS = 500;
 
-export interface SearchResultsEvent {
-  searchId: string;
-  entries: SearchResultsEventEntry[];
-  done: boolean;
-  limitHit: boolean;
-  notice?: string;
-}
-
-function isBoundedString(value: unknown, max: number): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= max;
-}
-
-function isPositiveInt(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 1;
-}
-
-// Dependency-free lexical path check for the preload boundary: relative,
-// forward-slashed, no null bytes, no backslashes, no empty/dot/dot-dot
-// segments. Main already ran validateUserWritePath before sending (it owns
-// containment); this re-check is the sandboxed preload's own closed gate —
-// it cannot require workspace-core, so it enforces the same lexical rules
-// inline. A path that fails drops the whole batch (a tampered event is not
-// salvageable row by row).
-export function isSafeRelativePath(value: unknown): value is string {
-  if (!isBoundedString(value, SEARCH_EVENT_MAX_PATH_CHARS)) return false;
-  if (value.includes("\0") || value.includes("\\")) return false;
-  if (value.startsWith("/") || /^[A-Za-z]:/.test(value)) return false;
-  for (const segment of value.split("/")) {
-    if (segment === "" || segment === "." || segment === "..") return false;
-  }
-  return true;
-}
-
-// The preload boundary check for search-result events: only a plain object
-// whose searchId is a bounded primitive string and whose entries all pass the
-// closed entry shape (safe relative path, 1-based integer line/column,
-// bounded preview, ordered in-bounds match offsets) gets through — and only
-// the validated fields are rebuilt into a fresh object (extra fields never
-// cross; String objects/toString tricks fail the typeof checks). Unit-tested
-// like parseUpdateStateEvent.
-export function parseSearchResultsEvent(value: unknown): SearchResultsEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  if (
-    !Object.hasOwn(value, "searchId") ||
-    !Object.hasOwn(value, "entries") ||
-    !Object.hasOwn(value, "done") ||
-    !Object.hasOwn(value, "limitHit")
-  ) {
-    return null;
-  }
-  const { searchId, entries, done, limitHit } = value as {
-    searchId?: unknown;
-    entries?: unknown;
-    done?: unknown;
-    limitHit?: unknown;
-  };
-  if (!isBoundedString(searchId, SEARCH_EVENT_MAX_ID_CHARS)) return null;
-  if (typeof done !== "boolean" || typeof limitHit !== "boolean") return null;
-  if (!Array.isArray(entries) || entries.length > SEARCH_EVENT_MAX_ENTRIES) return null;
-  const notice = optionalBoundedString(
-    (value as { notice?: unknown }).notice,
-    SEARCH_EVENT_MAX_NOTICE_CHARS,
-  );
-  if (notice === null) return null;
-  const safeEntries: SearchResultsEventEntry[] = [];
-  for (const raw of entries) {
-    if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
-    const entry = raw as Record<string, unknown>;
-    const { path, line, column, preview, matchStart, matchEnd } = entry;
-    if (!isSafeRelativePath(path)) return null;
-    if (!isPositiveInt(line) || !isPositiveInt(column)) return null;
-    if (
-      typeof preview !== "string" ||
-      preview.length > SEARCH_EVENT_MAX_PREVIEW_CHARS
-    ) {
-      return null;
-    }
-    if (
-      typeof matchStart !== "number" ||
-      typeof matchEnd !== "number" ||
-      !Number.isInteger(matchStart) ||
-      !Number.isInteger(matchEnd) ||
-      matchStart < 0 ||
-      matchEnd < matchStart ||
-      matchEnd > preview.length
-    ) {
-      return null;
-    }
-    const surface = entry.surface;
-    if (surface !== undefined && surface !== "file" && surface !== "chat") return null;
-    const threadId = optionalBoundedString(entry.threadId, 200);
-    const objectId = optionalBoundedString(entry.objectId, 200);
-    const title = optionalBoundedString(entry.title, 500);
-    if (threadId === null || objectId === null || title === null) return null;
-    safeEntries.push({
-      path,
-      line,
-      column,
-      preview,
-      matchStart,
-      matchEnd,
-      ...(surface !== undefined ? { surface } : {}),
-      ...(threadId !== undefined ? { threadId } : {}),
-      ...(objectId !== undefined ? { objectId } : {}),
-      ...(title !== undefined ? { title } : {}),
-    });
-  }
-  return {
-    searchId,
-    entries: safeEntries,
-    done,
-    limitHit,
-    ...(notice !== undefined ? { notice } : {}),
-  };
-}
-
-// WS-G2-C-2 engine Y.Doc binding: main owns the node-only live Y.Doc session;
-// the renderer's editor binds to a mirror doc kept convergent over IPC. A
-// remote CRDT delta (a co-editor's edit routed through the engine) is forwarded
-// main→renderer over the engine-ydoc-remote-update event channel as a raw Yjs
-// update (structured-clone Uint8Array). Like every event that crosses into the
-// sandboxed preload, its shape is re-validated there with this dependency-free
-// closed check. sessionId is the renderer-minted per-open correlation id (like
-// searchId): the renderer applies a forwarded delta only when it matches the
-// session currently bound, so a slow/stale session can never repaint another.
+// Engine Y.Doc binding: main owns the node-only live Y.Doc session; the
+// renderer's editor binds to a mirror doc kept convergent over IPC. sessionId
+// is the renderer-minted per-open correlation id (like searchId): the renderer
+// applies a forwarded delta only when it matches the session currently bound,
+// so a slow/stale session can never repaint another.
 export const ENGINE_YDOC_SESSION_ID_MAX_CHARS = 64;
 // Raw bytes cross renderer IPC by structured clone. Admit the durable engine's
 // measured raw-update range so an engine-owned session can always hand its
 // accepted state to the renderer. The daemon carries full states as raw blob
 // chunks under the same bound.
 export const ENGINE_YDOC_UPDATE_MAX_BYTES = 20 * 1024 * 1024;
-
-export interface EngineYDocRemoteUpdateEvent {
-  sessionId: string;
-  update: Uint8Array;
-  lineageGeneration: number;
-}
-
-export function parseEngineYDocRemoteUpdateEvent(
-  value: unknown,
-): EngineYDocRemoteUpdateEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  if (
-    !Object.hasOwn(value, "sessionId") ||
-    !Object.hasOwn(value, "update") ||
-    !Object.hasOwn(value, "lineageGeneration")
-  ) {
-    return null;
-  }
-  const { sessionId, update, lineageGeneration } = value as {
-    sessionId?: unknown;
-    update?: unknown;
-    lineageGeneration?: unknown;
-  };
-  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
-  // Structured clone preserves a Uint8Array as a real Uint8Array; anything else
-  // (a plain object, an ArrayBuffer, a tampered value) is rejected.
-  if (!(update instanceof Uint8Array)) return null;
-  if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
-  if (
-    typeof lineageGeneration !== "number" ||
-    !Number.isSafeInteger(lineageGeneration) ||
-    lineageGeneration < 1
-  ) {
-    return null;
-  }
-  return { sessionId, update, lineageGeneration };
-}
-
-export interface EngineYDocLineageReplacementEvent {
-  sessionId: string;
-  update: Uint8Array;
-  recoveredPaths: string[];
-  artifactAssets: EngineYDocArtifactAssetDescriptor[];
-  lineageGeneration: number;
-}
-
-export function parseEngineYDocLineageReplacementEvent(
-  value: unknown,
-): EngineYDocLineageReplacementEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { sessionId, update, recoveredPaths, artifactAssets, lineageGeneration } = value as {
-    sessionId?: unknown;
-    update?: unknown;
-    recoveredPaths?: unknown;
-    artifactAssets?: unknown;
-    lineageGeneration?: unknown;
-  };
-  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
-  if (!(update instanceof Uint8Array)) return null;
-  if (update.byteLength === 0 || update.byteLength > ENGINE_YDOC_UPDATE_MAX_BYTES) return null;
-  if (!Array.isArray(recoveredPaths) || !recoveredPaths.every(isSafeRelativePath)) return null;
-  if (!Array.isArray(artifactAssets) || !artifactAssets.every(isArtifactAssetDescriptor)) {
-    return null;
-  }
-  if (
-    typeof lineageGeneration !== "number" ||
-    !Number.isSafeInteger(lineageGeneration) ||
-    lineageGeneration < 1
-  ) {
-    return null;
-  }
-  return { sessionId, update, recoveredPaths, artifactAssets, lineageGeneration };
-}
-
-interface EngineYDocArtifactAssetDescriptor {
-  [key: string]: string | number | undefined;
-  id: string;
-  mimeType: string;
-  created: number;
-  ref: string;
-  sha256: string;
-  lastRetrieved?: number;
-  version?: number;
-}
-
-function isArtifactAssetDescriptor(
-  value: unknown,
-): value is EngineYDocArtifactAssetDescriptor {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const asset = value as Record<string, unknown>;
-  return (
-    typeof asset.id === "string" &&
-    asset.id.length > 0 &&
-    typeof asset.mimeType === "string" &&
-    asset.mimeType.length > 0 &&
-    Number.isSafeInteger(asset.created) &&
-    (asset.created as number) >= 0 &&
-    isSafeRelativePath(asset.ref) &&
-    typeof asset.sha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(asset.sha256) &&
-    (asset.lastRetrieved === undefined ||
-      (Number.isSafeInteger(asset.lastRetrieved) &&
-        (asset.lastRetrieved as number) >= 0)) &&
-    (asset.version === undefined ||
-      (Number.isSafeInteger(asset.version) && (asset.version as number) >= 0))
-  );
-}
 
 // The editor's save indicator, pushed from main on every real settle outcome.
 // It replaced a renderer-side timer that flipped to "saved" on a timeout no
@@ -641,89 +139,6 @@ export const ENGINE_YDOC_SAVE_STATES = [
   "deleted",
 ] as const;
 export type EngineYDocSaveStateName = (typeof ENGINE_YDOC_SAVE_STATES)[number];
-
-export interface EngineYDocSaveStateEvent {
-  sessionId: string;
-  state: EngineYDocSaveStateName;
-  // The highest applyLocalUpdate seq main had journaled when this settle
-  // STARTED. The renderer clears to "saved" only once this covers its latest
-  // local edit — otherwise an in-flight settle's success would claim edits it
-  // never carried.
-  seq: number;
-}
-
-export function parseEngineYDocSaveStateEvent(
-  value: unknown,
-): EngineYDocSaveStateEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  const { sessionId, state, seq } = value as {
-    sessionId?: unknown;
-    state?: unknown;
-    seq?: unknown;
-  };
-  if (!isBoundedString(sessionId, ENGINE_YDOC_SESSION_ID_MAX_CHARS)) return null;
-  if (
-    typeof state !== "string" ||
-    !(ENGINE_YDOC_SAVE_STATES as readonly string[]).includes(state)
-  ) {
-    return null;
-  }
-  if (typeof seq !== "number" || !Number.isSafeInteger(seq) || seq < 0) return null;
-  return { sessionId, state: state as EngineYDocSaveStateName, seq };
-}
-
-interface WorkspaceActivatedEvent {
-  workspaceId: string;
-  rootPath: string;
-  kind: "personal" | "shared" | "cloud-only";
-  mode: "local-first" | "cloud-first-local-copy" | "cloud-only";
-}
-
-export const WORKSPACE_KINDS = ["personal", "shared", "cloud-only"] as const;
-export const WORKSPACE_MODES = ["local-first", "cloud-first-local-copy", "cloud-only"] as const;
-
-function isWorkspaceKind(value: unknown): value is WorkspaceActivatedEvent["kind"] {
-  return (
-    typeof value === "string" &&
-    (WORKSPACE_KINDS as readonly string[]).includes(value)
-  );
-}
-
-function isWorkspaceMode(value: unknown): value is WorkspaceActivatedEvent["mode"] {
-  return (
-    typeof value === "string" &&
-    (WORKSPACE_MODES as readonly string[]).includes(value)
-  );
-}
-
-// Native app-menu / OS-open events carry a workspace summary from main to the
-// sandboxed renderer. Keep this dependency-free like menu/update/search
-// parsing: exact primitive fields only, extra fields stripped.
-export function parseWorkspaceActivatedEvent(
-  value: unknown,
-): WorkspaceActivatedEvent | null {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
-  if (
-    !Object.hasOwn(value, "workspaceId") ||
-    !Object.hasOwn(value, "rootPath") ||
-    !Object.hasOwn(value, "kind") ||
-    !Object.hasOwn(value, "mode")
-  ) {
-    return null;
-  }
-  const raw = value as Record<string, unknown>;
-  const { workspaceId, rootPath, kind, mode } = raw;
-  if (
-    !isBoundedString(workspaceId, 200) ||
-    !/^[a-z0-9][a-z0-9-]*$/.test(workspaceId)
-  ) {
-    return null;
-  }
-  if (!isBoundedString(rootPath, 4096)) return null;
-  if (!isWorkspaceKind(kind)) return null;
-  if (!isWorkspaceMode(mode)) return null;
-  return { workspaceId, rootPath, kind, mode };
-}
 
 export const CHANNELS = {
   reloadRenderer: "desktop:reload-renderer",
