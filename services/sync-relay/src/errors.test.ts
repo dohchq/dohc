@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import fixture from "../relay-error-codes.json";
-import { RELAY_ERRORS, RELAY_ERROR_STATUSES } from "./errorCodes";
+import { RELAY_ERRORS, RELAY_ERROR_STATUSES } from "./errors";
 
 describe("relay error codes", () => {
   it("matches the checked-in fixture exactly", () => {

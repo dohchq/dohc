@@ -1,9 +1,6 @@
+import { ProtocolShapeError } from "../wireSchema";
 import { describe, expect, it } from "vitest";
-import {
-  YdocProtocolShapeError,
-  decodeYdocOpenResult,
-  decodeYdocSettleResult,
-} from "./ydocWireContract";
+import { decodeYdocOpenResult, decodeYdocSettleResult } from "./ydocWireContract";
 
 // AUDIT-SILENTSAVE round 2 (D4). The settle result grew two fields that carry
 // safety meaning — `content: string | null` (null = the artifact was past the
@@ -46,13 +43,13 @@ describe("decodeYdocSettleResult", () => {
   it("Rejects an absent content key — null means something, missing is a violation", () => {
     const { content: _omitted, ...withoutContent } = settleResult();
     expect(() => decodeYdocSettleResult(withoutContent)).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
   });
 
   it("rejects non-string, non-null content", () => {
     expect(() => decodeYdocSettleResult(settleResult({ content: 12 }))).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
   });
 
@@ -66,14 +63,14 @@ describe("decodeYdocSettleResult", () => {
   it("Rejects an absent materialized key rather than assuming the file landed", () => {
     const { materialized: _omitted, ...withoutMaterialized } = settleResult();
     expect(() => decodeYdocSettleResult(withoutMaterialized)).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
   });
 
   it("rejects a non-boolean materialized", () => {
     expect(() =>
       decodeYdocSettleResult(settleResult({ materialized: "yes" })),
-    ).toThrow(YdocProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("reports a wrong-typed nested projection field path", () => {
@@ -86,7 +83,7 @@ describe("decodeYdocSettleResult", () => {
         },
       })),
     ).toThrowError(
-      expect.objectContaining<Partial<YdocProtocolShapeError>>({
+      expect.objectContaining<Partial<ProtocolShapeError>>({
         message: expect.stringContaining(
           "ydoc.settle result.projection.sourceStateVectorSha256",
         ),
@@ -171,7 +168,7 @@ describe("decodeYdocOpenResult", () => {
     ]) {
       expect(() =>
         decodeYdocOpenResult(openResult({ artifactAssets: [invalid] })),
-      ).toThrow(YdocProtocolShapeError);
+      ).toThrow(ProtocolShapeError);
     }
   });
 
@@ -186,24 +183,24 @@ describe("decodeYdocOpenResult", () => {
   it("Rejects an absent head key instead of assuming the version has the path", () => {
     const { head: _omitted, ...withoutHead } = openResult();
     expect(() => decodeYdocOpenResult(withoutHead)).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
   });
 
   it("Rejects an absent lineage key instead of assuming there is nothing to lose", () => {
     const { lineage: _omitted, ...withoutLineage } = openResult();
     expect(() => decodeYdocOpenResult(withoutLineage)).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
   });
 
   it("rejects values outside the contract", () => {
     expect(() => decodeYdocOpenResult(openResult({ head: true }))).toThrow(
-      YdocProtocolShapeError,
+      ProtocolShapeError,
     );
     expect(() =>
       decodeYdocOpenResult(openResult({ lineage: "present" })),
-    ).toThrow(YdocProtocolShapeError);
+    ).toThrow(ProtocolShapeError);
   });
 
   it("strips extra daemon fields without rejecting the result", () => {

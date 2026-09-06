@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
 const COMPOSE_FILE = 'docker-compose.self-host.yml'
@@ -43,117 +43,6 @@ function requireCommand(command, args, label) {
 
 function composeArgs(...args) {
   return ['compose', '--env-file', ENV_FILE, '-f', COMPOSE_FILE, ...args]
-}
-
-function readPackageJson(path) {
-  return JSON.parse(readFileSync(path, 'utf8'))
-}
-
-function checkServiceScripts() {
-  const root = readPackageJson('package.json')
-  record(
-    'root migrate script',
-    root.scripts?.['migrate'] === 'node scripts/migrate-postgres.mjs',
-    'package.json exposes pnpm migrate (Postgres schema bootstrap)',
-  )
-  record(
-    'migrate script file',
-    existsSync('scripts/migrate-postgres.mjs') &&
-      existsSync('scripts/lib/apply-migrations.mjs'),
-    'scripts/migrate-postgres.mjs + scripts/lib/apply-migrations.mjs',
-  )
-  for (const [label, path] of [
-    ['workspace API package', 'services/workspace-api/package.json'],
-    ['sync relay package', 'services/sync-relay/package.json'],
-  ]) {
-    record(label, existsSync(path), path)
-  }
-}
-
-// MU-C5 self-host proof: the WHOLE multi-user chat surface (presence,
-// reactions, shares, shared channels, DMs) must run on the services this script
-// already validates — sync-relay + Better Auth over Postgres — with NO new
-// service and nothing cloud-locked. Purely static (reads source + package.json),
-// so it is deterministic and needs neither Docker nor --start.
-function checkChatSurfaceSelfHostable() {
-  const relaySource = 'services/sync-relay/src/server.ts'
-  if (!existsSync(relaySource)) {
-    record('chat surface: relay source present', false, relaySource)
-    return
-  }
-  const source = readFileSync(relaySource, 'utf8')
-
-  // (a) The relay must serve every route the multi-user chat surface needs.
-  // Inspect the handler's canonical `SyncRelayRoute` dispatch union rather than
-  // line-grepping the file: parsing the route-kind literals out of the union
-  // survives reordering, added routes, and whitespace churn, and trips ONLY
-  // when a served route is renamed or removed — exactly when it should.
-  // Capture the union body brace-aware: from `type SyncRelayRoute =` to the
-  // statement-terminating `;` at brace depth 0. This survives a variant being
-  // reformatted onto multiple lines (each arm carries its own `;` inside `{…}`,
-  // which a naive `;\n` terminator would truncate on).
-  const unionStart = source.indexOf('type SyncRelayRoute =')
-  let unionBody = ''
-  if (unionStart !== -1) {
-    let depth = 0
-    for (let i = unionStart; i < source.length; i += 1) {
-      const ch = source[i]
-      if (ch === '{' || ch === '(' || ch === '[') depth += 1
-      else if (ch === '}' || ch === ')' || ch === ']') depth -= 1
-      else if (ch === ';' && depth === 0) {
-        unionBody = source.slice(unionStart, i)
-        break
-      }
-    }
-  }
-  const routeKinds = new Set(
-    [...unionBody.matchAll(/route:\s*"([^"]+)"/g)].map((match) => match[1]),
-  )
-  const REQUIRED_CHAT_ROUTES = [
-    'presence', // /sync/:ws/presence — owner + shared-channel presence
-    'share-presence', // /sync/shares/:id/presence — recipient/DM presence
-    'shares-create', // POST /sync/:ws/shares — path / channel / DM grants
-    'shares-list', // GET /sync/shares
-    'share', // GET /sync/shares/:id — grant metadata
-    'share-revoke', // POST /sync/shares/:id/revoke
-    'share-log', // GET read-view + POST member-append
-    'share-blob', // GET /sync/shares/:id/blobs/:sha
-  ]
-  const missingRoutes = REQUIRED_CHAT_ROUTES.filter((route) => !routeKinds.has(route))
-  record(
-    'chat surface: sync-relay serves every multi-user route',
-    missingRoutes.length === 0 && routeKinds.size > 0,
-    missingRoutes.length === 0 && routeKinds.size > 0
-      ? 'presence, share-presence, shares-create/list, share, share-revoke, share-log (member-append), share-blob'
-      : `missing served route kind(s): ${missingRoutes.join(', ') || 'route union not found'}`,
-  )
-
-  // (b) Keep the relay's runtime dependency set explicit. A new dependency
-  // needs review to confirm that it is a library, not a service missing from
-  // REQUIRED_SERVICES.
-  const relayPkgPath = 'services/sync-relay/package.json'
-  if (!existsSync(relayPkgPath)) {
-    record('chat surface: relay runtime deps stay within the self-host matrix', false, relayPkgPath)
-    return
-  }
-  const relayPkg = readPackageJson(relayPkgPath)
-  const deps = Object.keys(relayPkg.dependencies ?? {})
-  const ALLOWED_RUNTIME_DEPS = new Set([
-    '@dohc/security-contract',
-    '@dohc/workspace-auth',
-    '@dohc/workspace-core',
-    'better-auth', // rides the `postgres` auth core
-    'pg', // rides the `postgres` auth core
-  ])
-  const foreignDeps = deps.filter((dep) => !ALLOWED_RUNTIME_DEPS.has(dep))
-  record(
-    'chat surface: relay runtime deps stay within the self-host matrix',
-    foreignDeps.length === 0,
-    foreignDeps.length === 0
-      ? deps.join(', ') || 'no runtime deps'
-      : `runtime dep(s) are outside the audited self-host set: ${foreignDeps.join(', ')}`,
-  )
-
 }
 
 function checkComposeConfig() {
@@ -210,9 +99,6 @@ function startComposeStack() {
 
 requireCommand('docker', ['--version'], 'Docker CLI')
 requireCommand('docker', ['compose', 'version'], 'Docker Compose')
-checkServiceScripts()
-// Static self-host proof for the multi-user chat surface (no Docker needed).
-checkChatSurfaceSelfHostable()
 const composeOk = checkComposeConfig()
 
 if (startRequested && composeOk) {

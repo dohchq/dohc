@@ -38,7 +38,7 @@ import {
   type YdocSettleResult,
 } from "./ydocWireContract";
 
-export const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
+const LOCAL_EDITOR_ORIGIN: unique symbol = Symbol(
   "dohc.workspaceEngineClient.localEditorOrigin",
 );
 
@@ -1453,7 +1453,6 @@ export class YdocLiveAdapter {
     this.sessions.delete(sessionId);
     this.eventPositions.delete(sessionId);
   }
-
 
   dispose(): void {
     this.unsubscribeEvents();

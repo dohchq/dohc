@@ -10,3 +10,4 @@ export * from "./watcher";
 export * from "./syncStatus";
 export * from "./sites";
 export * from "./databases";
+export * from "./records";
