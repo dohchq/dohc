@@ -323,7 +323,8 @@ import {
   type PluginPipelineStatusEvent,
 } from "./plugins/PluginPipeline";
 import {
-  acquirePluginSurfaceLease,
+  createPluginPanelSurfaceHostLease,
+  createPluginWebAppHostLease,
   ensurePluginStarted,
 } from "./plugins/pluginHostStart";
 import { createPluginAuthoredTextWriter } from "./plugins/pluginAuthoredWrite";
@@ -345,11 +346,8 @@ import type { RegisteredPlugin } from "./plugins/pluginPanelRegistration";
 import { PluginWorkspaceRuntimes } from "./plugins/pluginWorkspaceRuntimes";
 import {
   PluginSurfaces,
-  type PluginPanelHostLease,
   type PluginPanelSdkAuthorization,
-  type PluginSurfaceHostLease,
   type PluginWebAppContainer,
-  type PluginWebAppHostLease,
 } from "./plugins/pluginSurfaces";
 
 import {
@@ -3617,73 +3615,6 @@ async function startAgentRunWithWorkspaceActivity(
   });
   if (!run) throw new Error("The agent run did not start.");
   return run;
-}
-
-function createPluginSurfaceHostLease(
-  pipeline: PluginPipeline,
-  pluginId: string,
-): PluginSurfaceHostLease {
-  const host = pipeline.host;
-  const lease = acquirePluginSurfaceLease(pipeline.hostOwnership, pluginId);
-  return {
-    start: async () => {
-      const startedHost = await ensurePluginStarted(
-        host,
-        pluginId,
-        () =>
-          lease.start((authority) =>
-            pipeline.ensureStarted(pluginId, authority),
-          ),
-      );
-      const spawnId = startedHost.getSpawnId(pluginId);
-      if (!spawnId) {
-        throw new Error(`Plugin "${pluginId}" has no active process.`);
-      }
-      return spawnId;
-    },
-    currentSpawnId: () => host.getSpawnId(pluginId),
-    release: () => lease.release(),
-  };
-}
-
-function createPluginPanelSurfaceHostLease(
-  pipeline: PluginPipeline,
-  pluginId: string,
-): PluginPanelHostLease {
-  const host = pipeline.host;
-  const lease = createPluginSurfaceHostLease(pipeline, pluginId);
-  return {
-    ...lease,
-    currentRecord: () => host.currentRecord(pluginId),
-    startPanel: async (panelId) => {
-      const spawnId = await lease.start();
-      const ready = host.readyPanelsForSpawn(pluginId, spawnId);
-      const panel = ready?.panels.find((candidate) => candidate.id === panelId);
-      if (!ready || !panel) {
-        throw new Error(
-          `Plugin "${pluginId}" does not declare panel "${panelId}" in its active runtime.`,
-        );
-      }
-      return { spawnId, hostRecord: ready.record, panel };
-    },
-  };
-}
-
-function createPluginWebAppHostLease(
-  pipeline: PluginPipeline,
-  pluginId: string,
-  webAppId: string,
-  instanceKey: string | null,
-): PluginWebAppHostLease {
-  const host = pipeline.host;
-  return {
-    ...createPluginSurfaceHostLease(pipeline, pluginId),
-    startWebApp: () => host.startWebApp(pluginId, webAppId, instanceKey),
-    unpair: (expectedSpawnId) => {
-      if (host.getSpawnId(pluginId) !== expectedSpawnId) return Promise.resolve();
-      return host.stopWebApp(pluginId, webAppId, instanceKey);
-    },
-  };
 }
 
 function createPluginWebAppContainer(
