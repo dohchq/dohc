@@ -442,6 +442,14 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
   function maximum(begin: LiveFrameBegin, p: LiveFrameReceivePolicy) {
     return begin.purpose === "client-vector" ? p.maxStateVectorBytes : begin.purpose === "initial-sync" ? p.maxSyncBytes : p.maxUpdateBytes;
   }
+  function preflightChunk(sender: Side, frame: Extract<LiveFrame, { kind: "chunk" }>, size: number) {
+    const state = sides[sender], peer = sides[opposite(sender)];
+    requireFrame(state.greeted && peer.greeted, "state");
+    requireFrame(size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames, "credit");
+    const active = state.active;
+    requireFrame(active && frame.transferId === active.begin.transferId && frame.offset === active.offset && frame.bytes.length <= active.begin.totalBytes - active.offset, "state");
+    return active;
+  }
   function transition(sender: Side, frame: LiveFrame, size: number): LiveFrameLease<LiveFrameTransfer> | undefined {
     const state = sides[sender], peer = sides[opposite(sender)];
     Object.freeze(frame);
@@ -476,8 +484,8 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       if (frame.result !== "success") close();
       return;
     }
-    requireFrame(size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames, "credit");
     if (frame.kind === "begin") {
+      requireFrame(size <= state.grantedBytes - state.chargedBytes && state.chargedFrames < state.grantedFrames, "credit");
       requireFrame(!state.active && frame.transferId === state.nextTransferId, "state");
       requireFrame(frame.totalBytes <= maximum(frame, limits.receive) && frame.totalBytes <= maximum(frame, peer.receivePolicy!), "limit");
       if (frame.purpose === "client-vector") requireFrame(sender === "client" && !vectorDone && !live, "state");
@@ -495,8 +503,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       state.nextTransferId = frame.transferId === Number.MAX_SAFE_INTEGER ? 0 : frame.transferId + 1;
       if (frame.purpose === "submit-update") pending = { deliveryId: frame.deliveryId, updateDigest: frame.digest, complete: false };
     } else {
-      const active = state.active;
-      requireFrame(active && frame.transferId === active.begin.transferId && frame.offset === active.offset && frame.bytes.length <= active.begin.totalBytes - active.offset, "state");
+      const active = preflightChunk(sender, frame, size);
       active.bytes?.set(frame.bytes, active.offset);
       active.offset += frame.bytes.length;
       if (active.offset === active.begin.totalBytes) {
@@ -529,6 +536,7 @@ export function createLiveFrameSession(role: Side, input: LiveFrameSessionPolicy
       const measure = new Writer(max - 12); payload(measure, frame); const size = measure.offset + 12;
       const release = holdFrame(role, frame.kind === "begin" || frame.kind === "chunk", size);
       try {
+        if (frame.kind === "chunk") preflightChunk(role, frame, size);
         const bytes = encodeOwned(frame, max);
         transition(role, frame, size);
         return lease(bytes, release);

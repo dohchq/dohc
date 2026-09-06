@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import vectors from "../vectors/live-frame-vectors.json";
 import { parseHostEpoch } from "./hostControl.js";
 import {
@@ -233,6 +233,48 @@ describe("live frame route ownership", () => {
     expect(() => client.send({ kind: "chunk", transferId: 1, offset: 1, bytes: new Uint8Array([1]) })).toThrow();
     expect(client.usage()).toMatchObject({ closed: true, outgoing: { queuedBytes: 0, queuedFrames: 0 } });
     server.close();
+  });
+  it.each(["no-credit", "ungreeted", "no-transfer", "wrong-id", "wrong-offset", "excess-bytes"] as const)(
+    "refuses outgoing CHUNK %s before copying payload bytes", condition => {
+      const { client, server } = condition === "ungreeted"
+        ? { client: createLiveFrameSession("client", limits), server: createLiveFrameSession("server", limits) }
+        : pair();
+      if (condition !== "ungreeted" && condition !== "no-credit") grant(server, client);
+      if (condition === "wrong-id" || condition === "wrong-offset" || condition === "excess-bytes") {
+        consume(client, server, begin("client-vector"));
+      }
+      const source = new Uint8Array(condition === "excess-bytes" ? [1, 2, 3] : [1, 2]);
+      const originalSet = Uint8Array.prototype.set;
+      let copies = 0;
+      const spy = vi.spyOn(Uint8Array.prototype, "set").mockImplementation(function (this: Uint8Array, input, offset) {
+        if (input instanceof Uint8Array && input.buffer === source.buffer) copies++;
+        return originalSet.call(this, input, offset);
+      });
+      try {
+        expect(() => client.send({ kind: "chunk", transferId: condition === "wrong-id" ? 2 : 1,
+          offset: condition === "wrong-offset" ? 1 : 0, bytes: source })).toThrow();
+        expect(copies).toBe(0);
+        expect(client.usage().outgoing).toMatchObject({ queuedBytes: 0, queuedFrames: 0 });
+      } finally { spy.mockRestore(); client.close(); server.close(); }
+    },
+  );
+  it("copies a permitted outgoing CHUNK only while its credit and coordinates remain available", () => {
+    const { client, server } = pair(); grant(server, client); consume(client, server, begin("client-vector"));
+    const source = new Uint8Array([1, 2]), originalSet = Uint8Array.prototype.set;
+    let copies = 0;
+    const spy = vi.spyOn(Uint8Array.prototype, "set").mockImplementation(function (this: Uint8Array, input, offset) {
+      if (input instanceof Uint8Array && input.buffer === source.buffer) {
+        copies++;
+        expect(client.usage().outgoing).toMatchObject({ promisedBytes: 525, promisedFrames: 1, queuedBytes: 30 });
+      }
+      return originalSet.call(this, input, offset);
+    });
+    try {
+      const sent = client.send({ kind: "chunk", transferId: 1, offset: 0, bytes: source });
+      expect(copies).toBe(1);
+      expect(client.usage().outgoing).toMatchObject({ promisedBytes: 495, promisedFrames: 0, queuedBytes: 30 });
+      sent.release();
+    } finally { spy.mockRestore(); client.close(); server.close(); }
   });
   it("completes a transfer larger than its queue window and retains consumer storage", () => {
     const { client, server } = pair({ ...limits, maxQueuedFrames: 1, maxAssemblyBytes: 1300 });
