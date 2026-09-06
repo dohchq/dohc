@@ -1,21 +1,22 @@
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, describe, expect, it } from "vitest";
 import { MAX_SHARE_PROPOSAL_OPS } from "@dohc/security-contract/share-proposal-bound";
-import { MAX_BLOB_BYTES, createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import { MAX_BLOB_BYTES, type SyncRelayHandler } from "./server";
 // The CONTRACT's shape, not a copy of it. A local re-declaration drifts, and a
 // test that proves the copy proves nothing about the route.
 import type { ProposedChange } from "./shareFilter";
-import { type SyncRelayStorage } from "./storage";
+import type { SyncRelayStorage } from "./storage";
 import {
   claimWorkspace as claim,
   closeTestStorages,
   createShare as mint,
+  interceptStorage,
   json,
   jsonBody,
   request,
   sha256,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 // The proposal lane, driven through the real routes.
 //
@@ -32,24 +33,7 @@ import {
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
-  let nextShare = 0;
-  let nextId = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    nowMs: () => 4242,
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail: (userId) => `${userId}@dohc.test`,
-    newShareId: () => `share-${nextShare++}`,
-    // Deterministic minted ids, so a test can name the moment the relay wrote.
-    newId: () => `id-${nextId++}`,
-  });
+  return testHandler(storage, { nowMs: () => 4242 });
 }
 
 const GRANTER = "granter";
@@ -1469,16 +1453,10 @@ describe("who may do what", () => {
       ["downgrade", (storage: SyncRelayStorage) => narrowToComment(storage, "share-0"), 403],
     ] as const) {
       const storage = await testStorage();
-      const raced = new Proxy(storage, {
-        get(target, prop, receiver) {
-          if (prop === "insertShareProposal") {
-            return (input: Parameters<SyncRelayStorage["insertShareProposal"]>[0]) => {
-              sabotage(target);
-              return target.insertShareProposal(input);
-            };
-          }
-          const value = Reflect.get(target, prop, receiver);
-          return typeof value === "function" ? value.bind(target) : value;
+      const raced = interceptStorage(storage, {
+        insertShareProposal: (target, input) => {
+          sabotage(target);
+          return target.insertShareProposal(input);
         },
       });
       const h = handler(raced);

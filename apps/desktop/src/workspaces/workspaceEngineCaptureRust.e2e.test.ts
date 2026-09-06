@@ -679,7 +679,7 @@ it.skipIf(engine.missing)(
         settledMoments.length + 1,
       );
       expect(capturedMoments).toHaveLength(3);
-      expect(capturedMoments[0]?.id).not.toBe(settledMoments[0]?.id);
+      expect(capturedMoments[0]?.id).not.toBe(settledMoments[0]?.momentId);
     } finally {
       await capture.stop().catch(() => undefined);
       await sessions.closeAll().catch(() => undefined);

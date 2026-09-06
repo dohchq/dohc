@@ -123,7 +123,7 @@ export class EngineWorkspaceRebindError extends Error {
   }
 }
 
-export class EngineWorkspaceSessionsClosedError extends Error {
+class EngineWorkspaceSessionsClosedError extends Error {
   constructor() {
     super("Rust engine workspace sessions are closed.");
     this.name = "EngineWorkspaceSessionsClosedError";

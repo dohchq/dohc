@@ -1,4 +1,11 @@
 // @vitest-environment jsdom
+import {
+  jsonResponse,
+  heldJsonResponse,
+  requestPath,
+  settle,
+  setControlValue,
+} from "./testing";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -6,7 +13,6 @@ import { CommentsPanel } from "./CommentsPanel";
 
 const FIRST_SESSION = "abcdefghijkl";
 const SECOND_SESSION = "mnopqrstuvwx";
-const SETTLE_TURN_LIMIT = 300;
 
 const OLD_MESSAGE = {
   messageId: "message-old",
@@ -23,37 +29,6 @@ const NEW_MESSAGE = {
   body: "Recovered timeline",
   author: { kind: "named" as const, displayName: "Owner" },
 };
-
-function jsonResponse(value: unknown, status = 200): Response {
-  return new Response(JSON.stringify(value), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function heldJsonResponse(status: number): {
-  bodyStarted: () => boolean;
-  release: (value: unknown) => void;
-  response: Response;
-} {
-  let bodyStarted = false;
-  let releaseBody: (value: unknown) => void = () => {
-    throw new Error("held response body is not ready");
-  };
-  const body = new Promise<unknown>((resolve) => {
-    releaseBody = resolve;
-  });
-  const response = new Response(null, { status });
-  vi.spyOn(response, "json").mockImplementation(() => {
-    bodyStarted = true;
-    return body as ReturnType<Response["json"]>;
-  });
-  return {
-    bodyStarted: () => bodyStarted,
-    release: (value) => releaseBody(value),
-    response,
-  };
-}
 
 function page(input: {
   activityRevision?: number;
@@ -87,35 +62,6 @@ function activity(input: {
     messages: input.messages ?? [],
     composerState: input.composerState ?? "available",
     profileName: input.profileName ?? null,
-  });
-}
-
-function requestPath(input: RequestInfo | URL): string {
-  if (typeof input === "string") return input;
-  if (input instanceof URL) return `${input.pathname}${input.search}`;
-  const url = new URL(input.url);
-  return `${url.pathname}${url.search}`;
-}
-
-async function settle(condition: () => boolean): Promise<void> {
-  for (let turn = 0; turn < SETTLE_TURN_LIMIT; turn += 1) {
-    await act(async () => {
-      await Promise.resolve();
-    });
-    if (condition()) return;
-  }
-  throw new Error("Condition did not settle");
-}
-
-function setControlValue(control: HTMLInputElement | HTMLTextAreaElement, value: string): void {
-  const prototype = control instanceof HTMLTextAreaElement
-    ? HTMLTextAreaElement.prototype
-    : HTMLInputElement.prototype;
-  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
-  if (!setter) throw new Error("control value setter is missing");
-  act(() => {
-    setter.call(control, value);
-    control.dispatchEvent(new Event("input", { bubbles: true }));
   });
 }
 
