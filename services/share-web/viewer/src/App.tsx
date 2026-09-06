@@ -55,7 +55,7 @@ class ExcalidrawRenderBoundary extends Component<
 const SESSION_HEADER = "x-dohc-link-session";
 const SESSION_PATH = /^\/s\/([A-Za-z0-9_-]{12})\/?$/u;
 const HANDOFF_CODE = /^[A-Za-z0-9_-]{43}$/u;
-const VIEW_HEARTBEAT_INTERVAL_MS = 4 * 60_000;
+const VIEW_LOG_HOLD_MS = 30_000;
 const TERMINAL_HEARTBEAT_STATUSES = new Set([401, 403, 404]);
 export const MAX_LOG_PAGES = 200;
 export const MARKDOWN_PREVIEW_BYTE_CAP = 2 * 1024 * 1024;
@@ -255,6 +255,7 @@ export async function loadLog(
   maxPages?: number,
   signal?: AbortSignal,
   expectedEpochLogFloor?: number,
+  holdMs?: number,
 ): Promise<LoadedLog> {
   let cursor = initialCursor;
   let pageNumber = 0;
@@ -263,7 +264,9 @@ export async function loadLog(
     pageNumber += 1;
     const response = await apiWithThrottleRetry(
       session,
-      `/api/view/log?since=${cursor}&limit=500`,
+      `/api/view/log?since=${cursor}&limit=500${
+        pageNumber === 1 && holdMs !== undefined ? `&hold=${String(holdMs)}` : ""
+      }`,
       signal,
     );
     if (!response.ok) throw new ViewResponseError(response.status);
@@ -1069,84 +1072,64 @@ export function App() {
   useEffect(() => {
     if (readySession === null) return;
     let current = true;
+    let operationVersion = 0;
     let refreshInFlight: Promise<ReadyState | null> | null = null;
-    const controller = new AbortController();
+    let followerController: AbortController | null = null;
+    const sessionController = new AbortController();
+    const refuseIfTerminal = (error: unknown): boolean => {
+      if (
+        current &&
+        error instanceof ViewResponseError &&
+        TERMINAL_HEARTBEAT_STATUSES.has(error.status)
+      ) {
+        readyStateRef.current = null;
+        setState({ status: "refused" });
+        return true;
+      }
+      return false;
+    };
+    const commit = (
+      previous: ReadyState,
+      loaded: LoadedCurrentState,
+      expectedVersion: number,
+    ): ReadyState | null => {
+      if (!current || operationVersion !== expectedVersion) return null;
+      const latest = readyStateRef.current;
+      if (!latest || latest.session !== readySession) return null;
+      const nextState: ReadyState = {
+        ...previous,
+        meta: retainNarrowedAccess(latest.meta, loaded.meta),
+        fileAccumulator: loaded.fileAccumulator,
+        files: filesFromAccumulator(loaded.fileAccumulator),
+        nextCursor: loaded.nextCursor,
+        epochLogFloor: loaded.epochLogFloor,
+      };
+      readyStateRef.current = nextState;
+      setState((value) =>
+        value.status === "ready" && value.session === readySession
+          ? nextState
+          : value
+      );
+      return nextState;
+    };
     const refresh = (): Promise<ReadyState | null> => {
       if (refreshInFlight) return refreshInFlight;
       const previous = readyStateRef.current;
-      if (
-        previous === null ||
-        previous.session !== readySession
-      ) {
+      if (previous === null || previous.session !== readySession) {
         return Promise.resolve(null);
       }
-      const fileAccumulator = new Map(previous.fileAccumulator);
+      operationVersion += 1;
+      const expectedVersion = operationVersion;
+      followerController?.abort();
       const refreshPromise = (async (): Promise<ReadyState | null> => {
         try {
-          const [meta, log] = await Promise.all([
-            loadMeta(readySession, controller.signal),
-            loadLog(
-              readySession,
-              previous.nextCursor,
-              fileAccumulator,
-              MAX_LOG_PAGES,
-              controller.signal,
-              previous.epochLogFloor,
-            ),
-          ]);
-          if (!current) return null;
-          const latest = readyStateRef.current;
-          const nextState: ReadyState = {
-            ...previous,
-            meta: latest?.session === readySession
-              ? retainNarrowedAccess(latest.meta, meta)
-              : meta,
-            fileAccumulator: log.fileAccumulator,
-            files: filesFromAccumulator(log.fileAccumulator),
-            nextCursor: log.nextCursor,
-            epochLogFloor: log.epochLogFloor,
-          };
-          readyStateRef.current = nextState;
-          setState((value) =>
-            value.status === "ready" && value.session === readySession
-              ? nextState
-              : value
+          const reloaded = await loadCurrentState(
+            readySession,
+            sessionController.signal,
           );
-          return nextState;
+          return commit(previous, reloaded, expectedVersion);
         } catch (error: unknown) {
-          if (error instanceof EpochFloorChangedError) {
-            try {
-              const reloaded = await loadCurrentState(readySession, controller.signal);
-              if (!current) return null;
-              const latest = readyStateRef.current;
-              const nextState: ReadyState = {
-                ...previous,
-                meta: latest?.session === readySession
-                  ? retainNarrowedAccess(latest.meta, reloaded.meta)
-                  : reloaded.meta,
-                fileAccumulator: reloaded.fileAccumulator,
-                files: filesFromAccumulator(reloaded.fileAccumulator),
-                nextCursor: reloaded.nextCursor,
-                epochLogFloor: reloaded.epochLogFloor,
-              };
-              readyStateRef.current = nextState;
-              setState((value) =>
-                value.status === "ready" && value.session === readySession
-                  ? nextState
-                  : value
-              );
-              return nextState;
-            } catch (reloadError: unknown) {
-              error = reloadError;
-            }
-          }
-          if (
-            current &&
-            error instanceof ViewResponseError &&
-            TERMINAL_HEARTBEAT_STATUSES.has(error.status)
-          ) {
-            setState({ status: "refused" });
-          }
+          refuseIfTerminal(error);
           return null;
         }
       })();
@@ -1157,16 +1140,85 @@ export function App() {
       return refreshPromise;
     };
     refreshReadyStateRef.current = refresh;
-    const interval = window.setInterval(() => {
-      void refresh();
-    }, VIEW_HEARTBEAT_INTERVAL_MS);
+    void (async () => {
+      let retryDelayMs = RETRY_INITIAL_MS;
+      for (;;) {
+        if (!current) return;
+        if (refreshInFlight) {
+          await refreshInFlight;
+          continue;
+        }
+        const previous = readyStateRef.current;
+        if (!previous || previous.session !== readySession) return;
+        const expectedVersion = operationVersion;
+        const requestController = new AbortController();
+        followerController = requestController;
+        const requestStartedAtMs = Date.now();
+        try {
+          const log = await loadLog(
+            readySession,
+            previous.nextCursor,
+            new Map(previous.fileAccumulator),
+            MAX_LOG_PAGES,
+            requestController.signal,
+            previous.epochLogFloor,
+            VIEW_LOG_HOLD_MS,
+          );
+          const meta = await loadMeta(readySession, requestController.signal);
+          if (commit(previous, { ...log, meta }, expectedVersion) === null) {
+            continue;
+          }
+          retryDelayMs = RETRY_INITIAL_MS;
+          const elapsedMs = Date.now() - requestStartedAtMs;
+          if (
+            log.nextCursor === previous.nextCursor &&
+            elapsedMs < VIEW_LOG_HOLD_MS
+          ) {
+            await waitForRetry(
+              VIEW_LOG_HOLD_MS - elapsedMs,
+              sessionController.signal,
+            );
+          }
+        } catch (error: unknown) {
+          if (!current || operationVersion !== expectedVersion) continue;
+          if (error instanceof EpochFloorChangedError) {
+            const reloaded = await refresh();
+            if (reloaded) {
+              retryDelayMs = RETRY_INITIAL_MS;
+              continue;
+            }
+            const latest = readyStateRef.current;
+            if (!latest || latest.session !== readySession) return;
+            try {
+              await waitForRetry(retryDelayMs, sessionController.signal);
+            } catch {
+              return;
+            }
+            retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+            continue;
+          }
+          if (refuseIfTerminal(error)) return;
+          try {
+            await waitForRetry(retryDelayMs, sessionController.signal);
+          } catch {
+            return;
+          }
+          retryDelayMs = Math.min(retryDelayMs * 2, RETRY_MAX_MS);
+        } finally {
+          if (followerController === requestController) {
+            followerController = null;
+          }
+        }
+      }
+    })();
     return () => {
       current = false;
+      operationVersion += 1;
       if (refreshReadyStateRef.current === refresh) {
         refreshReadyStateRef.current = null;
       }
-      controller.abort();
-      window.clearInterval(interval);
+      followerController?.abort();
+      sessionController.abort();
     };
   }, [readySession]);
 

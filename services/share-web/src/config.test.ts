@@ -3,6 +3,34 @@ import { MAX_RELAY_URL_LENGTH } from "@dohc/workspace-contracts/relay-values";
 import { loadShareWebConfig } from "./config";
 
 describe("share-web configuration", () => {
+  const accountEnvironment = {
+    NODE_ENV: "test",
+    DOHC_SHARE_WEB_RELAY_URL: "http://relay:1788",
+    DOHC_SHARE_WEB_PUBLIC_RELAY_URL: "https://relay.example.test",
+    DOHC_SHARE_WEB_PUBLIC_HOSTS: "share.example.test",
+    DOHC_SHARE_WEB_PUBLIC_ORIGIN: "https://share.example.test",
+    DOHC_SHARE_WEB_AUTH_URL: "http://workspace-api:1786",
+  };
+
+  it("enables account auth only with an explicit upstream and exact HTTPS audience", () => {
+    expect(loadShareWebConfig(accountEnvironment).accountAuth).toEqual({
+      upstreamUrl: "http://workspace-api:1786", publicOrigin: "https://share.example.test",
+    });
+    const { DOHC_SHARE_WEB_AUTH_URL: _unused, ...viewOnly } = accountEnvironment;
+    expect(loadShareWebConfig(viewOnly).accountAuth).toBeUndefined();
+  });
+
+  it.each(["http://share.example.test", "https://share.example.test/", "https://Share.example.test", "https://other.example.test", "null"])(
+    "refuses account origin %j", (publicOrigin) => {
+      expect(() => loadShareWebConfig({ ...accountEnvironment, DOHC_SHARE_WEB_PUBLIC_ORIGIN: publicOrigin })).toThrow();
+    },
+  );
+
+  it.each(["https://user:pass@auth.test", "http://auth.test/path", "http://auth.test?x=1", "http://auth.test#fragment", "file:///auth"])(
+    "refuses account upstream %j", (upstream) => {
+      expect(() => loadShareWebConfig({ ...accountEnvironment, DOHC_SHARE_WEB_AUTH_URL: upstream })).toThrow();
+    },
+  );
   it("requires and canonicalizes the public relay coordinate separately", () => {
     expect(() =>
       loadShareWebConfig({
