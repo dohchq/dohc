@@ -375,14 +375,6 @@ body {
 
 .section-head { margin-bottom: clamp(32px, 5vh, 56px); }
 
-/* A one-line instruction under an interactive stage. The lede describes;
- * this tells the visitor what to do with their hands. */
-.stage-hint {
-  margin-top: 14px;
-  color: var(--subtle);
-  font: 400 12.5px/1.5 var(--font-mono);
-}
-
 /* ---------- workspace graph ---------- */
 
 .principles-graph {
@@ -1063,7 +1055,6 @@ body {
 }
 
 .reader-view p + p { margin-top: 8px; }
-.reader-view .reader-note { margin-top: 12px; color: var(--subtle); font: 400 12.5px/1.5 var(--font-mono); }
 
 /* board */
 .reader-board { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
