@@ -1256,11 +1256,17 @@ export function createShareWebHandler({
       const authenticated = await readSession(request);
       if (!authenticated) return refused();
       let relayPath: string | null = null;
+      let logHoldMs = 0;
       if (request.method === "GET" && pathname === "/api/view/meta") {
         relayPath = "/sync/link/share";
       } else if (request.method === "GET" && pathname === "/api/view/current") {
         relayPath = "/sync/link/current";
       } else if (request.method === "GET" && pathname === "/api/view/log") {
+        const hold = new URL(request.url).searchParams.get("hold") ?? "0";
+        if (!DISCUSSION_HOLD.test(hold) || Number(hold) > MAX_DISCUSSION_ACTIVITY_HOLD_MS) {
+          return refused();
+        }
+        logHoldMs = Number(hold);
         relayPath = `/sync/link/log${search}`;
       } else if (request.method === "GET" && pathname.startsWith("/api/view/blob/")) {
         const sha = pathname.slice("/api/view/blob/".length);
@@ -1291,15 +1297,18 @@ export function createShareWebHandler({
         : null;
       if (isLog && !releaseActivityHold) return refused(429, refreshedCookieHeaders);
 
+      const readCapabilityToken = authenticated.session.capabilityToken;
+      const relayInit: RequestInit = {
+        headers: { authorization: `LinkCapability ${readCapabilityToken}` },
+        signal: request.signal,
+      };
+      const boundedLog = isLog ? boundedRelayRequest(
+        request.signal, relayUrl, relayPath, relayInit,
+        DEFAULT_RELAY_REQUEST_TIMEOUT_MS + logHoldMs,
+      ) : null;
       try {
-        const readCapabilityToken = authenticated.session.capabilityToken;
         const relayResponse = await fetchRelay(
-          relayRequest(relayUrl, relayPath, {
-            headers: {
-              authorization: `LinkCapability ${readCapabilityToken}`,
-            },
-            signal: request.signal,
-          }),
+          boundedLog?.request ?? relayRequest(relayUrl, relayPath, relayInit),
         );
         if (
           isLog &&
@@ -1348,6 +1357,7 @@ export function createShareWebHandler({
         releaseBlobProxy?.();
         return refused(503, refreshedCookieHeaders);
       } finally {
+        boundedLog?.dispose();
         releaseActivityHold?.();
       }
     }

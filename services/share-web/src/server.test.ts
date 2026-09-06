@@ -1713,6 +1713,55 @@ describe("share-web protected discussion proxy", () => {
     expect(cancellations).toBe(1);
   });
 
+  it("releases log hold capacity after a stalled relay deadline", async () => {
+    vi.useFakeTimers();
+    const browserAbort = new AbortController();
+    const relayed: Request[] = [];
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const page = { ok: true, ops: [], nextCursor: 0, hasMore: false, epochLogFloor: 0 };
+    const handler = createShareWebHandler({
+      relayUrl: "http://relay.test", publicHosts: new Set([HOST]),
+      relayExchangeKey: "discussion-relay-key", nowMs: () => 1_000,
+      newSessionToken: () => Buffer.alloc(32, 74).toString("base64url"),
+      newProfileSecret: () => PROFILE_ALPHA,
+      fetchRelay: async (relayRequest) => {
+        if (new URL(relayRequest.url).pathname === "/sync/link-exchange") {
+          return Response.json({ ok: true, grantId: "grant-log-deadline",
+            capabilityToken: CAP_ALPHA_1, capabilityExpiresAtMs: 901_000 });
+        }
+        relayed.push(relayRequest);
+        if (relayed.length > 8) return Response.json(page);
+        if (relayed.length === 8) markStarted();
+        return await new Promise<Response>((_resolve, reject) => {
+          relayRequest.signal.addEventListener("abort", () => reject(relayRequest.signal.reason), { once: true });
+        });
+      },
+    });
+    let pending: Promise<Response>[] = [];
+    try {
+      const state = await discussionSession(handler);
+      const init = { headers: sessionHeaders(state.session, state.cookies), signal: browserAbort.signal };
+      const path = "/api/view/log?since=0&hold=30000";
+      pending = Array.from({ length: 8 }, () => handler(request(path, init)));
+      await started;
+      expect((await handler(request(path, init))).status).toBe(429);
+      await vi.advanceTimersByTimeAsync(39_999);
+      expect(relayed.every((value) => !value.signal.aborted)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(relayed.every((value) => value.signal.aborted)).toBe(true);
+      expect((await Promise.all(pending)).map((value) => value.status)).toEqual(Array(8).fill(503));
+      const retry = await handler(request(path, init));
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toEqual(page);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      browserAbort.abort();
+      await Promise.allSettled(pending);
+      vi.useRealTimers();
+    }
+  });
+
   it.each(holdRoutes)("admits eight $kind holds per session and rejects the ninth", async ({ path, publicBody }) => {
     let activityCalls = 0;
     let markEightStarted: (() => void) | undefined;
