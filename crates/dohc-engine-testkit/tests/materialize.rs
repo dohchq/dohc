@@ -106,11 +106,13 @@ fn materializes_a_new_file_and_marks_complete() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("run");
 
@@ -169,11 +171,13 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("a blocked ancestor must not fail the whole run");
     let outcome_of = |id: &str| {
@@ -197,11 +201,13 @@ fn ordinary_write_refuses_symlinked_ancestor_then_recovers_with_real_directory()
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        30,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
     )
     .expect("pending write must recover after containment is restored");
     assert_eq!(recovered[0].outcome, JobOutcome::Completed);
@@ -251,11 +257,13 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("a symlinked temp must not fail the batch");
     let outcome_of = |id: &str| {
@@ -281,11 +289,13 @@ fn ordinary_write_temp_symlink_blocks_only_that_job_then_recovers() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        30,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
     )
     .expect("blocked temp job must recover after alias removal");
     assert_eq!(recovered.len(), 1);
@@ -333,11 +343,13 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("a blocked delete ancestor must not fail the whole run");
     assert_eq!(results[0].outcome, JobOutcome::Blocked);
@@ -350,11 +362,13 @@ fn ordinary_delete_refuses_symlinked_ancestor_then_recovers_with_real_directory(
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        30,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
     )
     .expect("pending delete must recover after containment is restored");
     assert_eq!(recovered[0].outcome, JobOutcome::Completed);
@@ -390,11 +404,13 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("a blocked conflict ancestor must not fail the whole run");
     assert_eq!(results[0].outcome, JobOutcome::Blocked);
@@ -411,11 +427,13 @@ fn ordinary_conflict_sibling_refuses_symlinked_ancestor_then_recovers() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        30,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 30,
+            faults: &NoFaults,
+        },
     )
     .expect("pending conflict must run after containment is restored");
     assert_eq!(recovered[0].outcome, JobOutcome::Conflict);
@@ -456,11 +474,13 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
         let results = run_pending_jobs(
             &store,
             sc.workspace(),
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            20,
-            faults.as_ref(),
+            &dohc_engine_files::MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 20,
+                faults: faults.as_ref(),
+            },
         )
         .expect("run");
         assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
@@ -475,11 +495,13 @@ fn job_committed_but_pipeline_unrun_replays_after_restart() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(results[0].outcome, JobOutcome::Completed);
@@ -502,11 +524,13 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("run");
     assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
@@ -521,11 +545,13 @@ fn crash_after_temp_write_leaves_no_torn_target_and_replay_completes() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(results[0].outcome, JobOutcome::Completed);
@@ -545,11 +571,13 @@ fn crash_after_flush_before_rename_replays_to_completion() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("run");
     assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
@@ -561,11 +589,13 @@ fn crash_after_flush_before_rename_replays_to_completion() {
     run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(std::fs::read(sc.target("a.md")).expect("read"), content);
@@ -584,11 +614,13 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("run");
     assert!(matches!(results[0].outcome, JobOutcome::Crashed(_)));
@@ -600,11 +632,13 @@ fn crash_after_rename_before_complete_replays_exactly_once() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(results[0].outcome, JobOutcome::AlreadyMaterialized);
@@ -635,11 +669,13 @@ fn external_newer_content_is_preserved_not_clobbered() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("run");
     assert_eq!(results[0].outcome, JobOutcome::Conflict);
@@ -685,11 +721,13 @@ fn delete_job_replays_after_remove_before_complete() {
     let first = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("delete crash");
     assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
@@ -701,11 +739,13 @@ fn delete_job_replays_after_remove_before_complete() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
@@ -740,11 +780,13 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
     let first = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        faults.as_ref(),
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: faults.as_ref(),
+        },
     )
     .expect("delete crash");
     assert!(matches!(first[0].outcome, JobOutcome::Crashed(_)));
@@ -756,11 +798,13 @@ fn delete_job_syncs_parent_dir_before_marking_complete() {
     let recovered = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::per_os(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::per_os(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("replay");
     assert_eq!(recovered[0].outcome, JobOutcome::AlreadyMaterialized);
@@ -790,11 +834,13 @@ fn superseded_lower_generation_job_is_skipped() {
     let r = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("run g2");
     assert_eq!(r[0].outcome, JobOutcome::Completed);
@@ -805,11 +851,13 @@ fn superseded_lower_generation_job_is_skipped() {
     let r = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        40,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 40,
+            faults: &NoFaults,
+        },
     )
     .expect("run g1");
     assert_eq!(r[0].outcome, JobOutcome::Superseded);
@@ -905,11 +953,13 @@ fn secret_non_transient_replace_error_removes_plaintext_temp() {
         sc.workspace(),
         &job,
         b"SECRET=plaintext",
-        DurabilityPolicy::none(),
-        &NonTransientFailingReplacer,
-        &NoBackoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &NonTransientFailingReplacer,
+            backoff: &NoBackoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect_err("replace must fail");
 
@@ -960,11 +1010,13 @@ fn bounded_retry_succeeds_below_the_cap_with_exact_attempt_count_and_backoff() {
     let results = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &replacer,
-        &backoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &replacer,
+            backoff: &backoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .expect("run");
     assert_eq!(results[0].outcome, JobOutcome::Completed);
@@ -997,11 +1049,13 @@ fn bounded_retry_fails_closed_at_the_cap_and_leaves_job_pending() {
     let err = run_pending_jobs(
         &store,
         sc.workspace(),
-        DurabilityPolicy::none(),
-        &replacer,
-        &backoff,
-        20,
-        &NoFaults,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &replacer,
+            backoff: &backoff,
+            now_ms: 20,
+            faults: &NoFaults,
+        },
     )
     .unwrap_err();
     // The terminal error says what the code says: on Windows the
@@ -1072,11 +1126,13 @@ fn every_materialize_fault_point_has_a_live_call_site() {
         let results = run_pending_jobs(
             &store,
             sc.workspace(),
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            20,
-            faults.as_ref(),
+            &dohc_engine_files::MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 20,
+                faults: faults.as_ref(),
+            },
         )
         .expect("run");
         assert_eq!(

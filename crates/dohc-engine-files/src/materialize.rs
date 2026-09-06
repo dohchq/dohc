@@ -421,23 +421,29 @@ fn should_crash(_faults: &dyn FaultInjector, _point: FaultPoint) -> bool {
     false
 }
 
+/// Shared execution settings for a materialization attempt or pending-job batch.
+/// The caller supplies the timestamp and owns the replacement and fault seams.
+#[derive(Clone, Copy)]
+pub struct MaterializeOptions<'a> {
+    pub policy: DurabilityPolicy,
+    pub replacer: &'a dyn AtomicReplacer,
+    pub backoff: &'a dyn ReplaceBackoff,
+    pub now_ms: i64,
+    pub faults: &'a dyn FaultInjector,
+}
+
 /// Execute every pending job (oldest first). Stops at the first job that
 /// crashes (simulating process death), returning the results accumulated so
 /// far; the remaining jobs stay pending and are replayed on the next call.
 pub fn run_pending_jobs(
     store: &EngineStore,
     root: &Path,
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<Vec<JobResult>, MaterializeError> {
     let jobs = store.list_pending_materialization_jobs()?;
     let mut results = Vec::with_capacity(jobs.len());
     for job in jobs {
-        let outcome =
-            materialize_one(store, root, &job, policy, replacer, backoff, now_ms, faults)?;
+        let outcome = materialize_one(store, root, &job, options)?;
         let crashed = matches!(outcome, JobOutcome::Crashed(_));
         results.push(JobResult {
             job_id: job.job_id,
@@ -451,40 +457,25 @@ pub fn run_pending_jobs(
 }
 
 /// Execute a single job through the five durable steps.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each seam is injected for testability"
-)]
 pub fn materialize_one(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    match materialize_one_ordinary(store, root, job, policy, replacer, backoff, now_ms, faults) {
+    match materialize_one_ordinary(store, root, job, options) {
         Err(MaterializeError::SymlinkTarget) => Ok(JobOutcome::Blocked),
         outcome => outcome,
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each seam is injected for testability"
-)]
 fn materialize_one_ordinary(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions { now_ms, faults, .. } = *options;
     // Canonicalizing the root deliberately accepts aliases above (or at) the
     // workspace boundary. The component walk below owns only descendants.
     let canonical_root =
@@ -510,7 +501,7 @@ fn materialize_one_ordinary(
     }
 
     if job.operation == MaterializationOperation::Delete {
-        return materialize_delete(store, &canonical_root, &target, job, policy, now_ms, faults);
+        return materialize_delete(store, &canonical_root, &target, job, options);
     }
 
     // Load the content blob (integrity-verified on read).
@@ -531,11 +522,7 @@ fn materialize_one_ordinary(
         &target,
         job,
         &content,
-        policy,
-        replacer,
-        backoff,
-        now_ms,
-        faults,
+        options,
         true,
         None,
         &StdSecretTempRemover,
@@ -547,51 +534,25 @@ fn materialize_one_ordinary(
 /// adopt the current disk state as their immediate preimage; version-switch
 /// jobs retain the preimage probed during phase 1 so an intervening edit
 /// conflicts. Conflict handling never writes a plaintext `.conflict` sibling.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each seam is injected for testability"
-)]
 pub fn materialize_secret_one(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
     plaintext: &[u8],
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    materialize_secret_one_with_remover(
-        store,
-        root,
-        job,
-        plaintext,
-        policy,
-        replacer,
-        backoff,
-        now_ms,
-        faults,
-        &StdSecretTempRemover,
-    )
+    materialize_secret_one_with_remover(store, root, job, plaintext, options, &StdSecretTempRemover)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each seam is injected for testability"
-)]
 fn materialize_secret_one_with_remover(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
     plaintext: &[u8],
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions { now_ms, faults, .. } = *options;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
@@ -634,11 +595,7 @@ fn materialize_secret_one_with_remover(
         &target,
         &plaintext_job,
         plaintext,
-        policy,
-        replacer,
-        backoff,
-        now_ms,
-        faults,
+        options,
         false,
         Some(&canonical_root),
         secret_temp_remover,
@@ -652,18 +609,13 @@ fn materialize_secret_one_with_remover(
 /// adopt the current regular file; version-switch deletes retain their
 /// phase-1 plaintext hash so an intervening edit conflicts. Neither path emits
 /// a plaintext conflict artifact.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "each seam is injected for testability"
-)]
 pub fn materialize_secret_delete_one(
     store: &EngineStore,
     root: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions { faults, .. } = *options;
     let canonical_root =
         std::fs::canonicalize(root).map_err(|err| MaterializeError::io(root, &err))?;
     let target = resolve_target(&canonical_root, &job.target_path)?;
@@ -671,7 +623,7 @@ pub fn materialize_secret_delete_one(
     if should_crash(faults, FaultPoint::MaterializeAfterJobCommit) {
         return Ok(JobOutcome::Crashed(FaultPoint::MaterializeAfterJobCommit));
     }
-    materialize_secret_delete(store, &canonical_root, &target, job, policy, now_ms, faults)
+    materialize_secret_delete(store, &canonical_root, &target, job, options)
 }
 
 fn materialize_secret_delete(
@@ -679,27 +631,25 @@ fn materialize_secret_delete(
     root: &Path,
     target: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
-    materialize_secret_delete_with_hook(store, root, target, job, policy, now_ms, faults, || {})
+    materialize_secret_delete_with_hook(store, root, target, job, options, || {})
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the test hook deterministically exercises the read-to-open race"
-)]
 fn materialize_secret_delete_with_hook(
     store: &EngineStore,
     root: &Path,
     target: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
     before_parent_open: impl FnOnce(),
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions {
+        policy,
+        now_ms,
+        faults,
+        ..
+    } = *options;
     let current = read_current_no_follow(target)?;
     let preimage = match current {
         CurrentTarget::Absent => {
@@ -809,15 +759,18 @@ fn materialize_write_content(
     target: &Path,
     job: &MaterializationJob,
     content: &[u8],
-    policy: DurabilityPolicy,
-    replacer: &dyn AtomicReplacer,
-    backoff: &dyn ReplaceBackoff,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
     preserve_conflict_artifact: bool,
     secret_root: Option<&Path>,
     secret_temp_remover: &dyn SecretTempRemover,
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions {
+        policy,
+        replacer,
+        backoff,
+        now_ms,
+        faults,
+    } = *options;
     if secret_root.is_some() {
         ensure_target_symlink_free(root, target)?;
     } else {
@@ -985,10 +938,14 @@ fn materialize_delete(
     root: &Path,
     target: &Path,
     job: &MaterializationJob,
-    policy: DurabilityPolicy,
-    now_ms: i64,
-    faults: &dyn FaultInjector,
+    options: &MaterializeOptions<'_>,
 ) -> Result<JobOutcome, MaterializeError> {
+    let MaterializeOptions {
+        policy,
+        now_ms,
+        faults,
+        ..
+    } = *options;
     // One fail-closed component walk gates both no-follow reads, the unlink,
     // and the parent-directory durability open for this ordinary delete. A
     // refusal is converted to Blocked by the ordinary entry boundary.
@@ -2672,11 +2629,13 @@ mod tests {
         let results = run_pending_jobs(
             &store,
             &scratch.root,
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            3,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 3,
+                faults: &NoFaults,
+            },
         )
         .expect("a special target must be a terminal conflict, not an IO error");
 
@@ -2727,9 +2686,13 @@ mod tests {
             &scratch.root,
             &target,
             &job,
-            DurabilityPolicy::none(),
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
             || {
                 std::fs::remove_file(&target).expect("remove target during race");
                 std::fs::remove_dir(&parent).expect("remove parent during race");
@@ -2768,11 +2731,13 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=ancestor\n",
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
         )
         .expect_err("symlinked ancestor must be refused");
 
@@ -2796,11 +2761,13 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=final\n",
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
         )
         .expect_err("symlinked final target must be refused");
 
@@ -2824,11 +2791,13 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=recovered\n",
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
         )
         .expect("regular orphan must be recovered");
 
@@ -2857,11 +2826,13 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=must-not-write\n",
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
         )
         .expect_err("symlink orphan must be refused");
 
@@ -2885,11 +2856,13 @@ mod tests {
             &scratch.root,
             &job,
             plaintext,
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &NoFaults,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
+            },
         )
         .expect("materialize secret");
 
@@ -2952,15 +2925,17 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=pinned\n",
-            DurabilityPolicy::none(),
-            &SwapAncestorBeforePinnedRename {
-                visible_parent,
-                parked_parent: parked_parent.clone(),
-                outside_parent: outside_parent.clone(),
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &SwapAncestorBeforePinnedRename {
+                    visible_parent,
+                    parked_parent: parked_parent.clone(),
+                    outside_parent: outside_parent.clone(),
+                },
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
             },
-            &NoBackoff,
-            2,
-            &NoFaults,
         )
         .expect("pinned rename must survive ancestor swap");
 
@@ -3015,14 +2990,16 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=locked\n",
-            DurabilityPolicy::none(),
-            &AssertAncestorLockedBeforeRename {
-                visible_parent: visible_parent.clone(),
-                parked_parent,
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &AssertAncestorLockedBeforeRename {
+                    visible_parent: visible_parent.clone(),
+                    parked_parent,
+                },
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
             },
-            &NoBackoff,
-            2,
-            &NoFaults,
         )
         .expect("ancestor lock must keep replacement in place");
 
@@ -3100,14 +3077,16 @@ mod tests {
             &workspace,
             &job,
             b"SECRET=grandparent-locked\n",
-            DurabilityPolicy::none(),
-            &AssertGrandparentLockedBeforeRename {
-                grandparent: grandparent.clone(),
-                parked_grandparent: parked_grandparent.clone(),
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &AssertGrandparentLockedBeforeRename {
+                    grandparent: grandparent.clone(),
+                    parked_grandparent: parked_grandparent.clone(),
+                },
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &NoFaults,
             },
-            &NoBackoff,
-            2,
-            &NoFaults,
         )
         .expect("grandparent lock must keep replacement in place");
 
@@ -3218,12 +3197,14 @@ mod tests {
             &scratch.root,
             &job,
             b"SECRET=plaintext\n",
-            DurabilityPolicy::none(),
-            &StdReplacer,
-            &NoBackoff,
-            2,
-            &ConflictFault {
-                target: target.clone(),
+            &MaterializeOptions {
+                policy: DurabilityPolicy::none(),
+                replacer: &StdReplacer,
+                backoff: &NoBackoff,
+                now_ms: 2,
+                faults: &ConflictFault {
+                    target: target.clone(),
+                },
             },
             &remover,
         )

@@ -819,11 +819,13 @@ fn capture_supersedes_an_older_pending_materialization_job() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NO_FAULTS,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NO_FAULTS,
+        },
     )
     .expect("drain");
     let stale = results
@@ -967,11 +969,13 @@ fn deduped_capture_marks_the_confirmed_head_as_materialized() {
     let results = run_pending_jobs(
         &store,
         scratch.path(),
-        DurabilityPolicy::none(),
-        &StdReplacer,
-        &NoBackoff,
-        200,
-        &NO_FAULTS,
+        &dohc_engine_files::MaterializeOptions {
+            policy: DurabilityPolicy::none(),
+            replacer: &StdReplacer,
+            backoff: &NoBackoff,
+            now_ms: 200,
+            faults: &NO_FAULTS,
+        },
     )
     .expect("drain");
     let stale = results
