@@ -6967,23 +6967,21 @@ function registerIpcHandlers(
           // Share-mount paths (shared-with-me/…) are a read-only projection of
           // someone else's files. The mount root itself (shared-with-me/<label>
           // with a matching mount record) additionally offers refresh and removal.
-          const template: Electron.MenuItemConstructorOptions[] =
-            explorerMenuEntries({
-              kind: input.kind,
-              pinned: input.pinned === true,
-              isMountPath: menuContext.isMountPath,
-              hasMountRecord: menuContext.hasMountRecord,
-              // Sharing onward is offered nowhere in a share view or a mount:
-              // someone else's files are not this account's to grant, and a share
-              // needs a relay-side workspace to grant from.
-              canShare: menuContext.canShare,
-              shareView: menuContext.shareView,
-            }).map((entry) =>
-              entry.kind === "separator"
-                ? { type: "separator" as const }
-                : item(entry.label, entry.id),
-            );
-          return template;
+          return explorerMenuEntries({
+            kind: input.kind,
+            pinned: input.pinned === true,
+            isMountPath: menuContext.isMountPath,
+            hasMountRecord: menuContext.hasMountRecord,
+            // Sharing onward is offered nowhere in a share view or a mount:
+            // someone else's files are not this account's to grant, and a share
+            // needs a relay-side workspace to grant from.
+            canShare: menuContext.canShare,
+            shareView: menuContext.shareView,
+          }).map((entry) =>
+            entry.kind === "separator"
+              ? { type: "separator" as const }
+              : item(entry.label, entry.id),
+          );
         },
       });
     })();
@@ -7043,36 +7041,34 @@ function registerIpcHandlers(
             { role: "paste" },
             { role: "selectAll" },
           ];
-          const template: Electron.MenuItemConstructorOptions[] =
-            input.context === "tab"
+          return input.context === "tab"
+            ? [
+                item("Move into New Group", "move-tab-to-new-group"),
+                item("Close Editor Group", "close-editor-group", {
+                  enabled: input.canCloseEditorGroup === true,
+                }),
+                separator,
+                item("Close Tab", "close-tab"),
+                item("Close Other Tabs", "close-other-tabs"),
+                separator,
+                item("Copy Path", "copy-path"),
+                item("Show in Explorer", "show-in-explorer"),
+              ]
+            : input.context === "status"
               ? [
-                  item("Move into New Group", "move-tab-to-new-group"),
-                  item("Close Editor Group", "close-editor-group", {
-                    enabled: input.canCloseEditorGroup === true,
+                  item("Open History", "open-history"),
+                  separator,
+                  item("Connect dohc Cloud", "connect-cloud"),
+                  item("Settings", "settings"),
+                  separator,
+                  item("Check for Updates…", "check-updates"),
+                  item("Update and Restart", "install-update", {
+                    enabled: currentUpdateState().canInstall === true,
                   }),
                   separator,
-                  item("Close Tab", "close-tab"),
-                  item("Close Other Tabs", "close-other-tabs"),
-                  separator,
-                  item("Copy Path", "copy-path"),
-                  item("Show in Explorer", "show-in-explorer"),
+                  item("Toggle Theme", "toggle-theme"),
                 ]
-              : input.context === "status"
-                ? [
-                    item("Open History", "open-history"),
-                    separator,
-                    item("Connect dohc Cloud", "connect-cloud"),
-                    item("Settings", "settings"),
-                    separator,
-                    item("Check for Updates…", "check-updates"),
-                    item("Update and Restart", "install-update", {
-                      enabled: currentUpdateState().canInstall === true,
-                    }),
-                    separator,
-                    item("Toggle Theme", "toggle-theme"),
-                  ]
-                : [...editRoles];
-          return template;
+              : [...editRoles];
         },
       });
     })();
