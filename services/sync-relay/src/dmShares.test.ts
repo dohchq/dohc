@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
-import { UnauthorizedError, type ResolveActor } from "@dohc/workspace-auth/session";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createSyncRelayHandler, type SyncRelayHandler } from "./server";
+import type { SyncRelayHandler } from "./server";
 import {
   filterOpForShare,
   validateChatChannelShareSelector,
@@ -11,14 +9,25 @@ import {
   type ShareFileChatResolver,
   type ShareSelector,
 } from "./shareFilter";
-import { type SyncRelayStorage } from "./storage";
+import type { SyncRelayStorage } from "./storage";
 import {
+  appendLog,
+  chatChannelCreate,
+  chatMessageAppend,
+  chatThreadCreate,
+  claimWorkspace,
   closeTestStorages,
+  createShare,
+  denialBytes,
   json,
   jsonBody,
+  logOp,
   request,
+  resetOpSeq,
+  sha256,
+  testHandler,
   testStorage,
-} from "./linkTestHelpers";
+} from "./testing";
 
 // A resolver that knows no file-linked thread and no object: a DM grant is a
 // chat-channel selector, and the file half must never decide anything for it.
@@ -40,21 +49,8 @@ const NO_FILE_CHAT: ShareFileChatResolver = {
 afterEach(closeTestStorages);
 
 function handler(storage: SyncRelayStorage): SyncRelayHandler {
-  const resolveActor: ResolveActor = (request, workspaceId) => {
-    const auth = request.headers.get("authorization") ?? "";
-    if (!auth.startsWith("Bearer user:")) throw new UnauthorizedError();
-    return { userId: auth.slice("Bearer user:".length), workspaceId };
-  };
   let nextShare = 0;
-  return createSyncRelayHandler({
-    storage,
-    resolveActor,
-    nowMs: () => 7777,
-    resolveUserIdByEmail: (email) =>
-      email.endsWith("@dohc.test") ? email.slice(0, -"@dohc.test".length) : null,
-    lookupUserEmail: (userId) => `${userId}@dohc.test`,
-    newShareId: () => `dmshare-${nextShare++}`,
-  });
+  return testHandler(storage, { nowMs: () => 7777, newShareId: () => `dmshare-${nextShare++}` });
 }
 
 const OWNER = "alice";
@@ -65,43 +61,25 @@ const DM_WIRE = "channel_dm_wire_1";
 const OTHER_WIRE = "channel_private_wire_2";
 
 async function createWorkspace(h: SyncRelayHandler): Promise<void> {
-  const response = await h(
-    request(OWNER, "/sync/workspaces", jsonBody({ workspaceId: WORKSPACE })),
-  );
-  expect(response.status).toBe(200);
+  await claimWorkspace(h, OWNER, WORKSPACE);
 }
 
-let opSeq = 0;
-
-function chatOp(
-  opKind: string,
-  payload: Record<string, unknown>,
-): { originSeq: number; opKind: string; payload: Record<string, unknown>; recordedAtMs: number } {
-  const originSeq = opSeq++;
-  return { originSeq, opKind, payload, recordedAtMs: 1000 + originSeq };
-}
+const chatOp = logOp;
 
 // A DM channel.create carries `kind:"dm"` — the only thing distinguishing it
 // from a regular MU-C4 channel op. Everything downstream is identical.
 function dmChannelCreate(wireId = DM_WIRE): ReturnType<typeof chatOp> {
-  return chatOp("chat.channel.create", {
-    channelId: `channel-${wireId}`,
-    name: "bob@dohc.test",
-    slug: "bob-dohc-test",
-    kind: "dm",
-    createdAtMs: 1,
-    wireId,
-  });
+  return chatOp(
+    "chat.channel.create",
+    chatChannelCreate(wireId, { name: "bob@dohc.test", slug: "bob-dohc-test", kind: "dm" }).payload,
+  );
 }
 
 function dmThreadCreate(wireId = DM_WIRE, threadId = "thread-dm-1"): ReturnType<typeof chatOp> {
-  return chatOp("chat.thread.create", {
-    threadId,
-    title: "",
-    createdAtMs: 2,
-    channelSlug: "bob-dohc-test",
-    channelWireId: wireId,
-  });
+  return chatOp(
+    "chat.thread.create",
+    chatThreadCreate(threadId, wireId, { slug: "bob-dohc-test" }).payload,
+  );
 }
 
 // A message binds only by threadId — it never carries a channelWireId, exactly
@@ -110,8 +88,9 @@ function dmMessage(
   body: string,
   overrides: Record<string, unknown> = {},
 ): ReturnType<typeof chatOp> {
-  const seq = opSeq;
-  return chatOp("chat.message.append", {
+  const op = chatOp("chat.message.append", {});
+  const seq = op.originSeq;
+  op.payload = {
     messageId: `message-${seq}`,
     threadId: "thread-dm-1",
     authorKind: "human",
@@ -120,14 +99,12 @@ function dmMessage(
     body,
     createdAtMs: 3 + seq,
     ...overrides,
-  });
+  };
+  return op;
 }
 
 async function appendOwnerOps(h: SyncRelayHandler, ops: unknown[]): Promise<void> {
-  const response = await h(
-    request(OWNER, `/sync/${WORKSPACE}/log`, jsonBody({ originId: "origin-owner", ops })),
-  );
-  expect(response.status).toBe(200);
+  await appendLog(h, OWNER, WORKSPACE, ops, { originId: "origin-owner" });
 }
 
 async function createDmGrant(
@@ -138,9 +115,7 @@ async function createDmGrant(
     access: "read-write",
   },
 ): Promise<string> {
-  const response = await h(request(OWNER, `/sync/${WORKSPACE}/shares`, jsonBody(body)));
-  expect(response.status).toBe(200);
-  return (await json(response)).shareId as string;
+  return createShare(h, OWNER, WORKSPACE, body);
 }
 
 // A member-append op: the client supplies its own originSeq (client-sequenced,
@@ -183,13 +158,6 @@ async function fetchSharedOps(
   const response = await h(request(userId, `/sync/shares/${shareId}/log?since=0`));
   expect(response.status).toBe(200);
   return (await json(response)).ops as Array<Record<string, unknown>>;
-}
-
-// Captures a denial as comparable bytes: unauthorized probes of every kind must
-// be indistinguishable from a share that never existed.
-async function denialBytes(response: Response): Promise<string> {
-  expect(response.status).toBe(404);
-  return `${response.status}:${await response.text()}`;
 }
 
 describe("chat-channel share selector (DM grants)", () => {
@@ -286,7 +254,7 @@ describe("chat-channel share selector (DM grants)", () => {
 
 describe("DM grants over the relay", () => {
   beforeEach(() => {
-    opSeq = 0;
+    resetOpSeq();
   });
 
   it("creates an email-addressed chat-channel grant and lists it on both sides", async () => {
@@ -356,7 +324,7 @@ describe("DM grants over the relay", () => {
     const h = handler(await testStorage());
     await createWorkspace(h);
     const ciphertext = "secret-ciphertext-bytes";
-    const ciphertextSha = createHash("sha256").update(ciphertext).digest("hex");
+    const ciphertextSha = sha256(ciphertext);
     const blobPut = await h(
       request(OWNER, `/sync/${WORKSPACE}/blobs/${ciphertextSha}`, { method: "PUT", body: ciphertext }),
     );

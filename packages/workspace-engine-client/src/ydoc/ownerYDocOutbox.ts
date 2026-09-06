@@ -10,7 +10,7 @@ import type { JsonValue, WorkspaceHandle } from "../protocol";
 export { parseLiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 export type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
 
-export const OWNER_YDOC_OUTBOX_METHOD = {
+const OWNER_YDOC_OUTBOX_METHOD = {
   append: "ydoc.ownerOutbox.append",
   readPending: "ydoc.ownerOutbox.readPending",
   acknowledge: "ydoc.ownerOutbox.acknowledge",
@@ -40,7 +40,7 @@ export interface OwnerYDocOutboxAppendResult {
   readonly state: OwnerYDocOutboxState;
 }
 
-export type OwnerYDocOutboxState = "active" | "sealed" | "quarantined";
+type OwnerYDocOutboxState = "active" | "sealed" | "quarantined";
 
 export interface OwnerYDocOutboxEntry {
   readonly sequence: number;

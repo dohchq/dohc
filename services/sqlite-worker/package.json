@@ -9,6 +9,9 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
+  "dependencies": {
+    "@dohc/workspace-core": "workspace:*"
+  },
   "devDependencies": {
     "@types/node": "^24.13.3",
     "typescript": "^7.0.2",

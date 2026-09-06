@@ -1,6 +1,7 @@
-import type { SearchResultsEvent, SearchResultsEventEntry } from "../../desktop/src/ipc/channels";
 import type {
   DohcDesktopBridge,
+  SearchResultsEvent,
+  SearchResultsEventEntry,
   WorkspaceActivityEvent,
 } from "../../desktop/src/ipc/bridgeContract";
 import {

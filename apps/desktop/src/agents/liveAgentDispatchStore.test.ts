@@ -594,7 +594,7 @@ describe("live agent dispatch store", () => {
     const { store } = createLiveAgentDispatchStore(WORKSPACE, sessions);
 
     await expect(store.listPending(WORKSPACE.workspaceId)).rejects.toMatchObject({
-      name: "ChatsProtocolShapeError",
+      name: "ProtocolShapeError",
     });
   });
 
