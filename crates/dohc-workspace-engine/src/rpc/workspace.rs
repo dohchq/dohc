@@ -658,19 +658,18 @@ impl EngineService {
             // succeeded, so an unbound or mismatched root can never grow a
             // watcher or files actor.
             let capture = capture_enabled.then(|| {
-                capture_driver::CaptureDriver::spawn(
-                    root.clone(),
-                    actor.clone(),
-                    params.workspace_id.clone(),
-                    self.leases.scoped(&root),
-                    self.self_writes.scoped(&root),
-                    Arc::clone(&capture_apply_gate),
-                    actor_open.store_freshly_created,
-                    capture_author_json.flatten(),
-                    self.events.clone(),
-                    #[cfg(feature = "harness")]
-                    self.capture_apply_probe.clone(),
-                )
+                capture_driver::CaptureDriver::spawn(capture_driver::CaptureDriverSpawnParams {
+                    root: root.clone(),
+                    actor: actor.clone(),
+                    workspace_id: params.workspace_id.clone(),
+                    leases: self.leases.scoped(&root),
+                    self_writes: self.self_writes.scoped(&root),
+                    apply_gate: Arc::clone(&capture_apply_gate),
+                    store_freshly_created: actor_open.store_freshly_created,
+                    initial_author_json: capture_author_json.flatten(),
+                    events: self.events.clone(),
+                    apply_probe: self.capture_apply_probe.clone(),
+                })
             });
             // STARTUP ORDERING BARRIER: existing stores and uncertain scans
             // apply the closed-period baseline before the handle is handed
@@ -827,10 +826,8 @@ impl EngineService {
         // owns the gate can still read the driver and finish. Cancellation is
         // idempotent when the detached task takes the driver below.
         removed.request_capture_shutdown();
-        #[cfg(feature = "harness")]
         let probe = self.capture_apply_probe.clone();
         let close_task = tokio::spawn(async move {
-            #[cfg(feature = "harness")]
             if let Some(probe) = &probe {
                 probe.observe_gate_wait_if_armed();
             }
