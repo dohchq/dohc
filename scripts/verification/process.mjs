@@ -66,8 +66,8 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
         escalation.unref();
       }
     };
-    process.once("SIGINT", interrupt);
-    process.once("SIGTERM", interrupt);
+    process.on("SIGINT", interrupt);
+    process.on("SIGTERM", interrupt);
     const deadline = timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; interrupt(); }, timeoutMs);
     output?.once("error", (error) => { outputError = error; interrupt(); });
     const cleanup = () => {

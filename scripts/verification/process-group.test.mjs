@@ -15,6 +15,69 @@ function killRecorded(path, group = false) {
   catch (error) { if (error.code !== "ESRCH") throw error; }
 }
 
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  test(`POSIX repeated ${signal} waits for owned group escalation and caller cleanup`, {
+    skip: process.platform === "win32" ? "Real POSIX signal delivery" : false,
+  }, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-repeated-signal-"));
+    let completed = false;
+    try {
+      writeFileSync(join(root, "command.mjs"), `
+        process.on('SIGTERM',()=>process.stderr.write('command ignored SIGTERM\\n'));
+        setInterval(()=>{},1000);
+        console.log('command ready');
+      `);
+      const result = spawnSync(process.execPath, ["--input-type=module", "-e", `
+        import assert from 'node:assert/strict';
+        import {writeFileSync} from 'node:fs';
+        import {join} from 'node:path';
+        import {run} from ${JSON.stringify(new URL("./process.mjs", import.meta.url).href)};
+        const root=process.argv[1];
+        let command, closed=false, signals=0, callerFinally=false;
+        let stdout='',stderr='';
+        try {
+          await assert.rejects(run(process.execPath,[join(root,'command.mjs')],{
+            timeoutMs:10000,log:join(root,'command.log'),
+            onSpawn:child=>{
+              command=child;
+              writeFileSync(join(root,'command.json'),JSON.stringify({pid:child.pid}));
+              child.once('close',()=>{closed=true;});
+              child.stdout.on('data',chunk=>{
+                stdout+=chunk;
+                if(signals===0 && stdout.includes('command ready')) {
+                  signals++;process.kill(process.pid,${JSON.stringify(signal)});
+                }
+              });
+              child.stderr.on('data',chunk=>{
+                stderr+=chunk;
+                if(signals===1 && stderr.includes('command ignored SIGTERM')) {
+                  signals++;process.kill(process.pid,${JSON.stringify(signal)});
+                }
+              });
+            },
+          }),/interrupted/);
+        } finally {callerFinally=true;}
+        assert.equal(signals,2);
+        assert.equal(closed,true);
+        assert.equal(command.signalCode,'SIGKILL');
+        assert.throws(()=>process.kill(-command.pid,0),{code:'ESRCH'});
+        assert.equal(process.listenerCount('SIGINT'),0);
+        assert.equal(process.listenerCount('SIGTERM'),0);
+        writeFileSync(join(root,'completed.json'),JSON.stringify({signals,closed,callerFinally}));
+      `, root], { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
+      completed = existsSync(join(root, "completed.json"));
+      assert.equal(result.error, undefined, result.stderr);
+      assert.equal(result.signal, null, "repeated signal must not terminate the supervisor before cleanup");
+      assert.equal(result.status, 0, result.stderr);
+      assert.equal(completed, true);
+      assert.deepEqual(JSON.parse(readFileSync(join(root, "completed.json"), "utf8")), { signals: 2, closed: true, callerFinally: true });
+    } finally {
+      if (!completed) killRecorded(join(root, "command.json"), true);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("POSIX timeout kills descendants holding pipes after their leader exits", {
   skip: process.platform === "win32" ? "POSIX detached process-group lifecycle" : false,
 }, () => {
