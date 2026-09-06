@@ -16,19 +16,13 @@ export type BoundaryCrossing =
   | "private-to-shared"
   | "unmergeable-overwrite";
 
-// The change-author vocabulary (including the branded local-author label) is
-// canonically owned by @dohc/workspace-contracts since the PR 0M-6 contracts
-// extraction. Re-exported here so existing imports keep working and the brand
-// stays one nominal type across packages.
+// Contracts owns the change-author types and the local-author label's brand.
 import type {
   ChangeAuthor,
   NonEmptyLocalAuthorLabel,
 } from "@dohc/workspace-contracts/engine";
 
-export type {
-  ChangeAuthor,
-  NonEmptyLocalAuthorLabel,
-} from "@dohc/workspace-contracts/engine";
+export type { ChangeAuthor } from "@dohc/workspace-contracts/engine";
 
 function parseCanonicalNonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string") {

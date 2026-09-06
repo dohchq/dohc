@@ -217,7 +217,3 @@ const invokedPath = process.argv[1] ? resolve(process.argv[1]) : null;
 if (invokedPath && invokedPath === fileURLToPath(import.meta.url)) {
   await runCliProcess();
 }
-
-export { parseCliArguments } from "./args";
-export { locateCliEndpoint, sendCliRequest } from "./client";
-export { cliErrorLine, DohcCliError } from "./errors";

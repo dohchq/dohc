@@ -36,7 +36,7 @@ export type FieldDefinition =
   | RelationFieldDefinition;
 
 export type ViewKind = "table" | "board" | "calendar";
-export type ViewSortDirection = "asc" | "desc";
+type ViewSortDirection = "asc" | "desc";
 
 export interface ViewSort {
   field: string;
@@ -82,7 +82,7 @@ export const COLLECTION_SCHEMA_REASON_CODES = [
   "record-too-large-for-adoption",
 ] as const;
 
-export type CollectionSchemaReasonCode =
+type CollectionSchemaReasonCode =
   (typeof COLLECTION_SCHEMA_REASON_CODES)[number];
 
 export interface CollectionSchemaReason {
@@ -114,7 +114,7 @@ export const FIELD_VALUE_REASON_CODES = [
 
 export type FieldValueReasonCode = (typeof FIELD_VALUE_REASON_CODES)[number];
 
-export interface FieldValueReason {
+interface FieldValueReason {
   code: FieldValueReasonCode;
   path: string;
 }
@@ -146,16 +146,16 @@ export interface CollectionSummary {
   omittedReasons?: number;
 }
 
-export interface CollectionDetails extends CollectionSummary {
+interface CollectionDetails extends CollectionSummary {
   schema: CollectionSchema;
   recordCount: number;
 }
 
-export type CollectionIndexedValueValidation =
+type CollectionIndexedValueValidation =
   | FieldValueValidation
   | { status: "untyped" };
 
-export interface CollectionResolvedRelation {
+interface CollectionResolvedRelation {
   recordId: string;
   label: string;
 }
@@ -179,7 +179,7 @@ export interface CollectionRecordGroup {
   records: CollectionRecord[];
 }
 
-export type CollectionFilterOperator = "equals" | "contains";
+type CollectionFilterOperator = "equals" | "contains";
 
 export interface CollectionQueryFilter {
   field: string;
@@ -192,7 +192,7 @@ export interface CollectionQuerySort {
   direction: ViewSortDirection;
 }
 
-export interface CollectionQueryCursorValue {
+interface CollectionQueryCursorValue {
   present: boolean;
   value: CollectionValue;
 }
@@ -237,14 +237,14 @@ export interface CollectionGetRecordParams {
   beforeHistoryId?: number;
 }
 
-export interface CollectionHistoryValue {
+interface CollectionHistoryValue {
   present: boolean;
   value: CollectionValue;
 }
 
 type CollectionChangeActorKind = "human" | "agent" | "automation";
 
-export interface CollectionFieldHistoryEntry {
+interface CollectionFieldHistoryEntry {
   historyId: number;
   field: string;
   previous: CollectionHistoryValue;

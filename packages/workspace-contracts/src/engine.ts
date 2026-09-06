@@ -13,18 +13,8 @@ export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
  * installation belong to the desktop custody boundary. The daemon may only
  * transport the serialized wrapped envelope and its relay fingerprint.
  */
-export interface KeyEnvelopeUploadParams {
-  workspaceId: WorkspaceId;
-  envelopeJson: string;
-  ifMatch?: string;
-}
-
 export interface KeyEnvelopeUploadResult {
   etag: string;
-}
-
-export interface KeyEnvelopeDownloadParams {
-  workspaceId: WorkspaceId;
 }
 
 export interface KeyEnvelopeDownloadResult {
@@ -72,7 +62,7 @@ export class VersionedTextStoreError extends Error {
   }
 }
 
-export type VersionKind = "main" | "named";
+type VersionKind = "main" | "named";
 
 export interface VersionRecord {
   id: VersionId;
@@ -153,7 +143,7 @@ type VersionedTextComparisonStatus =
   | "current-changed"
   | "diverged";
 
-export interface VersionedTextComparison {
+interface VersionedTextComparison {
   workspaceId: WorkspaceId;
   path: string;
   targetVersionId: VersionId;
@@ -376,20 +366,20 @@ interface VersionedTextMomentPayload {
   after: VersionedTextMomentPayloadSnapshot;
 }
 
-export interface VersionedTextWriteResult {
+interface VersionedTextWriteResult {
   object: FileObjectRecord;
   snapshot: TextFileSnapshot;
   moment: VersionedTextMoment;
 }
 
-export interface VersionedTextRenameResult {
+interface VersionedTextRenameResult {
   object: FileObjectRecord;
   before: TextFileSnapshot;
   after: TextFileSnapshot;
   moment: VersionedTextMoment;
 }
 
-export interface VersionedTextDeleteResult {
+interface VersionedTextDeleteResult {
   object: FileObjectRecord;
   before: TextFileSnapshot;
   moment: VersionedTextMoment;
@@ -553,7 +543,7 @@ type ChatChannelId = string;
 // kind enum only — no participant sets, presence, or DM UI yet.
 export type ChatChannelKind = "channel" | "dm" | "agent";
 
-export type ChatActor =
+type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string };
 
@@ -588,7 +578,7 @@ export interface ChatChannelSummary extends ChatChannel {
 // one local human actor for the single-user alpha). `lastReadSequence` counts
 // messages read from the start of the thread; `revision` is server-owned and
 // bumps on every applied advance — callers may CAS on it but never write it.
-export interface ChatThreadReadState {
+interface ChatThreadReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   lastReadSequence: number;
@@ -633,9 +623,9 @@ export interface ChannelThreadSummary {
   };
 }
 
-export type ChatDecisionState = "open" | "resolved";
+type ChatDecisionState = "open" | "resolved";
 
-export interface ChatDecisionRecord {
+interface ChatDecisionRecord {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
@@ -644,7 +634,7 @@ export interface ChatDecisionRecord {
   atMs: number;
 }
 
-export interface ChatAttachment {
+interface ChatAttachment {
   attachmentId: string;
   threadId: ChatThreadId;
   messageId: ChatMessageId;
@@ -683,7 +673,7 @@ export interface ChatMessage {
   attachments: ChatAttachment[];
 }
 
-export interface ChatAgentReadState {
+interface ChatAgentReadState {
   workspaceId: WorkspaceId;
   threadId: ChatThreadId;
   lastReadCreatedAtMs: number;
@@ -703,12 +693,12 @@ interface ChatMentionRecord {
 // Reactions (WS-MU-C2). The observed cell state — an emoji reaction by an
 // author is either present ("added") or tombstoned ("removed"). Tombstones are
 // retained so a stale re-add cannot win the LWW register.
-export type ChatReactionState = "added" | "removed";
+type ChatReactionState = "added" | "removed";
 
 // Who reacted. Solo this is the local user/agent; the design's verified relay
 // authorUserId (MU-C0) later fills authorId. displayName/kind render the
 // reaction ("<User>" / "<User>'s agent") without a separate lookup.
-export interface ChatReactionAuthor {
+interface ChatReactionAuthor {
   authorId: string;
   kind: ChatActor["kind"];
   displayName: string;
@@ -729,7 +719,7 @@ export interface ChatReaction {
   atMs: number;
 }
 
-export interface ChatFollow {
+interface ChatFollow {
   workspaceId: WorkspaceId;
   ownerUserId: string;
   targetKind: ChatFollowTargetKind;
@@ -738,7 +728,7 @@ export interface ChatFollow {
   updatedAtMs: number;
 }
 
-export interface ChatFeedReadState {
+interface ChatFeedReadState {
   workspaceId: WorkspaceId;
   ownerUserId: string;
   lastSeenCreatedAtMs: number;
@@ -746,7 +736,7 @@ export interface ChatFeedReadState {
   updatedAtMs: number;
 }
 
-export interface ChatFeedItem {
+interface ChatFeedItem {
   message: ChatMessage;
   thread: ChatThread;
   channel?: ChatChannel;
@@ -766,7 +756,7 @@ export interface ChatFeedPage {
 type ChatBookmarkTargetKind = "message" | "thread";
 type ChatBookmarkMode = "live" | "snapshot";
 type ChatBookmarkState = "active" | "archived";
-export type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
+type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
 
 /**
  * A receiver-owned request to materialize chat context as a workspace file.
@@ -1201,11 +1191,11 @@ export type EngineFilePathClassification =
   | { kind: "ignored" }
   | { kind: "secret" };
 
-export type VersionFileChangeStatus = "added" | "modified" | "deleted";
+type VersionFileChangeStatus = "added" | "modified" | "deleted";
 
 // One differing path, metadata only — what `versions.compareFiles` reports
 // per row. The hydrated shape below is built from this by reading the sides.
-export interface VersionFileChangeEntry {
+interface VersionFileChangeEntry {
   path: string;
   status: VersionFileChangeStatus;
   binary?: boolean;
@@ -1265,7 +1255,7 @@ export type SecretFileStoreErrorCode =
 
 // Metadata-only description of one secret file's tip: no content, no digest
 // of the plaintext, nothing derived from the secret bytes except length.
-export interface SecretFileStat {
+interface SecretFileStat {
   workspaceId: WorkspaceId;
   versionId: VersionId;
   path: string;
@@ -1425,4 +1415,3 @@ export type ChangeAuthor =
       depth: number;
     }
   | { kind: "local"; label: NonEmptyLocalAuthorLabel };
-
