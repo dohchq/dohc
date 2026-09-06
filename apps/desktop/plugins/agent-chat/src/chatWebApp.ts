@@ -218,6 +218,7 @@ export interface ChatWebAppTestHooks {
 }
 
 async function listen(
+  agent: string,
   server: Server,
   beforeListen?: (server: Server) => Promise<void> | void,
 ): Promise<string> {
@@ -247,7 +248,7 @@ async function listen(
   });
   const address = server.address();
   if (!address || typeof address === "string") {
-    throw new Error("The chat server did not start.");
+    throw new Error(`The ${agent} chat server did not start.`);
   }
   return "http://127.0.0.1:" + address.port + "/";
 }
@@ -1057,7 +1058,7 @@ export function createChatWebApp(options: ChatWebAppOptions): ChatWebApp {
     nextServer.unref();
     server = nextServer;
     try {
-      serverUrl = await listen(nextServer, testHooks?.beforeListen);
+      serverUrl = await listen(agent, nextServer, testHooks?.beforeListen);
       return serverUrl;
     } catch (error) {
       server = null;
