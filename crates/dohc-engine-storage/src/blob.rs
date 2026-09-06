@@ -17,13 +17,17 @@ use sha2::{Digest, Sha256};
 /// discipline `dohc-engine-files` hashes scanned files with, so a scanned file
 /// hash and a stored blob hash are byte-identical (`semantics/sha256-parity`).
 pub fn hex_sha256(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
+    hex(&Sha256::digest(bytes))
+}
+
+/// Lowercase-hex encode `bytes`.
+pub fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(out, "{byte:02x}");
     }
-    hex
+    out
 }
 
 /// Store `bytes` as a content-addressed binary blob, returning its sha-256 key.

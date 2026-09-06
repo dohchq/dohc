@@ -3256,8 +3256,11 @@ mod tests {
         predecessor_update: Option<&[u8]>,
     ) -> (ScratchDir, EngineStore, DocKey) {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db path"), 1_000).expect("store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db path"),
+            1_000,
+        )
+        .expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
             .expect("workspace");
@@ -3618,7 +3621,7 @@ mod tests {
 
     fn receiver_fixture() -> (ScratchDir, EngineStore, DocKey, BuiltConflictResolveV1) {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("db path");
         let mut store = EngineStore::open(&path, 1_000).expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1_000, &NoFaults)
@@ -4009,6 +4012,7 @@ mod tests {
         };
         let applied = crate::apply_replication_envelope(
             &mut receiver,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &replicated,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4073,6 +4077,7 @@ mod tests {
         };
         let applied = crate::apply_replication_envelope(
             &mut receiver,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &replayed_reinstall,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4207,8 +4212,14 @@ mod tests {
     fn local_result_verifier_rejects_durable_effect_provenance_drift() {
         let (_scratch, mut store, _key, built) = receiver_fixture();
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply exact result");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply exact result");
         let snapshot = VersionedTextStore::new(&mut store)
             .read_text("ws", "main", "doc.md")
             .expect("read result")
@@ -4262,9 +4273,14 @@ mod tests {
     fn exact_parent_applies_result_and_successor_then_child_only_verifies_history() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        let outcome =
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-                .expect("apply parent");
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply parent");
         assert!(matches!(outcome, crate::ApplyOutcome::Applied(_)));
         let (text, latest): (String, String) = store
             .read_with(|conn| {
@@ -4305,7 +4321,13 @@ mod tests {
             })
             .expect("moment count");
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &child, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &child,
+                &NoFaults,
+                &crate::NoLiveLeases
+            ),
             Ok(crate::ApplyOutcome::Applied(_))
         ));
         let moments_after: i64 = store
@@ -4321,8 +4343,14 @@ mod tests {
     fn tagged_child_verifies_and_acks_while_the_committed_result_is_live() {
         let (_scratch, mut store, key, built) = receiver_fixture();
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply parent");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply parent");
         let before: (String, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -4343,7 +4371,13 @@ mod tests {
         let _held = leases.acquire(&key).expect("hold committed result live");
         let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &child, &NoFaults, &leases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &child,
+                &NoFaults,
+                &leases
+            ),
             Ok(crate::ApplyOutcome::Applied(_))
         ));
         let after: (String, i64) = store
@@ -4411,8 +4445,13 @@ mod tests {
         let built = build_conflict_resolve_v1(payload).expect("poisoned carrier remains valid");
 
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        let parent_outcome =
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases);
+        let parent_outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        );
         assert!(
             matches!(parent_outcome, Ok(crate::ApplyOutcome::Refused(_))),
             "poisoned successor must refuse its parent: {parent_outcome:?}",
@@ -4429,8 +4468,13 @@ mod tests {
             .expect("simulate the refusal report committed before the next pull page");
 
         let child = imported_envelope(1, "moment.append", built.validated.shadows[0].clone());
-        let outcome =
-            crate::apply_replication_envelope(&mut store, &child, &NoFaults, &crate::NoLiveLeases);
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &child,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        );
         assert!(
             matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
             "the refused parent's authenticated shadow must retire without applying: {outcome:?}",
@@ -4482,6 +4526,7 @@ mod tests {
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
         crate::apply_replication_envelope(
             &mut mismatch_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &parent,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4493,6 +4538,7 @@ mod tests {
         assert!(matches!(
             crate::apply_replication_envelope(
                 &mut mismatch_store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &child,
                 &NoFaults,
                 &crate::NoLiveLeases,
@@ -4508,6 +4554,7 @@ mod tests {
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
         crate::apply_replication_envelope(
             &mut nonadjacent_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &parent,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4517,6 +4564,7 @@ mod tests {
         assert!(matches!(
             crate::apply_replication_envelope(
                 &mut nonadjacent_store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &intervening,
                 &NoFaults,
                 &crate::NoLiveLeases,
@@ -4527,6 +4575,7 @@ mod tests {
         assert!(matches!(
             crate::apply_replication_envelope(
                 &mut nonadjacent_store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &child,
                 &NoFaults,
                 &crate::NoLiveLeases,
@@ -4553,8 +4602,13 @@ mod tests {
         record.remove("conflictId");
         record.remove("conflictEffectIndex");
         let moment = imported_envelope(0, "moment.append", payload);
-        let outcome =
-            crate::apply_replication_envelope(&mut store, &moment, &NoFaults, &crate::NoLiveLeases);
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &moment,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        );
         assert!(
             matches!(outcome, Ok(crate::ApplyOutcome::Applied(_))),
             "unexpected untagged moment outcome: {outcome:?}",
@@ -4606,8 +4660,14 @@ mod tests {
             }),
             recorded_at_ms: 20,
         };
-        crate::apply_ydoc_envelope(&mut store, &update, &NoFaults, &crate::NoLiveLeases)
-            .expect("park dependent update");
+        crate::apply_ydoc_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &update,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("park dependent update");
         assert!(
             dohc_engine_collab::load_persisted(&store, &key)
                 .expect("load lineage")
@@ -4617,7 +4677,13 @@ mod tests {
         );
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases,),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            ),
             Err(SyncError::RetryableState {
                 reason: "ydoc-incomplete-lineage"
             })
@@ -4650,8 +4716,14 @@ mod tests {
     fn path_change_reports_delete_then_write_on_first_delivery_and_replays_record_only() {
         let (_scratch, mut store, _key, built) = path_change_receiver_fixture();
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply path-change parent");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply path-change parent");
         let changes = crate::conflict_apply::redelivered_materialization_changes(&store, &parent)
             .expect("first-delivery materialization changes");
         assert_eq!(
@@ -4680,7 +4752,13 @@ mod tests {
         let mut replay = imported_envelope(0, "conflict.resolve", built.value.clone());
         replay.origin_id = "other-peer".to_owned();
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &replay, &NoFaults, &crate::NoLiveLeases,),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &replay,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            ),
             Ok(crate::ApplyOutcome::Applied(_))
         ));
         let moments_after: i64 = store
@@ -4718,6 +4796,7 @@ mod tests {
         let absent_parent = imported_envelope(0, "conflict.resolve", absent_built.value.clone());
         crate::apply_replication_envelope(
             &mut absent_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &absent_parent,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4739,6 +4818,7 @@ mod tests {
         absent_replay.origin_id = "other-peer".to_owned();
         let outcome = crate::apply_replication_envelope(
             &mut absent_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &absent_replay,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4753,6 +4833,7 @@ mod tests {
         let binary_parent = imported_envelope(0, "conflict.resolve", binary_built.value.clone());
         crate::apply_replication_envelope(
             &mut binary_store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
             &binary_parent,
             &NoFaults,
             &crate::NoLiveLeases,
@@ -4782,6 +4863,7 @@ mod tests {
         assert!(matches!(
             crate::apply_replication_envelope(
                 &mut binary_store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
                 &binary_replay,
                 &NoFaults,
                 &crate::NoLiveLeases,
@@ -4795,7 +4877,13 @@ mod tests {
         let (_scratch, mut store, _key, built) = receiver_fixture();
         let child = imported_envelope(0, "moment.append", built.validated.shadows[0].clone());
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &child, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &child,
+                &NoFaults,
+                &crate::NoLiveLeases
+            ),
             Err(SyncError::CoordinateDiverged)
         ));
         assert_eq!(
@@ -4811,7 +4899,13 @@ mod tests {
         let leases = dohc_engine_collab::LeaseRegistry::new();
         let held = leases.acquire(&key).expect("hold live");
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &leases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &leases
+            ),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -4834,7 +4928,13 @@ mod tests {
         assert_eq!(live_text, "current text");
         drop(held);
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &leases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &leases
+            ),
             Ok(crate::ApplyOutcome::Applied(_))
         ));
         assert_eq!(
@@ -4851,8 +4951,14 @@ mod tests {
         let built = build_conflict_resolve_v1(payload).expect("lineage-unbound carrier");
         let parent = imported_envelope(0, "conflict.resolve", built.value);
 
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply lineage-unbound parent");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply lineage-unbound parent");
 
         assert_eq!(
             VersionedTextStore::new(&mut store)
@@ -4944,8 +5050,14 @@ mod tests {
         let built = build_conflict_resolve_v1(payload).expect("absent lineage-unbound carrier");
         let parent = imported_envelope(0, "conflict.resolve", built.value);
 
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("route the hidden local draft through review");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("route the hidden local draft through review");
 
         assert_eq!(
             projected_ydoc_text(&mut store, &derived_key),
@@ -5039,8 +5151,14 @@ mod tests {
         let built = build_conflict_resolve_v1(payload).expect("lineage-unbound carrier");
         let parent = imported_envelope(0, "conflict.resolve", built.value);
 
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply lineage-unbound parent");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply lineage-unbound parent");
 
         assert_eq!(projected_ydoc_text(&mut store, &key), "resolved text");
         assert_eq!(projected_ydoc_text(&mut store, &derived_key), "orphan edit");
@@ -5079,7 +5197,13 @@ mod tests {
             .expect("hold absent destination live");
 
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &leases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &parent,
+                &NoFaults,
+                &leases
+            ),
             Err(SyncError::RetryableState {
                 reason: "ydoc-session-live"
             })
@@ -5124,9 +5248,14 @@ mod tests {
             )
             .expect("advance local head");
         let parent = imported_envelope(0, "conflict.resolve", built.value.clone());
-        let outcome =
-            crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-                .expect("preserve divergent result");
+        let outcome = crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("preserve divergent result");
         assert!(matches!(outcome, crate::ApplyOutcome::Applied(_)));
         let (text, latest, open, inactive): (String, String, i64, i64) = store
             .read_with(|conn| {
@@ -5174,8 +5303,14 @@ mod tests {
     fn already_result_parent_is_record_only_and_idempotent_across_origins() {
         let (_scratch, mut store, _key, built) = receiver_fixture();
         let first = imported_envelope(0, "conflict.resolve", built.value.clone());
-        crate::apply_replication_envelope(&mut store, &first, &NoFaults, &crate::NoLiveLeases)
-            .expect("first parent");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &first,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("first parent");
         let before: (i64, i64) = store
             .read_with(|conn| {
                 Ok::<_, rusqlite::Error>((
@@ -5189,7 +5324,13 @@ mod tests {
         let mut second = imported_envelope(0, "conflict.resolve", built.value.clone());
         second.origin_id = "other-peer".to_owned();
         assert!(matches!(
-            crate::apply_replication_envelope(&mut store, &second, &NoFaults, &crate::NoLiveLeases),
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &second,
+                &NoFaults,
+                &crate::NoLiveLeases
+            ),
             Ok(crate::ApplyOutcome::Applied(_))
         ));
         let after: (i64, i64) = store
@@ -5265,8 +5406,14 @@ mod tests {
             .expect("open receiver mirror");
 
         let parent = imported_envelope(0, "conflict.resolve", built.value);
-        crate::apply_replication_envelope(&mut store, &parent, &NoFaults, &crate::NoLiveLeases)
-            .expect("apply equivalent result");
+        crate::apply_replication_envelope(
+            &mut store,
+            &mut dohc_engine_collab::WriterDocCache::new(),
+            &parent,
+            &NoFaults,
+            &crate::NoLiveLeases,
+        )
+        .expect("apply equivalent result");
 
         let (text, latest, open, shadow): (String, String, i64, i64) = store
             .read_with(|conn| {
@@ -5314,8 +5461,14 @@ mod tests {
         ] {
             let (_scratch, mut store, _key, built) = receiver_fixture();
             let first = imported_envelope(0, "conflict.resolve", built.value.clone());
-            crate::apply_replication_envelope(&mut store, &first, &NoFaults, &crate::NoLiveLeases)
-                .expect("first parent");
+            crate::apply_replication_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &first,
+                &NoFaults,
+                &crate::NoLiveLeases,
+            )
+            .expect("first parent");
             store
                 .write_with(&NoFaults, |tx| {
                     tx.execute(
@@ -5335,6 +5488,7 @@ mod tests {
                 matches!(
                     crate::apply_replication_envelope(
                         &mut store,
+                        &mut dohc_engine_collab::WriterDocCache::new(),
                         &replay,
                         &NoFaults,
                         &crate::NoLiveLeases,

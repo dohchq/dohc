@@ -36,13 +36,13 @@ use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_sync::{
     ApplyOutcome, ReplicationEnvelope, SyncError, apply_envelope_with, apply_secret_envelope,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use proptest::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&path, 1_000).expect("open");
     (scratch, store)
 }

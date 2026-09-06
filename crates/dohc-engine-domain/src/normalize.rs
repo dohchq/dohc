@@ -96,7 +96,7 @@ pub struct NormalizedState {
 /// a long-lived workspace is captured completely, not truncated).
 const MOMENT_PAGE: i64 = 512;
 
-pub(crate) fn capture(
+pub fn capture(
     store: &VersionedTextStore<'_>,
     workspace_id: &str,
 ) -> Result<NormalizedState, DomainError> {

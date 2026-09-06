@@ -3,7 +3,7 @@ use dohc_engine_domain::{
     SaveBookmark, SendMessage, StartChannelThread,
 };
 use dohc_engine_storage::{EngineStore, StorageError};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::params;
 
 const WS: &str = "b2-ws";
@@ -12,7 +12,7 @@ const NO_FAULTS: NoFaults = NoFaults;
 
 fn open_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let store = EngineStore::open(&db, 1).expect("open");
     (scratch, store)
 }

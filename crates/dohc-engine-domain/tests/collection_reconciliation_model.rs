@@ -5,7 +5,7 @@ use dohc_engine_domain::{
     reconcile_collections_in_tx, set_collection_adoption_state_in_tx,
 };
 use dohc_engine_storage::{EngineStore, StorageError, hex_sha256};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use rusqlite::{Connection, params};
 
 const WORKSPACE_ID: &str = "collection-reconciliation-model";
@@ -116,7 +116,7 @@ impl ModelState {
 
 fn fresh_store() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(&scratch).expect("engine db path");
     let mut store = EngineStore::open(&db, 1).expect("open store");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)

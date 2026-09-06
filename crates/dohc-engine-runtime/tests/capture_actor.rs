@@ -4,7 +4,7 @@ use dohc_engine_runtime::{
     MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults, RuntimeError, WorkspaceRootGuard, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -161,7 +161,7 @@ fn expected_capture_batch_state() -> CaptureBatchState {
 #[test]
 fn blocking_capture_variants_round_trip_through_the_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -215,7 +215,7 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
     const WORKSPACE_ID: &str = "ws-capture-batch";
     const VERSION_ID: &str = "main";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
         scratch.path(),
@@ -360,7 +360,7 @@ fn bounded_capture_batch_contains_a_leased_path_and_replays_without_duplicates()
 #[test]
 fn capture_batch_rejects_a_missing_named_version_before_writing() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     initialize_replicating_workspace(&db);
     let mut inputs = capture_batch_inputs();
     for input in &mut inputs {
@@ -406,7 +406,7 @@ fn capture_batch_rejects_a_missing_named_version_before_writing() {
 #[test]
 fn capture_batch_refuses_invalid_shapes_before_mutation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let before = capture_batch_state(&db);
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -490,7 +490,7 @@ fn capture_batch_refuses_invalid_shapes_before_mutation() {
 fn capture_batch_replaces_a_duplicate_path_without_duplicate_fts_rows() {
     const WORKSPACE_ID: &str = "ws-capture-batch-duplicate";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
         scratch.path(),
     ));
@@ -564,7 +564,7 @@ fn capture_batch_replaces_a_duplicate_path_without_duplicate_fts_rows() {
 fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
     const WORKSPACE_ID: &str = "ws-capture-batch-foreign";
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let policy = Arc::new(dohc_engine_runtime::search::read_engine_search_policy(
         scratch.path(),
     ));
@@ -650,7 +650,7 @@ fn added_batch_preserves_a_foreign_head_and_indexes_its_new_sibling() {
 #[test]
 fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     initialize_replicating_workspace(&db);
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -707,7 +707,7 @@ fn capture_batch_storage_before_persist_rolls_back_the_whole_chunk() {
 #[test]
 fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     initialize_replicating_workspace(&db);
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
@@ -762,7 +762,7 @@ fn capture_batch_storage_after_commit_replays_without_duplicate_side_effects() {
 #[tokio::test]
 async fn async_capture_variants_round_trip_and_honor_precancellation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -952,7 +952,7 @@ async fn binary_capture_round_trips_through_the_actor_both_ways() {
     use dohc_engine_runtime::CaptureIngestBinary;
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let input = |bytes: &[u8], now_ms: i64| CaptureIngestBinary {
@@ -1016,7 +1016,7 @@ async fn live_lease_blocks_text_and_binary_capture_without_mutation_until_retry(
     use dohc_engine_runtime::CaptureIngestBinary;
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let workspace_id = "ws-live-capture";
     let path = "notes/live.md";
     let object_id = dohc_engine_domain::derive_capture_object_id(workspace_id, "main", path);

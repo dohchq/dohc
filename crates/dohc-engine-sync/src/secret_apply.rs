@@ -138,7 +138,7 @@ pub(crate) fn redelivered_materialization_changes(
 }
 
 fn decode<T: for<'de> Deserialize<'de>>(value: &serde_json::Value) -> Result<T, SyncError> {
-    serde_json::from_value(value.clone()).map_err(|_| SyncError::InvalidInput {
+    Deserialize::deserialize(value).map_err(|_| SyncError::InvalidInput {
         reason: "secret replication payload is malformed",
     })
 }

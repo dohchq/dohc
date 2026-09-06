@@ -10,7 +10,8 @@ use dohc_engine_runtime::{
 use dohc_engine_storage::EngineStore;
 use dohc_engine_testkit::harness::wal_sidecar;
 use dohc_engine_testkit::{
-    PanicFaults, ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink,
+    PanicFaults, ScratchDir, engine_db_path, make_hardlink, try_make_dir_alias,
+    try_make_file_symlink,
 };
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -93,7 +94,7 @@ fn moments(db: &std::path::Path) -> i64 {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn actor_lifecycle_open_ready_closed() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
@@ -118,7 +119,7 @@ async fn actor_lifecycle_open_ready_closed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lexical_aliases_converge_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     // Same file, different lexical spelling (redundant `.` components).
@@ -145,7 +146,7 @@ async fn lexical_aliases_converge_on_one_actor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn symlink_or_junction_alias_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path"); // creates .dohc/engine
+    let db = engine_db_path(&scratch).expect("db path"); // creates .dohc/engine
     let real_engine_dir = db.parent().expect("engine dir").to_path_buf();
 
     let link_dir = scratch.join("engine-alias");
@@ -185,7 +186,7 @@ async fn symlink_or_junction_alias_converges_on_one_actor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_bumps_generation_and_preserves_state() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
@@ -214,7 +215,7 @@ async fn restart_bumps_generation_and_preserves_state() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn close_releases_the_connection() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
@@ -253,7 +254,7 @@ async fn close_releases_the_connection() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dropping_supervisor_releases_all_actors() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     {
         let sup = WorkspaceSupervisor::new();
@@ -274,7 +275,7 @@ async fn dropping_supervisor_releases_all_actors() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn hardlink_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     // Open (creates + initializes the db), then hard-link a second name to it.
@@ -298,7 +299,7 @@ async fn hardlink_converges_on_one_actor() {
 #[test]
 fn case_alias_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
     let a = sup.open(&db, 1).expect("open").actor;
 
@@ -323,7 +324,7 @@ fn case_alias_converges_on_one_actor() {
 #[test]
 fn file_symlink_converges_on_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
     let a = sup.open(&db, 1).expect("open real").actor;
 
@@ -351,7 +352,7 @@ fn file_symlink_converges_on_one_actor() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn worker_panic_publishes_closed() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
     let handle = sup.open(&db, 1).expect("open").actor;
     seed(&handle).await;
@@ -371,7 +372,7 @@ async fn worker_panic_publishes_closed() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn restart_after_panicked_predecessor_continues_generation() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = WorkspaceSupervisor::new();
 
     let handle = sup.open(&db, 1).expect("open").actor;
@@ -400,7 +401,7 @@ async fn restart_after_panicked_predecessor_continues_generation() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_opens_share_one_actor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let sup = Arc::new(WorkspaceSupervisor::new());
 
     let mut joins = Vec::new();
