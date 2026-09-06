@@ -23,18 +23,10 @@ export const YDOC_EVENT = {
   remoteUpdate: "ydoc.remoteUpdate",
 } as const;
 
-export type YdocContentKind = "richdoc" | "plaintext" | "scene";
+export type YdocContentKind = typeof YdocContentKindSchema.Type;
 export type JsonObject = { [key: string]: JsonValue | undefined };
 
-export interface ArtifactAssetDescriptor extends JsonObject {
-  id: string;
-  mimeType: string;
-  created: number;
-  ref: string;
-  sha256: string;
-  lastRetrieved?: number;
-  version?: number;
-}
+export type ArtifactAssetDescriptor = typeof ArtifactAssetDescriptorSchema.Type;
 
 export type YdocOpenParams = JsonObject & {
   versionId: string;
@@ -42,26 +34,6 @@ export type YdocOpenParams = JsonObject & {
   expectedObjectId?: string;
   contentKind?: YdocContentKind;
   seedFromArtifact?: boolean;
-};
-
-export type YdocOpenResult = JsonObject & {
-  sessionId: string;
-  objectId: string;
-  path: string;
-  contentKind: YdocContentKind;
-  // Whether the ENTERED VERSION has a committed snapshot for this path.
-  // "absent" means the version does not contain the path. See
-  // EngineYdocProviderSession.head.
-  head: "present" | "absent";
-  // Whether the daemon resumed durable CRDT state for this object. These two
-  // are independent and both are read: an ordinary first open of a captured
-  // file is lineage-absent and head-present, and a crash-orphaned draft the
-  // daemon resurrects is lineage-existing and head-absent. Only both absent
-  // means the session is bound to an empty doc over nothing.
-  lineage: "existing" | "absent";
-  artifactAssets?: ArtifactAssetDescriptor[];
-  seedContent?: string;
-  lineageClaimId: string | null;
 };
 
 // Declared write provenance beside the actor origin: the kind of actor that
@@ -89,42 +61,14 @@ export type YdocRecordUpdateParams = JsonObject & {
   seed?: boolean;
 };
 
-export type YdocRecordUpdateResult = JsonObject & {
-  seq: number;
-  lineageClaimId: string | null;
-};
-
-export type YdocResyncResult = JsonObject & {
-  lineageClaimId: string | null;
-  recoveredPaths: string[];
-  artifactAssets: ArtifactAssetDescriptor[];
-};
+export type YdocRecordUpdateResult = typeof RecordUpdateResultSchema.Type;
 
 export type YdocSettleParams = JsonObject & {
   sessionId: string;
   summary?: string;
 };
 
-type YdocProjectionProvenance = JsonObject & {
-  contentKind: YdocContentKind;
-  sourceStateVectorSha256: string;
-  destructive: boolean;
-};
-
-export type YdocSettleResult = JsonObject & {
-  momentId: string;
-  path: string;
-  // null once the settled body is past the engine's in-band response cap. The
-  // settle still committed and the engine wrote the file — read it from disk
-  // rather than echoing it back over the wire.
-  content: string | null;
-  sha256: string;
-  // false => the settle committed but the FILE did not move (materialization
-  // blocked by containment; the write is pending a retry). Nothing may report
-  // the document as saved on a false.
-  materialized: boolean;
-  projection: YdocProjectionProvenance;
-};
+export type YdocSettleResult = typeof SettleResultSchema.Type;
 
 export type YdocCloseParams = JsonObject & {
   sessionId: string;
@@ -132,22 +76,11 @@ export type YdocCloseParams = JsonObject & {
   summary?: string;
 };
 
-export type YdocCloseResult = JsonObject & {
-  closed: true;
-};
-
 export type YdocEvictParams = JsonObject & {
   sessionId: string;
 };
 
-export type YdocEvictResult = JsonObject & {
-  evicted: true;
-};
-
-export type YdocRemoteUpdatePayload = JsonObject & {
-  sessionId: string;
-  updateBase64: string;
-};
+type YdocRemoteUpdatePayload = typeof RemoteUpdatePayloadSchema.Type;
 
 function decodeYdocSchema<S extends Schema.ConstraintDecoder<unknown>>(
   schema: S,
@@ -184,9 +117,11 @@ const OpenResultSchema = mutableStruct({
   objectId: Schema.String,
   path: Schema.String,
   contentKind: YdocContentKindSchema,
+  // Head describes the entered version's snapshot. Lineage describes durable
+  // CRDT state. Only both absent means the session has neither source.
   head: Schema.Literals(["present", "absent"]),
   lineage: Schema.Literals(["existing", "absent"]),
-  artifactAssets: Schema.optionalKey(Schema.Array(ArtifactAssetDescriptorSchema)),
+  artifactAssets: Schema.optionalKey(Schema.mutable(Schema.Array(ArtifactAssetDescriptorSchema))),
   seedContent: Schema.optionalKey(Schema.String),
   lineageClaimId: Schema.NullOr(Schema.String),
 });
@@ -207,8 +142,10 @@ const ProjectionProvenanceSchema = mutableStruct({
 const SettleResultSchema = mutableStruct({
   momentId: Schema.String,
   path: Schema.String,
+  // Null means the committed content exceeded the in-band cap. Read the file.
   content: Schema.NullOr(Schema.String),
   sha256: Schema.String,
+  // False means settlement committed but materialization is pending. Do not report saved.
   materialized: Schema.Boolean,
   projection: ProjectionProvenanceSchema,
 });
@@ -219,13 +156,22 @@ const RemoteUpdatePayloadSchema = mutableStruct({
   updateBase64: Schema.String,
 });
 
-export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
-  const decoded = decodeYdocSchema(
-    OpenResultSchema,
-    value,
-    "ydoc.open result",
-  ) as YdocOpenResult;
-  decoded.artifactAssets?.forEach((asset, index) => {
+const YdocResultSchemas = {
+  [YDOC_METHOD.open]: OpenResultSchema,
+  [YDOC_METHOD.recordUpdate]: RecordUpdateResultSchema,
+  [YDOC_METHOD.resync]: ResyncResultSchema,
+  [YDOC_METHOD.settle]: SettleResultSchema,
+  [YDOC_METHOD.close]: CloseResultSchema,
+  [YDOC_METHOD.evict]: EvictResultSchema,
+} as const;
+
+type YdocMethod = keyof typeof YdocResultSchemas;
+type YdocMethodResultMap = {
+  [M in YdocMethod]: (typeof YdocResultSchemas)[M]["Type"];
+};
+
+function validateOpenAssets(assets: ArtifactAssetDescriptor[] | undefined): void {
+  assets?.forEach((asset, index) => {
     if (
       asset.id.length === 0 ||
       asset.mimeType.length === 0 ||
@@ -242,7 +188,6 @@ export function decodeYdocOpenResult(value: JsonValue): YdocOpenResult {
       );
     }
   });
-  return decoded;
 }
 
 function isNonnegativeSafeInteger(value: number): boolean {
@@ -278,46 +223,20 @@ function hasWellFormedSurrogates(value: string): boolean {
   return true;
 }
 
-export function decodeYdocRecordUpdateResult(
+export function decodeYdocResult<M extends YdocMethod>(
+  method: M,
   value: JsonValue,
-): YdocRecordUpdateResult {
+): YdocMethodResultMap[M] {
+  if (method === YDOC_METHOD.open) {
+    const decoded = decodeYdocSchema(OpenResultSchema, value, `${method} result`);
+    validateOpenAssets(decoded.artifactAssets);
+    return decoded as YdocMethodResultMap[M];
+  }
   return decodeYdocSchema(
-    RecordUpdateResultSchema,
+    YdocResultSchemas[method],
     value,
-    "ydoc.recordUpdate result",
-  ) as YdocRecordUpdateResult;
-}
-
-export function decodeYdocResyncResult(value: JsonValue): YdocResyncResult {
-  return decodeYdocSchema(
-    ResyncResultSchema,
-    value,
-    "ydoc.resync result",
-  ) as YdocResyncResult;
-}
-
-export function decodeYdocSettleResult(value: JsonValue): YdocSettleResult {
-  return decodeYdocSchema(
-    SettleResultSchema,
-    value,
-    "ydoc.settle result",
-  ) as YdocSettleResult;
-}
-
-export function decodeYdocCloseResult(value: JsonValue): YdocCloseResult {
-  return decodeYdocSchema(
-    CloseResultSchema,
-    value,
-    "ydoc.close result",
-  ) as YdocCloseResult;
-}
-
-export function decodeYdocEvictResult(value: JsonValue): YdocEvictResult {
-  return decodeYdocSchema(
-    EvictResultSchema,
-    value,
-    "ydoc.evict result",
-  ) as YdocEvictResult;
+    `${method} result`,
+  ) as YdocMethodResultMap[M];
 }
 
 export function decodeYdocRemoteUpdatePayload(
@@ -327,5 +246,5 @@ export function decodeYdocRemoteUpdatePayload(
     RemoteUpdatePayloadSchema,
     value,
     "ydoc.remoteUpdate payload",
-  ) as YdocRemoteUpdatePayload;
+  );
 }
