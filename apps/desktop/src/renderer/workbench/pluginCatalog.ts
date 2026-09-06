@@ -357,6 +357,7 @@ interface PluginCatalog {
   load: PluginLoadState;
   busy: Record<string, PluginAction | undefined>;
   openingWebApp: string | null;
+  webAppRootPending: (plugin: PluginStatusRecord) => boolean;
   errors: Record<string, string | undefined>;
   confirmation: PluginUninstallConfirmation | null;
   /** The most recent rename the pipeline has reported, for a tab tracking
@@ -434,6 +435,8 @@ export function usePluginCatalog(
   // newest event for each plugin and merge it over that list before painting.
   const statusRevision = useRef(0);
   const pendingStatusEvents = useRef(new Map<string, PendingStatusEvent>());
+  // A rename supplies the new directory identity, but no authoritative root.
+  const pendingWebAppRoots = useRef(new Set<string>());
   // The authoritative offered set as of the last successful loadOffers —
   // read at Add's settle time, not captured in addOffer's own closure,
   // which would still hold whatever was current when Add was CALLED. An
@@ -468,10 +471,13 @@ export function usePluginCatalog(
       const newerEvents = [...pendingStatusEvents.current.values()]
         .filter((pending) => pending.revision > revisionAtStart)
         .sort((left, right) => left.revision - right.revision);
-      setLoad({
-        status: "ready",
+      pendingWebAppRoots.current.clear();
+      const ready = {
+        status: "ready" as const,
         plugins: applyStatusEvents(result.plugins, newerEvents),
-      });
+      };
+      loadRef.current = ready;
+      setLoad(ready);
     } catch (error) {
       if (
         requestToken !== listRequestToken.current ||
@@ -560,6 +566,7 @@ export function usePluginCatalog(
     setOfferErrors({});
     offeredDirectoryNames.current = new Set();
     pendingStatusEvents.current.clear();
+    pendingWebAppRoots.current.clear();
     statusRevision.current = 0;
     void loadPlugins();
     void loadOffers();
@@ -581,6 +588,10 @@ export function usePluginCatalog(
       }
       if (event.kind === "renamed") {
         const oldKey = pluginKey({ id: event.pluginId, directoryName: event.from });
+        pendingWebAppRoots.current.delete(oldKey);
+        pendingWebAppRoots.current.add(
+          pluginKey({ id: event.pluginId, directoryName: event.to }),
+        );
         pendingStatusEvents.current.set(oldKey, {
           revision: ++statusRevision.current,
           event: {
@@ -608,9 +619,8 @@ export function usePluginCatalog(
           // A status event can follow the rename before React renders.
           loadRef.current = moved;
           setLoad(moved);
-        } else {
-          void loadPlugins(true);
         }
+        void loadPlugins(true);
         setRenamed({ pluginId: event.pluginId, from: event.from, to: event.to });
         return;
       }
@@ -624,10 +634,13 @@ export function usePluginCatalog(
       pendingStatusEvents.current.set(key, pending);
       setLoad((current) => {
         if (current.status !== "ready") return current;
-        return {
-          status: "ready",
+        const ready = {
+          status: "ready" as const,
           plugins: applyStatusEvents(current.plugins, [pending]),
         };
+        pendingWebAppRoots.current.delete(key);
+        loadRef.current = ready;
+        return ready;
       });
       if (event.kind === "removed" || event.kind === "changed") {
         // A plugin's identity can move either direction: an uninstall frees
@@ -725,6 +738,11 @@ export function usePluginCatalog(
 
   // The tab opens from main and takes focus there.
   async function openWebApp(plugin: PluginStatusRecord, webAppId: string) {
+    if (pendingWebAppRoots.current.has(pluginKey(plugin))) return;
+    const current = loadRef.current.status === "ready"
+      ? loadRef.current.plugins.find((row) => pluginKey(row) === pluginKey(plugin))
+      : undefined;
+    if (!current) return;
     const epoch = workspaceEpoch.current;
     const key = webAppKey(plugin.id, webAppId);
     setOpeningWebApp(key);
@@ -732,7 +750,7 @@ export function usePluginCatalog(
     try {
       await bridge().openPluginWebApp({
         workspaceId,
-        pluginRoot: plugin.rootPath,
+        pluginRoot: current.rootPath,
         pluginId: plugin.id,
         webAppId,
         // The plugin's page has no instance to name. Per-instance apps are
@@ -934,6 +952,7 @@ export function usePluginCatalog(
     load,
     busy,
     openingWebApp,
+    webAppRootPending: (plugin) => pendingWebAppRoots.current.has(pluginKey(plugin)),
     errors,
     confirmation,
     renamed,

@@ -216,6 +216,25 @@ function tableTextGrid(editor: Editor): string[][] {
 
 describe("table controls grips", () => {
   let editor: Editor | undefined;
+  let editorFrame: HTMLIFrameElement | undefined;
+
+  function moveEditorToFrame(target: Editor): Window {
+    editorFrame = document.createElement("iframe");
+    document.body.append(editorFrame);
+    const frameDocument = editorFrame.contentDocument!;
+    Object.defineProperty(frameDocument, "elementFromPoint", {
+      configurable: true,
+      value: () => elementFromPointResult,
+    });
+    const content = target.getJSON();
+    target.commands.clearContent();
+    frameDocument.body.append(target.view.dom);
+    target.view.updateRoot();
+    // Build fresh widgets after the editor moves. Their detached buttons
+    // start in the global document and are adopted when ProseMirror inserts them.
+    target.commands.setContent(content);
+    return editorFrame.contentWindow!;
+  }
 
   afterEach(() => {
     elementFromPointResult = null;
@@ -224,6 +243,8 @@ describe("table controls grips", () => {
     document.body.querySelector(".dohc-table-drop-indicator")?.remove();
     editor?.destroy();
     editor = undefined;
+    editorFrame?.remove();
+    editorFrame = undefined;
   });
 
   function dragFirstRowToLast(target: Editor): void {
@@ -560,6 +581,28 @@ describe("table controls grips", () => {
       ["C1", "C2", "C3"],
       ["A1", "A2", "A3"],
     ]);
+  });
+
+  it.each(["release", "Escape"])("handles a table drag's %s in the editor's window", (ending) => {
+    editor = createLabeledTableEditor();
+    const editorWindow = moveEditorToFrame(editor);
+    const source = editor.view.dom.querySelector(".dohc-table-grip--row") as HTMLElement;
+    expect(source.ownerDocument.defaultView).toBe(editorWindow);
+    elementFromPointResult = source;
+    dispatchPointer(source, "pointerdown");
+    elementFromPointResult = editor.view.dom.querySelectorAll("tr")[2]!.cells[1]!;
+    dispatchPointer(source, "pointermove", { clientX: 10, clientY: 10 });
+    expect(source.getAttribute("aria-grabbed")).toBe("true");
+    elementFromPointResult = null;
+
+    editorWindow.dispatchEvent(ending === "release"
+      ? new MouseEvent("mouseup", { button: 0 })
+      : new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(source.getAttribute("aria-grabbed")).toBe("false");
+    expect(tableTextGrid(editor).map((row) => row[0])).toEqual(
+      ending === "release" ? ["B1", "C1", "A1"] : ["A1", "B1", "C1"],
+    );
   });
 
   it("uses the pointer half to insert before the target row", () => {
@@ -1036,6 +1079,30 @@ describe("table controls grips", () => {
 
     expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(74);
     expect(handle.classList.contains("is-resizing")).toBe(false);
+  });
+
+  it.each(["release", "Escape"])("handles a row resize's %s in the editor's window", (ending) => {
+    editor = createTableEditor(2, 2);
+    const editorWindow = moveEditorToFrame(editor);
+    const row = editor.view.dom.querySelector("tr") as HTMLTableRowElement;
+    const handle = editor.view.dom.querySelector(".dohc-table-row-resize") as HTMLButtonElement;
+    expect(handle.ownerDocument.defaultView).toBe(editorWindow);
+    Object.defineProperty(row, "getBoundingClientRect", {
+      configurable: true,
+      value: () => ({ top: 0, bottom: 40, left: 0, right: 240, width: 240, height: 40 }),
+    });
+    dispatchPointer(handle, "pointerdown", { clientY: 100 });
+    dispatchPointer(handle, "pointermove", { clientY: 134 });
+    expect(row.style.height).toBe("74px");
+
+    editorWindow.dispatchEvent(ending === "release"
+      ? new MouseEvent("mouseup", { button: 0 })
+      : new KeyboardEvent("keydown", { key: "Escape" }));
+
+    expect(handle.getAttribute("aria-grabbed")).toBe("false");
+    expect(handle.classList.contains("is-resizing")).toBe(false);
+    expect(tableNode(editor).content?.[0]?.attrs?.height).toBe(ending === "release" ? 74 : null);
+    expect(row.style.height).toBe(ending === "release" ? "74px" : "");
   });
 
   it("commits a resize from a non-bubbling handle mouseup", () => {
