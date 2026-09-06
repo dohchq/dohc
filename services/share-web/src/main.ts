@@ -9,7 +9,7 @@ import {
 } from "@dohc/service-http";
 import { loadShareWebConfig } from "./config";
 import {
-  createShareWebHandler,
+  createShareWebApplication,
   SHARE_WEB_SECURITY_HEADERS,
   shareWebRefusalBody,
 } from "./server";
@@ -33,7 +33,7 @@ try {
   );
 }
 
-const handler = createShareWebHandler({
+const { handle: handler } = createShareWebApplication({
   relayUrl: config.relayUrl,
   publicRelayUrl: config.publicRelayUrl,
   relayExchangeKey: config.relayExchangeKey,

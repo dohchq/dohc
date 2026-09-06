@@ -1,7 +1,7 @@
 import { getCookies } from "better-auth/cookies";
 import { describe, expect, it, vi } from "vitest";
 import { createAccountAuthHandler } from "./accountAuth";
-import { createShareWebHandler } from "./server";
+import { createShareWebApplication } from "./server";
 
 const origin = "https://share.example.test";
 const accountAuth = { publicOrigin: origin, upstreamUrl: "http://workspace-api:1786" };
@@ -26,11 +26,11 @@ function upstreamSignIn(cookie = sessionCookie): Response {
 }
 
 function handler(fetchAuth: (request: Request) => Promise<Response>) {
-  return createShareWebHandler({
+  return createShareWebApplication({
     relayUrl: "http://relay:1788", publicRelayUrl: "https://relay.example.test",
     publicHosts: new Set(["share.example.test"]), accountAuth, fetchAuth,
     fetchRelay: async () => { throw new Error("account route reached link relay"); },
-  });
+  }).handle;
 }
 
 describe("browser account transport", () => {
@@ -146,7 +146,7 @@ describe("browser account transport", () => {
   });
 
   it("keeps account routes disabled in existing view-only configurations", async () => {
-    const serve = createShareWebHandler({ relayUrl: "http://relay:1788", publicRelayUrl: "http://relay:1788", publicHosts: new Set(["share.example.test"]) });
+    const { handle: serve } = createShareWebApplication({ relayUrl: "http://relay:1788", publicRelayUrl: "http://relay:1788", publicHosts: new Set(["share.example.test"]) });
     expect((await serve(request("session"))).status).toBe(404);
   });
 
