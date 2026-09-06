@@ -1,5 +1,6 @@
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
+import { createSettingsIpc } from "./ipc/settingsIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
@@ -89,13 +90,7 @@ import {
   DesktopUserSettingsResult,
   SetTitlebarThemePayload,
   StepWindowZoomPayload,
-  SetUserSettingsPayload,
-  SetWorkspaceSettingsPayload,
-  SetWorkspaceUiStatePayload,
-  WorkspaceSettingsPayload,
-  WorkspaceSettingsResult,
   WriteClipboardTextPayload,
-  GetWorkspaceUiStateResult,
   SyncStatusResult,
   RebuildEngineStoreResult,
   WorkspaceSummary,
@@ -420,19 +415,11 @@ import { WorkspaceGraphIndex } from "./workspaces/workspaceGraph";
 
 import { createDesktopChatBookmarks, type DesktopChatBookmarkProjectionState } from "./workspaces/desktopChatBookmarks";
 import { listFiles } from "./workspaces/workspaceFiles";
-import { readUiStateFile, writeUiStateFile } from "./workspaces/workspaceUiState";
-import {
-  DEFAULT_USER_SETTINGS,
-} from "./settings/userSettings";
 import {
   readCachedUserSettingsFile,
   writeUserSettingsFile,
 } from "./settings/userSettingsStore";
-import {
-  readWorkspaceSettingsFile,
-  resetWorkspaceSettingsFile,
-  saveWorkspaceSettingsFile,
-} from "./workspaces/workspaceSettingsFile";
+import { readWorkspaceSettingsFile } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
 import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemonAdapter";
@@ -6402,97 +6389,14 @@ function registerIpcHandlers(
     );
   });
 
-  ipcMain.handle(CHANNELS.getUserSettings, async (event) => {
-    assertTrustedSender(event);
-    return DesktopUserSettingsResult.parse(
-      await readCachedUserSettingsFile(stateDir()),
-    );
+  const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, stateDir, enqueueUserSettingsWrite,
+    setCachedPreferredName: (preferredName) => { cachedPreferredName = preferredName; },
+    applyZoomLevelToWindows, refreshDispatchTray, openDispatchWorkspaces,
+    chatDispatchService, withRendererWorkspaceOperation,
   });
-
-  ipcMain.handle(CHANNELS.setUserSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetUserSettingsPayload.parse(payload);
-    const result = await enqueueUserSettingsWrite(async () => {
-      await writeUserSettingsFile(stateDir(), input.settings);
-      cachedPreferredName = input.settings.profile.preferredName;
-      // The windows must match whatever zoom level was just persisted, however
-      // it got into the saved object.
-      applyZoomLevelToWindows(input.settings.appearance.zoomLevel);
-      return DesktopUserSettingsResult.parse({
-        settings: input.settings,
-        source: "stored",
-      });
-    });
-    await refreshDispatchTray();
-    if (input.settings.runner.enabled && input.settings.runner.command.trim()) {
-      for (const workspace of openDispatchWorkspaces()) {
-        void chatDispatchService.scanWorkspace(workspace.workspaceId).catch((error) => {
-          console.error("[desktop] runner-settings dispatch scan:", error);
-        });
-      }
-    }
-    return result;
-  });
-
-  ipcMain.handle(CHANNELS.resetUserSettings, async (event) => {
-    assertTrustedSender(event);
-    const result = await enqueueUserSettingsWrite(async () => {
-      await writeUserSettingsFile(stateDir(), DEFAULT_USER_SETTINGS);
-      cachedPreferredName = undefined;
-      applyZoomLevelToWindows(DEFAULT_USER_SETTINGS.appearance.zoomLevel);
-      return DesktopUserSettingsResult.parse({
-        settings: DEFAULT_USER_SETTINGS,
-        source: "stored",
-      });
-    });
-    await refreshDispatchTray();
-    return result;
-  });
-
-  ipcMain.handle(CHANNELS.getWorkspaceSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceSettingsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Workspace settings read stopped because this window changed workspaces.",
-      async (operation) =>
-        WorkspaceSettingsResult.parse(
-          await readWorkspaceSettingsFile(operation.workspace.rootPath),
-        ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.setWorkspaceSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetWorkspaceSettingsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Workspace settings save stopped because this window changed workspaces.",
-      async (operation) =>
-        WorkspaceSettingsResult.parse(
-          await saveWorkspaceSettingsFile(
-            operation.workspace.rootPath,
-            input.patch,
-          ),
-        ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.resetWorkspaceSettings, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceSettingsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Workspace settings reset stopped because this window changed workspaces.",
-      async (operation) =>
-        WorkspaceSettingsResult.parse(
-          await resetWorkspaceSettingsFile(operation.workspace.rootPath),
-        ),
-    );
-  });
+  settingsIpc.registerSettingsIpcHandlers();
 
   ipcMain.handle(CHANNELS.writeClipboardText, async (event, payload) => {
     assertTrustedSender(event);
@@ -6527,37 +6431,7 @@ function registerIpcHandlers(
     return DesktopUserSettingsResult.parse(await stepWindowZoom(input.step));
   });
 
-  // Per-workspace workbench UI state (.dohc/ui-state.json). The renderer
-  // cannot write .dohc through writeWorkspaceText (reserved path) — this
-  // narrow pair is the only writer, same pattern as agent-runs.json. Both
-  // directions are zod-bounded; a corrupt/foreign on-disk file reads as null
-  // ("no saved state"), never an error.
-  ipcMain.handle(CHANNELS.getWorkspaceUiState, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "UI state read stopped because this window changed workspaces.",
-      async (operation) => {
-        const parsed = GetWorkspaceUiStateResult.safeParse(
-          await readUiStateFile(operation.workspace.rootPath),
-        );
-        return parsed.success ? parsed.data : null;
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.setWorkspaceUiState, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = SetWorkspaceUiStatePayload.parse(payload);
-    await withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "UI state write stopped because this window changed workspaces.",
-      (operation) => writeUiStateFile(operation.workspace.rootPath, input.state),
-    );
-  });
+  settingsIpc.registerWorkspaceUiStateIpcHandlers();
 
   registerWorkspaceSearchIpcHandlers<
     IpcMainInvokeEvent,
