@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { JsonValue } from "../ydoc/generated/serde_json/JsonValue";
 import type { Request } from "../ydoc/generated/Request";
 import type { JsonObject } from "../ydoc/ydocWireContract";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 import {
   VERSIONED_METHOD,
   VersionedProtocolShapeError,

@@ -40,11 +40,11 @@ import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type JsonValue,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { startWorkspaceWatch } from "./workspaceWatcher";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import {

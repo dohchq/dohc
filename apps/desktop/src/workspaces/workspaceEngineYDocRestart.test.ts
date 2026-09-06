@@ -8,12 +8,14 @@ import {
   type EngineYdocProviderSession,
   type EngineYdocProviderSessionOptions,
   YdocReleasedWithSettleFailureError,
-  VersionedLoopbackEngine,
-  YdocLoopbackEngine,
   type EngineTransport,
   type Request,
   type Response,
 } from "@dohc/workspace-engine-client";
+import {
+  VersionedLoopbackEngine,
+  YdocLoopbackEngine,
+} from "@dohc/workspace-engine-client/testing";
 import {
   EngineDaemonUnavailableError,
   EngineWorkspaceSessions,

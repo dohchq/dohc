@@ -1,5 +1,9 @@
 import { rm } from "node:fs/promises";
-import { CHATS_METHOD, ChatsLoopbackEngine, type Request } from "@dohc/workspace-engine-client";
+import {
+  CHATS_METHOD,
+  type Request,
+} from "@dohc/workspace-engine-client";
+import { ChatsLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {

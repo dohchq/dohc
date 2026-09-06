@@ -18,7 +18,7 @@ import {
   ChatsAdapterCapabilityError,
   ChatsLiveAdapter,
 } from "./chatsLiveAdapter";
-import { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
+import { ChatsLoopbackEngine } from "../testing/chatsLoopbackEngine";
 
 const WORKSPACE = "ws-handle";
 const SENTINEL = new Error("captured");

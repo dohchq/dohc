@@ -12,7 +12,7 @@ import type { JsonObject } from "../ydoc/ydocWireContract";
 import {
   CONFLICT_ROW_HARD_CAP_BYTES,
   MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-} from "./engineTextLimits";
+} from "../versioned/engineTextLimits";
 import {
   VERSIONED_METHOD,
   type MomentRecord,
@@ -21,7 +21,7 @@ import {
   type VersionedContentKind,
   type VersionedMethod,
   type VersionedOrigin,
-} from "./versionedWireContract";
+} from "../versioned/versionedWireContract";
 
 // A refusal the real engine reports as an internal failure rather than a
 // caller mistake (`map_runtime` in crates/dohc-workspace-engine/src/lib.rs).
@@ -49,15 +49,6 @@ function refusalFrom(error: unknown): unknown {
 }
 
 const INBAND_LIMIT_BYTES = 48 * 1024;
-
-// The limits live in a leaf module (no imports) so a renderer can read them
-// without pulling this fixture's `node:crypto` into a browser bundle.
-export {
-  CONFLICT_ROW_HARD_CAP_BYTES,
-  MAX_DESKTOP_CAPTURE_TEXT_BYTES,
-  RESOLVE_REQUEST_FRAME_BYTES,
-  jsonStringEncodedLength,
-} from "./engineTextLimits";
 
 const MAX_SECRET_FILE_BYTES = 1024 * 1024;
 const MAX_CAPTURE_BINARY_FILE_BYTES = 5 * 1024 * 1024;

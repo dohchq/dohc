@@ -27,7 +27,7 @@ import {
   VersionedAdapterCapabilityError,
   VersionedLiveAdapter,
 } from "./versionedLiveAdapter";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 const WORKSPACE = "workspace";
 const SENTINEL = new Error("captured");

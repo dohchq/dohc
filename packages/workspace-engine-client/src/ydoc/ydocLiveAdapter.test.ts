@@ -24,7 +24,7 @@ import {
   isWellFormedUtf16,
   type EngineTransport,
 } from "./ydocLiveAdapter";
-import { YdocLoopbackEngine } from "./ydocLoopbackEngine";
+import { YdocLoopbackEngine } from "../testing/ydocLoopbackEngine";
 import {
   openEngineYdocProviderSession,
   YdocReleasedWithSettleFailureError,

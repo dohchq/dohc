@@ -13,7 +13,7 @@ import {
   encodeCollectionValue,
   encodeCollectionQueryParams,
 } from "./workspaceWireContract";
-import { encodeFixtureBigInts } from "./collectionFieldPipeline.testSupport";
+import { encodeFixtureBigInts } from "../testing/fixtureBigInts";
 
 const snapshot = {
   workspaceId: "workspace",

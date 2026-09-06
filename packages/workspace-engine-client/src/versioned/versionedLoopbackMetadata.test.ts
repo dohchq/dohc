@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { VERSIONED_METHOD } from "./versionedWireContract";
-import { VersionedLoopbackEngine } from "./versionedLoopbackEngine";
+import { VersionedLoopbackEngine } from "../testing/versionedLoopbackEngine";
 
 // The loopback is a stand-in for the daemon, so anything the daemon persists and
 // returns it must persist and return too — otherwise a loopback-backed test can

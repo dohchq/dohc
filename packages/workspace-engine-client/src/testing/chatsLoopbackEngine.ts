@@ -29,7 +29,7 @@ import {
   type ChatThread,
   type ChatThreadPause,
   type ChatThreadReadState,
-} from "./chatsWireContract";
+} from "../chats/chatsWireContract";
 
 const INBAND_CONTENT_CAP_BYTES = 48 * 1024;
 const MAX_PAGE_LIMIT = 500;

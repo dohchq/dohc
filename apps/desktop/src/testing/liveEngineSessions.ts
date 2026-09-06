@@ -1,12 +1,12 @@
 import {
   VERSIONED_METHOD,
-  VersionedLoopbackEngine,
   type CompletedDaemonBlob,
   type JsonValue,
   type Request,
   type Response,
   type WatcherStatusResult,
 } from "@dohc/workspace-engine-client";
+import { VersionedLoopbackEngine } from "@dohc/workspace-engine-client/testing";
 import { EngineWorkspaceSessions } from "@dohc/workspace-engine-client/daemon";
 import { createFakeDaemonCapture } from "./fakeDaemonCapture";
 

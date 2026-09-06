@@ -13,7 +13,7 @@ import {
   type ChatsMethodParamsMap,
   type ChatsMethodResultMap,
 } from "./chatsWireContract";
-import { ChatsLoopbackEngine } from "./chatsLoopbackEngine";
+import { ChatsLoopbackEngine } from "../testing/chatsLoopbackEngine";
 
 const WORKSPACE = "chat-loopback";
 
