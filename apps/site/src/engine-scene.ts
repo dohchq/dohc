@@ -1,8 +1,8 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { createV8Engine } from "./v8-model";
+import { createInlineSixEngine } from "./inline-six-model";
 
-export function mountV8(host: HTMLElement) {
+export function mountEngine(host: HTMLElement) {
   let renderer: THREE.WebGLRenderer;
   try {
     renderer = new THREE.WebGLRenderer({
@@ -34,13 +34,13 @@ export function mountV8(host: HTMLElement) {
   controls.minPolarAngle = 0.2;
   controls.maxPolarAngle = Math.PI * 0.8;
   renderer.domElement.style.touchAction = "pan-y";
-  const { engine, dispose: disposeModel } = createV8Engine();
+  const { engine, dispose: disposeModel } = createInlineSixEngine();
   scene.add(engine);
   const box = new THREE.Box3().setFromObject(engine);
   const center = box.getCenter(new THREE.Vector3());
   const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
   controls.target.copy(center);
-  const cameraDirection = new THREE.Vector3(7.5, 5.3, 9).normalize();
+  const cameraDirection = new THREE.Vector3(9, 6.5, 8).normalize();
   camera.position.copy(center).addScaledVector(cameraDirection, 14);
   controls.update();
   // Softboxes create long metal reflections without a downloaded environment map.
@@ -147,7 +147,7 @@ export function mountV8(host: HTMLElement) {
       halfFov,
       Math.atan(Math.tan(halfFov) * camera.aspect),
     );
-    const distance = (radius / Math.sin(limitingFov)) * 0.74;
+    const distance = (radius / Math.sin(limitingFov)) * 0.83;
     camera.position
       .sub(center)
       .normalize()
@@ -217,7 +217,7 @@ export function mountV8(host: HTMLElement) {
   renderer.domElement.setAttribute("role", "img");
   renderer.domElement.setAttribute(
     "aria-label",
-    "V8 engine model. Drag or use arrow keys to rotate.",
+    "DOHC inline-six engine model. Drag or use arrow keys to rotate.",
   );
   renderer.domElement.addEventListener(
     "keydown",

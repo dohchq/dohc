@@ -4,8 +4,8 @@ if (engineHost) {
     (entries) => {
       if (!entries.some((entry) => entry.isIntersecting)) return;
       observer.disconnect();
-      void import("./v8-scene")
-        .then(({ mountV8 }) => mountV8(engineHost))
+      void import("./engine-scene")
+        .then(({ mountEngine }) => mountEngine(engineHost))
         .catch((error) => {
           console.error("Unable to load the engine model", error);
         });
