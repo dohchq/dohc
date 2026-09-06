@@ -24,8 +24,15 @@
 //! task outlives the actor). Cancellation ([`CancellationToken`]) is checked
 //! between bounded units, never inside a transaction.
 
+mod journal;
 mod relay;
 
+use journal::{
+    journal_moment_outbound_in_tx, journal_moment_outbound_with_batch_in_tx,
+    journal_secret_delete_outbound_in_tx, journal_secret_fork_outbound_in_tx,
+    journal_secret_moment_outbound_in_tx, journal_secret_put_outbound_in_tx,
+    journal_version_create_outbound_in_tx,
+};
 use relay::{DeferredRelayTransport, execute_relay_operation};
 pub use relay::{
     RelayConfiguration, RelayOperation, RelayOperationOutcome, ShareViewIdentityRecord,
@@ -68,11 +75,11 @@ use dohc_engine_domain::{
     ProjectedWriteText, RECORD_ID_FRONTMATTER_KEY, RenameResult, RenameTextFile, ResolveDecision,
     ResolveTextConflict, ResolveTextConflictResult, RollbackTextFileMutation, RunRecordLink,
     SaveBookmark, SecretComparePage, SecretDelete, SecretFileStat, SecretFileStore,
-    SecretMomentPage, SecretMomentRecord, SecretOp, SecretRestoreResult, SecretWrite,
-    SecretWriteResult, SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata,
-    StartChannelThread, TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread,
-    VersionFileChangePage, VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary,
-    WriteResult, WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
+    SecretMomentPage, SecretMomentRecord, SecretRestoreResult, SecretWrite, SecretWriteResult,
+    SendMessage, SetFollow, SetReaction, SnapshotContent, SnapshotMetadata, StartChannelThread,
+    TextConflict, TextSnapshot, ThreadDispatchPause, UnreadFileThread, VersionFileChangePage,
+    VersionRecord, VersionedTextComparison, VersionedTextStore, WriteBinary, WriteResult,
+    WriteText, apply_secret_file_from_version_with, binary_delete_job_id,
     binary_rename_delete_job_id, binary_rename_write_job_id, binary_rollback_job_identity,
     capture_ingest_binary_with_admission_in_tx, capture_ingest_in_batch_with_admission_in_tx,
     capture_ingest_with_admission_in_tx, capture_manifest_seed, capture_retire_in_tx,
@@ -7385,148 +7392,6 @@ fn search_domain(error: crate::search::SearchError) -> dohc_engine_domain::Domai
             dohc_engine_domain::DomainError::StateCorrupt { reason }
         }
     }
-}
-
-fn outbound_domain(error: dohc_engine_sync::SyncError) -> DomainError {
-    DomainError::Storage(StorageError::persist_public(std::io::Error::other(
-        format!("outbound replication journal append failed: {error}"),
-    )))
-}
-
-fn relay_enabled_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-) -> Result<bool, DomainError> {
-    dohc_engine_sync::workspace_replicates_with_relay_in_tx(tx, workspace_id)
-        .map_err(outbound_domain)
-}
-
-/// File moments are the one kind a share view can carry, so this reads the
-/// wider `workspace_journals_file_moments_in_tx`. It is not the only site
-/// that does: `ydoc_recovery.rs` journals a recovered FILE moment and asks
-/// the same question, and the two must agree or a recovery would strand a
-/// change the recipient can see but never send.
-///
-/// Every sibling below stays on the owner-lane predicate: a share view
-/// creates no versions and writes no secrets, and journaling either would
-/// leave rows nothing drains.
-fn journal_moment_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    moment_id: &str,
-    deduped: bool,
-) -> Result<(), DomainError> {
-    let mut eligibility = None;
-    journal_moment_outbound_with_batch_in_tx(tx, workspace_id, moment_id, deduped, &mut eligibility)
-}
-
-fn journal_moment_outbound_with_batch_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    moment_id: &str,
-    deduped: bool,
-    eligibility: &mut Option<bool>,
-) -> Result<(), DomainError> {
-    if deduped {
-        return Ok(());
-    }
-    let journals_file_moments = match *eligibility {
-        Some(eligible) => eligible,
-        None => {
-            let eligible =
-                dohc_engine_sync::workspace_journals_file_moments_in_tx(tx, workspace_id)
-                    .map_err(outbound_domain)?;
-            *eligibility = Some(eligible);
-            eligible
-        }
-    };
-    if !journals_file_moments {
-        return Ok(());
-    }
-    dohc_engine_sync::journal_moment_append_in_tx(tx, workspace_id, moment_id)
-        .map_err(outbound_domain)
-}
-
-fn journal_secret_put_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    result: &SecretWriteResult,
-) -> Result<(), DomainError> {
-    let Some(moment) = result.moment.as_ref() else {
-        return Ok(());
-    };
-    journal_secret_put_moment_outbound_in_tx(tx, moment)
-}
-
-fn journal_secret_moment_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    moment: Option<&SecretMomentRecord>,
-) -> Result<(), DomainError> {
-    let Some(moment) = moment else {
-        return Ok(());
-    };
-    match moment.operation {
-        SecretOp::Write => journal_secret_put_moment_outbound_in_tx(tx, moment),
-        SecretOp::Delete => journal_secret_delete_outbound_in_tx(tx, moment),
-    }
-}
-
-fn journal_secret_put_moment_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    moment: &SecretMomentRecord,
-) -> Result<(), DomainError> {
-    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
-        return Ok(());
-    }
-    dohc_engine_sync::journal_secret_put_in_tx(tx, moment).map_err(outbound_domain)
-}
-
-fn journal_secret_delete_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    moment: &SecretMomentRecord,
-) -> Result<(), DomainError> {
-    if !relay_enabled_in_tx(tx, &moment.workspace_id)? {
-        return Ok(());
-    }
-    dohc_engine_sync::journal_secret_delete_in_tx(tx, moment).map_err(outbound_domain)
-}
-
-fn journal_secret_fork_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    workspace_id: &str,
-    from_version_id: &str,
-    to_version_id: &str,
-    recorded_at_ms: i64,
-) -> Result<(), DomainError> {
-    if !relay_enabled_in_tx(tx, workspace_id)? {
-        return Ok(());
-    }
-    dohc_engine_sync::journal_secret_version_fork_in_tx(
-        tx,
-        workspace_id,
-        from_version_id,
-        to_version_id,
-        recorded_at_ms,
-    )
-    .map_err(outbound_domain)
-}
-
-fn journal_version_create_outbound_in_tx(
-    tx: &rusqlite::Transaction<'_>,
-    record: &VersionRecord,
-    from_version_id: &str,
-) -> Result<(), DomainError> {
-    if !relay_enabled_in_tx(tx, &record.workspace_id)? {
-        return Ok(());
-    }
-    dohc_engine_sync::journal_version_create_in_tx(tx, record).map_err(outbound_domain)?;
-    dohc_engine_sync::journal_secret_version_fork_in_tx(
-        tx,
-        &record.workspace_id,
-        from_version_id,
-        &record.version_id,
-        record.created_at_ms,
-    )
-    .map_err(outbound_domain)
 }
 
 fn versioned_text_rename_on_store(
