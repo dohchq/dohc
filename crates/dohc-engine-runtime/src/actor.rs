@@ -35,8 +35,11 @@ use crate::search::{
 use crate::search::{SearchPolicySnapshot, read_engine_search_policy, resolve_effective_policy};
 use dohc_engine_collab::{
     AppendOutcome, CacheStats, CloseOutcome, CollabError, ContentKind, DocKey, LeaseRegistry,
-    LineageClaimStatus, Projection, Regime, SceneAsset, WriterDocCache, Ydoc,
+    LineageClaimStatus, OwnerDeliveryReceipt, OwnerOutboxAcknowledgeResult, OwnerOutboxAppendInput,
+    OwnerOutboxAppendResult, OwnerOutboxError, OwnerOutboxQuarantineInput, Projection, Regime,
+    SceneAsset, WriterDocCache, Ydoc, acknowledge_owner_outbox, append_owner_outbox,
     encode_scene_asset_record, encode_scene_asset_records, import_portable_scene,
+    quarantine_owner_outbox,
 };
 use dohc_engine_crypto::{SecretDataKey, SecretPlaintext, load_key_file};
 use dohc_engine_domain::{
@@ -1672,6 +1675,29 @@ enum Command {
         workspace_id: String,
         version_id: String,
         reply: oneshot::Sender<Result<Vec<CaptureManifestSeedEntry>, RuntimeError>>,
+    },
+    OwnerYdocOutboxAppend {
+        workspace_id: String,
+        input: OwnerOutboxAppendInput,
+        token: CancellationToken,
+        reply: oneshot::Sender<
+            Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError>,
+        >,
+    },
+    OwnerYdocOutboxAcknowledge {
+        workspace_id: String,
+        outbox_id: String,
+        receipts: Vec<OwnerDeliveryReceipt>,
+        token: CancellationToken,
+        reply: oneshot::Sender<
+            Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError>,
+        >,
+    },
+    OwnerYdocOutboxQuarantine {
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        token: CancellationToken,
+        reply: oneshot::Sender<Result<Result<(), OwnerOutboxError>, RuntimeError>>,
     },
     YdocOpenState {
         workspace_id: String,
@@ -3840,6 +3866,65 @@ impl ActorHandle {
             .send(Command::CaptureManifestSeed {
                 workspace_id,
                 version_id,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn owner_ydoc_outbox_append(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxAppendInput,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAppendResult, OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxAppend {
+                workspace_id,
+                input,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn owner_ydoc_outbox_acknowledge(
+        &self,
+        workspace_id: String,
+        outbox_id: String,
+        receipts: Vec<OwnerDeliveryReceipt>,
+        token: CancellationToken,
+    ) -> Result<Result<OwnerOutboxAcknowledgeResult, OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxAcknowledge {
+                workspace_id,
+                outbox_id,
+                receipts,
+                token,
+                reply,
+            })
+            .await
+            .map_err(|_| RuntimeError::ActorUnavailable)?;
+        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+    }
+
+    pub async fn owner_ydoc_outbox_quarantine(
+        &self,
+        workspace_id: String,
+        input: OwnerOutboxQuarantineInput,
+        token: CancellationToken,
+    ) -> Result<Result<(), OwnerOutboxError>, RuntimeError> {
+        let (reply, reply_rx) = oneshot::channel();
+        self.tx
+            .send(Command::OwnerYdocOutboxQuarantine {
+                workspace_id,
+                input,
+                token,
                 reply,
             })
             .await
@@ -8531,6 +8616,51 @@ fn worker_main(
             } => {
                 let outcome = capture_manifest_seed(&store, &workspace_id, &version_id)
                     .map_err(RuntimeError::from);
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxAppend {
+                workspace_id,
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    Ok(append_owner_outbox(&mut store, &workspace_id, input))
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxAcknowledge {
+                workspace_id,
+                outbox_id,
+                receipts,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    Ok(acknowledge_owner_outbox(
+                        &mut store,
+                        &workspace_id,
+                        &outbox_id,
+                        &receipts,
+                    ))
+                };
+                let _ = reply.send(outcome);
+            }
+            Command::OwnerYdocOutboxQuarantine {
+                workspace_id,
+                input,
+                token,
+                reply,
+            } => {
+                let outcome = if token.is_cancelled() {
+                    Err(RuntimeError::Cancelled)
+                } else {
+                    Ok(quarantine_owner_outbox(&mut store, &workspace_id, input))
+                };
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {
@@ -16166,6 +16296,178 @@ mod capture_secret_root_guard_tests {
                 });
             }
             self.bound.validate(root_dir)
+        }
+    }
+
+    #[test]
+    fn queued_owner_outbox_mutations_observe_cancellation_before_storage() {
+        for method in ["append", "acknowledge", "quarantine"] {
+            for abandon_reply in [false, true] {
+                let store_scratch = ScratchDir::new().expect("store scratch");
+                let root_scratch = ScratchDir::new().expect("root scratch");
+                let root = root_scratch.path().to_path_buf();
+                let db = store_scratch.engine_db_path().expect("database path");
+                let mut store = EngineStore::open(&db, 1).expect("seed store");
+                VersionedTextStore::new(&mut store)
+                    .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &NoFaults)
+                    .expect("main version");
+                let input = OwnerOutboxAppendInput {
+                    binding: dohc_engine_collab::LiveObjectBinding {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        main_version_id: VERSION_ID.to_owned(),
+                        object_id: "object-1".to_owned(),
+                        lineage_claim_id: "lineage-1".to_owned(),
+                        current_path: "owner.md".to_owned(),
+                        selector_paths: vec!["owner.md".to_owned()],
+                        restore_fence_generation: 0,
+                    },
+                    base_update: b"base".to_vec(),
+                    update: b"seed".to_vec(),
+                    append_key: "seed".to_owned(),
+                    limits: dohc_engine_collab::OwnerOutboxLimits {
+                        max_pending_bytes: 1000,
+                        max_pending_age_ms: 1000,
+                    },
+                    created_at_ms: 1,
+                };
+                let appended = append_owner_outbox(&mut store, WORKSPACE_ID, input.clone())
+                    .expect("seed append");
+                let before = dohc_engine_collab::read_pending_owner_outbox(
+                    &store,
+                    WORKSPACE_ID,
+                    &appended.outbox_id,
+                )
+                .expect("seed pending");
+                drop(store);
+                let supervisor = WorkspaceSupervisor::new();
+                let actor = supervisor.open(&db, 1).expect("actor").actor;
+                let blocker = PausedRootGuard::bind(&root);
+                let blocker_guard: Arc<dyn WorkspaceRootGuard> = blocker.clone();
+                let (blocker_reply, blocker_rx) = oneshot::channel();
+                actor
+                    .tx
+                    .blocking_send(Command::CaptureRetire {
+                        input: CaptureRetire {
+                            workspace_id: WORKSPACE_ID.to_owned(),
+                            version_id: VERSION_ID.to_owned(),
+                            path: "missing.md".to_owned(),
+                            metadata_summary: None,
+                            metadata_correlation_id: None,
+                            now_ms: 2,
+                            request_id: None,
+                            only_if_text_head: false,
+                            only_if_capture_origin: true,
+                            allow_ydoc_origin: true,
+                        },
+                        workspace_root: Some((root, Some(blocker_guard))),
+                        self_writes: None,
+                        leases: LeaseRegistry::new(),
+                        faults: Arc::new(NoFaults),
+                        token: CancellationToken::new(),
+                        reply: blocker_reply,
+                    })
+                    .expect("queue blocker");
+                blocker.wait_until_reached();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime");
+                let token = CancellationToken::new();
+                let pending = async {
+                    match method {
+                        "append" => actor
+                            .owner_ydoc_outbox_append(
+                                WORKSPACE_ID.to_owned(),
+                                OwnerOutboxAppendInput {
+                                    append_key: "cancelled".to_owned(),
+                                    update: b"cancelled update".to_vec(),
+                                    ..input
+                                },
+                                token.clone(),
+                            )
+                            .await
+                            .map(|outcome| outcome.map(|_| ())),
+                        "acknowledge" => actor
+                            .owner_ydoc_outbox_acknowledge(
+                                WORKSPACE_ID.to_owned(),
+                                appended.outbox_id.clone(),
+                                vec![OwnerDeliveryReceipt {
+                                    delivery_id: before.entries[0].delivery_id.clone(),
+                                    update_digest: before.entries[0].update_digest.clone(),
+                                    journal_cursor: 1,
+                                    accepting_host_epoch: 1,
+                                }],
+                                token.clone(),
+                            )
+                            .await
+                            .map(|outcome| outcome.map(|_| ())),
+                        _ => {
+                            actor
+                                .owner_ydoc_outbox_quarantine(
+                                    WORKSPACE_ID.to_owned(),
+                                    OwnerOutboxQuarantineInput {
+                                        outbox_id: appended.outbox_id.clone(),
+                                        reason: "cancelled quarantine".to_owned(),
+                                        observed_binding: None,
+                                    },
+                                    token.clone(),
+                                )
+                                .await
+                        }
+                    }
+                };
+                let mut pending = Some(Box::pin(pending));
+                let was_pending = runtime.block_on(std::future::poll_fn(|cx| {
+                    std::task::Poll::Ready(
+                        std::future::Future::poll(pending.as_mut().expect("future").as_mut(), cx)
+                            .is_pending(),
+                    )
+                }));
+                // The empty actor channel accepted the command on that poll;
+                // the earlier command still holds the writer. Service teardown
+                // cancels this same token when its reply future is dropped.
+                token.cancel();
+                if abandon_reply || !was_pending {
+                    drop(pending.take());
+                }
+                let (drained_reply, drained_rx) = oneshot::channel();
+                actor
+                    .tx
+                    .blocking_send(Command::CaptureManifestSeed {
+                        workspace_id: WORKSPACE_ID.to_owned(),
+                        version_id: VERSION_ID.to_owned(),
+                        reply: drained_reply,
+                    })
+                    .expect("queue read barrier after cancelled mutation");
+                blocker.release();
+                let blocker_result = blocker_rx.blocking_recv();
+                let result = pending.map(|pending| runtime.block_on(pending));
+                let drained_result = drained_rx.blocking_recv();
+                drop(actor);
+                supervisor
+                    .close(&db)
+                    .expect("close actor after queue drains");
+                let store = EngineStore::open_read_only(&db).expect("read store");
+                let after = dohc_engine_collab::read_pending_owner_outbox(
+                    &store,
+                    WORKSPACE_ID,
+                    &appended.outbox_id,
+                )
+                .expect("retained pending");
+                assert!(was_pending, "{method} must enter the held actor queue");
+                assert!(blocker_result.is_ok(), "blocker reply must complete");
+                assert!(
+                    drained_result.is_ok(),
+                    "read barrier must run before closing the actor"
+                );
+                if !abandon_reply {
+                    assert!(
+                        matches!(result, Some(Err(RuntimeError::Cancelled))),
+                        "{method}"
+                    );
+                }
+                assert_eq!(after, before, "{method}, abandoned reply={abandon_reply}");
+            }
         }
     }
 

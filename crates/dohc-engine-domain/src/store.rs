@@ -4394,9 +4394,8 @@ pub(crate) fn validate_path(path: &str) -> Result<(), DomainError> {
     Ok(())
 }
 
-/// Store-door guard for operations that introduce a plaintext alias. Only a
-/// tracked classification is eligible, and the returned key is canonical.
-pub fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
+/// Normalize a tracked workspace path through the shared engine-files policy.
+pub fn normalize_tracked_workspace_path(path: &str) -> Result<String, DomainError> {
     use dohc_engine_files::policy::{PathClassification, classify_engine_file_path_normalized};
 
     let (classification, normalized) = classify_engine_file_path_normalized(path);
@@ -4405,10 +4404,17 @@ pub fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainErro
             reason: "path is not eligible for plaintext storage",
         });
     }
-    validate_path(path)?;
     normalized.ok_or(DomainError::InvalidPath {
         reason: "tracked path is missing its normalized form",
     })
+}
+
+/// Store-door guard for operations that introduce a plaintext alias. Only a
+/// tracked classification is eligible, and the returned key is canonical.
+pub fn validate_plaintext_storable_path(path: &str) -> Result<String, DomainError> {
+    let normalized = normalize_tracked_workspace_path(path)?;
+    validate_path(path)?;
+    Ok(normalized)
 }
 
 /// Normalize a path used only to address an existing plaintext alias. Secret

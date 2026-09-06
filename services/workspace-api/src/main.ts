@@ -35,6 +35,7 @@ if (!testAuthSeam && secret.length < 32) {
   process.exit(1);
 }
 
+const webOrigin = process.env.DOHC_WEB_ORIGIN;
 const pool = new Pool({
   connectionString: process.env.POSTGRES_URL ?? defaultPostgresUrl,
 });
@@ -42,6 +43,7 @@ const auth = createWorkspaceAuth({
   pool,
   baseURL,
   secret: secret || "dev-test-only-secret-0123456789abcdef",
+  ...(webOrigin ? { trustedOrigins: [webOrigin] } : {}),
 });
 
 // Test-only seam (plan Phase 9 Step 3): approves a device code as a seeded
