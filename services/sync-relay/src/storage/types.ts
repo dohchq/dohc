@@ -1,3 +1,5 @@
+import type { LiveObjectBinding } from "@dohc/live-session-contract/live-object-binding";
+import type { LiveDocumentKey, ServerDerivedLiveUpdateAuthority } from "@dohc/live-session-contract/live-update-admission";
 import {
   type HostControlSnapshot,
   type HostMode,
@@ -33,6 +35,25 @@ export interface LiveHostConnectionCoordinate {
   readonly instanceId: string;
   readonly connectionId: string;
 }
+
+export interface CurrentLiveBindingRequest {
+  readonly document: LiveDocumentKey;
+  readonly actor:
+    | { readonly kind: "owner"; readonly userId: string; readonly shareId: string }
+    | { readonly kind: "named"; readonly userId: string; readonly grantId: string };
+}
+
+export type CurrentLiveBindingResult =
+  | {
+      readonly kind: "current";
+      readonly binding: LiveObjectBinding;
+      readonly authority: ServerDerivedLiveUpdateAuthority;
+      readonly host: LiveHostConnectionCoordinate;
+    }
+  | {
+      readonly kind: "refused";
+      readonly reason: "host-unavailable" | "stale-document" | "stale-selector" | "not-authorized";
+    };
 
 export interface BeginLiveHostTransitionInput {
   readonly from: LiveHostConnectionCoordinate;
@@ -427,6 +448,7 @@ export interface AppendLogBatchGuardContext {
 }
 
 export interface SyncRelayStorage {
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult;
   close(): void;
   getLiveHostControl(): HostControlSnapshot | null;
   provisionLiveHostControl(input: {

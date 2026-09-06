@@ -26,7 +26,7 @@ function parseHostControlTimestamp(value: unknown, name: string): number {
   return value as number;
 }
 
-function readLiveHostControl(db: SqliteDb): HostControlSnapshot | null {
+export function readLiveHostControl(db: SqliteDb): HostControlSnapshot | null {
   const row = db
     .prepare(`SELECT * FROM ${SESSION_HOST_CONTROL_TABLE} WHERE singleton_id = 1`)
     .get();

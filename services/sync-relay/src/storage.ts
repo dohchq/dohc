@@ -1,4 +1,7 @@
+import { resolveCurrentLiveDocumentBinding } from "./storage/liveDocumentAuthority";
 import {
+  type CurrentLiveBindingRequest,
+  type CurrentLiveBindingResult,
   type SqliteDb,
   type OpenSyncRelayStorageOptions,
   type SyncRelayStorage,
@@ -260,6 +263,10 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
 
   close(): void {
     this.db.close();
+  }
+
+  resolveCurrentLiveDocumentBinding(input: CurrentLiveBindingRequest): CurrentLiveBindingResult {
+    return resolveCurrentLiveDocumentBinding(this, input);
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
@@ -917,3 +924,5 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     return logStorage.fetchLogCoordinate(this, input);
   }
 }
+
+export type { CurrentLiveBindingRequest, CurrentLiveBindingResult } from "./storage/types";
