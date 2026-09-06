@@ -7,12 +7,15 @@
 //! durable yrs reconstruction → `ydoc.resync` path and compares the resulting
 //! typed-root state against the yjs oracle.
 
+mod common;
+
+use common::*;
 use dohc_engine_collab::{CacheStats, Ydoc};
 use dohc_engine_protocol::{
     transport::{
         EngineService as ProtocolEngineService, EngineTransport, InProcessTransport, RequestContext,
     },
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_testkit::ScratchDir;
 use dohc_workspace_engine::EngineService;
@@ -51,17 +54,6 @@ struct AuthoredUpdate {
 #[derive(Debug, Deserialize)]
 struct GoldenCorpus {
     scenarios: BTreeMap<String, Value>,
-}
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
 }
 
 async fn open_workspace(

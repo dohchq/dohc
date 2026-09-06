@@ -8743,7 +8743,7 @@ describe("share unmount projection", () => {
   });
 });
 describe("shared view banner", () => {
-  it("does not offer site creation in a received share workspace", async () => {
+  it("does not offer app creation in a received share workspace", async () => {
     const user = userEvent.setup();
     const bridge = Object.assign(makeShareBridge(), {
       listSites: vi.fn(async () => ({ sites: [] })),
@@ -8754,10 +8754,10 @@ describe("shared view banner", () => {
 
     expect(
       await screen.findByText(
-        "This shared view cannot create a site. Ask the workspace owner to add one.",
+        "This shared view cannot create an app. Ask the workspace owner to add one.",
       ),
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "Create site" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Create app" })).toBeNull();
     expect(bridge.createWorkspaceFolder).not.toHaveBeenCalled();
     expect(bridge.createWorkspaceFile).not.toHaveBeenCalled();
   });

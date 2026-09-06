@@ -20,9 +20,13 @@
 
 pub mod db_scan;
 pub mod faults;
+pub mod fixtures;
 pub mod harness;
 pub mod scratch;
 
 pub use db_scan::{EngineDbScan, bytes_contain};
 pub use faults::{GateFaults, PanicFaults, ScriptedFaults};
-pub use scratch::{ScratchDir, make_hardlink, try_make_dir_alias, try_make_file_symlink};
+pub use fixtures::{decode_hex, flip_byte, open_store};
+pub use scratch::{
+    ScratchDir, engine_db_path, make_hardlink, try_make_dir_alias, try_make_file_symlink,
+};

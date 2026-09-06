@@ -7,7 +7,7 @@ use dohc_engine_protocol::{
     wire::{Request, WorkspaceHandle},
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::{ScratchDir, harness::write_fingerprint_db};
+use dohc_engine_testkit::{ScratchDir, engine_db_path, harness::write_fingerprint_db};
 use dohc_workspace_engine::{EngineService, root_binding::read_root_binding};
 use serde_json::{Value, json};
 use std::sync::Arc;
@@ -199,7 +199,7 @@ async fn root_bound_replay_composes_real_domains_end_to_end() {
         .await
         .expect("reopened workspace close");
 
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db_path, 103).expect("reopen after actor close");
     assert!(!store.was_freshly_created());
     let bound_token: String = store
@@ -291,7 +291,7 @@ async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence(
         .await
         .expect("workspace close");
 
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&db_path, 101).expect("store reopen");
     let counts = store
         .read_with(|conn| {
@@ -309,7 +309,7 @@ async fn local_conflict_open_rejects_snapshot_hash_mismatch_without_persistence(
 #[tokio::test]
 async fn a_ts_v1_fingerprint_is_refused_before_binding() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     write_fingerprint_db(&db_path, 1).expect("foreign v1 fixture");
     let transport = InProcessTransport::new(Arc::new(EngineService::new()));
     let error = transport
@@ -330,7 +330,7 @@ async fn a_ts_v1_fingerprint_is_refused_before_binding() {
 #[tokio::test]
 async fn an_existing_store_under_an_unbound_root_is_refused() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     let initial = {
         let store = EngineStore::open(&db_path, 50).expect("create real v2 store");
         assert!(store.was_freshly_created());
@@ -436,10 +436,10 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
         )
         .await
         .expect("close source");
-    let source_db = source.engine_db_path().expect("source db");
+    let source_db = engine_db_path(&source).expect("source db");
 
     let unbound = ScratchDir::new().expect("unbound root");
-    std::fs::copy(&source_db, unbound.engine_db_path().expect("unbound db")).expect("copy db");
+    std::fs::copy(&source_db, engine_db_path(&unbound).expect("unbound db")).expect("copy db");
     let error = transport
         .call(
             RequestContext::unbounded(),
@@ -463,7 +463,7 @@ async fn an_engine_db_copied_to_another_root_is_refused() {
         )
         .await
         .expect("close other");
-    std::fs::copy(&source_db, other.engine_db_path().expect("other db")).expect("overwrite db");
+    std::fs::copy(&source_db, engine_db_path(&other).expect("other db")).expect("overwrite db");
     let error = transport
         .call(
             RequestContext::unbounded(),
@@ -544,7 +544,7 @@ async fn a_fresh_root_with_a_malformed_binding_refuses_twice_and_keeps_no_store(
 #[tokio::test]
 async fn a_read_only_open_of_an_unbound_root_with_a_store_is_refused_untouched() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db_path = scratch.engine_db_path().expect("db path");
+    let db_path = engine_db_path(&scratch).expect("db path");
     drop(EngineStore::open(&db_path, 50).expect("create store"));
     let before = std::fs::read(&db_path).expect("store bytes");
 

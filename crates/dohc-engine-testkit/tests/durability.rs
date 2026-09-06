@@ -7,7 +7,7 @@ use dohc_engine_storage::{EngineStore, FaultPoint, NoFaults, StorageError};
 use dohc_engine_testkit::harness::{
     open_readonly_keeper, wal_sidecar, write_fingerprint_db, write_foreign_unversioned_db,
 };
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::path::Path;
 
 const WS: &str = "ws";
@@ -72,7 +72,7 @@ fn assert_rejected_without_mutation(db: &Path, expected_code: &str) {
 #[test]
 fn write_then_reopen_reads_back() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     {
         let mut store = open(&db, 1_000);
@@ -99,7 +99,7 @@ fn write_then_reopen_reads_back() {
 #[test]
 fn crash_after_commit_recovers_exactly_once() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let input = write("doc/a.md", "committed body", "m1", Some("req-42"), 5);
 
     {
@@ -136,7 +136,7 @@ fn crash_after_commit_recovers_exactly_once() {
 #[test]
 fn crash_before_persist_leaves_no_partial_state() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let input = write("doc/ghost.md", "should vanish", "m1", Some("req-lost"), 7);
 
     {
@@ -168,7 +168,7 @@ fn crash_before_persist_leaves_no_partial_state() {
 #[test]
 fn v1_fingerprint_is_rejected_without_mutation() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     write_fingerprint_db(&db, 1).expect("write v1 db");
 
     // Typed variant carries the found/expected versions.
@@ -188,7 +188,7 @@ fn v1_fingerprint_is_rejected_without_mutation() {
 #[test]
 fn foreign_unversioned_database_is_rejected_without_mutation() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     write_foreign_unversioned_db(&db).expect("write foreign db");
 
     assert_rejected_without_mutation(&db, "foreign-database");
@@ -199,7 +199,7 @@ fn foreign_unversioned_database_is_rejected_without_mutation() {
 #[test]
 fn synchronous_is_pinned_to_normal() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let store = EngineStore::open(&db, 1).expect("open");
     assert_eq!(store.synchronous_setting().expect("synchronous"), 1);
 }
@@ -210,7 +210,7 @@ fn synchronous_is_pinned_to_normal() {
 #[test]
 fn committed_write_replays_from_wal_on_reopen() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     let keeper = {
         let mut writer = open(&db, 1);
@@ -248,7 +248,7 @@ fn committed_write_replays_from_wal_on_reopen() {
 #[test]
 fn idempotency_key_reuse_is_guarded() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = open(&db, 1);
 
     let first = write("doc/k.md", "original", "m1", Some("req-k"), 1);
@@ -280,7 +280,7 @@ fn idempotency_key_reuse_is_guarded() {
 #[test]
 fn close_reopen_mutate_cycle_stays_writable() {
     let scratch = ScratchDir::new().expect("scratch dir");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
 
     for round in 0..3_i64 {
         let mut store = open(&db, round + 1);

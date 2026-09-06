@@ -32,7 +32,7 @@ const LABELS: Record<ViewId, string> = {
   explorer: "Explorer",
   search: "Search",
   graph: "Graph",
-  sites: "Sites",
+  sites: "Apps",
   history: "History",
   plugins: "Plugins",
 };

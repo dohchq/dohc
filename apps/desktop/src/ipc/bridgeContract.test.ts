@@ -2255,7 +2255,7 @@ describe("workspace UI state IPC contract", () => {
   });
 
   it.each([
-    ["site preview", siteTabPath("client-portal"), "dohc://site/%63lient-portal"],
+    ["site preview", siteTabPath("client-portal"), "dohc://app/%63lient-portal"],
     [
       "plugin panel",
       pluginPanelTabPath("hello-plugin", "main"),

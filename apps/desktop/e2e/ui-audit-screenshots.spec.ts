@@ -92,7 +92,7 @@ polish, collaboration, and making the editor feel effortless.
 | --- | --- | --- |
 | Editor polish | Ice | In progress |
 | Sync relay | Agent | Shipping |
-| Sites preview | Ice | Planned |
+| Apps preview | Ice | Planned |
 
 ### Launch checklist
 

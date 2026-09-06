@@ -5536,7 +5536,7 @@ export const WorkspaceUiState = z.object({
             tab === CHATS_TAB_PATH
               ? "Chats can be open in only one editor group."
               : isSiteTabPath(tab)
-                ? "A site preview can be open in only one editor group."
+                ? "An app preview can be open in only one editor group."
                 : isPluginPanelTabPath(tab)
                   ? "A plugin panel can be open in only one editor group."
                   : "This tab can be open in only one editor group.",

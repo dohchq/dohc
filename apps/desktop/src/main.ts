@@ -689,6 +689,7 @@ import { commandForSiteScript } from "./workspaces/siteScriptCommand";
 import {
   assertActiveWorkspaceForSite,
   createSitePreviewLifecycle,
+  START_CANCELLED_MESSAGE,
 } from "./workspaces/sitePreviewLifecycle";
 import { startStaticDirectoryPreview } from "./security/staticDirectoryPreview";
 import { PluginHost } from "./plugins/PluginHost";
@@ -1311,7 +1312,7 @@ function buildOutputRelativeToSite(siteRoot: string, workspaceRelativeOutput: st
   if (workspaceRelativeOutput === siteRoot) return ".";
   if (!workspaceRelativeOutput.startsWith(`${siteRoot}/`)) {
     throw new Error(
-      `Build output must be within the site directory: ${workspaceRelativeOutput}`,
+      `Build output must be inside the app folder: ${workspaceRelativeOutput}`,
     );
   }
   return workspaceRelativeOutput.slice(siteRoot.length + 1);
@@ -1339,7 +1340,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
           path: ownerPath,
         });
         if (read.kind !== "asset") {
-          throw new Error("Shared site file returned an invalid result.");
+          throw new Error("Shared app file returned an invalid result.");
         }
         return read.bytes;
       },
@@ -1366,7 +1367,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
       !input.site.configuredScripts.start &&
       !input.site.scripts.start
     ) {
-      throw new Error(`Site has no dev or start script: ${input.site.root}`);
+      throw new Error(`App has no dev or start script: ${input.site.root}`);
     }
     const script =
       input.site.configuredScripts.dev || input.site.scripts.dev ? "dev" : "start";
@@ -1420,7 +1421,7 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
     if (!result.ok || !result.outputPath) {
       const recentLogs = recentSiteBuildLogText(result.logs);
       throw new Error(
-        `Site build failed or did not produce a static output folder.${
+        `App build failed or did not produce a static output folder.${
           recentLogs ? `\n\nRecent output:\n${recentLogs}` : ""
         }`,
       );
@@ -1431,9 +1432,9 @@ async function executePreviewForSite(input: SitePreviewExecutionInput) {
     );
   }
   if (!input.isCurrent() || input.signal.aborted) {
-    throw new Error("Site preview start was cancelled because the renderer restarted.");
+    throw new Error(START_CANCELLED_MESSAGE);
   }
-  if (!outputRoot) throw new Error(`Site has no build output to preview: ${input.site.root}`);
+  if (!outputRoot) throw new Error(`App has no build output to preview: ${input.site.root}`);
   const handle = await startStaticSitePreview(
     input.workspaceRoot,
     buildOutputSiteRoot(input.site, outputRoot),
@@ -10313,7 +10314,7 @@ function registerIpcHandlers(
     return withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
-      "The Site preview logs request does not target the active workspace. Open the workspace and try again.",
+      "The app preview logs request does not target the active workspace. Open the workspace and try again.",
       (operation) =>
         GetSitePreviewLogsResult.parse(
           operation.state.sitePreviews.status(
@@ -10330,7 +10331,7 @@ function registerIpcHandlers(
     await withRendererWorkspaceOperation(
       event.sender,
       input.workspaceId,
-      "The Site preview stop request does not target the active workspace. Open the workspace and try again.",
+      "The app preview stop request does not target the active workspace. Open the workspace and try again.",
       (operation) =>
         operation.state.sitePreviews.stop({
           getActiveWorkspaceId: () => {

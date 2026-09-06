@@ -15,14 +15,14 @@ use dohc_engine_domain::{
 use dohc_engine_storage::{
     EngineStore, MaterializationOperation, Preimage, hex_sha256, put_binary_blob,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-binary-merge";
 const NO_FAULTS: NoFaults = NoFaults;
 
 fn open() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NO_FAULTS)
@@ -185,9 +185,10 @@ fn equal_bytes_merge_uncontested() {
     let before = moment_count(&store);
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("equal bytes merge");
     match result {
@@ -241,9 +242,10 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     );
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("differing bytes merge");
     let conflict = match result {
@@ -284,9 +286,11 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     // Keeping the current side writes nothing: main keeps its own bytes.
     let before = moment_count(&store);
     let kept = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve("conflict-1", ResolveConflictKind::KeepCurrent, "keep"),
             &NO_FAULTS,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("keep the current binary side");
     assert_eq!(kept.conflict.status, ConflictStatus::Resolved);
@@ -298,16 +302,19 @@ fn differing_bytes_open_a_conflict_resolvable_by_side() {
     // A second conflict over the same pair resolves the other way, so both
     // choices cannot be wired to the same side.
     let reopened = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-2", "conflict-2", "obj-merge-2"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("second merge reopens the conflict");
     assert!(matches!(reopened, MergeTextFileResult::Conflict { .. }));
     let applied = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve("conflict-2", ResolveConflictKind::ApplyIncoming, "apply"),
             &NO_FAULTS,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("apply the incoming binary side");
     assert_eq!(applied.conflict.chosen_from, ConflictChoice::Incoming);
@@ -356,16 +363,19 @@ fn applying_a_binary_side_into_the_active_version_enqueues_its_materialization()
         "f-1",
     );
     VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("merge opens the conflict");
 
     VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve("conflict-1", ResolveConflictKind::ApplyIncoming, "active"),
             &NO_FAULTS,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("apply the incoming binary side");
 
@@ -393,9 +403,10 @@ fn a_new_source_only_binary_file_fast_forwards() {
     let feat_sha = write_binary(&mut store, "feat", "logo.png", feat_bytes, "obj-f", "f-1");
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("source-only binary merge");
     match result {
@@ -457,9 +468,10 @@ fn a_source_only_binary_replacement_fast_forwards_over_the_unchanged_head() {
     );
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("source-only binary replacement");
     match result {
@@ -500,9 +512,10 @@ fn a_source_only_binary_change_fast_forwards_over_an_unchanged_text_head() {
     );
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("bytes over an unchanged text head");
     match result {
@@ -553,9 +566,10 @@ fn an_empty_text_head_over_a_binary_base_is_not_a_binary_fast_forward() {
     );
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("merge an emptied head whose base was binary");
     assert!(
@@ -589,11 +603,11 @@ fn a_replayed_binary_fast_forward_reports_the_head_it_wrote() {
     input.request_id = Some("merge-request-1".to_owned());
 
     let first = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .merge_text_file_from_version_with(&input, &NO_FAULTS, |_, _| Ok(()))
         .expect("source-only binary merge");
     let after_first = moment_count(&store);
     let replay = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(&input, &NO_FAULTS)
+        .merge_text_file_from_version_with(&input, &NO_FAULTS, |_, _| Ok(()))
         .expect("the same request replays");
     match (first, replay) {
         (
@@ -641,9 +655,10 @@ fn text_replacing_an_untouched_binary_head_opens_a_conflict() {
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("text replacing an untouched binary head");
     match result {
@@ -734,9 +749,10 @@ fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
         .expect("the source removes the binary asset");
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("logo.png", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("a removed binary asset merges into a conflict");
     let conflict = match result {
@@ -747,9 +763,11 @@ fn applying_an_absent_incoming_side_removes_the_binary_head_and_its_file() {
     assert!(!conflict.incoming.is_present(), "the source removed it");
 
     let resolved = VersionedTextStore::new(&mut store)
-        .resolve_text_conflict(
+        .resolve_text_conflict_with(
             &resolve("conflict-1", ResolveConflictKind::ApplyIncoming, "removal"),
             &NO_FAULTS,
+            |_, _, _| Ok(()),
+            |_, _, ()| Ok(()),
         )
         .expect("apply the removal");
     let delete = resolved.delete.expect("the binary head is removed");
@@ -807,9 +825,10 @@ fn a_binary_base_under_two_text_sides_opens_a_conflict() {
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("merge a path whose base was binary");
     match result {
@@ -847,9 +866,10 @@ fn an_empty_text_head_over_a_binary_base_is_not_a_fast_forward() {
     write_text(&mut store, "feat", "notes.md", "feature text\n", "f-1");
 
     let result = VersionedTextStore::new(&mut store)
-        .merge_text_file_from_version(
+        .merge_text_file_from_version_with(
             &merge_input("notes.md", "merge-1", "conflict-1", "obj-merge-1"),
             &NO_FAULTS,
+            |_, _| Ok(()),
         )
         .expect("merge an emptied head whose base was binary");
     assert!(

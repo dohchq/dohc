@@ -1,51 +1,51 @@
 import { describe, expect, it, vi } from "vitest";
-import { createFirstSiteFiles, firstSiteRoot } from "./createFirstSite";
+import { createFirstAppFiles, firstAppRoot } from "./createFirstApp";
 
-describe("first site creation", () => {
+describe("first app creation", () => {
   it("creates a folder before its source file", async () => {
     const order: string[] = [];
     const createWorkspaceFolder = vi.fn(async () => {
       order.push("folder");
-      return { path: "site" };
+      return { path: "app" };
     });
     const createWorkspaceFile = vi.fn(async () => {
       order.push("file");
-      return { path: "site/index.html" };
+      return { path: "app/index.html" };
     });
 
     await expect(
-      createFirstSiteFiles({
-        workspaceId: "ws-sites",
+      createFirstAppFiles({
+        workspaceId: "ws-apps",
         files: [],
         folders: [],
         mutations: { createWorkspaceFile, createWorkspaceFolder },
       }),
-    ).resolves.toEqual({ root: "site" });
+    ).resolves.toEqual({ root: "app" });
 
     expect(order).toEqual(["folder", "file"]);
     expect(createWorkspaceFile).toHaveBeenCalledWith({
-      workspaceId: "ws-sites",
-      relativePath: "site/index.html",
-      initialText: expect.stringContaining("<h1>My site</h1>"),
+      workspaceId: "ws-apps",
+      relativePath: "app/index.html",
+      initialText: expect.stringContaining("<h1>My app</h1>"),
     });
   });
 
-  it("uses an existing site folder when only its entry file is missing", async () => {
+  it("uses an existing app folder when only its entry file is missing", async () => {
     const createWorkspaceFolder = vi.fn();
-    const createWorkspaceFile = vi.fn(async () => ({ path: "site/index.html" }));
+    const createWorkspaceFile = vi.fn(async () => ({ path: "app/index.html" }));
 
     await expect(
-      createFirstSiteFiles({
-        workspaceId: "ws-sites",
-        files: [{ path: "Site/notes.txt", kind: "file" }],
-        folders: ["Site"],
+      createFirstAppFiles({
+        workspaceId: "ws-apps",
+        files: [{ path: "App/notes.txt", kind: "file" }],
+        folders: ["App"],
         mutations: { createWorkspaceFile, createWorkspaceFolder },
       }),
-    ).resolves.toEqual({ root: "Site" });
+    ).resolves.toEqual({ root: "App" });
 
     expect(createWorkspaceFolder).not.toHaveBeenCalled();
     expect(createWorkspaceFile).toHaveBeenCalledWith(
-      expect.objectContaining({ relativePath: "Site/index.html" }),
+      expect.objectContaining({ relativePath: "App/index.html" }),
     );
   });
 
@@ -56,8 +56,8 @@ describe("first site creation", () => {
     const createWorkspaceFile = vi.fn();
 
     await expect(
-      createFirstSiteFiles({
-        workspaceId: "ws-sites",
+      createFirstAppFiles({
+        workspaceId: "ws-apps",
         files: [],
         folders: [],
         mutations: { createWorkspaceFile, createWorkspaceFolder },
@@ -69,10 +69,10 @@ describe("first site creation", () => {
 
   it("chooses another root when the usual entry path already exists", () => {
     expect(
-      firstSiteRoot(
-        [{ path: "SITE/index.html", kind: "file" }],
-        ["SITE"],
+      firstAppRoot(
+        [{ path: "APP/index.html", kind: "file" }],
+        ["APP"],
       ),
-    ).toBe("site-2");
+    ).toBe("app-2");
   });
 });

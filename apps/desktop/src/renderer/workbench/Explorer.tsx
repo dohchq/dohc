@@ -234,7 +234,7 @@ export function editorTitle(path: string, label?: string): string {
   if (isPluginDetailsTabPath(path)) {
     return `Plugin: ${parsePluginDetailsTabPath(path)?.pluginId ?? "details"}`;
   }
-  if (isSiteTabPath(path)) return `Site: ${parseSiteTabPath(path) ?? "preview"}`;
+  if (isSiteTabPath(path)) return `App: ${parseSiteTabPath(path) ?? "preview"}`;
   if (isVersionCompareTabPath(path)) return "Compare with Main";
   return basenameOf(path);
 }

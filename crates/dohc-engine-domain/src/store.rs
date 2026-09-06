@@ -28,7 +28,7 @@ use crate::records::{
 };
 use dohc_engine_storage::{
     EngineStore, FaultInjector, MAX_IDENTIFIER_BYTES, MaterializationJobSpec, Preimage,
-    StorageError, TxnOutcome, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job,
+    StorageError, TxnOutcome, cancel_pending_jobs_for_path, enqueue_delete_job, enqueue_job, hex,
     put_binary_blob,
 };
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
@@ -1365,16 +1365,6 @@ impl<'a> VersionedTextStore<'a> {
         })
     }
 
-    /// Read `path` in the workspace's currently-active version.
-    pub fn read_text_active(
-        &self,
-        workspace_id: &str,
-        path: &str,
-    ) -> Result<Option<TextSnapshot>, DomainError> {
-        let active = self.get_active_version(workspace_id)?;
-        self.read_text(workspace_id, &active.version_id, path)
-    }
-
     /// List every version in the workspace, ordered by
     /// `(created_at_ms, name, version_id)` (`versions-list-versions`).
     pub fn list_versions(&self, workspace_id: &str) -> Result<Vec<VersionRecord>, DomainError> {
@@ -1601,21 +1591,6 @@ impl<'a> VersionedTextStore<'a> {
             }
             Ok(out)
         })
-    }
-
-    /// List the durable fork-base snapshots frozen for `version` at fork time,
-    /// ordered by path. The fork base is the three-way-merge anchor a later
-    /// compare/merge shard builds on; exposing it lets the differential harness
-    /// catch a wrong/leaked/missing base.
-    pub fn list_fork_base_snapshots(
-        &self,
-        workspace_id: &str,
-        version_id: &str,
-    ) -> Result<Vec<SnapshotView>, DomainError> {
-        self.list_fork_base_records(workspace_id, version_id)?
-            .iter()
-            .map(snapshot_view)
-            .collect()
     }
 
     /// Content-aware fork-base records for `version` (see
@@ -1900,18 +1875,6 @@ impl<'a> VersionedTextStore<'a> {
         })?;
         committed(outcome)?;
         Ok(record)
-    }
-
-    // ------------------------------------------------------------- differential
-
-    /// A deterministic, normalized snapshot of the workspace's version graph,
-    /// moment order, active version, and per-version snapshots (blob hashes) —
-    /// the comparison surface for the differential harness (`TEST_ORACLE.md` §2).
-    pub fn normalized_snapshot(
-        &self,
-        workspace_id: &str,
-    ) -> Result<crate::normalize::NormalizedState, DomainError> {
-        crate::normalize::capture(self, workspace_id)
     }
 
     // --------------------------------------------------------------- internals
@@ -6121,15 +6084,6 @@ pub(crate) fn hash_optional_text_fields(value: Option<&str>) -> (&'static [u8], 
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        let _ = write!(out, "{byte:02x}");
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use std::borrow::Cow;
@@ -6263,8 +6217,11 @@ mod tests {
     #[test]
     fn next_moment_order_uses_generation_first_indexes() {
         let scratch = ScratchDir::new().expect("scratch");
-        let store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         let details = store
             .read_with(|conn| {
                 let mut statement =
@@ -6337,9 +6294,12 @@ mod tests {
 
         let sequential_scratch = ScratchDir::new().expect("sequential scratch");
         let batch_scratch = ScratchDir::new().expect("batch scratch");
-        let mut sequential =
-            initialized_store(&sequential_scratch.engine_db_path().expect("sequential db"));
-        let mut batched = initialized_store(&batch_scratch.engine_db_path().expect("batch db"));
+        let mut sequential = initialized_store(
+            &dohc_engine_testkit::engine_db_path(&sequential_scratch).expect("sequential db"),
+        );
+        let mut batched = initialized_store(
+            &dohc_engine_testkit::engine_db_path(&batch_scratch).expect("batch db"),
+        );
         let inputs = vec![
             capture_input("notes/a.md", "alpha".to_owned(), 10),
             capture_input("notes/b.md", "bravo".to_owned(), 11),
@@ -6392,8 +6352,11 @@ mod tests {
     #[test]
     fn capture_batch_reuses_candidate_after_item_savepoint_rollback() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6447,8 +6410,11 @@ mod tests {
     #[test]
     fn capture_batch_accepts_a_final_maximum_moment_order() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6507,8 +6473,11 @@ mod tests {
     #[test]
     fn direct_write_borrows_text_and_projected_write_moves_owned_text() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6576,8 +6545,11 @@ mod tests {
     #[test]
     fn fresh_capture_reuses_prepared_state_without_result_readback() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6631,8 +6603,11 @@ mod tests {
     #[test]
     fn fresh_capture_reused_corrupt_blob_fails_closed_and_rolls_back() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6710,8 +6685,11 @@ mod tests {
     #[test]
     fn fresh_capture_fast_path_matches_hydration_at_history_text_cap() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6743,8 +6721,11 @@ mod tests {
     #[test]
     fn renamed_capture_path_uses_disambiguated_object_fast_path() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");
@@ -6850,8 +6831,11 @@ mod tests {
     #[test]
     fn retired_capture_reuses_unaliased_object_with_result_hydration() {
         let scratch = ScratchDir::new().expect("scratch");
-        let mut store =
-            EngineStore::open(&scratch.engine_db_path().expect("db"), 1).expect("open store");
+        let mut store = EngineStore::open(
+            &dohc_engine_testkit::engine_db_path(&scratch).expect("db"),
+            1,
+        )
+        .expect("open store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version("ws", "main", 1, &NoFaults)
             .expect("ensure main version");

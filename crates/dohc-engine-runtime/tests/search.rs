@@ -26,7 +26,7 @@ use dohc_engine_sync::{
     ApplyOutcome, ReplicationEnvelope, ShareBoundary, ShareSurface, apply_chat_envelope,
     apply_shared_envelope,
 };
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use serde_json::json;
 use std::path::Path;
 
@@ -203,7 +203,7 @@ fn granular(
 fn short_query_falls_back_to_a_bounded_linear_scan() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     write_file(&mut store, "obj-ai", "notes/ai.md", "AI operating plan", 10);
     start_thread(
@@ -239,7 +239,7 @@ fn rebuild_extracts_drawing_text_without_indexing_scene_data() {
     const INVALID: &str = "rebuilddrawinginvalidrawneedle";
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let scene = json!({
         "type": "excalidraw",
@@ -305,7 +305,7 @@ fn rebuild_extracts_drawing_text_without_indexing_scene_data() {
 fn short_query_scan_caps_every_row_examined_even_without_matches() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     for index in 0..3 {
         let text = if index == 2 {
@@ -370,7 +370,7 @@ fn short_query_scan_caps_every_row_examined_even_without_matches() {
 fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     write_file(
         &mut store,
@@ -453,7 +453,7 @@ fn short_query_file_scan_spends_its_row_budget_only_on_the_requested_scope() {
 fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let text = format!("needle {}", "x".repeat(128));
     write_file(
@@ -493,7 +493,7 @@ fn first_file_candidate_may_exceed_the_page_budget_when_it_fits_the_row_budget()
 fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let text = format!("needle {}", "x".repeat(64));
     for index in 0..3 {
@@ -542,7 +542,7 @@ fn regular_fts_file_page_bounds_source_before_materializing_all_hits() {
 fn short_query_fallback_preserves_unicode_case_matching() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     write_file(
         &mut store,
@@ -577,7 +577,7 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
     // line.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     write_file(
         &mut store,
@@ -626,7 +626,7 @@ fn inclusive_result_anchor_keeps_the_candidate_after_an_exhausted_row() {
 fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let prefix = "topic\nneedle ";
     let body = format!("{prefix}{}", "x".repeat(64 * 1024 - prefix.len()));
@@ -700,7 +700,7 @@ fn oversized_chat_thread_hydration_stops_at_the_actor_page_budget() {
 fn oversized_legacy_chat_rows_are_skipped_without_failing_later_hits() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     start_thread(
         &mut store,
@@ -752,7 +752,7 @@ fn chat_projection_lines_follow_canonical_replication_order() {
     // carrying an earlier source timestamp.
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     start_thread(
         &mut store,
@@ -789,7 +789,7 @@ fn chat_projection_lines_follow_canonical_replication_order() {
 fn chat_projection_lines_include_prior_multiline_message_bodies() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     start_thread(
         &mut store,
@@ -819,7 +819,7 @@ fn chat_projection_lines_include_prior_multiline_message_bodies() {
 fn untitled_chat_search_uses_the_complete_first_line_for_its_title() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let body = format!("{}Actual topic\nsearchable detail", " ".repeat(160));
     start_thread(&mut store, "channel-title", "thread-title", &body, 100);
@@ -837,7 +837,7 @@ fn untitled_chat_search_uses_the_complete_first_line_for_its_title() {
 fn granular_chat_query_bounds_owned_rows_before_actor_delivery() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let body = format!("needle {}", "x".repeat(8 * 1024));
     start_thread(&mut store, "channel-budget", "thread-budget", &body, 10);
@@ -886,7 +886,7 @@ fn granular_chat_query_bounds_owned_rows_before_actor_delivery() {
 fn index_and_query_round_trip_files_and_chats() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(
@@ -930,7 +930,7 @@ fn index_and_query_round_trip_files_and_chats() {
 fn secret_ignored_and_hidden_paths_never_appear() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     // R07 closes the store door before search sees a row at all: plaintext
@@ -1015,7 +1015,7 @@ fn secret_ignored_and_hidden_paths_never_appear() {
 fn broken_file_policy_fails_closed_but_chat_search_survives() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(&mut store, "obj-ok", "notes/plan.md", "file needle", 10);
@@ -1081,7 +1081,7 @@ fn broken_file_policy_fails_closed_but_chat_search_survives() {
 fn read_your_writes_same_txn_no_torn_index() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     // Seed three files, then in one transaction rebuild the index and upsert a
@@ -1133,7 +1133,7 @@ fn read_your_writes_same_txn_no_torn_index() {
 fn crash_mid_index_reopen_repairs() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
 
     {
         let mut store = open(&db, 1);
@@ -1189,7 +1189,7 @@ fn crash_mid_index_reopen_repairs() {
 fn bounds_query_length_and_limit() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(&mut store, "obj-ok", "a.md", "needle needle needle", 10);
@@ -1251,7 +1251,7 @@ fn bounds_query_length_and_limit() {
 fn trigram_prefilter_is_case_insensitive_and_min_three() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(
@@ -1302,7 +1302,7 @@ fn trigram_prefilter_is_case_insensitive_and_min_three() {
 fn read_with_rebuild_is_atomic_across_mid_rebuild_crash() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
@@ -1382,7 +1382,7 @@ fn read_with_rebuild_is_atomic_across_mid_rebuild_crash() {
 fn orphan_thread_does_not_disable_all_search() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(&mut store, "obj-ok", "notes/plan.md", "needle here", 10);
@@ -1422,7 +1422,7 @@ fn orphan_thread_does_not_disable_all_search() {
 fn legacy_certified_store_backfills_missing_chat_fts_on_first_search() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     start_thread(
@@ -1473,7 +1473,7 @@ fn legacy_certified_store_backfills_missing_chat_fts_on_first_search() {
 fn degraded_policy_does_not_reindex_chat_per_query() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     start_thread(&mut store, "chan-1", "th-1", "chat needle", 20);
@@ -1520,7 +1520,7 @@ fn degraded_policy_does_not_reindex_chat_per_query() {
 fn multiple_chat_threads_all_return() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     // Several threads each matching the query; the grouped single-fetch preview
@@ -1551,7 +1551,7 @@ fn multiple_chat_threads_all_return() {
 fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
     let scratch = ScratchDir::new().expect("scratch");
     let root = scratch.path().to_path_buf();
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
 
     write_file(
@@ -1611,7 +1611,7 @@ fn binary_overwrite_of_indexed_text_is_no_longer_searchable() {
 #[test]
 fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let thread = replicated_envelope(
         "search-peer",
@@ -1676,7 +1676,7 @@ fn replicated_chat_apply_is_findable_through_the_real_search_reader() {
 #[test]
 fn parked_replicated_message_is_findable_after_thread_promotion() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let message = replicated_envelope(
         "early-peer",
@@ -1717,7 +1717,7 @@ fn parked_replicated_message_is_findable_after_thread_promotion() {
 #[test]
 fn shared_channel_replicated_chat_is_findable_through_the_real_search_reader() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let mut store = open(&db, 1);
     let boundary = ShareBoundary {
         share_id: "search-share".to_owned(),

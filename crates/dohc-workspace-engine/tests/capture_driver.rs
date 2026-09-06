@@ -3,10 +3,13 @@
 //! record them autonomously — no RPC involved — across text, binary, and
 //! secret content; policy flips re-offer; teardown is clean and ordered.
 
+mod common;
+
+use common::*;
 use dohc_engine_protocol::{
     ErrorCode,
     transport::{EngineTransport, InProcessTransport, RequestContext},
-    wire::{Request, WorkspaceHandle},
+    wire::WorkspaceHandle,
 };
 use dohc_engine_storage::{EngineStore, NoFaults};
 use dohc_engine_testkit::ScratchDir;
@@ -19,21 +22,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const WORKSPACE_ID: &str = "ws-capture-driver";
 /// Generous: watcher settle + the 500ms drive interval + scan/hash time.
 const WAIT: Duration = Duration::from_secs(20);
-
-fn request(id: u64, method: &str, workspace: Option<WorkspaceHandle>, params: Value) -> Request {
-    Request {
-        id,
-        method: method.to_owned(),
-        workspace,
-        deadline_ms: None,
-        idempotency_key: None,
-        params,
-    }
-}
 
 async fn open_workspace(
     transport: &InProcessTransport<EngineService>,
@@ -136,14 +127,6 @@ async fn wait_for_text(
         );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-}
-
-fn write_file(root: &Path, path: &str, bytes: &[u8]) {
-    let absolute = root.join(path);
-    if let Some(parent) = absolute.parent() {
-        std::fs::create_dir_all(parent).expect("create parent");
-    }
-    std::fs::write(absolute, bytes).expect("write file");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

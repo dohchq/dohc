@@ -13,20 +13,11 @@
 
 use dohc_engine_collab::{ContentKind, DocKey};
 use dohc_engine_domain::{ResolveConflictKind, ResolveTextConflict, VersionedTextStore, WriteText};
-use dohc_engine_runtime::{
-    CancellationToken, NoFaults, RuntimeError, SelfWriteRecorder, WorkspaceSupervisor,
-};
+use dohc_engine_runtime::{CancellationToken, NoFaults, RuntimeError, WorkspaceSupervisor};
 use dohc_engine_storage::EngineStore;
 use dohc_engine_sync::{NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use std::sync::Arc;
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 const WS: &str = "ws-base-conflict";
 const PATH: &str = "notes/plan.md";
@@ -81,7 +72,14 @@ fn seed_divergent_base(
         }),
         recorded_at_ms: 3,
     };
-    apply_ydoc_envelope(store, &base_op, &NoFaults, &NoLiveLeases).expect("base applies");
+    apply_ydoc_envelope(
+        store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base_op,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("base applies");
     let conflict_id: String = store
         .read_with(|conn| {
             conn.query_row(
@@ -113,7 +111,7 @@ fn head_text(db: &std::path::Path) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_base_conflict_freezes_the_settle() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, winner_base, _winner_doc, _conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
@@ -133,7 +131,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
             Some(lineage_claim_id),
             None,
             "freeze-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             6,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -168,7 +166,7 @@ async fn an_open_base_conflict_freezes_the_settle() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn positioned_keep_current_rotates_the_lineage_and_journals_one_compound_resolve() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, conflict_id, predecessor_claim) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let (key, _winner_base, _winner_doc, conflict_id) = seed_divergent_base(&mut store);
@@ -327,7 +325,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
     // it — probing only `ydoc-mat_<moment>` leaves the disk pre-resolution
     // while every marker reports the choice as settled.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
@@ -393,7 +391,7 @@ async fn a_pending_resolution_job_replays_before_the_next_settle() {
             state.lineage_claim_id,
             None,
             "replay-session".to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             12,
             Arc::new(NoFaults),
             CancellationToken::new(),
@@ -415,7 +413,7 @@ async fn an_open_base_conflict_freezes_the_open_too() {
     // against the unreviewed side while the head froze. The gate covers
     // open and settle symmetrically.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store);
@@ -458,7 +456,7 @@ async fn an_oversized_resolution_hits_the_successor_projection_limit_before_effe
     // state-corrupt.
     //
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (_key, _winner_base, _winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
@@ -516,7 +514,7 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
     // ydoc_updates without bound. The resolve runs the append path's
     // best-effort compaction.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (_key, winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let (key, winner_base, winner_doc, conflict_id) = seed_divergent_base(&mut store);
@@ -543,8 +541,14 @@ async fn a_resolution_fold_self_bounds_the_update_log() {
                 }),
                 recorded_at_ms: 100 + seq,
             };
-            apply_ydoc_envelope(&mut store, &op, &NoFaults, &NoLiveLeases)
-                .expect("delta coalesces");
+            apply_ydoc_envelope(
+                &mut store,
+                &mut dohc_engine_collab::WriterDocCache::new(),
+                &op,
+                &NoFaults,
+                &NoLiveLeases,
+            )
+            .expect("delta coalesces");
         }
         (key, winner_doc, conflict_id)
     };
@@ -618,7 +622,7 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
     // the live edits or reversing the reviewed choice.
     //
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
@@ -687,7 +691,7 @@ async fn a_resolution_refuses_while_a_session_holds_the_document() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_absent_path_resolution_uses_the_derived_live_lease() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let conflict_id = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         let (_, _, _, conflict_id) = seed_divergent_base(&mut store);
@@ -808,7 +812,7 @@ async fn a_reviewed_deletion_retires_the_lineage_instead_of_being_reversed() {
     // snapshot. The user's approved deletion was silently reversed.
     //
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
@@ -1014,7 +1018,7 @@ async fn moved_text_and_binary_results_archive_the_full_predecessor_without_a_su
         ("binary", None, Some(b"\x89BIN\0reviewed".as_slice())),
     ] {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("db");
+        let db = engine_db_path(&scratch).expect("db");
         let (key, conflict_id) = {
             let mut store = EngineStore::open(&db, 1).expect("open store");
             let (key, _winner_base, _winner_doc, conflict_id) = seed_divergent_base(&mut store);
@@ -1220,7 +1224,7 @@ async fn an_idempotent_retry_survives_a_live_session() {
     // different answer.
     //
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let (key, _winner_base, _winner_doc, conflict_id) = {
         let mut store = EngineStore::open(&db, 1).expect("open store");
         seed_divergent_base(&mut store)
