@@ -1273,6 +1273,47 @@ describe("table controls grips", () => {
     expect(rowStrip.style.width).toBe("0px");
   });
 
+  it("refreshes edge hit areas after layout changes while the same cell stays hovered", () => {
+    editor = createTableEditor(2, 2);
+    const dom = editor.view.dom;
+    const table = dom.querySelector("table")!;
+    const cells = [...table.querySelectorAll<HTMLElement>("td, th")];
+    const colStrip = table.querySelector<HTMLElement>(".dohc-table-append--col")!;
+    const rowStrip = table.querySelector<HTMLElement>(".dohc-table-append--row")!;
+    const resizeHandles = [...table.querySelectorAll<HTMLElement>(".dohc-table-row-resize")];
+    let width = 200;
+    let height = 100;
+    Object.defineProperty(table, "getBoundingClientRect", {
+      value: () => new DOMRect(20, 30, width, height),
+    });
+    cells.forEach((cell, index) => {
+      Object.defineProperty(cell, "getBoundingClientRect", {
+        value: () => new DOMRect(
+          20 + (index % 2) * width / 2,
+          30 + Math.floor(index / 2) * height / 2,
+          width / 2,
+          height / 2,
+        ),
+      });
+    });
+    dom.dispatchEvent(new MouseEvent("mouseenter"));
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+    expect(colStrip.style.height).toBe("100px");
+    expect(rowStrip.style.width).toBe("200px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["200px", "200px"]);
+
+    const unchangedDocument = editor.state.doc;
+    width = 340;
+    height = 180;
+    cells[0]!.dispatchEvent(new MouseEvent("mousemove", { bubbles: true }));
+
+    expect(editor.state.doc).toBe(unchangedDocument);
+    expect(colStrip.style.height).toBe("180px");
+    expect(rowStrip.style.width).toBe("340px");
+    expect(resizeHandles.map((handle) => handle.style.width)).toEqual(["340px", "340px"]);
+    expect(table.querySelectorAll(".dohc-table-row-resize.is-active")).toHaveLength(1);
+  });
+
   it("append-row button adds a row at the bottom edge", () => {
     editor = createTableEditor(2, 2);
     const appendRow = editor.view.dom.querySelector(

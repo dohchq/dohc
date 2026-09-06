@@ -1751,6 +1751,8 @@ export function makeTableControlsPlugin(
       clearHover();
       return false;
     }
+    // Pane resizing and loaded images can change geometry without a document edit.
+    sizeAppendStrips(table);
     // Grips carry TableMap indices, so hover must use the same map: DOM
     // sibling counting drifts when a rowspan from above covers earlier
     // slots. A spanning cell activates its anchor row/column handle.
