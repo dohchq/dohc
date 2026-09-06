@@ -19,6 +19,7 @@
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
+    "@dohc/workspace-contracts": "workspace:*",
     "@dohc/workspace-core": "workspace:*",
     "better-auth": "^1.6.26",
     "pg": "^8.22.0"
