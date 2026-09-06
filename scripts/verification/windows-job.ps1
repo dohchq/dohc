@@ -56,12 +56,14 @@ public static class VerificationJob {
             start.RedirectStandardInput = true;
             start.RedirectStandardOutput = true;
             start.RedirectStandardError = true;
+            start.Environment.TryGetValue("NODE_OPTIONS", out var nodeOptions);
+            start.Environment.Remove("NODE_OPTIONS"); // Preloads must not run before job assignment.
             using (var child = Process.Start(start)) {
                 try {
                     // The trusted relay waits for this payload before spawning the command.
                     if (!AssignProcessToJobObject(job, child.Handle))
                         throw new Win32Exception(Marshal.GetLastWin32Error());
-                    child.StandardInput.Write(payload);
+                    child.StandardInput.Write(System.Text.Json.JsonSerializer.Serialize(new { payload, nodeOptions }));
                     child.StandardInput.Close();
                     var stdout = child.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
                     var stderr = child.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());

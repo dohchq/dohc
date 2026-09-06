@@ -1,10 +1,13 @@
 import { spawn } from "node:child_process";
 
 // The job owner sends the payload only after assigning this relay to the job.
-let payload = "";
-for await (const chunk of process.stdin) payload += chunk;
+let input = "";
+for await (const chunk of process.stdin) input += chunk;
+const { payload, nodeOptions } = JSON.parse(input);
 const { command, args } = JSON.parse(Buffer.from(payload, "base64").toString("utf8"));
-const child = spawn(command, args, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+const env = { ...process.env };
+if (nodeOptions !== null) env.NODE_OPTIONS = nodeOptions;
+const child = spawn(command, args, { env, windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
 let spawnFailed = false;
 child.stdout.pipe(process.stdout);
 child.stderr.pipe(process.stderr);
