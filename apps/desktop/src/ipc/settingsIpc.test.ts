@@ -204,23 +204,30 @@ describe("registered settings IPC", () => {
     const firstSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "First" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: 1 } };
     const nextSettings = { ...DEFAULT_USER_SETTINGS, profile: { preferredName: "Next" }, appearance: { ...DEFAULT_USER_SETTINGS.appearance, zoomLevel: -2 } };
     const first = h.invoke(CHANNELS.setUserSettings, { settings: firstSettings });
-    await reached.promise;
-    const next = h.invoke(CHANNELS.setUserSettings, { settings: nextSettings });
-    const zoom = h.zoom("in");
-    const reset = h.invoke(CHANNELS.resetUserSettings);
-    expect(writes).toHaveBeenCalledTimes(1);
-    expect(h.effects).toEqual([]);
-    expect(h.preferredName()).toBe("Before");
-    expect(h.refreshDispatchTray).not.toHaveBeenCalled();
-    release.resolve();
-    await expect(first).resolves.toEqual({ settings: firstSettings, source: "stored" });
-    await expect(next).resolves.toEqual({ settings: nextSettings, source: "stored" });
-    await expect(zoom).resolves.toMatchObject({ settings: { appearance: { zoomLevel: -1 } } });
-    await expect(reset).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
-    expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2, -1, 0]);
-    expect(h.setCachedPreferredName.mock.calls).toEqual([["First"], ["Next"], [undefined]]);
-    expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
-    await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+    const pending = [first];
+    try {
+      await reached.promise;
+      const next = h.invoke(CHANNELS.setUserSettings, { settings: nextSettings });
+      const zoom = h.zoom("in");
+      const reset = h.invoke(CHANNELS.resetUserSettings);
+      pending.push(next, zoom, reset);
+      expect(writes).toHaveBeenCalledTimes(1);
+      expect(h.effects).toEqual([]);
+      expect(h.preferredName()).toBe("Before");
+      expect(h.refreshDispatchTray).not.toHaveBeenCalled();
+      release.resolve();
+      await expect(first).resolves.toEqual({ settings: firstSettings, source: "stored" });
+      await expect(next).resolves.toEqual({ settings: nextSettings, source: "stored" });
+      await expect(zoom).resolves.toMatchObject({ settings: { appearance: { zoomLevel: -1 } } });
+      await expect(reset).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+      expect(writes.mock.calls.map(([, settings]) => settings.appearance.zoomLevel)).toEqual([1, -2, -1, 0]);
+      expect(h.setCachedPreferredName.mock.calls).toEqual([["First"], ["Next"], [undefined]]);
+      expect(h.applyZoomLevelToWindows.mock.calls).toEqual([[1], [-2], [-1], [0]]);
+      await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+    } finally {
+      release.resolve();
+      await Promise.allSettled(pending);
+    }
   });
 
   it("leaves name, zoom, and dispatch untouched after persistence fails and permits the next write", async () => {
@@ -245,14 +252,20 @@ describe("registered settings IPC", () => {
     const oldDirectory = h.stateDirectory();
     const reached = deferred(), release = deferred();
     const earlier = h.enqueueUserSettingsWrite(async () => { reached.resolve(); await release.promise; });
-    await reached.promise;
-    const saving = h.invoke(CHANNELS.setUserSettings, settingsPayload);
-    h.setStateDirectory(await createTestScratch("settings-ipc-next-user-"));
-    release.resolve();
-    await earlier;
-    await saving;
-    await expect(userSettingsStore.readUserSettingsFile(oldDirectory)).resolves.toMatchObject({ source: "default" });
-    await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+    let saving: Promise<unknown> | undefined;
+    try {
+      await reached.promise;
+      saving = h.invoke(CHANNELS.setUserSettings, settingsPayload);
+      h.setStateDirectory(await createTestScratch("settings-ipc-next-user-"));
+      release.resolve();
+      await earlier;
+      await saving;
+      await expect(userSettingsStore.readUserSettingsFile(oldDirectory)).resolves.toMatchObject({ source: "default" });
+      await expect(userSettingsStore.readUserSettingsFile(h.stateDirectory())).resolves.toEqual({ settings: DEFAULT_USER_SETTINGS, source: "stored" });
+    } finally {
+      release.resolve();
+      await Promise.allSettled([earlier, saving]);
+    }
   });
 
   it("waits for tray refresh then starts each enabled runner scan with its own rejection handler", async () => {
@@ -264,15 +277,20 @@ describe("registered settings IPC", () => {
     h.scanWorkspace.mockRejectedValueOnce(error).mockImplementationOnce(() => scanRelease.promise);
     const settings = { ...DEFAULT_USER_SETTINGS, runner: { command: "agent run", enabled: true, timeoutMinutes: 30 } };
     const result = h.invoke(CHANNELS.setUserSettings, { settings });
-    await trayReached.promise;
-    expect(h.scanWorkspace).not.toHaveBeenCalled();
-    expect(h.openDispatchWorkspaces).not.toHaveBeenCalled();
-    trayRelease.resolve();
-    await expect(result).resolves.toEqual({ settings, source: "stored" });
-    await logged.promise;
-    expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]);
-    expect(log).toHaveBeenCalledExactlyOnceWith("[desktop] runner-settings dispatch scan:", error);
-    scanRelease.resolve();
+    try {
+      await trayReached.promise;
+      expect(h.scanWorkspace).not.toHaveBeenCalled();
+      expect(h.openDispatchWorkspaces).not.toHaveBeenCalled();
+      trayRelease.resolve();
+      await expect(result).resolves.toEqual({ settings, source: "stored" });
+      await logged.promise;
+      expect(h.scanWorkspace.mock.calls).toEqual([["workspace-a"], ["workspace-b"]]);
+      expect(log).toHaveBeenCalledExactlyOnceWith("[desktop] runner-settings dispatch scan:", error);
+    } finally {
+      trayRelease.resolve();
+      scanRelease.resolve();
+      await Promise.allSettled([result]);
+    }
   });
 
   it("propagates a tray failure after persistence and skips runner scans", async () => {
@@ -344,9 +362,8 @@ describe("registered workspace settings and UI state", () => {
       if (owner === "renderer") await retirement;
     } finally {
       release.resolve();
+      await Promise.all([rejection, retirement]);
     }
-    await rejection;
-    await retirement;
   });
 
   it("suppresses a retired save response without pretending the admitted disk write was undone", async () => {
@@ -363,8 +380,8 @@ describe("registered workspace settings and UI state", () => {
       await h.open(h.first, "workspace-b");
     } finally {
       release.resolve();
+      await rejection;
     }
-    await rejection;
     await expect(workspaceSettingsFile.readWorkspaceSettingsFile(h.root)).resolves.toMatchObject({ settings: { agents: { mcpAutoStart: false } } });
   });
 
@@ -408,7 +425,7 @@ describe("registered workspace settings and UI state", () => {
       await h.sessions.retireAfterCrash(h.first);
     } finally {
       release.resolve();
+      await rejection;
     }
-    await rejection;
   });
 });
