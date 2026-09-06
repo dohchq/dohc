@@ -14,13 +14,13 @@ import { renderCliResult } from "./render";
 
 const DEFAULT_RESPONSE_TIMEOUT_MS = 30_000;
 
-export interface CliExecutionResult {
+interface CliExecutionResult {
   exitCode: 0 | 1;
   stdout: string;
   stderr: string;
 }
 
-export interface CliExecutionOptions {
+interface CliExecutionOptions {
   argv: readonly string[];
   cwd?: string;
   env?: Readonly<Record<string, string | undefined>>;
@@ -206,7 +206,7 @@ export async function executeCli(options: CliExecutionOptions): Promise<CliExecu
   }
 }
 
-export async function runCliProcess(argv = process.argv.slice(2)): Promise<void> {
+async function runCliProcess(argv = process.argv.slice(2)): Promise<void> {
   const result = await executeCli({ argv });
   if (result.stdout) process.stdout.write(result.stdout);
   if (result.stderr) process.stderr.write(result.stderr);

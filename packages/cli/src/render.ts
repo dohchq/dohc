@@ -1,28 +1,19 @@
-import type { z } from "zod";
 import type {
-  channelsResultSchema,
   CliGrepContextMessage,
   CliGrepMatch,
   CliResultByVerb,
-  exportResultSchema,
-  inboxResultSchema,
-  postResultSchema,
-  reactResultSchema,
-  replyResultSchema,
-  showResultSchema,
-  threadsResultSchema,
 } from "./protocol";
 import { renderAuthorDisplayName } from "./chatIdentity";
 import { renderThreadMarkdown } from "./threadMarkdown";
 
-export type ChannelsResult = z.infer<typeof channelsResultSchema>;
-export type ThreadsResult = z.infer<typeof threadsResultSchema>;
-export type InboxResult = z.infer<typeof inboxResultSchema>;
-export type ShowResult = z.infer<typeof showResultSchema>;
-export type PostResult = z.infer<typeof postResultSchema>;
-export type ReplyResult = z.infer<typeof replyResultSchema>;
-export type ReactResult = z.infer<typeof reactResultSchema>;
-export type ExportResult = z.infer<typeof exportResultSchema>;
+type ChannelsResult = CliResultByVerb["channels"];
+type ThreadsResult = CliResultByVerb["threads"];
+type InboxResult = CliResultByVerb["inbox"];
+export type ShowResult = CliResultByVerb["show"];
+type PostResult = CliResultByVerb["post"];
+type ReplyResult = CliResultByVerb["reply"];
+type ReactResult = CliResultByVerb["react"];
+type ExportResult = CliResultByVerb["export"];
 
 function lineSafe(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -82,12 +73,12 @@ export function renderInbox(result: InboxResult): string {
   return lines.join("\n");
 }
 
-export function renderPost(result: PostResult): string {
+function renderPost(result: PostResult): string {
   const posted = `posted ${result.threadId} ${result.messageId} in #${result.channel.slug}`;
   return result.warning ? `${posted}\nwarning: ${result.warning}` : posted;
 }
 
-export function renderReply(result: ReplyResult): string {
+function renderReply(result: ReplyResult): string {
   const details = [`replied ${result.threadId} ${result.messageId}`];
   if (result.parentMessageId) details.push(`to ${result.parentMessageId}`);
   if (result.resolvedMessageId) details.push(`resolved ${result.resolvedMessageId}`);
@@ -95,7 +86,7 @@ export function renderReply(result: ReplyResult): string {
   return result.warning ? `${replied}\nwarning: ${result.warning}` : replied;
 }
 
-export function renderReact(result: ReactResult): string {
+function renderReact(result: ReactResult): string {
   return `${result.state} ${result.emoji} on ${result.messageId} in ${result.threadId}`;
 }
 
@@ -127,7 +118,7 @@ export function renderGrep(
   return groups.join(options.context > 0 ? "\n--\n" : "\n");
 }
 
-export function renderExport(result: ExportResult): string {
+function renderExport(result: ExportResult): string {
   return result.files.map((file) => `${file.threadId}  ${file.path}`).join("\n");
 }
 
