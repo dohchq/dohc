@@ -944,7 +944,7 @@ export function createShareWebApplication({
       if (!sessions.isCurrent(discriminator, authenticated.token, capabilityToken, nowMs())) {
         return { ok: false, status: 404 };
       }
-      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.setCookie };
+      return { ok: true, capabilityToken, profileSecret, setCookie: refreshed.headers["set-cookie"] ?? null };
     } finally {
       signal.removeEventListener("abort", abort);
     }
