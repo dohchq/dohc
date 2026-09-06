@@ -8,7 +8,7 @@ import { Client, Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createShareWebApplication } from "./server";
 import { createNamedLiveBrowserResolver } from "../../sync-relay/src/namedLiveBrowserAuth";
-import { closeTestStorages, testStorage } from "../../sync-relay/src/linkTestHelpers";
+import { closeTestStorages, testStorage } from "../../sync-relay/src/testing";
 
 const connectionString = process.env.POSTGRES_URL ?? "postgres://dohc:dohc@localhost:54329/dohc";
 const probe = new Client({ connectionString, connectionTimeoutMillis: 2000 });
