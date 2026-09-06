@@ -1298,121 +1298,6 @@ enum CaptureIndexing {
 
 enum Command {
     Run(Box<dyn FnOnce(&mut EngineStore, &mut WriterDocCache) + Send>),
-    SetActiveVersion {
-        input: ActiveVersionSwitch,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    YdocOpenState {
-        workspace_id: String,
-        now_ms: i64,
-        drain_deferred: bool,
-        expected_key: Option<DocKey>,
-        version_id: String,
-        path: String,
-        content_kind: Option<ContentKind>,
-        seed_from_artifact: bool,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
-    },
-    YdocMaterializeSceneSeedAssets {
-        root_dir: PathBuf,
-        workspace_id: String,
-        job_ids: Vec<String>,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<YdocSeedMaterialization, RuntimeError>>,
-    },
-    YdocRecordUpdate {
-        key: DocKey,
-        path: String,
-        content_kind: ContentKind,
-        regime: Regime,
-        update: Vec<u8>,
-        request_id: Option<String>,
-        actor_origin_id: Option<String>,
-        attribution: Option<ChangeAttribution>,
-        expected_lineage_claim_id: Option<String>,
-        require_empty_lineage: bool,
-        seed_source_sha256: Option<String>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocAppend, RuntimeError>>,
-    },
-    YdocSettle {
-        root_dir: PathBuf,
-        key: DocKey,
-        path: String,
-        content_kind: ContentKind,
-        expected_lineage_claim_id: Option<String>,
-        expected_head_sha: Option<String>,
-        session_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocSettleOutcome, RuntimeError>>,
-    },
-    YdocResync {
-        key: DocKey,
-        expected_lineage_claim_id: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
-    },
-    YdocCloseSession {
-        key: DocKey,
-        materialization: Option<YdocCloseMaterialization>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<YdocCloseSessionOutcome, RuntimeError>>,
-    },
-    RepairConflictedYdocRecoveries {
-        workspace_id: String,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<
-            Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError>,
-        >,
-    },
-    MaterializeReplayPending {
-        root_dir: PathBuf,
-        workspace_id: String,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<usize, RuntimeError>>,
-    },
-    MaterializeReplayPendingForFence {
-        root_dir: PathBuf,
-        workspace_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    MaterializeReplaySelectedForFence {
-        root_dir: PathBuf,
-        workspace_id: String,
-        self_writes: Arc<dyn SelfWriteRecorder>,
-        materialization_job_ids: Vec<String>,
-        now_ms: i64,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    ConflictResolve {
-        input: ResolveTextConflict,
-        leases: LeaseRegistry,
-        root_dir: Option<PathBuf>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ResolveTextConflictResult, RuntimeError>>,
-    },
-    ConflictApplyReplicated {
-        envelope: ReplicationEnvelope,
-        faults: Arc<dyn FaultInjector>,
-        leases: LeaseRegistry,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
-    },
     Relay {
         transport: DeferredRelayTransport,
         operation: RelayOperation,
@@ -2817,17 +2702,19 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SetActiveVersion {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            switch_active_version_on_store(
+                store,
+                &input.workspace_id,
+                &input.version_id,
+                &input.root_dir,
+                input.self_writes.as_ref(),
+                input.now_ms,
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn create_named_version(
@@ -3018,23 +2905,22 @@ impl ActorHandle {
         seed_from_artifact: bool,
         token: CancellationToken,
     ) -> Result<YdocOpenState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocOpenState {
-                workspace_id,
+        self.run(move |store, cache| {
+            ydoc_open_state_on_store(
+                store,
+                cache,
+                &workspace_id,
                 now_ms,
                 drain_deferred,
-                expected_key,
-                version_id,
-                path,
+                expected_key.as_ref(),
+                &version_id,
+                &path,
                 content_kind,
                 seed_from_artifact,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                &token,
+            )
+        })
+        .await
     }
 
     /// Report the content kind of durable Y.Doc state whose current CRDT
@@ -3066,19 +2952,39 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
     ) -> Result<YdocSeedMaterialization, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocMaterializeSceneSeedAssets {
-                root_dir,
-                workspace_id,
-                job_ids,
-                self_writes,
-                now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _cache| {
+            let selected: HashSet<String> = job_ids.into_iter().collect();
+            reconcile_scene_asset_materialization_conflicts(store, &root_dir, &selected, now_ms)
+                .and_then(|invalid_jobs| {
+                    replay_pending_materializations(
+                        store,
+                        &root_dir,
+                        MaterializationReplayScope {
+                            workspace_id: &workspace_id,
+                            self_writes: Some(self_writes.as_ref()),
+                        },
+                        now_ms,
+                        &NoFaults,
+                        Some(&selected),
+                        false,
+                    )?;
+                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
+                        store.load_materialization_job(job_id).map(|job| {
+                            count
+                                + usize::from(
+                                    job.is_some_and(|job| job.status == JobStatus::Complete),
+                                )
+                        })
+                    })?;
+                    let incomplete_jobs = selected.len().saturating_sub(completed);
+                    Ok(YdocSeedMaterialization {
+                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
+                        incomplete_jobs,
+                        invalid_jobs,
+                    })
+                })
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3099,28 +3005,28 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocAppend, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocRecordUpdate {
-                key,
-                path,
+        self.run(move |store, cache| {
+            ydoc_record_update_on_store(
+                store,
+                cache,
+                &key,
+                &path,
                 content_kind,
                 regime,
-                update,
-                request_id,
+                &update,
                 actor_origin_id,
                 attribution,
                 expected_lineage_claim_id,
                 require_empty_lineage,
                 seed_source_sha256,
+                request_id,
+                true,
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3138,25 +3044,27 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocSettleOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocSettle {
-                root_dir,
-                key,
-                path,
+        self.run(move |store, cache| {
+            ydoc_settle_on_store(
+                store,
+                cache,
+                &root_dir,
+                &key,
+                &path,
                 content_kind,
-                expected_lineage_claim_id,
+                true,
+                expected_lineage_claim_id.as_deref(),
                 expected_head_sha,
-                session_id,
-                self_writes,
+                None,
+                &session_id,
+                self_writes.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+                None,
+            )
+        })
+        .await
     }
 
     pub async fn ydoc_resync(
@@ -3165,17 +3073,16 @@ impl ActorHandle {
         expected_lineage_claim_id: Option<String>,
         token: CancellationToken,
     ) -> Result<YdocResyncState, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocResync {
-                key,
-                expected_lineage_claim_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            ydoc_resync_on_store(
+                store,
+                cache,
+                &key,
+                expected_lineage_claim_id.as_deref(),
+                &token,
+            )
+        })
+        .await
     }
 
     /// Test evidence seam: observe the actor-local writer cache without
@@ -3238,19 +3145,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<YdocCloseSessionOutcome, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCloseSession {
-                key,
-                materialization,
+        self.run(move |store, cache| {
+            ydoc_close_session_on_store(
+                store,
+                cache,
+                &key,
+                materialization.as_ref(),
                 now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                faults.as_ref(),
+                &token,
+            )
+        })
+        .await
     }
 
     /// Move disk-conflicted Y.Doc recovery artifacts to deterministic free
@@ -3261,17 +3167,26 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Vec<dohc_engine_sync::YdocRecoveryMaterialization>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RepairConflictedYdocRecoveries {
-                workspace_id,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                dohc_engine_sync::repair_conflicted_ydoc_recoveries(
+                    store,
+                    &workspace_id,
+                    faults.as_ref(),
+                )
+                .map_err(RuntimeError::from)
+            };
+            // A proven-empty scan performed no lineage transaction, so it
+            // must not invalidate an unrelated active writer session. Any
+            // materialization or error can have changed lineage state.
+            if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
+                cache.clear();
+            }
+            outcome
+        })
+        .await
     }
 
     /// Replay every pending materialization job (best-effort, per-job
@@ -3282,17 +3197,25 @@ impl ActorHandle {
         workspace_id: String,
         now_ms: i64,
     ) -> Result<usize, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplayPending {
-                root_dir,
-                workspace_id,
+        self.run(move |store, _cache| {
+            // Open-time replay runs before the files layer starts. The
+            // switch path calls the same tolerant per-job executor with a
+            // selected durable job set and watcher suppression enabled.
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: None,
+                },
                 now_ms,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+                &NoFaults,
+                None,
+                false,
+            )
+            .map(|summary| summary.completed)
+        })
+        .await
     }
 
     /// Replay pending writes before a version fence scans the filesystem.
@@ -3306,18 +3229,30 @@ impl ActorHandle {
         self_writes: Arc<dyn SelfWriteRecorder>,
         now_ms: i64,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplayPendingForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
+        self.run(move |store, _cache| {
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: Some(self_writes.as_ref()),
+                },
                 now_ms,
-                reply,
+                &NoFaults,
+                None,
+                false,
+            )
+            .and_then(|summary| {
+                if summary.failed == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ActiveVersionMaterializationIncomplete {
+                        failed_jobs: summary.failed,
+                    })
+                }
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     /// Strictly replay one caller-owned set of pending materialization jobs.
@@ -3330,19 +3265,31 @@ impl ActorHandle {
         materialization_job_ids: Vec<String>,
         now_ms: i64,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeReplaySelectedForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                materialization_job_ids,
+        self.run(move |store, _cache| {
+            let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
+            replay_pending_materializations(
+                store,
+                &root_dir,
+                MaterializationReplayScope {
+                    workspace_id: &workspace_id,
+                    self_writes: Some(self_writes.as_ref()),
+                },
                 now_ms,
-                reply,
+                &NoFaults,
+                Some(&selected),
+                false,
+            )
+            .and_then(|summary| {
+                let failed_jobs =
+                    summary.failed + selected.len().saturating_sub(summary.selected_seen);
+                if failed_jobs == 0 {
+                    Ok(())
+                } else {
+                    Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
+                }
             })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        })
+        .await
     }
 
     pub async fn conflict_list(
@@ -3411,19 +3358,22 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<ResolveTextConflictResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictResolve {
-                input,
-                leases,
-                root_dir,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = conflict_resolve_on_store(
+                store,
+                &input,
+                root_dir.as_deref(),
+                &leases,
+                faults.as_ref(),
+                &token,
+            );
+            // Resolution can replace or archive a lineage; the tuple probe
+            // already misses on every such outcome (the claim id changes or
+            // the marker is deleted), but the reset hooks are unconditional.
+            cache.clear();
+            outcome
+        })
+        .await
     }
 
     pub async fn conflict_apply_replicated(
@@ -3433,18 +3383,28 @@ impl ActorHandle {
         leases: LeaseRegistry,
         token: CancellationToken,
     ) -> Result<ApplyOutcome<ConflictApplyResult>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictApplyReplicated {
-                envelope,
-                faults,
-                leases,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, cache| {
+            let outcome = if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                match apply_conflict_envelope(store, &envelope, faults.as_ref(), &leases) {
+                    Ok(outcome @ ApplyOutcome::Refused(_)) => {
+                        retain_refusal_for_direct_retry(store, &envelope, faults.as_ref())
+                            .map(|()| outcome)
+                            .map_err(RuntimeError::from)
+                    }
+                    Ok(ApplyOutcome::Skipped) => read_replayed_refusal(store, &envelope)
+                        .map(|refusal| refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused))
+                        .map_err(RuntimeError::from),
+                    outcome => outcome.map_err(RuntimeError::from),
+                }
+            };
+            // A replicated conflict envelope can replace or archive a
+            // lineage (probe-covered; reset hooks stay unconditional).
+            cache.clear();
+            outcome
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6540,360 +6500,6 @@ fn worker_main(
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
             Command::Run(work) => work(&mut store, &mut doc_cache),
-            Command::SetActiveVersion {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = switch_active_version_on_store(
-                    &mut store,
-                    &input.workspace_id,
-                    &input.version_id,
-                    &input.root_dir,
-                    input.self_writes.as_ref(),
-                    input.now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocOpenState {
-                workspace_id,
-                now_ms,
-                drain_deferred,
-                expected_key,
-                version_id,
-                path,
-                content_kind,
-                seed_from_artifact,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_open_state_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &workspace_id,
-                    now_ms,
-                    drain_deferred,
-                    expected_key.as_ref(),
-                    &version_id,
-                    &path,
-                    content_kind,
-                    seed_from_artifact,
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocMaterializeSceneSeedAssets {
-                root_dir,
-                workspace_id,
-                job_ids,
-                self_writes,
-                now_ms,
-                reply,
-            } => {
-                let selected: HashSet<String> = job_ids.into_iter().collect();
-                let outcome = reconcile_scene_asset_materialization_conflicts(
-                    &store, &root_dir, &selected, now_ms,
-                )
-                .and_then(|invalid_jobs| {
-                    replay_pending_materializations(
-                        &mut store,
-                        &root_dir,
-                        MaterializationReplayScope {
-                            workspace_id: &workspace_id,
-                            self_writes: Some(self_writes.as_ref()),
-                        },
-                        now_ms,
-                        &NoFaults,
-                        Some(&selected),
-                        false,
-                    )?;
-                    let completed = selected.iter().try_fold(0_usize, |count, job_id| {
-                        store.load_materialization_job(job_id).map(|job| {
-                            count
-                                + usize::from(
-                                    job.is_some_and(|job| job.status == JobStatus::Complete),
-                                )
-                        })
-                    })?;
-                    let incomplete_jobs = selected.len().saturating_sub(completed);
-                    Ok(YdocSeedMaterialization {
-                        materialized: invalid_jobs == 0 && incomplete_jobs == 0,
-                        incomplete_jobs,
-                        invalid_jobs,
-                    })
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::YdocRecordUpdate {
-                key,
-                path,
-                content_kind,
-                regime,
-                update,
-                request_id,
-                actor_origin_id,
-                attribution,
-                expected_lineage_claim_id,
-                require_empty_lineage,
-                seed_source_sha256,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_record_update_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    &path,
-                    content_kind,
-                    regime,
-                    &update,
-                    actor_origin_id,
-                    attribution,
-                    expected_lineage_claim_id,
-                    require_empty_lineage,
-                    seed_source_sha256,
-                    request_id,
-                    true,
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocSettle {
-                root_dir,
-                key,
-                path,
-                content_kind,
-                expected_lineage_claim_id,
-                expected_head_sha,
-                session_id,
-                self_writes,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_settle_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &root_dir,
-                    &key,
-                    &path,
-                    content_kind,
-                    true,
-                    expected_lineage_claim_id.as_deref(),
-                    expected_head_sha,
-                    None,
-                    &session_id,
-                    self_writes.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                    None,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocResync {
-                key,
-                expected_lineage_claim_id,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_resync_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    expected_lineage_claim_id.as_deref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocCloseSession {
-                key,
-                materialization,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_close_session_on_store(
-                    &mut store,
-                    &mut doc_cache,
-                    &key,
-                    materialization.as_ref(),
-                    now_ms,
-                    faults.as_ref(),
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::RepairConflictedYdocRecoveries {
-                workspace_id,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    dohc_engine_sync::repair_conflicted_ydoc_recoveries(
-                        &mut store,
-                        &workspace_id,
-                        faults.as_ref(),
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                // A proven-empty scan performed no lineage transaction, so it
-                // must not invalidate an unrelated active writer session. Any
-                // materialization or error can have changed lineage state.
-                if !matches!(&outcome, Ok(recoveries) if recoveries.is_empty()) {
-                    doc_cache.clear();
-                }
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplayPending {
-                root_dir,
-                workspace_id,
-                now_ms,
-                reply,
-            } => {
-                // Open-time replay runs before the files layer starts. The
-                // switch path calls the same tolerant per-job executor with a
-                // selected durable job set and watcher suppression enabled.
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: None,
-                    },
-                    now_ms,
-                    &NoFaults,
-                    None,
-                    false,
-                )
-                .map(|summary| summary.completed);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplayPendingForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                now_ms,
-                reply,
-            } => {
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: Some(self_writes.as_ref()),
-                    },
-                    now_ms,
-                    &NoFaults,
-                    None,
-                    false,
-                )
-                .and_then(|summary| {
-                    if summary.failed == 0 {
-                        Ok(())
-                    } else {
-                        Err(RuntimeError::ActiveVersionMaterializationIncomplete {
-                            failed_jobs: summary.failed,
-                        })
-                    }
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeReplaySelectedForFence {
-                root_dir,
-                workspace_id,
-                self_writes,
-                materialization_job_ids,
-                now_ms,
-                reply,
-            } => {
-                let selected: HashSet<String> = materialization_job_ids.into_iter().collect();
-                let outcome = replay_pending_materializations(
-                    &mut store,
-                    &root_dir,
-                    MaterializationReplayScope {
-                        workspace_id: &workspace_id,
-                        self_writes: Some(self_writes.as_ref()),
-                    },
-                    now_ms,
-                    &NoFaults,
-                    Some(&selected),
-                    false,
-                )
-                .and_then(|summary| {
-                    let failed_jobs =
-                        summary.failed + selected.len().saturating_sub(summary.selected_seen);
-                    if failed_jobs == 0 {
-                        Ok(())
-                    } else {
-                        Err(RuntimeError::ActiveVersionMaterializationIncomplete { failed_jobs })
-                    }
-                });
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictResolve {
-                input,
-                leases,
-                root_dir,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = conflict_resolve_on_store(
-                    &mut store,
-                    &input,
-                    root_dir.as_deref(),
-                    &leases,
-                    faults.as_ref(),
-                    &token,
-                );
-                // Resolution can replace or archive a lineage; the tuple probe
-                // already misses on every such outcome (the claim id changes or
-                // the marker is deleted), but the reset hooks are unconditional.
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictApplyReplicated {
-                envelope,
-                faults,
-                leases,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    match apply_conflict_envelope(&mut store, &envelope, faults.as_ref(), &leases) {
-                        Ok(outcome @ ApplyOutcome::Refused(_)) => {
-                            retain_refusal_for_direct_retry(&mut store, &envelope, faults.as_ref())
-                                .map(|()| outcome)
-                                .map_err(RuntimeError::from)
-                        }
-                        Ok(ApplyOutcome::Skipped) => read_replayed_refusal(&store, &envelope)
-                            .map(|refusal| {
-                                refusal.map_or(ApplyOutcome::Skipped, ApplyOutcome::Refused)
-                            })
-                            .map_err(RuntimeError::from),
-                        outcome => outcome.map_err(RuntimeError::from),
-                    }
-                };
-                // A replicated conflict envelope can replace or archive a
-                // lineage (probe-covered; reset hooks stay unconditional).
-                doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
             Command::Relay {
                 transport,
                 operation,
