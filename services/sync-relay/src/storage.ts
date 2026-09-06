@@ -1,912 +1,163 @@
-import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import {
+  type SqliteDb,
+  type OpenSyncRelayStorageOptions,
+  type SyncRelayStorage,
+  type LiveHostControlResult,
+  type LiveHostConnectionCoordinate,
+  type BeginLiveHostTransitionInput,
+  type ActivateLiveHostTransitionInput,
+  type WorkspaceSyncIdentity,
+  type WorkspaceBootstrap,
+  type VerifyWorkspaceIdentityResult,
+  type ClaimWorkspaceIdentityResult,
+  type RotateWorkspaceIdentityResult,
+  type EnforceWorkspaceIdentityResult,
+  type PutBlobResult,
+  type CollectUnreferencedBlobsResult,
+  type KeyEnvelopeRow,
+  type SyncRelayLogInput,
+  type AppendLogBatchGuardContext,
+  type AppendLogBatchResult,
+  type SyncRelayShareRow,
+  type SyncRelayShareGrantRow,
+  type SyncRelayLinkCredentialRow,
+  type SyncRelayLinkCredentialGrantRow,
+  type SyncRelayLinkCredentialMint,
+  type LinkGrantTransitionResult,
+  type ShareGrantTransitionResult,
+  type SyncRelayLinkSessionRow,
+  type AppendLinkDiscussionMessageResult,
+  type AppendAuthenticatedDiscussionMessageResult,
+  type SyncRelayShareDiscussionCursor,
+  type SyncRelayShareDiscussionPageDirection,
+  type SyncRelayShareDiscussionPage,
+  type SyncRelayShareDiscussionActivityPage,
+  type SyncRelayLinkPrincipalRow,
+  type SyncRelayDeletedDiscussionMessage,
+  type SyncRelayLinkHandoffCodeRow,
+  type LinkHandoffRedeemResult,
+  type SyncRelayShareWithGrantRow,
+  type SyncRelayLinkInventoryCursor,
+  type SyncRelayLinkInventoryPage,
+  type SyncRelayIndependentGrantInventoryCursor,
+  type SyncRelayIndependentGrantInventoryPage,
+  type SyncRelayLogRow,
+  type ThreadFileBinding,
+  type ObjectMomentRow,
+  type ShareProposalOpRow,
+  type ShareProposalRow,
+  type ShareProposalState,
+  type FetchLogPageResult,
+  type CurrentFileStateSnapshot,
+} from "./storage/types";
 import { createRequire } from "node:module";
-import { dirname, resolve } from "node:path";
+import { resolve, dirname } from "node:path";
+import { mkdirSync } from "node:fs";
 import {
-  nextHostEpoch,
-  parseHostControlIdentifier,
-  parseHostEpoch,
-  parseHostMode,
-  parseHostTransitionGeneration,
-  type HostControlSnapshot,
-  type HostEpoch,
-  type HostMode,
-  type HostTransitionGeneration,
-} from "@dohc/live-session-contract/host-control";
-import { AGENT_CHANNEL_WIRE_ID } from "@dohc/security-contract/chat-wire-ids";
-import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
-import {
-  normalizeShareDiscussionBody,
-  normalizeShareDiscussionDisplayName,
-  SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT,
-  SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
-  SHARE_DISCUSSION_NAME_BYTE_LIMIT,
-  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT,
-} from "@dohc/security-contract/share-discussion";
-import { shareAccessRank } from "@dohc/security-contract/share-selector";
-import { validateUserWritePath } from "@dohc/workspace-core";
-import {
-  conflictResolveBlobShas,
-  type ConflictResolveEnvelopeContext,
-} from "./conflictResolve";
-import { asRecord } from "@dohc/workspace-core";
-import { RelayError } from "./errors";
-import {
-  constantTimeHashEqual,
-  LINK_HANDOFF_CODES_PER_GRANT_LIMIT,
-  LINK_SESSIONS_PER_GRANT_LIMIT,
-  LINK_SESSION_RENEWAL_GRACE_MS,
-} from "./linkSecurity";
-
-export const SHARED_BLOB_CANDIDATE_LIMIT = 64;
-
-export type LiveHostControlRefusalReason =
-  | "not-provisioned"
-  | "conflicting-provision"
-  | "stale-epoch"
-  | "wrong-mode"
-  | "wrong-host"
-  | "wrong-instance"
-  | "wrong-connection"
-  | "busy-transition"
-  | "draining"
-  | "closed"
-  | "same-mode"
-  | "stale-transition"
-  | "completed-transition-id"
-  | "exhausted-epoch"
-  | "exhausted-transition-generation";
-
-export type LiveHostControlResult =
-  | { readonly ok: true; readonly snapshot: HostControlSnapshot }
-  | { readonly ok: false; readonly reason: LiveHostControlRefusalReason };
-
-export interface LiveHostConnectionCoordinate {
-  readonly mode: HostMode;
-  readonly hostId: string;
-  readonly hostEpoch: HostEpoch;
-  readonly instanceId: string;
-  readonly connectionId: string;
-}
-
-export interface BeginLiveHostTransitionInput {
-  readonly from: LiveHostConnectionCoordinate;
-  readonly toMode: HostMode;
-  readonly toHostId: string;
-  readonly transitionId: string;
-  readonly startedAtMs: number;
-  readonly guard: () => void;
-}
-
-export interface ActivateLiveHostTransitionInput {
-  readonly transitionGeneration: HostTransitionGeneration;
-  readonly transitionId: string;
-  readonly transitionFromEpoch: HostEpoch;
-  readonly mode: HostMode;
-  readonly hostId: string;
-  readonly hostEpoch: HostEpoch;
-  readonly instanceId: string;
-  readonly connectionId: string;
-  readonly updatedAtMs: number;
-  readonly guard: () => void;
-}
-
-export interface SyncRelayLogInput {
-  originSeq: number;
-  opKind: string;
-  payloadJson: string;
-  recordedAtMs: number;
-}
-
-export interface SyncRelayLogRow extends SyncRelayLogInput {
-  workspaceId: string;
-  originId: string;
-  relaySeq: number;
-}
-
-interface AppendLogBatchResult {
-  inserted: number;
-  skipped: number;
-  currentMaxOriginSeq: number;
-}
-
-interface FetchLogPageResult {
-  rows: SyncRelayLogRow[];
-  nextCursor: number;
-  hasMore: boolean;
-}
-
-export interface CurrentFileStateRow {
-  path: string;
-  blobSha256: string;
-  contentKind: "text" | "binary";
-}
-
-export interface CurrentFileStateSnapshot {
-  files: CurrentFileStateRow[];
-  nextCursor: number;
-  epochLogFloor: number;
-  tooMany: boolean;
-}
-
-interface PutBlobResult {
-  byteLength: number;
-  alreadyHad: boolean;
-}
-
-export interface CollectUnreferencedBlobsResult {
-  removed: number;
-  removedSha256s: string[];
-}
-
-interface KeyEnvelopeRow {
-  envelopeJson: string;
-  sha256: string;
-  updatedAtMs: number;
-}
-
-export interface SyncRelayShareRow {
-  shareId: string;
-  workspaceId: string;
-  granterUserId: string;
-  // Validated selector JSON without access. The grant owns access.
-  selectorJson: string;
-  createdAtMs: number;
-}
-
-export type SyncRelayShareGrantStatus = "active" | "revoked";
-
-export interface SyncRelayShareGrantRow {
-  grantId: string;
-  shareId: string;
-  principalKind: "user" | "email" | "link";
-  principalUserId: string | null;
-  principalEmail: string | null;
-  access: string;
-  generation: number;
-  status: SyncRelayShareGrantStatus;
-  createdAtMs: number;
-  revokedAtMs: number | null;
-  parentGrantId: string | null;
-}
-
-export interface SyncRelayLinkCredentialRow {
-  credentialId: string;
-  grantId: string;
-  secretHash: string;
-  generation: number;
-  mintedAtMs: number;
-  retiredAtMs: number | null;
-}
-
-export interface SyncRelayLinkCredentialGrantRow {
-  credential: SyncRelayLinkCredentialRow;
-  grant: SyncRelayShareGrantRow;
-}
-
-export interface SyncRelayLinkSessionRow {
-  sessionId: string;
-  capabilityHash: string;
-  grantId: string;
-  generation: number;
-  mintedAtMs: number;
-  expiresAtMs: number;
-  principalId: string | null;
-}
-
-export interface SyncRelayLinkPrincipalRow {
-  principalId: string;
-  grantId: string;
-  mintGeneration: number;
-  profileTokenHash: string;
-  displayName: string | null;
-  createdAtMs: number;
-  blockedAtMs: number | null;
-  discussionRevision: number;
-  storageBytes: number;
-}
-
-export interface SyncRelayShareDiscussionMessageRow {
-  messageId: string;
-  shareId: string;
-  idempotencyKey: string;
-  requestHash: string;
-  authorKind: "owner" | "named" | "link";
-  authorUserId: string | null;
-  linkGrantId: string | null;
-  linkPrincipalId: string | null;
-  displayNameSnapshot: string;
-  body: string | null;
-  createdAtMs: number;
-  deletedAtMs: number | null;
-  deletedByUserId: string | null;
-  discussionRevision: number;
-  storageBytes: number;
-}
-
-export interface SyncRelayShareDiscussionCursor {
-  createdAtMs: number;
-  messageId: string;
-}
-
-export interface SyncRelayShareDiscussionPageMessage
-  extends SyncRelayShareDiscussionMessageRow {
-  linkPrincipalBlocked: boolean | null;
-}
-
-export interface SyncRelayShareDiscussionPage {
-  messages: SyncRelayShareDiscussionPageMessage[];
-  nextCursor: SyncRelayShareDiscussionCursor | null;
-  linkCommentsPaused: boolean;
-  activityRevision: number;
-}
-
-export type SyncRelayShareDiscussionPageDirection =
-  | "oldest-first"
-  | "newest-first";
-
-export interface SyncRelayShareDiscussionActivityPage {
-  latestRevision: number;
-  cursorRevision: number;
-  hasMore: boolean;
-  messages: SyncRelayShareDiscussionPageMessage[];
-  principals: SyncRelayLinkPrincipalRow[];
-  linkCommentsPaused: boolean;
-}
-
-export interface SyncRelayDeletedDiscussionMessage {
-  messageId: string;
-  createdAtMs: number;
-  deletedAtMs: number;
-}
-
-export type AppendLinkDiscussionMessageResult =
-  | {
-      ok: true;
-      replayed: boolean;
-      principal: SyncRelayLinkPrincipalRow;
-      message: SyncRelayShareDiscussionMessageRow;
-    }
-  | {
-      ok: false;
-      reason: "paused" | "blocked";
-      activityRevision: number;
-    }
-  | {
-      ok: false;
-      reason:
-        | "invalid-input"
-        | "not-authorized"
-        | "name-already-set"
-        | "idempotency-conflict"
-        | "principal-limit"
-        | "rate-limit"
-        | "lifetime-limit"
-        | "share-limit"
-        | "workspace-quota";
-    };
-
-export type AppendAuthenticatedDiscussionMessageResult =
-  | {
-      ok: true;
-      replayed: boolean;
-      message: SyncRelayShareDiscussionMessageRow;
-    }
-  | {
-      ok: false;
-      reason:
-        | "invalid-input"
-        | "idempotency-conflict"
-        | "rate-limit"
-        | "lifetime-limit"
-        | "share-limit"
-        | "workspace-quota";
-    };
-
-export interface SyncRelayLinkHandoffCodeRow {
-  codeId: string;
-  codeHash: string;
-  grantId: string;
-  generation: number;
-  mintedAtMs: number;
-  expiresAtMs: number;
-}
-
-interface StoredSyncRelayLinkHandoffCodeRow
-  extends SyncRelayLinkHandoffCodeRow {
-  resultGrantId: string | null;
-}
-
-export type LinkHandoffRedeemResult =
-  | {
-      ok: true;
-      shareId: string;
-      grant: SyncRelayShareGrantRow;
-    }
-  | { ok: false };
-
-export type ShareGrantTransitionResult =
-  | { ok: true; grant: SyncRelayShareGrantRow }
-  | { ok: false };
-
-export type LinkGrantTransitionResult =
-  | ShareGrantTransitionResult
-  | {
-      ok: false;
-      reason: "dependents-changed";
-      dependents: SyncRelayShareGrantRow[];
-    };
-
-export interface SyncRelayShareWithGrantRow {
-  share: SyncRelayShareRow;
-  grant: SyncRelayShareGrantRow;
-}
-
-export interface SyncRelayLinkInventoryRow extends SyncRelayShareWithGrantRow {
-  dependents: SyncRelayShareGrantRow[];
-  lastUsedAtMs: number | null;
-  urlIssuedAtMs: number | null;
-}
-
-export interface SyncRelayLinkInventoryCursor {
-  shareCreatedAtMs: number;
-  shareId: string;
-  linkCreatedAtMs: number;
-  grantId: string;
-}
-
-export interface SyncRelayLinkInventoryPage {
-  links: SyncRelayLinkInventoryRow[];
-  nextCursor: SyncRelayLinkInventoryCursor | null;
-}
-
-export interface SyncRelayIndependentGrantInventoryCursor {
-  shareId: string;
-  grantCreatedAtMs: number;
-  grantId: string;
-}
-
-export interface SyncRelayIndependentGrantInventoryPage {
-  grants: SyncRelayShareGrantRow[];
-  nextCursor: SyncRelayIndependentGrantInventoryCursor | null;
-}
-
-export const LINK_INVENTORY_PAGE_SIZE = 1_000;
-export const LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT = 1_000;
-
-interface SyncRelayLinkCredentialMint {
-  credentialId: string;
-  secretHash: string;
-}
-
-// A recipient's submitted changes, held at the relay until the
-// granter accepts or declines them. `open` is the only state that can change.
-export type ShareProposalState = "open" | "accepted" | "declined" | "withdrawn";
-
-export interface ShareProposalRow {
-  proposalId: string;
-  shareId: string;
-  workspaceId: string;
-  // SERVER-derived from the authenticated submitter. Never client-supplied.
-  proposedByUserId: string;
-  // The one version the share exposed when this was submitted.
-  versionId: string;
-  state: ShareProposalState;
-  createdAtMs: number;
-  settledAtMs: number | null;
-}
-
-// One net change to one file. Not a moment: the relay mints the moment from
-// the granter's own facts at accept (see `shareProposals.ts`).
-export interface ShareProposalOpRow {
-  opIndex: number;
-  basedOnPath: string | null;
-  // Which file the change is built on, resolved from `basedOnPath` at submit
-  // and followed at accept. null for a file the granter does not have.
-  basedOnObjectId: string | null;
-  basedOnBlobSha256: string | null;
-  operation: "write" | "delete";
-  afterPath: string | null;
-  afterBlobSha256: string | null;
-  afterContentKind: "text" | "binary" | null;
-  afterByteLength: number | null;
-  recordedAtMs: number;
-}
-
-// One moment the granter's log holds for one object, as the base rewrite needs
-// to describe it. `path` and `blobSha256` are null when the moment deletes the
-// object.
-export interface ObjectMomentRow {
-  momentId: string;
-  versionId: string;
-  path: string | null;
-  blobSha256: string | null;
-  contentKind: string | null;
-  byteLength: number | null;
-  recordedAtMs: number;
-}
-
-export interface WorkspaceSyncIdentity {
-  replicationEpoch: string;
-  streamIdentity: string;
-}
-
-interface WorkspaceBootstrap {
-  hasContent: boolean;
-  identity: WorkspaceSyncIdentity | null;
-}
-
-export type ClaimWorkspaceIdentityResult =
-  | "claimed"
-  | "matched"
-  | "epoch-superseded"
-  | "epoch-unknown"
-  | "stream-mismatch";
-
-export type VerifyWorkspaceIdentityResult = Exclude<
-  ClaimWorkspaceIdentityResult,
-  "claimed"
->;
-
-export type EnforceWorkspaceIdentityResult =
-  | ClaimWorkspaceIdentityResult
-  | "identity-required";
-
-export type RotateWorkspaceIdentityResult =
-  | "rotated"
-  | "not-owner"
-  | "unchanged"
-  | "epoch-superseded";
-
-export interface AppendLogBatchGuardContext {
-  enforceWorkspaceIdentity(
-    identity: WorkspaceSyncIdentity | null,
-  ): EnforceWorkspaceIdentityResult;
-}
-
-export interface SyncRelayStorage {
-  close(): void;
-  getLiveHostControl(): HostControlSnapshot | null;
-  provisionLiveHostControl(input: {
-    mode: HostMode;
-    hostId: string;
-    updatedAtMs: number;
-    guard: () => void;
-  }): LiveHostControlResult;
-  registerLiveHost(input: LiveHostConnectionCoordinate & {
-    updatedAtMs: number;
-    guard: () => void;
-  }): LiveHostControlResult;
-  disconnectLiveHost(input: LiveHostConnectionCoordinate & {
-    updatedAtMs: number;
-    guard: () => void;
-  }): LiveHostControlResult;
-  beginLiveHostTransition(input: BeginLiveHostTransitionInput): LiveHostControlResult;
-  abortLiveHostTransition(input: {
-    transitionId: string;
-    transitionGeneration: HostTransitionGeneration;
-    updatedAtMs: number;
-  }): LiveHostControlResult;
-  commitLiveHostTransitionEpoch(input: {
-    transitionId: string;
-    transitionGeneration: HostTransitionGeneration;
-    updatedAtMs: number;
-  }): LiveHostControlResult;
-  activateLiveHostTransition(input: ActivateLiveHostTransitionInput): LiveHostControlResult;
-  claimWorkspace(input: {
-    workspaceId: string;
-    ownerUserId: string;
-    createdAtMs: number;
-  }): "created" | "owned" | "not-owner";
-  getWorkspaceBootstrap(workspaceId: string): WorkspaceBootstrap;
-  getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null;
-  getEpochLogFloor(workspaceId: string): number;
-  verifyWorkspaceIdentity(input: {
-    workspaceId: string;
-    replicationEpoch: string;
-    streamIdentity: string;
-  }): VerifyWorkspaceIdentityResult;
-  claimWorkspaceIdentity(input: {
-    workspaceId: string;
-    replicationEpoch: string;
-    streamIdentity: string;
-  }): ClaimWorkspaceIdentityResult;
-  rotateWorkspaceIdentity(input: {
-    workspaceId: string;
-    ownerUserId: string;
-    replicationEpoch: string;
-    streamIdentity: string;
-    rotatedAtMs: number;
-  }): RotateWorkspaceIdentityResult;
-  workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean;
-  putBlob(input: {
-    workspaceId: string;
-    sha256: string;
-    content: Uint8Array;
-    createdAtMs: number;
-  }): PutBlobResult;
-  // Async + chunked so a large sweep never monopolizes the event loop on the
-  // request path. Only reclaims blobs that are both unreferenced and older than
-  // the retention grace window (created_at_ms <= nowMs - grace), which is what
-  // keeps a blob uploaded moments before its referencing log op is appended
-  // from being deleted between the two phases.
-  collectUnreferencedBlobs(
-    workspaceId: string,
-    options: { nowMs: number },
-  ): Promise<CollectUnreferencedBlobsResult>;
-  getBlob(workspaceId: string, sha256: string): Uint8Array | null;
-  missingBlobs(workspaceId: string, sha256s: string[]): string[];
-  // Create-only on first write (expectedSha256 null), compare-and-swap
-  // thereafter: the caller must present the sha256 of the envelope it intends
-  // to replace. Replaced envelopes are retained in an append-only history
-  // table (audit trail + server-side recovery from a bad overwrite).
-  putKeyEnvelope(input: {
-    workspaceId: string;
-    envelopeJson: string;
-    updatedAtMs: number;
-    expectedSha256: string | null;
-  }): { sha256: string };
-  getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null;
-  appendLogBatch(input: {
-    workspaceId: string;
-    originId: string;
-    ops: SyncRelayLogInput[];
-    // MU-C4 revoke-race gate: runs inside the append's BEGIN IMMEDIATE
-    // transaction, i.e. under the SQLite write lock that serializes revokes,
-    // before anything is inserted. A throwing guard rolls the whole batch
-    // back. This is how the member-append route re-verifies the share
-    // (recipient-owned, unrevoked, granter in standing) with NO window left
-    // between the check and the insert — a route-level re-check alone leaves
-    // a gap where a concurrent revoke commits after the check but before the
-    // transaction opens.
-    guard?: (context: AppendLogBatchGuardContext) => void;
-  }): AppendLogBatchResult;
-  fetchLogPage(input: {
-    workspaceId: string;
-    sinceRelaySeq: number;
-    limit: number;
-  }): FetchLogPageResult;
-  fetchLogPageDescending(input: {
-    workspaceId: string;
-    beforeRelaySeq: number | null;
-    limit: number;
-  }): SyncRelayLogRow[];
-  fetchLogCoordinate(input: {
-    workspaceId: string;
-    originId: string;
-    originSeq: number;
-  }): SyncRelayLogRow | null;
-  readCurrentFileState(input: {
-    workspaceId: string;
-    versionId: string;
-    selectorPaths: readonly string[];
-    limit: number;
-  }): CurrentFileStateSnapshot;
-  currentFileBlobByteLength(input: {
-    workspaceId: string;
-    versionId: string;
-    selectorPaths: readonly string[];
-    sha256: string;
-    epochLogFloor: number;
-  }): number | null;
-  createShare(input: {
-    share: SyncRelayShareRow;
-    grant: SyncRelayShareGrantRow;
-  }): void;
-  createFileLinkShare(input: {
-    share: SyncRelayShareRow;
-    grant: SyncRelayShareGrantRow;
-    credential: SyncRelayLinkCredentialRow;
-    guard: () => void;
-  }): boolean;
-  createLinkGrant(input: {
-    grant: SyncRelayShareGrantRow;
-    credential: SyncRelayLinkCredentialRow;
-  }): boolean;
-  getShareGrant(grantId: string): SyncRelayShareGrantRow | null;
-  getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null;
-  findLinkGrantByCredentialHash(
-    secretHash: string,
-  ): SyncRelayLinkCredentialGrantRow | null;
-  rotateLinkGrant(input: {
-    shareId: string;
-    grantId: string;
-    rotatedAtMs: number;
-    expectedDependentGrantIds: readonly string[];
-    guard: () => void;
-    mintCredential: () => SyncRelayLinkCredentialMint;
-  }): LinkGrantTransitionResult;
-  retuneShareGrant(input: {
-    shareId: string;
-    grantId: string;
-    access: string;
-    changedAtMs: number;
-    expectedDependentGrantIds: readonly string[];
-    guard: () => void;
-    mintCredential?: () => SyncRelayLinkCredentialMint;
-  }): LinkGrantTransitionResult;
-  revokeShareGrant(input: {
-    shareId: string;
-    grantId: string;
-    revokedAtMs: number;
-    expectedDependentGrantIds?: readonly string[];
-    guard?: () => void;
-  }): LinkGrantTransitionResult;
-  promoteShareGrant(input: {
-    shareId: string;
-    grantId: string;
-    expectedParentGrantId: string;
-    expectedParentGeneration: number;
-    guard: () => void;
-  }): ShareGrantTransitionResult;
-  mintLinkSession(input: {
-    session: Omit<SyncRelayLinkSessionRow, "principalId">;
-    guard?: () => void;
-  }): boolean;
-  replaceLinkSession(input: {
-    currentSession: SyncRelayLinkSessionRow;
-    session: Omit<SyncRelayLinkSessionRow, "principalId">;
-    guard: () => void;
-  }): boolean;
-  findLinkSessionByCapabilityHash(
-    capabilityHash: string,
-  ): SyncRelayLinkSessionRow | null;
-  appendLinkDiscussionMessage(input: {
-    capabilityHash: string;
-    profileTokenHash: string;
-    claimedName?: string | null;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    guard?: () => void;
-  }): AppendLinkDiscussionMessageResult;
-  appendAuthenticatedDiscussionMessage(input: {
-    shareId: string;
-    authorUserId: string;
-    displayName: string;
-    body: string;
-    idempotencyKey: string;
-    createdAtMs: number;
-    readGuard: () => "owner" | "recipient";
-    appendGuard: () => "owner" | "recipient";
-  }): AppendAuthenticatedDiscussionMessageResult;
-  listShareDiscussionMessages(input: {
-    shareId: string;
-    after?: SyncRelayShareDiscussionCursor | null;
-    before?: SyncRelayShareDiscussionCursor | null;
-    direction?: SyncRelayShareDiscussionPageDirection;
-    limit: number;
-  }): SyncRelayShareDiscussionPage;
-  getShareDiscussionRevision(shareId: string): number | null;
-  listShareDiscussionActivity(input: {
-    shareId: string;
-    sinceRevision: number;
-    limit: number;
-  }): SyncRelayShareDiscussionActivityPage;
-  getLinkPrincipal(principalId: string): SyncRelayLinkPrincipalRow | null;
-  getLinkPrincipalForGrantProfile(
-    grantId: string,
-    profileTokenHash: string,
-  ): SyncRelayLinkPrincipalRow | null;
-  setLinkPrincipalBlocked(input: {
-    shareId: string;
-    workspaceId: string;
-    principalId: string;
-    actorUserId: string;
-    blockedAtMs: number | null;
-  }): boolean;
-  setShareLinkWritesPaused(input: {
-    shareId: string;
-    workspaceId: string;
-    actorUserId: string;
-    pausedAtMs: number | null;
-  }): boolean;
-  deleteShareDiscussionMessage(input: {
-    shareId: string;
-    workspaceId: string;
-    messageId: string;
-    deletedAtMs: number;
-    actorUserId: string;
-  }): SyncRelayDeletedDiscussionMessage | null;
-  mintLinkHandoffCode(input: {
-    code: SyncRelayLinkHandoffCodeRow;
-    guard: () => boolean;
-  }): boolean;
-  hasLinkHandoffCode(codeHash: string): boolean;
-  redeemLinkHandoffCode(input: {
-    codeHash: string;
-    principalUserId: string;
-    redeemedAtMs: number;
-    mintGrantId: () => string;
-    guard: (code: SyncRelayLinkHandoffCodeRow) => boolean;
-  }): LinkHandoffRedeemResult;
-  // Claims any pending email invites addressed to `email` for `userId`,
-  // changing the grant principal from email to user. Idempotent; the email
-  // match is exact on the normalized (lowercased) address. Returns the number
-  // of grants claimed.
-  claimPendingSharesForEmail(email: string, userId: string): number;
-  getShare(shareId: string): SyncRelayShareRow | null;
-  listActiveShareGrantsForRecipient(
-    shareId: string,
-    recipientUserId: string,
-  ): SyncRelayShareGrantRow[];
-  listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[];
-  listLinkGrantsByWorkspace(
-    workspaceId: string,
-    cursor?: SyncRelayLinkInventoryCursor,
-  ): SyncRelayLinkInventoryPage;
-  listActiveIndependentShareGrants(input: {
-    workspaceId: string;
-    shareIds: readonly string[];
-    cursor?: SyncRelayIndependentGrantInventoryCursor;
-  }): SyncRelayIndependentGrantInventoryPage;
-  // Received listings exclude revoked shares entirely: after revocation the
-  // recipient must not be able to read even the share's metadata (paths,
-  // version names) — a revoked share is indistinguishable from one that
-  // never existed.
-  listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[];
-  // Idempotent; returns false only when the share does not exist.
-  revokeShare(shareId: string, revokedAtMs: number): boolean;
-  // Candidate moment rows for the shared-blob allowlist. Both semantics start
-  // from objects that used the exact hash. Historical reads choose each
-  // object's latest matching moment. Current-state reads resolve only those
-  // objects' latest moments, then match the blob and path before applying the
-  // cap. The share filter still makes the authorization decision.
-  listObjectMomentLogRowsByBlob(input: {
-    workspaceId: string;
-    versionId: string;
-    sha256: string;
-    semantics: "historical-log" | "current-state";
-    selectorPaths?: readonly string[];
-  }): SyncRelayLogRow[];
-  // version.create snapshot candidates use their own exact-hash index. The
-  // share filter still decides which snapshots the selector exposes.
-  listVersionCreateLogRowsByBlob(input: {
-    workspaceId: string;
-    versionId: string;
-    sha256: string;
-  }): SyncRelayLogRow[];
-  // MU-C4 shared channels: the channelWireId bound by the earliest
-  // chat.thread.create op for this threadId in the workspace's log (relay
-  // order). undefined means no create exists; null means the earliest create
-  // exists but carries no shareable channel binding. Earliest-wins mirrors the
-  // engine's insert-if-absent thread apply, so a later forged re-create can
-  // never re-bind an existing thread across a share boundary.
-  findThreadCreateChannelWireId(
-    workspaceId: string,
-    threadId: string,
-  ): string | null | undefined;
-  // The kind claimed by the earliest chat.channel.create op for this wire id.
-  // undefined means no create exists; null means the earliest exact create is
-  // malformed/unshareable. Later duplicate creates never override the first.
-  findChannelCreateKind(
-    workspaceId: string,
-    channelWireId: string,
-  ): "channel" | "dm" | "agent" | null | undefined;
-  // The file a thread is about, as claimed by the earliest
-  // chat.thread.create for this threadId. Earliest-wins for the same reason
-  // the channel binding uses it: a later forged re-create must not re-bind an
-  // existing thread into a share. undefined means no create exists; null means
-  // the earliest create exists but binds the thread to no file.
-  findThreadCreateFileBinding(
-    workspaceId: string,
-    threadId: string,
-  ): ThreadFileBinding | null | undefined;
-  // Where this object sits right NOW. undefined means the relay has never
-  // seen the object; null means its latest moment deleted it (or named no
-  // readable path). Both deny.
-  objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined;
-  // The object at this path right now, or undefined when none is. The reverse
-  // of the lookup above; a thread bound by path is re-proved through it.
-  objectIdAtPath(workspaceId: string, path: string): string | undefined;
-  // Which object sits at this path, in the one version a share
-  // exposes. `objectIdAtPath` above answers across every version at once, so
-  // a path last touched in a side version resolves to an object that share
-  // never saw — and every lookup below would then be scoped to a version that
-  // object has nothing in. undefined means "nothing is there", which the
-  // submit door refuses rather than minting a create.
-  objectIdAtPathInVersion(input: {
-    workspaceId: string;
-    versionId: string;
-    path: string;
-  }): string | undefined;
-  // The granter's own moment for this object within one version:
-  // the latest one, or the latest that produced `blobSha256` when one is
-  // named. The first answers "did this file drift since they sent it?"; the
-  // second is the correct three-way base for a change built on that content.
-  //
-  // The latest match wins, because content can return to an earlier state and
-  // the recipient started from the most recent moment that produced it. null
-  // when no moment did, which reads as an unknown base and opens a conflict.
-  //
-  // A share exposes exactly one version, and the same content can sit under
-  // the same object id in another one. An unscoped lookup would hand a main
-  // share a base from a side version — a moment the granter's main line never
-  // held — so the version is a parameter, never a default.
-  objectMoment(input: {
-    workspaceId: string;
-    objectId: string;
-    versionId: string;
-    blobSha256?: string;
-  }): ObjectMomentRow | null;
-  // Store one submit. `submitId` is idempotent per share: a retried POST
-  // returns `created: false` and the proposal it already made, so a lost
-  // response can never become two proposals for one intent.
-  insertShareProposal(input: {
-    proposalId: string;
-    shareId: string;
-    workspaceId: string;
-    proposedByUserId: string;
-    versionId: string;
-    submitId: string;
-    createdAtMs: number;
-    ops: ShareProposalOpRow[];
-    guard?: () => void;
-  }): { proposalId: string; created: boolean };
-  getShareProposal(
-    proposalId: string,
-  ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null;
-  listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }>;
-  // The granter's open proposals, as counts rather than op rows. The review
-  // surface polls this on a timer and renders a sender and a count from it, so
-  // serving every op of every open proposal would resolve a base per op on
-  // every tick to build rows nobody reads. One proposal's ops come from
-  // getShareProposal, when a granter opens it.
-  listShareProposalsForWorkspace(
-    workspaceId: string,
-  ): Array<ShareProposalRow & { opCount: number }>;
-  // Move a proposal out of `open`. Returns false when it already moved, which
-  // is how a double accept, a decline racing an accept, and a withdraw racing
-  // either one all lose without a second check.
-  settleShareProposal(
-    proposalId: string,
-    to: Exclude<ShareProposalState, "open">,
-    settledAtMs: number,
-  ): boolean;
-  // The same move, without a transaction of its own, for a caller that already
-  // holds the write lock. Accept uses it inside appendLogBatch's guard so the
-  // release and the settle commit together or not at all.
-  settleShareProposalInTransaction(
-    proposalId: string,
-    to: Exclude<ShareProposalState, "open">,
-    settledAtMs: number,
-  ): boolean;
-  // The highest origin_seq this origin holds, or -1 when it holds none. The
-  // proposal accept needs it because a proposal's changes carry no
-  // coordinates: they were never a log, so the relay numbers them.
-  maxOriginSeq(workspaceId: string, originId: string): number;
-}
-
-// The two wire shapes a file-linked thread create carries, kept apart because
-// they come from opposite ends of a share. `object` is the granter's own op —
-// its `linkedObjectId` is a granter-local id the relay resolves to a path.
-// `path` is a RECIPIENT's op, pushed back through the share log: a recipient's
-// object ids are its own and mean nothing here, so its create names the
-// granted path directly, and the relay re-proves that path against the log.
-//
-// Declared here, where it is read out of the log, and re-exported by
-// `shareFilter.ts` for the filter that consumes it.
-export type ThreadFileBinding =
-  | { kind: "object"; objectId: string }
-  | { kind: "path"; path: string };
-
-interface SqliteRunResult {
-  changes: number;
-  lastInsertRowid?: number | bigint;
-}
-
-interface SqliteStatement {
-  all(...params: unknown[]): Array<Record<string, unknown>>;
-  get(...params: unknown[]): Record<string, unknown> | undefined;
-  iterate(...params: unknown[]): IterableIterator<Record<string, unknown>>;
-  run(...params: unknown[]): SqliteRunResult;
-}
-
-interface SqliteDb {
-  exec(sql: string): void;
-  prepare(sql: string): SqliteStatement;
-  close(): void;
-}
+  DEFAULT_WORKSPACE_QUOTA_BYTES,
+  DEFAULT_BLOB_GRACE_MS,
+  LINK_DISCUSSION_PRINCIPAL_LIMIT,
+  DISCUSSION_MESSAGE_RATE_LIMIT,
+  DISCUSSION_LIFETIME_MESSAGE_LIMIT,
+  DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT,
+  SYNC_RELAY_BUSY_TIMEOUT_MS,
+} from "./storage/limits";
+import { LINK_SESSIONS_PER_GRANT_LIMIT } from "./linkSecurity";
+import { randomUUID } from "node:crypto";
+import { initializeSyncRelaySchema } from "./storage/schema";
+import { type HostControlSnapshot, type HostMode, type HostTransitionGeneration } from "@dohc/live-session-contract/host-control";
+import * as hostControlStorage from "./storage/hostControl";
+import * as workspacesStorage from "./storage/workspaces";
+import * as blobsStorage from "./storage/blobs";
+import * as keyEnvelopesStorage from "./storage/keyEnvelopes";
+import * as logStorage from "./storage/log";
+import * as sharesStorage from "./storage/shares";
+import * as discussionStorage from "./storage/discussion";
+import * as handoffStorage from "./storage/handoff";
+import * as objectIndexStorage from "./storage/objectIndex";
+import * as proposalsStorage from "./storage/proposals";
+import * as currentFilesStorage from "./storage/currentFiles";
+export {
+  SHARED_BLOB_CANDIDATE_LIMIT,
+  LINK_INVENTORY_PAGE_SIZE,
+  LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT,
+  SYNC_RELAY_BUSY_TIMEOUT_MS,
+  DEFAULT_WORKSPACE_QUOTA_BYTES,
+  LINK_DISCUSSION_BODY_CODE_POINT_LIMIT,
+  LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT,
+  LINK_DISCUSSION_NAME_CODE_POINT_LIMIT,
+  LINK_DISCUSSION_NAME_BYTE_LIMIT,
+  LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT,
+  LINK_DISCUSSION_PRINCIPAL_LIMIT,
+  DISCUSSION_MESSAGE_RATE_LIMIT,
+  DISCUSSION_MESSAGE_RATE_WINDOW_MS,
+  DISCUSSION_LIFETIME_MESSAGE_LIMIT,
+  DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT,
+  LINK_DISCUSSION_PAGE_LIMIT,
+  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT,
+  DEFAULT_BLOB_GRACE_MS,
+} from "./storage/limits";
+export {
+  type LiveHostControlRefusalReason,
+  type LiveHostControlResult,
+  type LiveHostConnectionCoordinate,
+  type BeginLiveHostTransitionInput,
+  type ActivateLiveHostTransitionInput,
+  type SyncRelayLogInput,
+  type SyncRelayLogRow,
+  type CurrentFileStateRow,
+  type CurrentFileStateSnapshot,
+  type CollectUnreferencedBlobsResult,
+  type SyncRelayShareRow,
+  type SyncRelayShareGrantStatus,
+  type SyncRelayShareGrantRow,
+  type SyncRelayLinkCredentialRow,
+  type SyncRelayLinkCredentialGrantRow,
+  type SyncRelayLinkSessionRow,
+  type SyncRelayLinkPrincipalRow,
+  type SyncRelayShareDiscussionMessageRow,
+  type SyncRelayShareDiscussionCursor,
+  type SyncRelayShareDiscussionPageMessage,
+  type SyncRelayShareDiscussionPage,
+  type SyncRelayShareDiscussionPageDirection,
+  type SyncRelayShareDiscussionActivityPage,
+  type SyncRelayDeletedDiscussionMessage,
+  type AppendLinkDiscussionMessageResult,
+  type AppendAuthenticatedDiscussionMessageResult,
+  type SyncRelayLinkHandoffCodeRow,
+  type LinkHandoffRedeemResult,
+  type ShareGrantTransitionResult,
+  type LinkGrantTransitionResult,
+  type SyncRelayShareWithGrantRow,
+  type SyncRelayLinkInventoryRow,
+  type SyncRelayLinkInventoryCursor,
+  type SyncRelayLinkInventoryPage,
+  type SyncRelayIndependentGrantInventoryCursor,
+  type SyncRelayIndependentGrantInventoryPage,
+  type ShareProposalState,
+  type ShareProposalRow,
+  type ShareProposalOpRow,
+  type ObjectMomentRow,
+  type WorkspaceSyncIdentity,
+  type ClaimWorkspaceIdentityResult,
+  type VerifyWorkspaceIdentityResult,
+  type EnforceWorkspaceIdentityResult,
+  type RotateWorkspaceIdentityResult,
+  type AppendLogBatchGuardContext,
+  type SyncRelayStorage,
+  type ThreadFileBinding,
+  type OpenSyncRelayStorageOptions,
+} from "./storage/types";
+export { initializeSyncRelaySchema } from "./storage/schema";
+export {
+  objectPathFromMomentPayload,
+  objectMomentFromMomentPayload,
+  currentFileStateQuery,
+  currentFileBlobByteLengthQuery,
+} from "./storage/currentFiles";
+export { normalizeDiscussionDisplayName } from "./storage/discussion";
+export { referencedBlobShas } from "./storage/blobReferences";
+export { SyncRelayConflictError, SyncRelayQuotaExceededError, SyncRelayBlobMissingError } from "./storage/errors";
 
 interface SqliteModule {
   DatabaseSync: new (path: string) => SqliteDb;
@@ -916,1698 +167,6 @@ const requireModule = createRequire(import.meta.url);
 
 function nodeSqlite(): SqliteModule {
   return requireModule("node:sqlite") as SqliteModule;
-}
-
-export const SYNC_RELAY_BUSY_TIMEOUT_MS = 5_000;
-export const DEFAULT_WORKSPACE_QUOTA_BYTES = 2 * 1024 * 1024 * 1024;
-export const LINK_DISCUSSION_BODY_CODE_POINT_LIMIT =
-  SHARE_DISCUSSION_BODY_CODE_POINT_LIMIT;
-export const LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT =
-  SHARE_DISCUSSION_BODY_INPUT_BYTE_LIMIT;
-export const LINK_DISCUSSION_NAME_CODE_POINT_LIMIT =
-  SHARE_DISCUSSION_NAME_CODE_POINT_LIMIT;
-export const LINK_DISCUSSION_NAME_BYTE_LIMIT = SHARE_DISCUSSION_NAME_BYTE_LIMIT;
-export const LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT = 64;
-export const LINK_DISCUSSION_PRINCIPAL_LIMIT = 100;
-export const DISCUSSION_MESSAGE_RATE_LIMIT = 10;
-export const DISCUSSION_MESSAGE_RATE_WINDOW_MS = 60_000;
-export const DISCUSSION_LIFETIME_MESSAGE_LIMIT = 500;
-export const DISCUSSION_NON_OWNER_SHARE_ROW_LIMIT = 5_000;
-export const LINK_DISCUSSION_PAGE_LIMIT = 100;
-// Share creation accepts account ids up to 256 characters. Reserve the
-// four-byte UTF-8 worst case so a later owner tombstone never grows quota.
-export const LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT = 1_024;
-const LINK_DISCUSSION_SQLITE_INTEGER_BYTES = 8;
-const LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES =
-  LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT +
-  4 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
-const LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES =
-  LINK_DISCUSSION_NAME_BYTE_LIMIT + 5 * LINK_DISCUSSION_SQLITE_INTEGER_BYTES;
-const MAX_DISCUSSION_REVISION = Number.MAX_SAFE_INTEGER;
-// Retention grace for freshly-uploaded blobs (0P sync-hardening item 4). Blob
-// upload is two-phase (PUT /blobs/:sha, then POST /log referencing it); GC that
-// runs between the two must not reclaim the blob just because no log row
-// references it yet. Any blob younger than this window is untouchable. Ten
-// minutes comfortably covers a slow/retried push.
-export const DEFAULT_BLOB_GRACE_MS = 10 * 60 * 1000;
-const RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT = 10;
-const ACTIVE_LINK_DEPENDENT_GRANT_LIMIT = 1_000;
-
-function dependentGrantIdsMatch(
-  dependents: readonly SyncRelayShareGrantRow[],
-  expectedGrantIds: readonly string[],
-): boolean {
-  if (!Array.isArray(expectedGrantIds) || expectedGrantIds.some((id) => typeof id !== "string")) {
-    return false;
-  }
-  const expected = new Set(expectedGrantIds);
-  return (
-    expected.size === dependents.length &&
-    dependents.every((dependent) => expected.has(dependent.grantId))
-  );
-}
-
-export interface OpenSyncRelayStorageOptions {
-  workspaceQuotaBytes?: number;
-  blobGraceMs?: number;
-  linkSessionsPerGrantLimit?: number;
-  linkDiscussionPrincipalLimit?: number;
-  discussionMessageRateLimit?: number;
-  discussionLifetimeMessageLimit?: number;
-  discussionNonOwnerShareRowLimit?: number;
-  newDiscussionId?: () => string;
-}
-
-const NORMALIZED_SHARE_SCHEMA_SQL = `
-  CREATE TABLE IF NOT EXISTS sync_relay_shares (
-    share_id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    granter_user_id TEXT NOT NULL,
-    selector_json TEXT NOT NULL,
-    created_at_ms INTEGER NOT NULL,
-    link_writes_paused_at_ms INTEGER,
-    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
-    FOREIGN KEY (workspace_id)
-      REFERENCES sync_relay_workspaces(workspace_id)
-      ON DELETE CASCADE
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_granter
-    ON sync_relay_shares(granter_user_id, created_at_ms);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_shares_workspace
-    ON sync_relay_shares(workspace_id, created_at_ms, share_id);
-
-  CREATE TABLE IF NOT EXISTS sync_relay_share_grants (
-    grant_id TEXT PRIMARY KEY,
-    share_id TEXT NOT NULL,
-    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('user', 'email', 'link')),
-    principal_user_id TEXT,
-    principal_email TEXT,
-    access TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
-    created_at_ms INTEGER NOT NULL,
-    revoked_at_ms INTEGER,
-    parent_grant_id TEXT,
-    CHECK (
-      (principal_kind = 'user' AND principal_user_id IS NOT NULL AND principal_email IS NULL)
-      OR
-      (principal_kind = 'email' AND principal_user_id IS NULL AND principal_email IS NOT NULL)
-      OR
-      (principal_kind = 'link' AND principal_user_id IS NULL AND principal_email IS NULL)
-    ),
-    CHECK (
-      (status = 'active' AND revoked_at_ms IS NULL)
-      OR
-      (status = 'revoked' AND revoked_at_ms IS NOT NULL)
-    ),
-    CHECK (parent_grant_id IS NULL OR principal_kind = 'user'),
-    FOREIGN KEY (share_id)
-      REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
-    FOREIGN KEY (parent_grant_id)
-      REFERENCES sync_relay_share_grants(grant_id)
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_share
-    ON sync_relay_share_grants(share_id, created_at_ms);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_user
-    ON sync_relay_share_grants(principal_user_id, created_at_ms);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_grants_email
-    ON sync_relay_share_grants(principal_email, created_at_ms);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_grants_grant_share
-    ON sync_relay_share_grants(grant_id, share_id);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_grants_active_dependent
-    ON sync_relay_share_grants(parent_grant_id, principal_user_id)
-    WHERE status = 'active' AND parent_grant_id IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS sync_relay_link_credentials (
-    credential_id TEXT PRIMARY KEY,
-    grant_id TEXT NOT NULL,
-    secret_hash TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    minted_at_ms INTEGER NOT NULL,
-    retired_at_ms INTEGER,
-    FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-  ) STRICT;
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_link_credentials_current
-    ON sync_relay_link_credentials(grant_id)
-    WHERE retired_at_ms IS NULL;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_credentials_hash
-    ON sync_relay_link_credentials(secret_hash);
-
-  CREATE TABLE IF NOT EXISTS sync_relay_link_usage (
-    grant_id TEXT PRIMARY KEY,
-    last_used_at_ms INTEGER NOT NULL CHECK (last_used_at_ms >= 0),
-    FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-  ) STRICT;
-
-  CREATE TABLE IF NOT EXISTS sync_relay_link_principals (
-    principal_id TEXT PRIMARY KEY,
-    grant_id TEXT NOT NULL,
-    mint_generation INTEGER NOT NULL CHECK (mint_generation >= 1),
-    profile_token_hash TEXT NOT NULL CHECK (length(profile_token_hash) > 0),
-    display_name TEXT CHECK (
-      display_name IS NULL OR (
-        length(display_name) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}
-        AND length(CAST(display_name AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}
-      )
-    ),
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    blocked_at_ms INTEGER,
-    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
-    storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
-    UNIQUE (grant_id, profile_token_hash),
-    FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_principals_budget
-    ON sync_relay_link_principals(grant_id, mint_generation, created_at_ms, principal_id);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_principals_activity
-    ON sync_relay_link_principals(grant_id, discussion_revision);
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_link_principals_principal_grant
-    ON sync_relay_link_principals(principal_id, grant_id);
-
-  CREATE TABLE IF NOT EXISTS sync_relay_link_sessions (
-    session_id TEXT PRIMARY KEY,
-    capability_hash TEXT NOT NULL UNIQUE,
-    grant_id TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    minted_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
-    principal_id TEXT,
-    CHECK (expires_at_ms > minted_at_ms),
-    FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
-    FOREIGN KEY (principal_id, grant_id)
-      REFERENCES sync_relay_link_principals(principal_id, grant_id) ON DELETE CASCADE
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_sessions_grant
-    ON sync_relay_link_sessions(grant_id, generation, expires_at_ms);
-
-  CREATE TABLE IF NOT EXISTS sync_relay_share_discussion_messages (
-    message_id TEXT PRIMARY KEY,
-    share_id TEXT NOT NULL,
-    idempotency_key TEXT NOT NULL CHECK (length(idempotency_key) BETWEEN 1 AND 64),
-    request_hash TEXT NOT NULL CHECK (length(request_hash) > 0),
-    author_kind TEXT NOT NULL CHECK (author_kind IN ('owner', 'named', 'link')),
-    author_user_id TEXT,
-    link_grant_id TEXT,
-    link_principal_id TEXT,
-    display_name_snapshot TEXT NOT NULL CHECK (
-      length(display_name_snapshot) BETWEEN 1 AND ${LINK_DISCUSSION_NAME_CODE_POINT_LIMIT}
-      AND length(CAST(display_name_snapshot AS BLOB)) <= ${LINK_DISCUSSION_NAME_BYTE_LIMIT}
-    ),
-    body TEXT CHECK (
-      body IS NULL OR (
-        length(body) BETWEEN 1 AND ${LINK_DISCUSSION_BODY_CODE_POINT_LIMIT}
-        AND length(CAST(body AS BLOB)) <= ${LINK_DISCUSSION_BODY_INPUT_BYTE_LIMIT}
-        AND instr(body, char(0)) = 0
-      )
-    ),
-    created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
-    deleted_at_ms INTEGER,
-    deleted_by_user_id TEXT,
-    discussion_revision INTEGER NOT NULL DEFAULT 0 CHECK (discussion_revision >= 0),
-    storage_bytes INTEGER NOT NULL CHECK (storage_bytes > 0),
-    CHECK (
-      (author_kind IN ('owner', 'named')
-       AND author_user_id IS NOT NULL
-       AND link_grant_id IS NULL
-       AND link_principal_id IS NULL)
-      OR
-      (author_kind = 'link'
-       AND author_user_id IS NULL
-       AND link_grant_id IS NOT NULL
-       AND link_principal_id IS NOT NULL)
-    ),
-    CHECK (
-      (deleted_at_ms IS NULL AND deleted_by_user_id IS NULL AND body IS NOT NULL)
-      OR
-      (deleted_at_ms IS NOT NULL AND deleted_by_user_id IS NOT NULL AND body IS NULL)
-    ),
-    FOREIGN KEY (share_id)
-      REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
-    FOREIGN KEY (link_grant_id, share_id)
-      REFERENCES sync_relay_share_grants(grant_id, share_id) ON DELETE CASCADE,
-    FOREIGN KEY (link_principal_id, link_grant_id)
-      REFERENCES sync_relay_link_principals(principal_id, grant_id) ON DELETE CASCADE
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_page
-    ON sync_relay_share_discussion_messages(share_id, created_at_ms, message_id);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_activity
-    ON sync_relay_share_discussion_messages(share_id, discussion_revision);
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_principal_budget
-    ON sync_relay_share_discussion_messages(
-      link_principal_id, created_at_ms, message_id
-    ) WHERE author_kind = 'link';
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_named_budget
-    ON sync_relay_share_discussion_messages(
-      share_id, author_user_id, created_at_ms, message_id
-    ) WHERE author_kind = 'named';
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_non_owner_budget
-    ON sync_relay_share_discussion_messages(share_id, author_kind, message_id)
-    WHERE author_kind IN ('named', 'link');
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_user_replay
-    ON sync_relay_share_discussion_messages(share_id, author_user_id, idempotency_key)
-    WHERE author_kind IN ('owner', 'named');
-  CREATE UNIQUE INDEX IF NOT EXISTS idx_sync_relay_share_discussion_link_replay
-    ON sync_relay_share_discussion_messages(
-      share_id, link_principal_id, idempotency_key
-    ) WHERE author_kind = 'link';
-
-  CREATE TABLE IF NOT EXISTS sync_relay_link_handoff_codes (
-    code_id TEXT PRIMARY KEY,
-    code_hash TEXT NOT NULL UNIQUE,
-    grant_id TEXT NOT NULL,
-    generation INTEGER NOT NULL CHECK (generation >= 1),
-    minted_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
-    result_grant_id TEXT,
-    CHECK (expires_at_ms > minted_at_ms),
-    FOREIGN KEY (grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE,
-    FOREIGN KEY (result_grant_id)
-      REFERENCES sync_relay_share_grants(grant_id) ON DELETE CASCADE
-      DEFERRABLE INITIALLY DEFERRED
-  ) STRICT;
-  CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_grant
-    ON sync_relay_link_handoff_codes(grant_id, minted_at_ms);
-`;
-
-const SESSION_HOST_CONTROL_MIGRATION_ID = "session-host-control-v1";
-const SESSION_HOST_CONTROL_TABLE = "sync_relay_session_host_control";
-const SESSION_HOST_CONTROL_COLUMNS = [
-  "singleton_id",
-  "configured_mode",
-  "configured_host_id",
-  "host_epoch",
-  "transition_generation",
-  "admission_state",
-  "registered_instance_id",
-  "registered_connection_id",
-  "transition_phase",
-  "transition_id",
-  "transition_from_mode",
-  "transition_from_host_id",
-  "transition_from_instance_id",
-  "transition_from_connection_id",
-  "transition_from_epoch",
-  "transition_to_mode",
-  "transition_to_host_id",
-  "transition_started_at_ms",
-  "last_completed_transition_id",
-  "updated_at_ms",
-] as const;
-
-const SESSION_HOST_CONTROL_SCHEMA_SQL = `
-CREATE TABLE sync_relay_session_host_control (
-  singleton_id INTEGER NOT NULL PRIMARY KEY CHECK (singleton_id = 1),
-  configured_mode TEXT NOT NULL
-    CHECK (configured_mode IN ('device', 'service')),
-  configured_host_id TEXT NOT NULL
-    CHECK (length(CAST(configured_host_id AS BLOB)) BETWEEN 1 AND 1024),
-  host_epoch INTEGER NOT NULL
-    CHECK (host_epoch BETWEEN 1 AND 9007199254740991),
-  transition_generation INTEGER NOT NULL
-    CHECK (transition_generation BETWEEN 0 AND 9007199254740991),
-  admission_state TEXT NOT NULL
-    CHECK (admission_state IN ('closed', 'open', 'draining')),
-  registered_instance_id TEXT
-    CHECK (
-      registered_instance_id IS NULL OR
-      length(CAST(registered_instance_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  registered_connection_id TEXT
-    CHECK (
-      registered_connection_id IS NULL OR
-      length(CAST(registered_connection_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_phase TEXT
-    CHECK (transition_phase IN ('draining', 'activating')),
-  transition_id TEXT
-    CHECK (
-      transition_id IS NULL OR
-      length(CAST(transition_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_from_mode TEXT
-    CHECK (transition_from_mode IN ('device', 'service')),
-  transition_from_host_id TEXT
-    CHECK (
-      transition_from_host_id IS NULL OR
-      length(CAST(transition_from_host_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_from_instance_id TEXT
-    CHECK (
-      transition_from_instance_id IS NULL OR
-      length(CAST(transition_from_instance_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_from_connection_id TEXT
-    CHECK (
-      transition_from_connection_id IS NULL OR
-      length(CAST(transition_from_connection_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_from_epoch INTEGER
-    CHECK (
-      transition_from_epoch IS NULL OR
-      transition_from_epoch BETWEEN 1 AND 9007199254740991
-    ),
-  transition_to_mode TEXT
-    CHECK (transition_to_mode IN ('device', 'service')),
-  transition_to_host_id TEXT
-    CHECK (
-      transition_to_host_id IS NULL OR
-      length(CAST(transition_to_host_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  transition_started_at_ms INTEGER
-    CHECK (
-      transition_started_at_ms IS NULL OR
-      transition_started_at_ms BETWEEN 0 AND 9007199254740991
-    ),
-  last_completed_transition_id TEXT
-    CHECK (
-      last_completed_transition_id IS NULL OR
-      length(CAST(last_completed_transition_id AS BLOB)) BETWEEN 1 AND 1024
-    ),
-  updated_at_ms INTEGER NOT NULL
-    CHECK (updated_at_ms BETWEEN 0 AND 9007199254740991),
-  CHECK (
-    admission_state <> 'open' OR
-    (registered_instance_id IS NOT NULL AND registered_connection_id IS NOT NULL)
-  ),
-  CHECK (
-    registered_connection_id IS NULL OR registered_instance_id IS NOT NULL
-  ),
-  CHECK (
-    admission_state <> 'closed' OR registered_connection_id IS NULL
-  ),
-  CHECK (
-    last_completed_transition_id IS NULL OR transition_generation >= 1
-  ),
-  CHECK (
-    (
-      transition_phase IS NULL AND
-      transition_id IS NULL AND
-      transition_from_mode IS NULL AND
-      transition_from_host_id IS NULL AND
-      transition_from_instance_id IS NULL AND
-      transition_from_connection_id IS NULL AND
-      transition_from_epoch IS NULL AND
-      transition_to_mode IS NULL AND
-      transition_to_host_id IS NULL AND
-      transition_started_at_ms IS NULL AND
-      admission_state IN ('closed', 'open') AND
-      (admission_state = 'open' OR last_completed_transition_id IS NULL)
-    ) OR (
-      transition_phase = 'draining' AND
-      admission_state = 'draining' AND
-      transition_generation >= 1 AND
-      last_completed_transition_id IS NULL AND
-      transition_id IS NOT NULL AND
-      transition_from_mode IS NOT NULL AND
-      transition_from_host_id IS NOT NULL AND
-      transition_from_instance_id IS NOT NULL AND
-      transition_from_connection_id IS NOT NULL AND
-      transition_from_epoch IS NOT NULL AND
-      transition_to_mode IS NOT NULL AND
-      transition_to_host_id IS NOT NULL AND
-      transition_started_at_ms IS NOT NULL AND
-      configured_mode = transition_from_mode AND
-      configured_host_id = transition_from_host_id AND
-      registered_instance_id = transition_from_instance_id AND
-      registered_connection_id = transition_from_connection_id AND
-      host_epoch = transition_from_epoch AND
-      transition_to_mode <> transition_from_mode
-    ) OR (
-      transition_phase = 'activating' AND
-      admission_state = 'closed' AND
-      transition_generation >= 1 AND
-      last_completed_transition_id IS NULL AND
-      transition_id IS NOT NULL AND
-      transition_from_mode IS NOT NULL AND
-      transition_from_host_id IS NOT NULL AND
-      transition_from_instance_id IS NOT NULL AND
-      transition_from_connection_id IS NOT NULL AND
-      transition_from_epoch IS NOT NULL AND
-      transition_to_mode IS NOT NULL AND
-      transition_to_host_id IS NOT NULL AND
-      transition_started_at_ms IS NOT NULL AND
-      configured_mode = transition_to_mode AND
-      configured_host_id = transition_to_host_id AND
-      registered_instance_id IS NULL AND
-      registered_connection_id IS NULL AND
-      host_epoch = transition_from_epoch + 1 AND
-      transition_to_mode <> transition_from_mode
-    )
-  )
-) STRICT;
-`;
-
-function normalizedSchemaSql(value: string): string {
-  return value.trim().replace(/;$/, "").replace(/\s+/g, " ");
-}
-
-function assertSessionHostControlSchema(db: SqliteDb): void {
-  const columns = db
-    .prepare(`PRAGMA table_info(${SESSION_HOST_CONTROL_TABLE})`)
-    .all()
-    .map((row) => String(row.name));
-  const schema = db
-    .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
-    .get(SESSION_HOST_CONTROL_TABLE);
-  if (
-    columns.join("\u0000") !== SESSION_HOST_CONTROL_COLUMNS.join("\u0000") ||
-    typeof schema?.sql !== "string" ||
-    normalizedSchemaSql(schema.sql) !== normalizedSchemaSql(SESSION_HOST_CONTROL_SCHEMA_SQL)
-  ) {
-    throw new Error("session host control schema is missing or damaged");
-  }
-}
-
-function initializeSessionHostControlSchema(db: SqliteDb): void {
-  const marker = db
-    .prepare(
-      "SELECT EXISTS(SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?) AS complete",
-    )
-    .get(SESSION_HOST_CONTROL_MIGRATION_ID);
-  const existing = db
-    .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
-    .get(SESSION_HOST_CONTROL_TABLE);
-  const marked = Number(marker?.complete ?? 0) === 1;
-
-  if (marked) {
-    if (existing === undefined) {
-      throw new Error("session host control migration is marked but its table is missing");
-    }
-    assertSessionHostControlSchema(db);
-    return;
-  }
-  if (existing !== undefined) {
-    throw new Error("unmarked session host control table already exists");
-  }
-
-  db.exec(SESSION_HOST_CONTROL_SCHEMA_SQL);
-  assertSessionHostControlSchema(db);
-  db.prepare(
-    "INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)",
-  ).run(SESSION_HOST_CONTROL_MIGRATION_ID, Date.now());
-}
-
-const LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID = "live-document-authority-v1";
-const LIVE_DOCUMENT_AUTHORITY_SCHEMA = {
-  sync_relay_live_documents: `
-CREATE TABLE sync_relay_live_documents (
-  workspace_id TEXT NOT NULL
-    CHECK (length(CAST(workspace_id AS BLOB)) BETWEEN 1 AND 512),
-  main_version_id TEXT NOT NULL
-    CHECK (main_version_id = 'main'),
-  object_id TEXT NOT NULL
-    CHECK (length(CAST(object_id AS BLOB)) BETWEEN 1 AND 512),
-  lineage_claim_id TEXT NOT NULL
-    CHECK (
-      length(lineage_claim_id) = 64 AND
-      lineage_claim_id NOT GLOB '*[^0-9a-f]*'
-    ),
-  replaces_lineage_claim_id TEXT
-    CHECK (
-      replaces_lineage_claim_id IS NULL OR (
-        length(replaces_lineage_claim_id) = 64 AND
-        replaces_lineage_claim_id NOT GLOB '*[^0-9a-f]*' AND
-        replaces_lineage_claim_id <> lineage_claim_id
-      )
-    ),
-  current_path TEXT NOT NULL
-    CHECK (length(CAST(current_path AS BLOB)) BETWEEN 1 AND 1024),
-  baseline_moment_relay_seq INTEGER NOT NULL
-    CHECK (baseline_moment_relay_seq BETWEEN 1 AND 9007199254740991),
-  baseline_projected_sha256 TEXT NOT NULL
-    CHECK (
-      length(baseline_projected_sha256) = 64 AND
-      baseline_projected_sha256 NOT GLOB '*[^0-9a-f]*'
-    ),
-  baseline_projected_byte_length INTEGER NOT NULL
-    CHECK (baseline_projected_byte_length BETWEEN 0 AND 2097152),
-  baseline_digest TEXT NOT NULL
-    CHECK (
-      length(baseline_digest) = 64 AND
-      baseline_digest NOT GLOB '*[^0-9a-f]*'
-    ),
-  baseline_bytes BLOB NOT NULL
-    CHECK (length(baseline_bytes) BETWEEN 1 AND 20971520),
-  lineage_state TEXT NOT NULL CHECK (lineage_state IN ('current', 'retired')),
-  admission_state TEXT NOT NULL CHECK (admission_state IN ('closed', 'open')),
-  restore_fence_generation INTEGER NOT NULL
-    CHECK (restore_fence_generation BETWEEN 0 AND 9007199254740991),
-  registered_at_ms INTEGER NOT NULL
-    CHECK (registered_at_ms BETWEEN 0 AND 9007199254740991),
-  retired_at_ms INTEGER
-    CHECK (retired_at_ms IS NULL OR retired_at_ms BETWEEN 0 AND 9007199254740991),
-  PRIMARY KEY (workspace_id, main_version_id, object_id, lineage_claim_id),
-  CHECK (lineage_claim_id = baseline_digest),
-  CHECK (
-    (lineage_state = 'current' AND retired_at_ms IS NULL)
-    OR
-    (lineage_state = 'retired' AND admission_state = 'closed' AND retired_at_ms IS NOT NULL)
-  ),
-  FOREIGN KEY (workspace_id)
-    REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-) STRICT;
-  `,
-  idx_sync_relay_live_documents_current: `
-CREATE UNIQUE INDEX idx_sync_relay_live_documents_current
-  ON sync_relay_live_documents(workspace_id, main_version_id, object_id)
-  WHERE lineage_state = 'current';
-  `,
-  sync_relay_live_document_baseline_ranges: `
-CREATE TABLE sync_relay_live_document_baseline_ranges (
-  workspace_id TEXT NOT NULL,
-  main_version_id TEXT NOT NULL,
-  object_id TEXT NOT NULL,
-  lineage_claim_id TEXT NOT NULL,
-  client_id INTEGER NOT NULL
-    CHECK (client_id BETWEEN 0 AND 9007199254740991),
-  start_clock INTEGER NOT NULL
-    CHECK (start_clock BETWEEN 0 AND 4294967294),
-  end_clock INTEGER NOT NULL
-    CHECK (end_clock BETWEEN 1 AND 4294967295 AND start_clock < end_clock),
-  PRIMARY KEY (
-    workspace_id, main_version_id, object_id, lineage_claim_id,
-    client_id, start_clock
-  ),
-  FOREIGN KEY (workspace_id, main_version_id, object_id, lineage_claim_id)
-    REFERENCES sync_relay_live_documents(
-      workspace_id, main_version_id, object_id, lineage_claim_id
-    ) ON DELETE CASCADE
-) STRICT;
-  `,
-  idx_sync_relay_live_document_baseline_coverage: `
-CREATE INDEX idx_sync_relay_live_document_baseline_coverage
-  ON sync_relay_live_document_baseline_ranges(
-    workspace_id, main_version_id, object_id, lineage_claim_id,
-    client_id, start_clock, end_clock
-  );
-  `,
-} as const;
-
-const LIVE_DOCUMENT_AUTHORITY_COLUMNS = {
-  sync_relay_live_documents: [
-    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
-    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
-    ["replaces_lineage_claim_id", "TEXT", 0, 0], ["current_path", "TEXT", 1, 0],
-    ["baseline_moment_relay_seq", "INTEGER", 1, 0], ["baseline_projected_sha256", "TEXT", 1, 0],
-    ["baseline_projected_byte_length", "INTEGER", 1, 0], ["baseline_digest", "TEXT", 1, 0],
-    ["baseline_bytes", "BLOB", 1, 0], ["lineage_state", "TEXT", 1, 0],
-    ["admission_state", "TEXT", 1, 0], ["restore_fence_generation", "INTEGER", 1, 0],
-    ["registered_at_ms", "INTEGER", 1, 0], ["retired_at_ms", "INTEGER", 0, 0],
-  ],
-  sync_relay_live_document_baseline_ranges: [
-    ["workspace_id", "TEXT", 1, 1], ["main_version_id", "TEXT", 1, 2],
-    ["object_id", "TEXT", 1, 3], ["lineage_claim_id", "TEXT", 1, 4],
-    ["client_id", "INTEGER", 1, 5], ["start_clock", "INTEGER", 1, 6],
-    ["end_clock", "INTEGER", 1, 0],
-  ],
-} as const;
-
-function assertLiveDocumentAuthoritySchema(db: SqliteDb): void {
-  const fail = (): never => { throw new Error("live document authority schema is missing or damaged"); };
-  const same = (actual: unknown, expected: unknown): void => {
-    if (JSON.stringify(actual) !== JSON.stringify(expected)) fail();
-  };
-  // Preserve quoted values: changing 'main' to 'MAIN' changes the constraint.
-  const sqlText = (sql: string): string => sql.trim().replace(/;$/, "").replace(/\s+/g, " ");
-  for (const [name, sql] of Object.entries(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) {
-    const rows = db.prepare("SELECT type, tbl_name, sql FROM sqlite_schema WHERE name = ?").all(name);
-    const row = rows[0];
-    const table = name === "sync_relay_live_documents" || name === "idx_sync_relay_live_documents_current"
-      ? "sync_relay_live_documents" : "sync_relay_live_document_baseline_ranges";
-    if (rows.length !== 1 || !row || row.type !== (name.startsWith("idx_") ? "index" : "table")
-      || row.tbl_name !== table || typeof row.sql !== "string" || sqlText(row.sql) !== sqlText(sql)) fail();
-  }
-  const documentKey = ["workspace_id", "main_version_id", "object_id", "lineage_claim_id"];
-  for (const [table, columns] of Object.entries(LIVE_DOCUMENT_AUTHORITY_COLUMNS)) {
-    same(db.prepare(`PRAGMA table_info(${table})`).all().map(row =>
-      [row.cid, row.name, row.type, row.notnull, row.dflt_value, row.pk]),
-    columns.map(([name, type, notnull, pk], cid) => [cid, name, type, notnull, null, pk]));
-    const parent = table === "sync_relay_live_documents" ? "sync_relay_workspaces" : "sync_relay_live_documents";
-    const foreignColumns = table === "sync_relay_live_documents" ? ["workspace_id"] : documentKey;
-    same(db.prepare(`PRAGMA foreign_key_list(${table})`).all().map(row =>
-      [row.id, row.seq, row.table, row.from, row.to, row.on_update, row.on_delete, row.match]),
-    foreignColumns.map((name, seq) => [0, seq, parent, name, name, "NO ACTION", "CASCADE", "NONE"]));
-    const namedIndex = table === "sync_relay_live_documents"
-      ? "idx_sync_relay_live_documents_current" : "idx_sync_relay_live_document_baseline_coverage";
-    const primaryColumns = table === "sync_relay_live_documents" ? documentKey : [...documentKey, "client_id", "start_clock"];
-    const indexedColumns = table === "sync_relay_live_documents"
-      ? documentKey.slice(0, 3) : [...documentKey, "client_id", "start_clock", "end_clock"];
-    const expectedIndexes = [
-      [namedIndex, table === "sync_relay_live_documents" ? 1 : 0, "c", table === "sync_relay_live_documents" ? 1 : 0],
-      [`sqlite_autoindex_${table}_1`, 1, "pk", 0],
-    ];
-    const orderIndexes = (rows: unknown[][]): unknown[][] => rows.sort((a, b) => String(a[0]).localeCompare(String(b[0])));
-    same(orderIndexes(db.prepare(`PRAGMA index_list(${table})`).all().map(row =>
-      [row.name, row.unique, row.origin, row.partial])), orderIndexes(expectedIndexes));
-    for (const [name, indexColumns] of [[namedIndex, indexedColumns], [`sqlite_autoindex_${table}_1`, primaryColumns]] as const) {
-      same(db.prepare(`PRAGMA index_info(${name})`).all().map(row => [row.seqno, row.cid, row.name]),
-        indexColumns.map((column, seq) => [seq, columns.findIndex(entry => entry[0] === column), column]));
-    }
-  }
-}
-
-function initializeLiveDocumentAuthoritySchema(db: SqliteDb): void {
-  const marked = db.prepare("SELECT 1 FROM sync_relay_migrations WHERE migration_id = ?")
-    .get(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID) !== undefined;
-  const existing = db.prepare("SELECT name FROM sqlite_schema WHERE name IN (?, ?, ?, ?)")
-    .all(...Object.keys(LIVE_DOCUMENT_AUTHORITY_SCHEMA));
-  if (marked) {
-    assertLiveDocumentAuthoritySchema(db);
-    return;
-  }
-  if (existing.length > 0) throw new Error("unmarked live document authority schema already exists");
-  for (const sql of Object.values(LIVE_DOCUMENT_AUTHORITY_SCHEMA)) db.exec(sql);
-  assertLiveDocumentAuthoritySchema(db);
-  db.prepare("INSERT INTO sync_relay_migrations (migration_id, completed_at_ms) VALUES (?, ?)")
-    .run(LIVE_DOCUMENT_AUTHORITY_MIGRATION_ID, Date.now());
-}
-
-export function initializeSyncRelaySchema(db: SqliteDb): void {
-  db.exec("BEGIN IMMEDIATE");
-  try {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sync_relay_workspaces (
-        workspace_id TEXT PRIMARY KEY,
-        owner_user_id TEXT NOT NULL,
-        created_at_ms INTEGER NOT NULL,
-        replication_epoch TEXT,
-        stream_identity TEXT,
-        epoch_log_floor INTEGER
-      );
-
-      CREATE TABLE IF NOT EXISTS sync_relay_workspace_usage (
-        workspace_id TEXT PRIMARY KEY,
-        usage_bytes INTEGER NOT NULL CHECK (usage_bytes >= 0),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      ) STRICT;
-
-      -- Every epoch that stops being active remains durable here. This makes
-      -- stale pre-reset credentials permanently identifiable after rotation.
-      CREATE TABLE IF NOT EXISTS sync_relay_epoch_supersessions (
-        workspace_id TEXT NOT NULL,
-        replication_epoch TEXT NOT NULL,
-        stream_identity TEXT NOT NULL,
-        superseded_at_ms INTEGER NOT NULL,
-        PRIMARY KEY (workspace_id, replication_epoch, stream_identity),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS sync_relay_log (
-        workspace_id TEXT NOT NULL,
-        origin_id TEXT NOT NULL,
-        origin_seq INTEGER NOT NULL,
-        op_kind TEXT NOT NULL,
-        payload_json TEXT NOT NULL,
-        recorded_at_ms REAL NOT NULL,
-        relay_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        UNIQUE(workspace_id, origin_id, origin_seq),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_page
-        ON sync_relay_log(workspace_id, relay_seq);
-      -- MU-C4: findThreadCreateChannelWireId's LIKE pre-filter cannot use an
-      -- index on payload_json, but this PARTIAL index confines the scan to a
-      -- workspace's chat.thread.create rows (a tiny slice of a busy log) in
-      -- relay order, instead of every log row. Per-request memoization in the
-      -- caller (server.ts chatResolverFor) removes the per-message repeats;
-      -- if channel history ever makes even the confined scan hot, the upgrade
-      -- path is a dedicated thread_channel_bindings table filled at insert.
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_thread_creates
-        ON sync_relay_log(workspace_id, relay_seq)
-        WHERE op_kind = 'chat.thread.create';
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_log_channel_creates
-        ON sync_relay_log(workspace_id, relay_seq)
-        WHERE op_kind = 'chat.channel.create';
-
-      CREATE TABLE IF NOT EXISTS sync_relay_blobs (
-        workspace_id TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        byte_length INTEGER NOT NULL,
-        content BLOB NOT NULL,
-        created_at_ms INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (workspace_id, sha256),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-
-      CREATE TABLE IF NOT EXISTS sync_relay_key_envelopes (
-        workspace_id TEXT PRIMARY KEY,
-        envelope_json TEXT NOT NULL,
-        updated_at_ms INTEGER NOT NULL,
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-
-      -- Append-only audit trail: every replaced key envelope is retained with
-      -- when it was replaced and by what (sha256 of the successor). The
-      -- envelope is the only recovery path for the wrapped workspace key, so
-      -- an overwrite — even a CAS-correct one — must never destroy the prior
-      -- copy; a lockout caused by a bad replacement stays recoverable
-      -- server-side.
-      CREATE TABLE IF NOT EXISTS sync_relay_key_envelope_history (
-        history_seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        workspace_id TEXT NOT NULL,
-        envelope_json TEXT NOT NULL,
-        envelope_sha256 TEXT NOT NULL,
-        replaced_at_ms INTEGER NOT NULL,
-        replaced_by_sha256 TEXT NOT NULL,
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id)
-          ON DELETE CASCADE
-      );
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_key_envelope_history
-        ON sync_relay_key_envelope_history(workspace_id, history_seq);
-
-      ${NORMALIZED_SHARE_SCHEMA_SQL}
-
-      -- #646 PR2: where every object the relay has ever seen sits RIGHT NOW,
-      -- maintained at insert time by appendLogBatch. The file-chat share
-      -- filter resolves a thread's object to its current path and tests that
-      -- path against the selector, so this lookup is on the share read path
-      -- and must be a primary-key read. A LIKE scan cannot serve it:
-      -- moment.append rows are most of a busy log, so the partial-index trick
-      -- above would confine nothing.
-      --
-      -- The path column is NULL when the object's latest moment deletes it,
-      -- or when that moment names no readable path. Both read as "deny" — the
-      -- filter fails closed on NULL exactly as it does on an absent row.
-      CREATE TABLE IF NOT EXISTS sync_relay_object_paths (
-        workspace_id TEXT NOT NULL,
-        object_id    TEXT NOT NULL,
-        path         TEXT,
-        relay_seq    INTEGER NOT NULL,
-        PRIMARY KEY (workspace_id, object_id),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-      ) STRICT;
-      -- The reverse lookup: which object sits at this path now. A thread bound
-      -- by PATH is re-proved through this on every serve, so it is on the
-      -- share read path and must not scan.
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_paths_path
-        ON sync_relay_object_paths(workspace_id, path);
-
-      -- #646 PR3a: one row per moment the relay has seen for an object, which
-      -- is what the base rewrite resolves against. sync_relay_object_paths
-      -- above answers "where is this object NOW?"; accept needs the harder
-      -- question, "which of your own moments produced the content the
-      -- recipient started from?", because that moment is the correct
-      -- three-way base. A blob hash is the only identifier both sides of a
-      -- share genuinely share, so the hash is what the lookup keys on.
-      --
-      -- path and blob_sha256 are NULL when the moment deletes the object.
-      -- A NULL hash is never a lookup target: an absent base reads as
-      -- "unknown", and unknown opens a conflict rather than claiming a base.
-      CREATE TABLE IF NOT EXISTS sync_relay_object_moments (
-        workspace_id   TEXT NOT NULL,
-        object_id      TEXT NOT NULL,
-        relay_seq      INTEGER NOT NULL,
-        moment_id      TEXT NOT NULL,
-        version_id     TEXT NOT NULL,
-        path           TEXT,
-        blob_sha256    TEXT,
-        content_kind   TEXT,
-        byte_length    INTEGER,
-        recorded_at_ms INTEGER NOT NULL,
-        PRIMARY KEY (workspace_id, object_id, relay_seq),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-      ) STRICT;
-      -- Base resolution by content hash. Latest matching moment wins, because
-      -- content can return to an earlier state and the recipient started from
-      -- the most recent moment that produced it.
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob
-        ON sync_relay_object_moments(workspace_id, object_id, blob_sha256, relay_seq);
-      -- Blob authorization knows the share's target version and hash, but not
-      -- the object. The object-first index above serves proposal-base lookups
-      -- and cannot seek this query.
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_blob_lookup
-        ON sync_relay_object_moments(
-          workspace_id, version_id, blob_sha256, object_id, relay_seq DESC
-        );
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_latest
-        ON sync_relay_object_moments(
-          workspace_id, version_id, object_id, relay_seq DESC
-        );
-      -- WHICH object sits at a path IN ONE VERSION. sync_relay_object_paths
-      -- answers the same question across every version at once, latest-wins,
-      -- so a path last touched in a side version resolves to the wrong object
-      -- for a share that exposes another one. The proposal lane asks this
-      -- instead, and it must not scan.
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_object_moments_path
-        ON sync_relay_object_moments(workspace_id, version_id, path, relay_seq);
-
-      -- version.create can establish snapshot blobs without a moment.append
-      -- row. Keep those log rows discoverable by exact workspace/hash lookup;
-      -- authorization still runs against the original version.create payload.
-      CREATE TABLE IF NOT EXISTS sync_relay_version_snapshot_blobs (
-        workspace_id TEXT NOT NULL,
-        relay_seq     INTEGER NOT NULL,
-        version_id    TEXT NOT NULL,
-        blob_sha256  TEXT NOT NULL,
-        PRIMARY KEY (workspace_id, relay_seq, blob_sha256),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-        FOREIGN KEY (relay_seq)
-          REFERENCES sync_relay_log(relay_seq) ON DELETE CASCADE
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_version_snapshot_blobs_lookup
-        ON sync_relay_version_snapshot_blobs(
-          workspace_id, version_id, blob_sha256, relay_seq DESC
-        );
-
-      -- The public viewer starts from this accepted current state and uses the
-      -- relay log only for forward changes. This is deliberately keyed by
-      -- version and path: the viewer fold resolves path occupancy and applies
-      -- before-path/hash compare-and-swap rules, so latest raw object moments
-      -- are not an equivalent current-state model.
-      CREATE TABLE IF NOT EXISTS sync_relay_current_files (
-        workspace_id    TEXT NOT NULL,
-        version_id      TEXT NOT NULL,
-        path            TEXT NOT NULL,
-        blob_sha256     TEXT NOT NULL,
-        content_kind    TEXT NOT NULL CHECK (content_kind IN ('text', 'binary')),
-        state_relay_seq INTEGER NOT NULL,
-        PRIMARY KEY (workspace_id, version_id, path),
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE,
-        FOREIGN KEY (state_relay_seq)
-          REFERENCES sync_relay_log(relay_seq) ON DELETE CASCADE
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_current_files_path
-        ON sync_relay_current_files(
-          workspace_id, version_id, path, state_relay_seq
-        );
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_current_files_blob
-        ON sync_relay_current_files(
-          workspace_id, version_id, blob_sha256, path, state_relay_seq
-        );
-
-      -- #646 PR3a: a recipient's submitted changes, held until the granter
-      -- accepts or declines them. Nothing here is in the granter's log: accept
-      -- is what releases it, through the same appendLogBatch the chat path
-      -- already uses.
-      --
-      -- workspace_id is denormalized so the granter's owner-scoped read
-      -- never joins through a share the granter may have revoked.
-      -- submit_id makes one submit idempotent: a retried POST returns the
-      -- proposal it already made instead of a second one.
-      -- version_id is PINNED at submit from the selector the recipient read.
-      -- Accept and the review listing both resolve the granter's moments
-      -- within it, so a selector edited mid-flight cannot move a proposal to a
-      -- version its author never saw.
-      CREATE TABLE IF NOT EXISTS sync_relay_share_proposals (
-        proposal_id         TEXT PRIMARY KEY,
-        share_id            TEXT NOT NULL,
-        workspace_id        TEXT NOT NULL,
-        proposed_by_user_id TEXT NOT NULL,
-        version_id          TEXT NOT NULL,
-        submit_id           TEXT NOT NULL,
-        state               TEXT NOT NULL,
-        created_at_ms       INTEGER NOT NULL,
-        settled_at_ms       INTEGER,
-        UNIQUE (share_id, submit_id),
-        FOREIGN KEY (share_id)
-          REFERENCES sync_relay_shares(share_id) ON DELETE CASCADE,
-        FOREIGN KEY (workspace_id)
-          REFERENCES sync_relay_workspaces(workspace_id) ON DELETE CASCADE
-      ) STRICT;
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_share_proposals_workspace
-        ON sync_relay_share_proposals(workspace_id, state, created_at_ms);
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_share_proposals_share
-        ON sync_relay_share_proposals(share_id, created_at_ms);
-
-      -- One NET change to one file. Not a moment, and deliberately not shaped
-      -- like one: a recipient never learns a granter moment id, so it states
-      -- what it read and what it wants, and the relay mints the moment.
-      --
-      -- based_on_object_id is resolved AT SUBMIT, from the path the recipient
-      -- named. The path is where the granter had the file when the recipient
-      -- read it; the object id is which file it is. Resolving at accept
-      -- instead would follow the path, so a rename between submit and accept
-      -- would find a different file and a delete would find none — and a
-      -- change whose base resolved to nothing is minted as a create, which
-      -- resurrects a file the granter deleted. The object id does not move.
-      CREATE TABLE IF NOT EXISTS sync_relay_share_proposal_ops (
-        proposal_id          TEXT NOT NULL,
-        op_index             INTEGER NOT NULL,
-        based_on_path        TEXT,
-        based_on_object_id   TEXT,
-        based_on_blob_sha256 TEXT,
-        operation            TEXT NOT NULL,
-        after_path           TEXT,
-        after_blob_sha256    TEXT,
-        after_content_kind   TEXT,
-        after_byte_length    INTEGER,
-        recorded_at_ms       INTEGER NOT NULL,
-        PRIMARY KEY (proposal_id, op_index),
-        FOREIGN KEY (proposal_id)
-          REFERENCES sync_relay_share_proposals(proposal_id) ON DELETE CASCADE
-      ) STRICT;
-    `);
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS sync_relay_migrations (
-        migration_id TEXT PRIMARY KEY,
-        completed_at_ms INTEGER NOT NULL
-      ) STRICT;
-    `);
-    initializeSessionHostControlSchema(db);
-    initializeLiveDocumentAuthoritySchema(db);
-    db.exec(`
-      CREATE INDEX IF NOT EXISTS idx_sync_relay_link_handoff_codes_result_grant
-        ON sync_relay_link_handoff_codes(result_grant_id)
-        WHERE result_grant_id IS NOT NULL
-    `);
-    db.exec(`
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_insert
-      AFTER INSERT ON sync_relay_workspaces
-      BEGIN
-        INSERT INTO sync_relay_workspace_usage (workspace_id, usage_bytes)
-        VALUES (NEW.workspace_id, 0)
-        ON CONFLICT(workspace_id) DO NOTHING;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_blob_insert
-      AFTER INSERT ON sync_relay_blobs
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + NEW.byte_length
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_blob_delete
-      AFTER DELETE ON sync_relay_blobs
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - OLD.byte_length
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_log_insert
-      AFTER INSERT ON sync_relay_log
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + length(CAST(NEW.payload_json AS BLOB))
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_log_delete
-      AFTER DELETE ON sync_relay_log
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - length(CAST(OLD.payload_json AS BLOB))
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_insert
-      AFTER INSERT ON sync_relay_key_envelopes
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + length(CAST(NEW.envelope_json AS BLOB))
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_update
-      AFTER UPDATE OF envelope_json ON sync_relay_key_envelopes
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes
-          - length(CAST(OLD.envelope_json AS BLOB))
-          + length(CAST(NEW.envelope_json AS BLOB))
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_delete
-      AFTER DELETE ON sync_relay_key_envelopes
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - length(CAST(OLD.envelope_json AS BLOB))
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_history_insert
-      AFTER INSERT ON sync_relay_key_envelope_history
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + length(CAST(NEW.envelope_json AS BLOB))
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_envelope_history_delete
-      AFTER DELETE ON sync_relay_key_envelope_history
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - length(CAST(OLD.envelope_json AS BLOB))
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_supersession_insert
-      AFTER INSERT ON sync_relay_epoch_supersessions
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes
-          + length(CAST(NEW.replication_epoch AS BLOB))
-          + length(CAST(NEW.stream_identity AS BLOB))
-        WHERE workspace_id = NEW.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_supersession_delete
-      AFTER DELETE ON sync_relay_epoch_supersessions
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes
-          - length(CAST(OLD.replication_epoch AS BLOB))
-          - length(CAST(OLD.stream_identity AS BLOB))
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_share_delete
-      BEFORE DELETE ON sync_relay_shares
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes
-          - COALESCE((
-              SELECT SUM(message.storage_bytes)
-              FROM sync_relay_share_discussion_messages AS message
-              WHERE message.share_id = OLD.share_id
-            ), 0)
-          - COALESCE((
-              SELECT SUM(principal.storage_bytes)
-              FROM sync_relay_link_principals AS principal
-              JOIN sync_relay_share_grants AS grant
-                ON grant.grant_id = principal.grant_id
-              WHERE grant.share_id = OLD.share_id
-            ), 0)
-        WHERE workspace_id = OLD.workspace_id;
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_grant_delete
-      BEFORE DELETE ON sync_relay_share_grants
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - COALESCE((
-          SELECT SUM(storage_bytes)
-          FROM sync_relay_link_principals
-          WHERE grant_id = OLD.grant_id
-        ), 0)
-        WHERE workspace_id = (
-          SELECT workspace_id FROM sync_relay_shares WHERE share_id = OLD.share_id
-        );
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_message_insert
-      AFTER INSERT ON sync_relay_share_discussion_messages
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + NEW.storage_bytes
-        WHERE workspace_id = (
-          SELECT workspace_id FROM sync_relay_shares WHERE share_id = NEW.share_id
-        );
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_message_delete
-      AFTER DELETE ON sync_relay_share_discussion_messages
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - OLD.storage_bytes
-        WHERE workspace_id = (
-          SELECT workspace_id FROM sync_relay_shares WHERE share_id = OLD.share_id
-        );
-      END;
-
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_principal_insert
-      AFTER INSERT ON sync_relay_link_principals
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes + NEW.storage_bytes
-        WHERE workspace_id = (
-          SELECT share.workspace_id
-          FROM sync_relay_share_grants AS grant
-          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-          WHERE grant.grant_id = NEW.grant_id
-        );
-      END;
-      CREATE TRIGGER IF NOT EXISTS trg_sync_relay_workspace_usage_principal_delete
-      AFTER DELETE ON sync_relay_link_principals
-      BEGIN
-        UPDATE sync_relay_workspace_usage
-        SET usage_bytes = usage_bytes - OLD.storage_bytes
-        WHERE workspace_id = (
-          SELECT share.workspace_id
-          FROM sync_relay_share_grants AS grant
-          JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-          WHERE grant.grant_id = OLD.grant_id
-        );
-      END;
-    `);
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  }
-}
-
-// Where a `moment.append` payload says its object is after the op: the
-// destination path of a write or a rename (a rename carries the destination in
-// both `path` and `payloadAfterPath`, `crates/dohc-engine-domain/src/store.rs`
-// `rename`), or NULL for a delete.
-//
-// NULL is also the answer for a moment that names an object but no readable
-// path. That op moved the object somewhere this table cannot state, and a
-// stale row would keep serving the object's chat at a path the relay can no
-// longer prove. Unknown denies.
-export function objectPathFromMomentPayload(
-  payloadJson: string,
-): { objectId: string; path: string | null } | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
-  const record = asRecord(parsed);
-  if (!record) return null;
-  const objectId = record.objectId;
-  if (typeof objectId !== "string" || objectId.length === 0) return null;
-  if (record.operation === "delete") return { objectId, path: null };
-  for (const field of ["path", "payloadAfterPath"] as const) {
-    const value = record[field];
-    if (typeof value === "string" && value.length > 0) return { objectId, path: value };
-  }
-  return { objectId, path: null };
-}
-
-// What one `moment.append` says about its object, in the shape the
-// base rewrite reads back. The three fields the read filter already trusts —
-// `objectId`, the after path, the after hash — plus the moment's own id, which
-// is what `head_fast_forward` compares against on the granter's engine
-// (`crates/dohc-engine-sync/src/moment_apply.rs`).
-//
-// A delete states a null path and a null hash. A moment the relay cannot read
-// this far states nothing, and an unindexed moment simply cannot be chosen as
-// a base — which fails closed, because an unresolvable base opens a conflict.
-export function objectMomentFromMomentPayload(
-  payloadJson: string,
-): {
-  objectId: string;
-  momentId: string;
-  versionId: string;
-  path: string | null;
-  blobSha256: string | null;
-  contentKind: string | null;
-  byteLength: number | null;
-  recordedAtMs: number;
-} | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
-  const record = asRecord(parsed);
-  if (!record) return null;
-  const objectId = record.objectId;
-  const momentId = record.momentId;
-  const versionId = record.versionId;
-  const recordedAtMs = record.recordedAtMs;
-  if (
-    typeof objectId !== "string" ||
-    objectId.length === 0 ||
-    typeof momentId !== "string" ||
-    momentId.length === 0 ||
-    typeof versionId !== "string" ||
-    versionId.length === 0 ||
-    typeof recordedAtMs !== "number" ||
-    !Number.isSafeInteger(recordedAtMs)
-  ) {
-    return null;
-  }
-  const deleted = record.operation === "delete";
-  const path = deleted ? null : readableString(record.path) ?? readableString(record.payloadAfterPath);
-  const blobSha256 = deleted ? null : readableString(record.payloadAfterBlobSha256);
-  const contentKind = deleted ? null : readableString(record.payloadAfterContentKind);
-  const byteLength =
-    !deleted && typeof record.payloadAfterByteLength === "number" &&
-    Number.isSafeInteger(record.payloadAfterByteLength)
-      ? record.payloadAfterByteLength
-      : null;
-  return { objectId, momentId, versionId, path, blobSha256, contentKind, byteLength, recordedAtMs };
-}
-
-function readableString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-const OBJECT_MOMENT_INSERT_SQL = `
-  INSERT INTO sync_relay_object_moments (
-    workspace_id, object_id, relay_seq, moment_id, version_id,
-    path, blob_sha256, content_kind, byte_length, recorded_at_ms
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  ON CONFLICT(workspace_id, object_id, relay_seq) DO NOTHING`;
-
-const VERSION_SNAPSHOT_BLOB_INSERT_SQL = `
-  INSERT INTO sync_relay_version_snapshot_blobs (
-    workspace_id, relay_seq, version_id, blob_sha256
-  ) VALUES (?, ?, ?, ?)
-  ON CONFLICT(workspace_id, relay_seq, blob_sha256) DO NOTHING`;
-
-interface CurrentFileStatements {
-  get: ReturnType<SqliteDb["prepare"]>;
-  put: ReturnType<SqliteDb["prepare"]>;
-  remove: ReturnType<SqliteDb["prepare"]>;
-}
-
-function currentFileStatements(db: SqliteDb): CurrentFileStatements {
-  return {
-    get: db.prepare(
-      `SELECT blob_sha256
-       FROM sync_relay_current_files
-       WHERE workspace_id = ? AND version_id = ? AND path = ?`,
-    ),
-    put: db.prepare(
-      `INSERT INTO sync_relay_current_files (
-         workspace_id, version_id, path, blob_sha256, content_kind, state_relay_seq
-       ) VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(workspace_id, version_id, path) DO UPDATE SET
-         blob_sha256 = excluded.blob_sha256,
-         content_kind = excluded.content_kind,
-         state_relay_seq = excluded.state_relay_seq`,
-    ),
-    remove: db.prepare(
-      `DELETE FROM sync_relay_current_files
-       WHERE workspace_id = ? AND version_id = ? AND path = ?`,
-    ),
-  };
-}
-
-function trackedPath(value: unknown): string | null {
-  if (typeof value !== "string" || value.length === 0) return null;
-  const validation = validateUserWritePath(value);
-  if (!validation.ok || validation.normalized !== value) return null;
-  return classifyEngineFilePath(validation.normalized).kind === "tracked"
-    ? validation.normalized
-    : null;
-}
-
-function optionalPathAliasMatches(value: unknown, expected: string | null): boolean {
-  if (value === null || value === undefined) return true;
-  const path = trackedPath(value);
-  return path !== null && expected !== null && path === expected;
-}
-
-function digest(value: unknown): string | null {
-  return typeof value === "string" && /^[a-f0-9]{64}$/u.test(value)
-    ? value
-    : null;
-}
-
-function applyCurrentFileOp(
-  statements: CurrentFileStatements,
-  workspaceId: string,
-  opKind: string,
-  payloadJson: string,
-  relaySeq: number,
-): void {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return;
-  }
-  const payload = asRecord(parsed);
-  if (!payload) return;
-
-  if (opKind === "version.create") {
-    const versionId = readableString(payload.versionId);
-    if (!versionId || !Array.isArray(payload.forkSnapshots)) return;
-    for (const rawSnapshot of payload.forkSnapshots) {
-      const snapshot = asRecord(rawSnapshot);
-      if (!snapshot) continue;
-      const path = trackedPath(snapshot.path);
-      const blobSha256 = digest(snapshot.blobSha256);
-      if (!path || !blobSha256) continue;
-      if (statements.get.get(workspaceId, versionId, path) !== undefined) continue;
-      statements.put.run(
-        workspaceId,
-        versionId,
-        path,
-        blobSha256,
-        snapshot.contentKind === "binary" ? "binary" : "text",
-        relaySeq,
-      );
-    }
-    return;
-  }
-
-  if (opKind !== "moment.append") return;
-  const versionId = readableString(payload.versionId);
-  if (!versionId) return;
-  const operation = payload.operation;
-  if (operation !== "write" && operation !== "rename" && operation !== "delete") return;
-  const hasNoBefore =
-    (payload.payloadBeforePath === null || payload.payloadBeforePath === undefined) &&
-    (payload.payloadBeforeBlobSha256 === null ||
-      payload.payloadBeforeBlobSha256 === undefined);
-  const beforePath = trackedPath(payload.payloadBeforePath);
-  const beforeBlobSha256 = digest(payload.payloadBeforeBlobSha256);
-  const before = beforePath && beforeBlobSha256
-    ? { path: beforePath, blobSha256: beforeBlobSha256 }
-    : null;
-  if (!hasNoBefore && !before) return;
-  if (!optionalPathAliasMatches(payload.beforePath, before?.path ?? null)) return;
-
-  if (operation === "delete") {
-    if (!before) return;
-    if (
-      !optionalPathAliasMatches(payload.path, before.path) ||
-      !optionalPathAliasMatches(payload.payloadAfterPath, before.path)
-    ) {
-      return;
-    }
-    const current = statements.get.get(workspaceId, versionId, before.path);
-    if (current?.blob_sha256 !== before.blobSha256) return;
-    statements.remove.run(workspaceId, versionId, before.path);
-    return;
-  }
-
-  const afterPath = trackedPath(payload.payloadAfterPath);
-  const afterBlobSha256 = digest(payload.payloadAfterBlobSha256);
-  if (!afterPath || !afterBlobSha256) return;
-  if (!optionalPathAliasMatches(payload.path, afterPath)) return;
-  if (before && before.path !== afterPath && operation !== "rename") return;
-  if (hasNoBefore) {
-    if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) return;
-  } else {
-    if (!before) return;
-    const current = statements.get.get(workspaceId, versionId, before.path);
-    if (current !== undefined) {
-      if (current.blob_sha256 !== before.blobSha256) return;
-      if (
-        before.path !== afterPath &&
-        statements.get.get(workspaceId, versionId, afterPath) !== undefined
-      ) {
-        return;
-      }
-      if (before.path !== afterPath) {
-        statements.remove.run(workspaceId, versionId, before.path);
-      }
-    } else if (statements.get.get(workspaceId, versionId, afterPath) !== undefined) {
-      return;
-    }
-  }
-  statements.put.run(
-    workspaceId,
-    versionId,
-    afterPath,
-    afterBlobSha256,
-    payload.payloadAfterContentKind === "binary" ? "binary" : "text",
-    relaySeq,
-  );
-}
-
-function currentFileSelectorClause(selectorPaths: readonly string[]): {
-  sql: string;
-  params: string[];
-} {
-  if (selectorPaths.length === 0) return { sql: "", params: [] };
-  const params: string[] = [];
-  const ranges = selectorPaths.map((root) => {
-    const descendantPrefix = `${root}/`;
-    // Normalized roots never end in slash. Under SQLite binary collation,
-    // replacing the descendant slash (0x2f) with `0` (0x30) is the exact
-    // exclusive upper bound, including descendants that start with a
-    // supplementary Unicode code point.
-    params.push(root, descendantPrefix, `${root}0`);
-    return "(path = ? OR (path >= ? AND path < ?))";
-  });
-  return { sql: ` AND (${ranges.join(" OR ")})`, params };
-}
-
-export function currentFileStateQuery(selectorPaths: readonly string[]): {
-  sql: string;
-  selectorParams: string[];
-} {
-  const selector = currentFileSelectorClause(selectorPaths);
-  return {
-    sql:
-      `SELECT path, blob_sha256, content_kind
-       FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_path
-       WHERE workspace_id = ? AND version_id = ?
-         AND state_relay_seq > ? AND state_relay_seq <= ?${selector.sql}
-       ORDER BY path
-       LIMIT ?`,
-    selectorParams: selector.params,
-  };
-}
-
-export function currentFileBlobByteLengthQuery(selectorPaths: readonly string[]): {
-  sql: string;
-  selectorParams: string[];
-} {
-  const selector = currentFileSelectorClause(selectorPaths);
-  return {
-    sql:
-      `SELECT CAST(blob.byte_length AS TEXT) AS byte_length
-       FROM sync_relay_current_files INDEXED BY idx_sync_relay_current_files_blob
-       JOIN sync_relay_blobs AS blob
-         ON blob.workspace_id = sync_relay_current_files.workspace_id
-        AND blob.sha256 = sync_relay_current_files.blob_sha256
-       WHERE sync_relay_current_files.workspace_id = ?
-         AND sync_relay_current_files.version_id = ?
-         AND sync_relay_current_files.blob_sha256 = ?
-         AND sync_relay_current_files.state_relay_seq > ?${selector.sql}
-       LIMIT 1`,
-    selectorParams: selector.params,
-  };
-}
-
-// Latest-wins: a rename is a later fact about the same object, and the share
-// must follow the file rather than its history.
-//
-// The relay_seq guard is defence in depth, and today it is unreachable: both
-// writers walk the log in relay order (appendLogBatch inserts under the write
-// lock and reads back the row it just took; the seed scans ORDER BY
-// relay_seq), so no upsert here can arrive out of order. Its inverse mutation
-// therefore survives, which is recorded rather than papered over. It stays
-// because this table decides which chat a share serves, and a path moved
-// backwards by a future out-of-order writer would serve a file's discussion at
-// a path the relay can no longer prove.
-const OBJECT_PATH_UPSERT_SQL = `
-  INSERT INTO sync_relay_object_paths (workspace_id, object_id, path, relay_seq)
-  VALUES (?, ?, ?, ?)
-  ON CONFLICT(workspace_id, object_id) DO UPDATE
-    SET path = excluded.path, relay_seq = excluded.relay_seq
-    WHERE excluded.relay_seq > sync_relay_object_paths.relay_seq`;
-
-export function normalizeDiscussionDisplayName(value: unknown): string | null {
-  const result = normalizeShareDiscussionDisplayName(value);
-  return result.ok ? result.value : null;
-}
-
-function validLinkDiscussionIdempotencyKey(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length >= 1 &&
-    value.length <= LINK_DISCUSSION_IDEMPOTENCY_KEY_LIMIT &&
-    /^[\x20-\x7e]+$/u.test(value)
-  );
-}
-
-function linkDiscussionRequestHash(body: string, claimedName: string | null): string {
-  return createHash("sha256")
-    .update(JSON.stringify({ body, claimedName }))
-    .digest("base64url");
-}
-
-function namedDiscussionRequestHash(body: string): string {
-  return createHash("sha256")
-    .update(JSON.stringify({ body }))
-    .digest("base64url");
-}
-
-function discussionMessageStorageBytes(input: {
-  messageId: string;
-  shareId: string;
-  idempotencyKey: string;
-  requestHash: string;
-  authorKind: "owner" | "named" | "link";
-  authorUserId: string | null;
-  linkGrantId: string | null;
-  linkPrincipalId: string | null;
-  displayNameSnapshot: string;
-  body: string;
-}): number {
-  return (
-    utf8Bytes(
-      input.messageId,
-      input.shareId,
-      input.idempotencyKey,
-      input.requestHash,
-      input.authorKind,
-      input.authorUserId,
-      input.linkGrantId,
-      input.linkPrincipalId,
-      input.displayNameSnapshot,
-      input.body,
-    ) + LINK_DISCUSSION_MESSAGE_FIXED_STORAGE_BYTES
-  );
-}
-
-function linkPrincipalStorageBytes(input: {
-  principalId: string;
-  grantId: string;
-  profileTokenHash: string;
-}): number {
-  return (
-    utf8Bytes(input.principalId, input.grantId, input.profileTokenHash) +
-    LINK_DISCUSSION_PRINCIPAL_FIXED_STORAGE_BYTES
-  );
-}
-
-function validDiscussionDeletingUserId(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    Buffer.byteLength(value, "utf8") <=
-      LINK_DISCUSSION_DELETING_USER_ID_BYTE_LIMIT
-  );
-}
-
-function utf8Bytes(...values: Array<string | null>): number {
-  return values.reduce(
-    (total, value) => total + (value === null ? 0 : Buffer.byteLength(value, "utf8")),
-    0,
-  );
-}
-
-function parseHostControlTimestamp(value: unknown, name: string): number {
-  if (!Number.isSafeInteger(value) || (value as number) < 0) {
-    throw new RangeError(`${name} must be a non-negative safe integer`);
-  }
-  return value as number;
-}
-
-function readLiveHostControl(db: SqliteDb): HostControlSnapshot | null {
-  const row = db
-    .prepare(`SELECT * FROM ${SESSION_HOST_CONTROL_TABLE} WHERE singleton_id = 1`)
-    .get();
-  if (row === undefined) return null;
-
-  const transitionGeneration = Number(row.transition_generation);
-  const phase = row.transition_phase;
-  const transition =
-    phase === null
-      ? null
-      : {
-          phase: parseHostTransitionPhase(phase),
-          transitionGeneration: parseHostTransitionGeneration(transitionGeneration),
-          transitionId: parseHostControlIdentifier(row.transition_id, "transition ID"),
-          fromMode: parseHostMode(row.transition_from_mode),
-          fromHostId: parseHostControlIdentifier(
-            row.transition_from_host_id,
-            "transition source host ID",
-          ),
-          fromInstanceId: parseHostControlIdentifier(
-            row.transition_from_instance_id,
-            "transition source instance ID",
-          ),
-          fromConnectionId: parseHostControlIdentifier(
-            row.transition_from_connection_id,
-            "transition source connection ID",
-          ),
-          fromEpoch: parseHostEpoch(row.transition_from_epoch),
-          toMode: parseHostMode(row.transition_to_mode),
-          toHostId: parseHostControlIdentifier(
-            row.transition_to_host_id,
-            "transition target host ID",
-          ),
-          startedAtMs: parseHostControlTimestamp(
-            row.transition_started_at_ms,
-            "transition start time",
-          ),
-        } as const;
-
-  return {
-    configuredMode: parseHostMode(row.configured_mode),
-    configuredHostId: parseHostControlIdentifier(row.configured_host_id, "configured host ID"),
-    hostEpoch: parseHostEpoch(row.host_epoch),
-    admissionState: parseHostAdmissionState(row.admission_state),
-    registeredInstanceId:
-      row.registered_instance_id === null
-        ? null
-        : parseHostControlIdentifier(row.registered_instance_id, "registered instance ID"),
-    registeredConnectionId:
-      row.registered_connection_id === null
-        ? null
-        : parseHostControlIdentifier(row.registered_connection_id, "registered connection ID"),
-    updatedAtMs: parseHostControlTimestamp(row.updated_at_ms, "host control update time"),
-    lastTransitionGeneration:
-      transitionGeneration === 0
-        ? null
-        : parseHostTransitionGeneration(transitionGeneration),
-    lastCompletedTransitionId:
-      row.last_completed_transition_id === null
-        ? null
-        : parseHostControlIdentifier(
-            row.last_completed_transition_id,
-            "last completed transition ID",
-          ),
-    transition,
-  };
-}
-
-function parseHostAdmissionState(value: unknown): HostControlSnapshot["admissionState"] {
-  if (value === "closed" || value === "open" || value === "draining") return value;
-  throw new Error("stored host admission state is invalid");
-}
-
-function parseHostTransitionPhase(
-  value: unknown,
-): NonNullable<HostControlSnapshot["transition"]>["phase"] {
-  if (value === "draining" || value === "activating") return value;
-  throw new Error("stored host transition phase is invalid");
-}
-
-function liveHostSuccess(snapshot: HostControlSnapshot): LiveHostControlResult {
-  return { ok: true, snapshot };
-}
-
-function liveHostRefusal(reason: LiveHostControlRefusalReason): LiveHostControlResult {
-  return { ok: false, reason };
-}
-
-function readRequiredLiveHostControl(db: SqliteDb): HostControlSnapshot {
-  const snapshot = readLiveHostControl(db);
-  if (snapshot === null) throw new Error("session host control row disappeared");
-  return snapshot;
-}
-
-function parseLiveHostConnectionCoordinate(
-  input: LiveHostConnectionCoordinate,
-): LiveHostConnectionCoordinate {
-  return {
-    mode: parseHostMode(input.mode),
-    hostId: parseHostControlIdentifier(input.hostId, "host ID"),
-    hostEpoch: parseHostEpoch(input.hostEpoch),
-    instanceId: parseHostControlIdentifier(input.instanceId, "host instance ID"),
-    connectionId: parseHostControlIdentifier(input.connectionId, "live connection ID"),
-  };
-}
-
-function compareConfiguredCoordinate(
-  snapshot: HostControlSnapshot,
-  coordinate: Pick<LiveHostConnectionCoordinate, "mode" | "hostId" | "hostEpoch">,
-): LiveHostControlRefusalReason | null {
-  if (snapshot.configuredMode !== coordinate.mode) return "wrong-mode";
-  if (snapshot.configuredHostId !== coordinate.hostId) return "wrong-host";
-  if (snapshot.hostEpoch !== coordinate.hostEpoch) return "stale-epoch";
-  return null;
 }
 
 export function openSyncRelayStorage(
@@ -2690,11 +249,11 @@ export function openSyncRelayStorage(
 }
 
 class SqliteSyncRelayStorage implements SyncRelayStorage {
-  private readonly newDiscussionId: () => string;
+  readonly newDiscussionId: () => string;
 
   constructor(
-    private readonly db: SqliteDb,
-    private readonly options: Required<OpenSyncRelayStorageOptions>,
+    readonly db: SqliteDb,
+    readonly options: Required<OpenSyncRelayStorageOptions>,
   ) {
     this.newDiscussionId = options.newDiscussionId;
   }
@@ -2704,7 +263,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
   }
 
   getLiveHostControl(): HostControlSnapshot | null {
-    return readLiveHostControl(this.db);
+    return hostControlStorage.getLiveHostControl(this);
   }
 
   provisionLiveHostControl(input: {
@@ -2713,169 +272,25 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     updatedAtMs: number;
     guard: () => void;
   }): LiveHostControlResult {
-    const mode = parseHostMode(input.mode);
-    const hostId = parseHostControlIdentifier(input.hostId, "configured host ID");
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host control update time");
-    return this.tx(() => {
-      const existing = readLiveHostControl(this.db);
-      if (existing !== null) {
-        if (existing.configuredMode !== mode || existing.configuredHostId !== hostId) {
-          return liveHostRefusal("conflicting-provision");
-        }
-        input.guard();
-        return liveHostSuccess(existing);
-      }
-      input.guard();
-      this.db
-        .prepare(
-          `INSERT INTO ${SESSION_HOST_CONTROL_TABLE} (
-             singleton_id, configured_mode, configured_host_id, host_epoch,
-             transition_generation, admission_state, updated_at_ms
-           ) VALUES (1, ?, ?, 1, 0, 'closed', ?)`,
-        )
-        .run(mode, hostId, updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.provisionLiveHostControl(this, input);
   }
 
   registerLiveHost(input: LiveHostConnectionCoordinate & {
     updatedAtMs: number;
     guard: () => void;
   }): LiveHostControlResult {
-    const coordinate = parseLiveHostConnectionCoordinate(input);
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host registration time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
-      if (mismatch !== null) return liveHostRefusal(mismatch);
-      if (snapshot.transition !== null) {
-        return liveHostRefusal(
-          snapshot.transition.phase === "draining" ? "draining" : "busy-transition",
-        );
-      }
-      if (
-        snapshot.registeredInstanceId !== null &&
-        snapshot.registeredInstanceId !== coordinate.instanceId
-      ) {
-        return liveHostRefusal("wrong-instance");
-      }
-      if (
-        snapshot.admissionState === "open" &&
-        snapshot.registeredConnectionId === coordinate.connectionId
-      ) {
-        input.guard();
-        return liveHostSuccess(snapshot);
-      }
-      input.guard();
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET registered_instance_id = ?, registered_connection_id = ?,
-               admission_state = 'open', last_completed_transition_id = NULL,
-               updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.registerLiveHost(this, input);
   }
 
   disconnectLiveHost(input: LiveHostConnectionCoordinate & {
     updatedAtMs: number;
     guard: () => void;
   }): LiveHostControlResult {
-    const coordinate = parseLiveHostConnectionCoordinate(input);
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host disconnect time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
-      if (mismatch !== null) return liveHostRefusal(mismatch);
-      if (snapshot.registeredInstanceId !== coordinate.instanceId) {
-        return liveHostRefusal("wrong-instance");
-      }
-      if (snapshot.registeredConnectionId !== coordinate.connectionId) {
-        return liveHostRefusal("wrong-connection");
-      }
-      if (snapshot.transition !== null) {
-        return liveHostRefusal(
-          snapshot.transition.phase === "draining" ? "draining" : "busy-transition",
-        );
-      }
-      if (snapshot.admissionState !== "open") return liveHostRefusal("closed");
-      input.guard();
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET admission_state = 'closed', registered_connection_id = NULL,
-               last_completed_transition_id = NULL, updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.disconnectLiveHost(this, input);
   }
 
   beginLiveHostTransition(input: BeginLiveHostTransitionInput): LiveHostControlResult {
-    const from = parseLiveHostConnectionCoordinate(input.from);
-    const toMode = parseHostMode(input.toMode);
-    const toHostId = parseHostControlIdentifier(input.toHostId, "target host ID");
-    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
-    const startedAtMs = parseHostControlTimestamp(input.startedAtMs, "transition start time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      const mismatch = compareConfiguredCoordinate(snapshot, from);
-      if (mismatch !== null) return liveHostRefusal(mismatch);
-      if (snapshot.registeredInstanceId !== from.instanceId) {
-        return liveHostRefusal("wrong-instance");
-      }
-      if (snapshot.registeredConnectionId !== from.connectionId) {
-        return liveHostRefusal("wrong-connection");
-      }
-      if (snapshot.transition !== null) return liveHostRefusal("busy-transition");
-      if (snapshot.admissionState !== "open") return liveHostRefusal("closed");
-      if (toMode === snapshot.configuredMode) return liveHostRefusal("same-mode");
-      if (snapshot.hostEpoch === Number.MAX_SAFE_INTEGER) {
-        return liveHostRefusal("exhausted-epoch");
-      }
-      if (snapshot.lastCompletedTransitionId === transitionId) {
-        return liveHostRefusal("completed-transition-id");
-      }
-      const storedGeneration = snapshot.lastTransitionGeneration ?? 0;
-      if (storedGeneration === Number.MAX_SAFE_INTEGER) {
-        return liveHostRefusal("exhausted-transition-generation");
-      }
-      const nextGeneration = parseHostTransitionGeneration(storedGeneration + 1);
-      input.guard();
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET transition_generation = ?, admission_state = 'draining',
-               transition_phase = 'draining', transition_id = ?,
-               transition_from_mode = ?, transition_from_host_id = ?,
-               transition_from_instance_id = ?, transition_from_connection_id = ?,
-               transition_from_epoch = ?, transition_to_mode = ?,
-               transition_to_host_id = ?, transition_started_at_ms = ?,
-               last_completed_transition_id = NULL, updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(
-          nextGeneration,
-          transitionId,
-          from.mode,
-          from.hostId,
-          from.instanceId,
-          from.connectionId,
-          from.hostEpoch,
-          toMode,
-          toHostId,
-          startedAtMs,
-          startedAtMs,
-        );
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.beginLiveHostTransition(this, input);
   }
 
   abortLiveHostTransition(input: {
@@ -2883,35 +298,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     transitionGeneration: HostTransitionGeneration;
     updatedAtMs: number;
   }): LiveHostControlResult {
-    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
-    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "transition abort time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      if (
-        snapshot.transition?.phase !== "draining" ||
-        snapshot.transition.transitionId !== transitionId ||
-        snapshot.transition.transitionGeneration !== transitionGeneration
-      ) {
-        return liveHostRefusal("stale-transition");
-      }
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET admission_state = 'closed', registered_connection_id = NULL,
-               transition_phase = NULL, transition_id = NULL,
-               transition_from_mode = NULL, transition_from_host_id = NULL,
-               transition_from_instance_id = NULL,
-               transition_from_connection_id = NULL, transition_from_epoch = NULL,
-               transition_to_mode = NULL, transition_to_host_id = NULL,
-               transition_started_at_ms = NULL, last_completed_transition_id = NULL,
-               updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.abortLiveHostTransition(this, input);
   }
 
   commitLiveHostTransitionEpoch(input: {
@@ -2919,94 +306,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     transitionGeneration: HostTransitionGeneration;
     updatedAtMs: number;
   }): LiveHostControlResult {
-    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
-    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "transition commit time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      if (
-        snapshot.transition?.phase !== "draining" ||
-        snapshot.transition.transitionId !== transitionId ||
-        snapshot.transition.transitionGeneration !== transitionGeneration
-      ) {
-        return liveHostRefusal("stale-transition");
-      }
-      if (snapshot.hostEpoch === Number.MAX_SAFE_INTEGER) {
-        return liveHostRefusal("exhausted-epoch");
-      }
-      const nextEpoch = nextHostEpoch(snapshot.hostEpoch);
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET configured_mode = transition_to_mode,
-               configured_host_id = transition_to_host_id, host_epoch = ?,
-               admission_state = 'closed', registered_instance_id = NULL,
-               registered_connection_id = NULL, transition_phase = 'activating',
-               updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(nextEpoch, updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.commitLiveHostTransitionEpoch(this, input);
   }
 
   activateLiveHostTransition(input: ActivateLiveHostTransitionInput): LiveHostControlResult {
-    const transitionGeneration = parseHostTransitionGeneration(input.transitionGeneration);
-    const transitionId = parseHostControlIdentifier(input.transitionId, "transition ID");
-    const transitionFromEpoch = parseHostEpoch(input.transitionFromEpoch);
-    const coordinate = parseLiveHostConnectionCoordinate(input);
-    const updatedAtMs = parseHostControlTimestamp(input.updatedAtMs, "host activation time");
-    return this.tx(() => {
-      const snapshot = readLiveHostControl(this.db);
-      if (snapshot === null) return liveHostRefusal("not-provisioned");
-      if (
-        snapshot.transition === null &&
-        snapshot.admissionState === "open" &&
-        snapshot.lastCompletedTransitionId === transitionId &&
-        snapshot.lastTransitionGeneration === transitionGeneration &&
-        snapshot.configuredMode === coordinate.mode &&
-        snapshot.configuredHostId === coordinate.hostId &&
-        snapshot.hostEpoch === coordinate.hostEpoch &&
-        snapshot.hostEpoch === transitionFromEpoch + 1 &&
-        snapshot.registeredInstanceId === coordinate.instanceId &&
-        snapshot.registeredConnectionId === coordinate.connectionId
-      ) {
-        input.guard();
-        return liveHostSuccess(snapshot);
-      }
-      if (snapshot.transition?.phase !== "activating") {
-        return liveHostRefusal(
-          snapshot.transition === null ? "stale-transition" : "busy-transition",
-        );
-      }
-      const transition = snapshot.transition;
-      if (
-        transition.transitionGeneration !== transitionGeneration ||
-        transition.transitionId !== transitionId ||
-        transition.fromEpoch !== transitionFromEpoch
-      ) {
-        return liveHostRefusal("stale-transition");
-      }
-      const mismatch = compareConfiguredCoordinate(snapshot, coordinate);
-      if (mismatch !== null) return liveHostRefusal(mismatch);
-      input.guard();
-      this.db
-        .prepare(
-          `UPDATE ${SESSION_HOST_CONTROL_TABLE}
-           SET admission_state = 'open', registered_instance_id = ?,
-               registered_connection_id = ?, transition_phase = NULL,
-               last_completed_transition_id = transition_id, transition_id = NULL,
-               transition_from_mode = NULL, transition_from_host_id = NULL,
-               transition_from_instance_id = NULL,
-               transition_from_connection_id = NULL, transition_from_epoch = NULL,
-               transition_to_mode = NULL, transition_to_host_id = NULL,
-               transition_started_at_ms = NULL, updated_at_ms = ?
-           WHERE singleton_id = 1`,
-        )
-        .run(coordinate.instanceId, coordinate.connectionId, updatedAtMs);
-      return liveHostSuccess(readRequiredLiveHostControl(this.db));
-    });
+    return hostControlStorage.activateLiveHostTransition(this, input);
   }
 
   claimWorkspace(input: {
@@ -3014,92 +318,19 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ownerUserId: string;
     createdAtMs: number;
   }): "created" | "owned" | "not-owner" {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const existing = this.db
-        .prepare(
-          "SELECT owner_user_id FROM sync_relay_workspaces WHERE workspace_id = ?",
-        )
-        .get(input.workspaceId);
-      if (typeof existing?.owner_user_id === "string") {
-        this.db.exec("COMMIT");
-        return existing.owner_user_id === input.ownerUserId ? "owned" : "not-owner";
-      }
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_workspaces (workspace_id, owner_user_id, created_at_ms)
-           VALUES (?, ?, ?)`,
-        )
-        .run(input.workspaceId, input.ownerUserId, Math.trunc(input.createdAtMs));
-      this.db.exec("COMMIT");
-      return "created";
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return workspacesStorage.claimWorkspace(this, input);
   }
 
   getWorkspaceIdentity(workspaceId: string): WorkspaceSyncIdentity | null {
-    const row = this.db
-      .prepare(
-        `SELECT replication_epoch, stream_identity
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    if (row === undefined) return null;
-    const replicationEpoch = row.replication_epoch;
-    const streamIdentity = row.stream_identity;
-    if (replicationEpoch == null && streamIdentity == null) return null;
-    if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
-      throw new Error("sync relay workspace identity is partially populated");
-    }
-    return { replicationEpoch, streamIdentity };
+    return workspacesStorage.getWorkspaceIdentity(this, workspaceId);
   }
 
   getWorkspaceBootstrap(workspaceId: string): WorkspaceBootstrap {
-    const row = this.db
-      .prepare(
-        `SELECT replication_epoch, stream_identity,
-                EXISTS(
-                  SELECT 1 FROM sync_relay_log
-                  WHERE sync_relay_log.workspace_id = sync_relay_workspaces.workspace_id
-                    AND sync_relay_log.relay_seq >
-                      COALESCE(sync_relay_workspaces.epoch_log_floor, 0)
-                  LIMIT 1
-                ) AS has_content
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    if (row === undefined) throw new Error("workspace does not exist");
-    const hasContent = row.has_content;
-    if (hasContent !== 0 && hasContent !== 1) {
-      throw new Error("sync relay workspace content state is invalid");
-    }
-    return {
-      hasContent: hasContent === 1,
-      identity: workspaceIdentityFromRow(row),
-    };
+    return workspacesStorage.getWorkspaceBootstrap(this, workspaceId);
   }
 
   getEpochLogFloor(workspaceId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT epoch_log_floor
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    if (row === undefined) throw new Error("workspace does not exist");
-    if (row.epoch_log_floor == null) return 0;
-    const floor = Number(row.epoch_log_floor);
-    if (!Number.isSafeInteger(floor) || floor < 0) {
-      throw new Error("sync relay workspace epoch log floor is invalid");
-    }
-    return floor;
+    return workspacesStorage.getEpochLogFloor(this, workspaceId);
   }
 
   verifyWorkspaceIdentity(input: {
@@ -3107,21 +338,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     replicationEpoch: string;
     streamIdentity: string;
   }): VerifyWorkspaceIdentityResult {
-    const row = this.db
-      .prepare(
-        `SELECT replication_epoch, stream_identity
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(input.workspaceId);
-    if (row === undefined) {
-      throw new Error("cannot verify identity for an absent workspace");
-    }
-    const current = workspaceIdentityFromRow(row);
-    // Reads never establish identity. An identity-bearing GET against an
-    // unset workspace has no coordinate to match and is therefore unknown.
-    if (current === null) return "epoch-unknown";
-    return this.classifyWorkspaceIdentity(input.workspaceId, current, input);
+    return workspacesStorage.verifyWorkspaceIdentity(this, input);
   }
 
   claimWorkspaceIdentity(input: {
@@ -3129,63 +346,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     replicationEpoch: string;
     streamIdentity: string;
   }): ClaimWorkspaceIdentityResult {
-    // The common path is verification only. Do this SELECT before taking a
-    // write lock so matched identity-bearing pulls/claims do not serialize
-    // against relay writers.
-    const initial = this.db
-      .prepare(
-        `SELECT replication_epoch, stream_identity
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(input.workspaceId);
-    if (initial === undefined) {
-      throw new Error("cannot claim identity for an absent workspace");
-    }
-    const initialIdentity = workspaceIdentityFromRow(initial);
-    if (initialIdentity !== null) {
-      return this.classifyWorkspaceIdentity(
-        input.workspaceId,
-        initialIdentity,
-        input,
-      );
-    }
-
-    // Only first adoption needs a write transaction. Re-read after acquiring
-    // the lock to close the race with another claimant.
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.db
-        .prepare(
-          `SELECT replication_epoch, stream_identity
-           FROM sync_relay_workspaces
-           WHERE workspace_id = ?`,
-        )
-        .get(input.workspaceId);
-      if (row === undefined) {
-        throw new Error("cannot claim identity for an absent workspace");
-      }
-      const current = workspaceIdentityFromRow(row);
-      if (current === null) {
-        this.db
-          .prepare(
-            `UPDATE sync_relay_workspaces
-             SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = 0
-             WHERE workspace_id = ?`,
-          )
-          .run(input.replicationEpoch, input.streamIdentity, input.workspaceId);
-        this.db.exec("COMMIT");
-        return "claimed";
-      }
-      const result = this.classifyWorkspaceIdentity(input.workspaceId, current, input);
-      this.db.exec("COMMIT");
-      return result;
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return workspacesStorage.claimWorkspaceIdentity(this, input);
   }
 
   rotateWorkspaceIdentity(input: {
@@ -3195,188 +356,26 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     streamIdentity: string;
     rotatedAtMs: number;
   }): RotateWorkspaceIdentityResult {
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const row = this.db
-        .prepare(
-          `SELECT owner_user_id, replication_epoch, stream_identity
-           FROM sync_relay_workspaces
-           WHERE workspace_id = ?`,
-        )
-        .get(input.workspaceId);
-      if (row === undefined || row.owner_user_id !== input.ownerUserId) {
-        this.db.exec("COMMIT");
-        return "not-owner";
-      }
-      const replicationEpoch = row.replication_epoch;
-      const streamIdentity = row.stream_identity;
-      if (replicationEpoch == null && streamIdentity != null) {
-        throw new Error("sync relay workspace identity is partially populated");
-      }
-      if (replicationEpoch != null && typeof replicationEpoch !== "string") {
-        throw new Error("sync relay workspace identity has an invalid epoch");
-      }
-      if (streamIdentity == null && replicationEpoch != null) {
-        throw new Error("sync relay workspace identity is partially populated");
-      }
-      if (streamIdentity != null && typeof streamIdentity !== "string") {
-        throw new Error("sync relay workspace identity has an invalid stream");
-      }
-      if (
-        replicationEpoch === input.replicationEpoch &&
-        streamIdentity === input.streamIdentity
-      ) {
-        this.db.exec("COMMIT");
-        return "unchanged";
-      }
-
-      // An epoch number that has entered history must never become active
-      // again, even under a freshly minted stream id. This prevents a reset
-      // generation from being resurrected by changing only half the coordinate.
-      const targetEpochWasSuperseded =
-        this.db
-          .prepare(
-            `SELECT 1 AS ok
-             FROM sync_relay_epoch_supersessions
-             WHERE workspace_id = ? AND replication_epoch = ?
-             LIMIT 1`,
-          )
-          .get(input.workspaceId, input.replicationEpoch) !== undefined;
-      if (targetEpochWasSuperseded) {
-        this.db.exec("COMMIT");
-        return "epoch-superseded";
-      }
-      if (typeof replicationEpoch === "string" && typeof streamIdentity === "string") {
-        const alreadyRecorded =
-          this.db
-            .prepare(
-              `SELECT 1 AS ok
-               FROM sync_relay_epoch_supersessions
-               WHERE workspace_id = ? AND replication_epoch = ? AND stream_identity = ?`,
-            )
-            .get(input.workspaceId, replicationEpoch, streamIdentity) !== undefined;
-        if (!alreadyRecorded) {
-          this.assertWorkspaceQuota(
-            input.workspaceId,
-            Buffer.byteLength(replicationEpoch, "utf8") +
-              Buffer.byteLength(streamIdentity, "utf8"),
-          );
-        }
-        this.db
-          .prepare(
-            `INSERT OR IGNORE INTO sync_relay_epoch_supersessions (
-              workspace_id, replication_epoch, stream_identity, superseded_at_ms
-          ) VALUES (?, ?, ?, ?)`,
-          )
-          .run(
-            input.workspaceId,
-            replicationEpoch,
-            streamIdentity,
-            Math.trunc(input.rotatedAtMs),
-          );
-      }
-      const floor = Number(
-        this.db
-          .prepare(
-            `SELECT COALESCE(MAX(relay_seq), 0) AS floor
-             FROM sync_relay_log
-             WHERE workspace_id = ?`,
-          )
-          .get(input.workspaceId)?.floor ?? 0,
-      );
-      this.db
-        .prepare(
-          `UPDATE sync_relay_workspaces
-           SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = ?
-           WHERE workspace_id = ?`,
-        )
-        .run(input.replicationEpoch, input.streamIdentity, floor, input.workspaceId);
-      this.db
-        .prepare(
-          `DELETE FROM sync_relay_current_files
-           WHERE workspace_id = ?`,
-        )
-        .run(input.workspaceId);
-      this.db.exec("COMMIT");
-      return "rotated";
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return workspacesStorage.rotateWorkspaceIdentity(this, input);
   }
 
-  private classifyWorkspaceIdentity(
+  classifyWorkspaceIdentity(
     workspaceId: string,
     current: WorkspaceSyncIdentity,
     presented: WorkspaceSyncIdentity,
   ): VerifyWorkspaceIdentityResult {
-    if (
-      current.replicationEpoch === presented.replicationEpoch &&
-      current.streamIdentity === presented.streamIdentity
-    ) {
-      return "matched";
-    }
-    const coordinateWasSuperseded =
-      this.db
-        .prepare(
-          `SELECT 1 AS ok
-           FROM sync_relay_epoch_supersessions
-           WHERE workspace_id = ? AND replication_epoch = ? AND stream_identity = ?`,
-        )
-        .get(
-          workspaceId,
-          presented.replicationEpoch,
-          presented.streamIdentity,
-        ) !== undefined;
-    if (coordinateWasSuperseded) return "epoch-superseded";
-    if (current.replicationEpoch !== presented.replicationEpoch) {
-      return "epoch-unknown";
-    }
-    return "stream-mismatch";
+    return workspacesStorage.classifyWorkspaceIdentity(this, workspaceId, current, presented);
   }
 
-  private enforceWorkspaceIdentityInTransaction(
+  enforceWorkspaceIdentityInTransaction(
     workspaceId: string,
     presented: WorkspaceSyncIdentity | null,
   ): EnforceWorkspaceIdentityResult {
-    const row = this.db
-      .prepare(
-        `SELECT replication_epoch, stream_identity
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    if (row === undefined) {
-      throw new Error("cannot enforce identity for an absent workspace");
-    }
-    const current = workspaceIdentityFromRow(row);
-    if (presented === null) {
-      return current === null ? "matched" : "identity-required";
-    }
-    if (current !== null) {
-      return this.classifyWorkspaceIdentity(workspaceId, current, presented);
-    }
-    this.db
-      .prepare(
-        `UPDATE sync_relay_workspaces
-         SET replication_epoch = ?, stream_identity = ?, epoch_log_floor = 0
-         WHERE workspace_id = ?`,
-      )
-      .run(presented.replicationEpoch, presented.streamIdentity, workspaceId);
-    return "claimed";
+    return workspacesStorage.enforceWorkspaceIdentityInTransaction(this, workspaceId, presented);
   }
 
   workspaceIsOwnedBy(workspaceId: string, ownerUserId: string): boolean {
-    const row = this.db
-      .prepare(
-        `SELECT 1 AS ok
-         FROM sync_relay_workspaces
-         WHERE workspace_id = ? AND owner_user_id = ?`,
-      )
-      .get(workspaceId, ownerUserId);
-    return row !== undefined;
+    return workspacesStorage.workspaceIsOwnedBy(this, workspaceId, ownerUserId);
   }
 
   putBlob(input: {
@@ -3385,172 +384,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     content: Uint8Array;
     createdAtMs: number;
   }): PutBlobResult {
-    const byteLength = input.content.byteLength;
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const existing = this.db
-        .prepare(
-          "SELECT 1 AS ok FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
-        )
-        .get(input.workspaceId, input.sha256);
-      if (existing !== undefined) {
-        this.db.exec("COMMIT");
-        return { byteLength, alreadyHad: true };
-      }
-      this.assertWorkspaceQuota(input.workspaceId, byteLength);
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_blobs (workspace_id, sha256, byte_length, content, created_at_ms)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.workspaceId,
-          input.sha256,
-          byteLength,
-          Buffer.from(input.content),
-          Math.trunc(input.createdAtMs),
-        );
-      this.db.exec("COMMIT");
-      return { byteLength, alreadyHad: false };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return blobsStorage.putBlob(this, input);
   }
 
-  async collectUnreferencedBlobs(
+  collectUnreferencedBlobs(
     workspaceId: string,
     options: { nowMs: number },
   ): Promise<CollectUnreferencedBlobsResult> {
-    // Grace window (item 4): never reclaim a blob younger than blobGraceMs, so
-    // a blob uploaded just before its referencing log op is appended survives
-    // the gap between the two phases. cutoff is the newest created_at_ms still
-    // eligible for collection.
-    //
-    // An open proposal's content is referenced too, and the log
-    // cannot say so — a proposed change is not in the log, which is the whole
-    // point of holding it. Without this second clause a proposal left open
-    // past the grace window would lose its content to the sweep and could
-    // never be accepted, so the granter's only honest answer would be
-    // "decline". A settled proposal stops protecting its blobs: an accepted
-    // one has them in the log, and a declined one never will.
-    const cutoff = options.nowMs - this.options.blobGraceMs;
-    // Phase 1 (read only, no write lock): candidate shas that are unreferenced
-    // and aged past the grace window.
-    const candidates = this.db
-      .prepare(
-        `SELECT b.sha256
-         FROM sync_relay_blobs b
-         WHERE b.workspace_id = ?
-           AND b.created_at_ms <= ?
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_log l
-             WHERE l.workspace_id = b.workspace_id
-               AND l.payload_json LIKE '%' || b.sha256 || '%'
-           )
-           AND NOT EXISTS (
-             SELECT 1
-             FROM sync_relay_share_proposal_ops o
-             JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
-             WHERE p.workspace_id = b.workspace_id
-               AND p.state = 'open'
-               AND o.after_blob_sha256 = b.sha256
-           )
-         ORDER BY b.sha256`,
-      )
-      .all(workspaceId, cutoff)
-      .map((row) => String(row.sha256));
-    // Delete in bounded chunks, each in its own short transaction, and
-    // yield the event loop between chunks so a large sweep never monopolizes it
-    // (CodeRabbit: keep GC off the single-threaded request path). The delete
-    // RE-CHECKS unreferenced + aged so a blob newly referenced (or replaced)
-    // between phases is left alone.
-    const removedSha256s: string[] = [];
-    const deleteStmt = this.db.prepare(
-      `DELETE FROM sync_relay_blobs
-       WHERE workspace_id = ? AND sha256 = ? AND created_at_ms <= ?
-         AND NOT EXISTS (
-           SELECT 1
-           FROM sync_relay_log l
-           WHERE l.workspace_id = ?
-             AND l.payload_json LIKE '%' || ? || '%'
-         )
-         AND NOT EXISTS (
-           SELECT 1
-           FROM sync_relay_share_proposal_ops o
-           JOIN sync_relay_share_proposals p ON p.proposal_id = o.proposal_id
-           WHERE p.workspace_id = ? AND p.state = 'open' AND o.after_blob_sha256 = ?
-         )`,
-    );
-    const CHUNK = 200;
-    for (let start = 0; start < candidates.length; start += CHUNK) {
-      const chunk = candidates.slice(start, start + CHUNK);
-      this.db.exec("BEGIN IMMEDIATE");
-      try {
-        for (const sha256 of chunk) {
-          const result = deleteStmt.run(
-            workspaceId,
-            sha256,
-            cutoff,
-            workspaceId,
-            sha256,
-            workspaceId,
-            sha256,
-          );
-          if (result.changes > 0) removedSha256s.push(sha256);
-        }
-        this.db.exec("COMMIT");
-      } catch (error) {
-        try {
-          this.db.exec("ROLLBACK");
-        } catch {}
-        throw error;
-      }
-      if (start + CHUNK < candidates.length) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-      }
-    }
-    return { removed: removedSha256s.length, removedSha256s };
+    return blobsStorage.collectUnreferencedBlobs(this, workspaceId, options);
   }
 
   getBlob(workspaceId: string, sha256: string): Uint8Array | null {
-    const row = this.db
-      .prepare(
-        "SELECT content FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 = ?",
-      )
-      .get(workspaceId, sha256);
-    const content = row?.content;
-    if (Buffer.isBuffer(content)) return content;
-    if (content instanceof Uint8Array) return Buffer.from(content);
-    return null;
+    return blobsStorage.getBlob(this, workspaceId, sha256);
   }
 
   missingBlobs(workspaceId: string, sha256s: string[]): string[] {
-    if (sha256s.length === 0) return [];
-    // Batch the presence check into chunked `IN (...)` queries instead of one
-    // point SELECT per hash (was up to ~2,000 sequential round trips). Dedupe
-    // the probe set but preserve the caller's order/duplicates in the result.
-    const unique = [...new Set(sha256s)];
-    const found = new Set<string>();
-    // Keep well under SQLite's default 999 bound-variable limit (one slot is
-    // taken by workspace_id).
-    const CHUNK = 500;
-    for (let start = 0; start < unique.length; start += CHUNK) {
-      const chunk = unique.slice(start, start + CHUNK);
-      const placeholders = chunk.map(() => "?").join(", ");
-      const rows = this.db
-        .prepare(
-          `SELECT sha256 FROM sync_relay_blobs WHERE workspace_id = ? AND sha256 IN (${placeholders})`,
-        )
-        .all(workspaceId, ...chunk);
-      for (const row of rows) {
-        if (typeof row.sha256 === "string") found.add(row.sha256);
-      }
-    }
-    return sha256s.filter((sha256) => !found.has(sha256));
+    return blobsStorage.missingBlobs(this, workspaceId, sha256s);
   }
 
   putKeyEnvelope(input: {
@@ -3559,98 +408,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     updatedAtMs: number;
     expectedSha256: string | null;
   }): { sha256: string } {
-    const nextSha256 = sha256HexUtf8(input.envelopeJson);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const current = this.db
-        .prepare(
-          "SELECT envelope_json FROM sync_relay_key_envelopes WHERE workspace_id = ?",
-        )
-        .get(input.workspaceId);
-      const currentJson =
-        typeof current?.envelope_json === "string" ? current.envelope_json : null;
-      if (currentJson === input.envelopeJson) {
-        // Byte-identical re-PUT: an idempotent retry (e.g. enroll after a
-        // dropped response), not a replacement. No history entry.
-        this.db.exec("COMMIT");
-        return { sha256: nextSha256 };
-      }
-      // The envelope + its append-only history count toward the workspace
-      // quota: each rotation adds roughly the new
-      // envelope's size (the prior copy moves into history), so the cap now
-      // bounds unbounded rotation growth. workspaceUsageBytes already includes
-      // both tables, so the incremental bytes to charge is the new envelope.
-      const envelopeAddedBytes = Buffer.byteLength(input.envelopeJson, "utf8");
-      if (currentJson === null) {
-        if (input.expectedSha256 !== null) {
-          throw new SyncRelayConflictError(
-            "key envelope does not exist; a conditional replace has nothing to match",
-          );
-        }
-        this.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
-        this.db
-          .prepare(
-            `INSERT INTO sync_relay_key_envelopes (workspace_id, envelope_json, updated_at_ms)
-             VALUES (?, ?, ?)`,
-          )
-          .run(input.workspaceId, input.envelopeJson, Math.trunc(input.updatedAtMs));
-        this.db.exec("COMMIT");
-        return { sha256: nextSha256 };
-      }
-      const currentSha256 = sha256HexUtf8(currentJson);
-      if (input.expectedSha256 === null) {
-        throw new SyncRelayConflictError(
-          "key envelope already exists; replacing it requires If-Match with the current sha256",
-        );
-      }
-      if (input.expectedSha256 !== currentSha256) {
-        throw new SyncRelayConflictError(
-          "key envelope was replaced concurrently; refresh and retry with the current sha256",
-        );
-      }
-      this.assertWorkspaceQuota(input.workspaceId, envelopeAddedBytes);
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_key_envelope_history (
-            workspace_id, envelope_json, envelope_sha256, replaced_at_ms, replaced_by_sha256
-          ) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(
-          input.workspaceId,
-          currentJson,
-          currentSha256,
-          Math.trunc(input.updatedAtMs),
-          nextSha256,
-        );
-      this.db
-        .prepare(
-          `UPDATE sync_relay_key_envelopes
-           SET envelope_json = ?, updated_at_ms = ?
-           WHERE workspace_id = ?`,
-        )
-        .run(input.envelopeJson, Math.trunc(input.updatedAtMs), input.workspaceId);
-      this.db.exec("COMMIT");
-      return { sha256: nextSha256 };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return keyEnvelopesStorage.putKeyEnvelope(this, input);
   }
 
   getKeyEnvelope(workspaceId: string): KeyEnvelopeRow | null {
-    const row = this.db
-      .prepare(
-        "SELECT envelope_json, updated_at_ms FROM sync_relay_key_envelopes WHERE workspace_id = ?",
-      )
-      .get(workspaceId);
-    if (typeof row?.envelope_json !== "string") return null;
-    return {
-      envelopeJson: row.envelope_json,
-      sha256: sha256HexUtf8(row.envelope_json),
-      updatedAtMs: Number(row.updated_at_ms),
-    };
+    return keyEnvelopesStorage.getKeyEnvelope(this, workspaceId);
   }
 
   appendLogBatch(input: {
@@ -3659,231 +421,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ops: SyncRelayLogInput[];
     guard?: (context: AppendLogBatchGuardContext) => void;
   }): AppendLogBatchResult {
-    for (const op of input.ops) {
-      if (typeof op.recordedAtMs !== "number" || !Number.isSafeInteger(op.recordedAtMs)) {
-        throw new Error("recordedAtMs must be an integer in the safe wire range");
-      }
-    }
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      // Authorization re-verification under the write lock (see the interface
-      // comment): BEGIN IMMEDIATE serializes writers, so a revoke committed
-      // by another writer is either already visible here (guard throws, batch
-      // rolls back) or must wait for this COMMIT — there is no in-between.
-      input.guard?.({
-        enforceWorkspaceIdentity: (identity) =>
-          this.enforceWorkspaceIdentityInTransaction(input.workspaceId, identity),
-      });
-      let inserted = 0;
-      let skipped = 0;
-      let addedLogBytes = 0;
-      const newOps: SyncRelayLogInput[] = [];
-      const maxStmt = this.db.prepare(
-        `SELECT COALESCE(MAX(origin_seq), -1) AS max_seq
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND origin_id = ?`,
-      );
-      const existingStmt = this.db.prepare(
-        `SELECT op_kind, payload_json, recorded_at_ms
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
-      );
-      // Read the current MAX(origin_seq) once, then track it locally: each
-      // insert is exactly currentMax + 1, so re-querying per op (was N extra
-      // SELECTs per batch) is unnecessary. Skipped ops leave it unchanged.
-      let currentMax = Number(
-        maxStmt.get(input.workspaceId, input.originId)?.max_seq ?? -1,
-      );
-      for (const op of input.ops) {
-        if (op.originSeq <= currentMax) {
-          const existing = existingStmt.get(
-            input.workspaceId,
-            input.originId,
-            op.originSeq,
-          );
-          if (
-            existing &&
-            existing.op_kind === op.opKind &&
-            existing.payload_json === op.payloadJson &&
-            Number(existing.recorded_at_ms) === op.recordedAtMs
-          ) {
-            skipped += 1;
-            continue;
-          }
-          throw new SyncRelayConflictError(
-            `origin_seq ${op.originSeq} already exists with different content`,
-          );
-        }
-        if (op.originSeq !== currentMax + 1) {
-          throw new SyncRelayConflictError(
-            `origin_seq gap: expected ${currentMax + 1}, got ${op.originSeq}`,
-          );
-        }
-        currentMax = op.originSeq;
-        newOps.push(op);
-        addedLogBytes += Buffer.byteLength(op.payloadJson, "utf8");
-      }
-
-      this.assertWorkspaceQuota(input.workspaceId, addedLogBytes);
-
-      // Data-integrity gate (0P sync-hardening): a log op must never be made
-      // durable while it references a blob the relay does not hold. The blob
-      // GC grace window covers the fresh PUT->POST gap, but not an old blob
-      // that ages past the grace, nor a blob GC'd after a failed /log that a
-      // retry then re-references via /blobs/have. Validate every referenced
-      // sha IN THIS SAME transaction, before inserting: SQLite serializes
-      // writers (BEGIN IMMEDIATE), so a concurrent GC cannot delete a checked
-      // blob between this probe and the insert that pins it. Only new ops are
-      // checked -- a skipped idempotent duplicate is already durable and its
-      // blobs were validated at first append. Any missing blob rejects the
-      // whole batch atomically (no partial append) with a retryable error the
-      // client resolves by re-uploading and re-posting.
-      const referencedShas = new Set<string>();
-      for (const op of newOps) {
-        for (const sha of referencedBlobShas(op.opKind, op.payloadJson, {
-          workspaceId: input.workspaceId,
-          recordedAtMs: op.recordedAtMs,
-        })) {
-          referencedShas.add(sha);
-        }
-      }
-      if (referencedShas.size > 0) {
-        const missing = this.missingBlobs(input.workspaceId, [...referencedShas]);
-        if (missing.length > 0) {
-          throw new SyncRelayBlobMissingError(
-            `log append references ${missing.length} blob(s) not stored on the relay ` +
-              `(first: ${missing[0]}); (re-)upload the blob(s) and retry`,
-          );
-        }
-      }
-
-      const insertStmt = this.db.prepare(
-        `INSERT INTO sync_relay_log (
-          workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-      );
-      const objectPathStmt = this.db.prepare(OBJECT_PATH_UPSERT_SQL);
-      const objectMomentStmt = this.db.prepare(OBJECT_MOMENT_INSERT_SQL);
-      const versionSnapshotBlobStmt = this.db.prepare(VERSION_SNAPSHOT_BLOB_INSERT_SQL);
-      const currentFileStmt = currentFileStatements(this.db);
-      for (const op of newOps) {
-        const result = insertStmt.run(
-          input.workspaceId,
-          input.originId,
-          op.originSeq,
-          op.opKind,
-          op.payloadJson,
-          op.recordedAtMs,
-        );
-        inserted += 1;
-        // Keep "where is this object now?" answerable by primary
-        // key. The relay_seq this row just took IS the order the guard in the
-        // upsert compares, so a later moment always wins and an out-of-order
-        // one never moves a path backwards.
-        if (op.opKind === "moment.append") {
-          const resolved = objectPathFromMomentPayload(op.payloadJson);
-          if (resolved) {
-            objectPathStmt.run(
-              input.workspaceId,
-              resolved.objectId,
-              resolved.path,
-              Number(result.lastInsertRowid),
-            );
-          }
-          // The same insert, one question deeper. The row above
-          // keeps "where is this object now?" answerable; this one keeps
-          // "which moment produced this content?" answerable, which is what a
-          // proposal's base resolves to at accept.
-          const moment = objectMomentFromMomentPayload(op.payloadJson);
-          if (moment) {
-            objectMomentStmt.run(
-              input.workspaceId,
-              moment.objectId,
-              Number(result.lastInsertRowid),
-              moment.momentId,
-              moment.versionId,
-              moment.path,
-              moment.blobSha256,
-              moment.contentKind,
-              moment.byteLength,
-              moment.recordedAtMs,
-            );
-          }
-        }
-        if (op.opKind === "version.create") {
-          const versionId = versionIdFromVersionCreatePayload(op.payloadJson);
-          if (versionId) {
-            const shas = referencedBlobShas(op.opKind, op.payloadJson, {
-              workspaceId: input.workspaceId,
-              recordedAtMs: op.recordedAtMs,
-            });
-            for (const sha256 of new Set(shas)) {
-              versionSnapshotBlobStmt.run(
-                input.workspaceId,
-                Number(result.lastInsertRowid),
-                versionId,
-                sha256,
-              );
-            }
-          }
-        }
-        applyCurrentFileOp(
-          currentFileStmt,
-          input.workspaceId,
-          op.opKind,
-          op.payloadJson,
-          Number(result.lastInsertRowid),
-        );
-      }
-
-      this.db.exec("COMMIT");
-      return { inserted, skipped, currentMaxOriginSeq: currentMax };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return logStorage.appendLogBatch(this, input);
   }
 
-  private workspaceUsageBytes(workspaceId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT usage_bytes
-         FROM sync_relay_workspace_usage
-         WHERE workspace_id = ?`,
-      )
-      .get(workspaceId);
-    if (row === undefined) {
-      throw new Error("workspace usage counter is missing");
-    }
-    return Number(row.usage_bytes);
+  workspaceUsageBytes(workspaceId: string): number {
+    return workspacesStorage.workspaceUsageBytes(this, workspaceId);
   }
 
-  private assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
-    if (addedBytes <= 0) return;
-    const currentUsage = this.workspaceUsageBytes(workspaceId);
-    if (currentUsage + addedBytes > this.options.workspaceQuotaBytes) {
-      throw new SyncRelayQuotaExceededError(
-        `workspace storage quota exceeded: ${currentUsage + addedBytes} bytes would exceed quota ${this.options.workspaceQuotaBytes}`,
-      );
-    }
+  assertWorkspaceQuota(workspaceId: string, addedBytes: number): void {
+    return workspacesStorage.assertWorkspaceQuota(this, workspaceId, addedBytes);
   }
 
   createShare(input: {
     share: SyncRelayShareRow;
     grant: SyncRelayShareGrantRow;
   }): void {
-    if (input.grant.shareId !== input.share.shareId) {
-      throw new Error("share and grant ids do not match");
-    }
-    if (input.grant.principalKind === "link") {
-      throw new Error("a link grant requires an existing share and a credential");
-    }
-    this.tx(() => {
-      this.insertShare(input.share);
-      this.insertShareGrant(input.grant);
-    });
+    return sharesStorage.createShare(this, input);
   }
 
   createFileLinkShare(input: {
@@ -3892,119 +445,28 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     credential: SyncRelayLinkCredentialRow;
     guard: () => void;
   }): boolean {
-    const { share, grant, credential } = input;
-    if (
-      grant.shareId !== share.shareId ||
-      grant.principalKind !== "link" ||
-      grant.principalUserId !== null ||
-      grant.principalEmail !== null ||
-      grant.parentGrantId !== null ||
-      (grant.access !== "view" && grant.access !== "comment") ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null ||
-      grant.generation !== 1 ||
-      grant.createdAtMs !== share.createdAtMs ||
-      credential.grantId !== grant.grantId ||
-      credential.generation !== grant.generation ||
-      credential.mintedAtMs !== grant.createdAtMs ||
-      credential.retiredAtMs !== null ||
-      !credential.secretHash
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      input.guard();
-      this.insertShare(share);
-      this.insertShareGrant(grant);
-      this.insertLinkCredential(credential);
-      return true;
-    });
+    return sharesStorage.createFileLinkShare(this, input);
   }
 
   createLinkGrant(input: {
     grant: SyncRelayShareGrantRow;
     credential: SyncRelayLinkCredentialRow;
   }): boolean {
-    const { grant, credential } = input;
-    if (
-      grant.principalKind !== "link" ||
-      grant.principalUserId !== null ||
-      grant.principalEmail !== null ||
-      grant.parentGrantId !== null ||
-      grant.status !== "active" ||
-      grant.revokedAtMs !== null ||
-      grant.generation !== 1 ||
-      credential.grantId !== grant.grantId ||
-      credential.generation !== grant.generation ||
-      credential.retiredAtMs !== null ||
-      !credential.secretHash
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      const activeShare = this.db
-        .prepare(
-          `SELECT 1 AS active
-           FROM sync_relay_share_grants
-           WHERE share_id = ? AND status = 'active'
-           LIMIT 1`,
-        )
-        .get(grant.shareId);
-      if (!this.getShare(grant.shareId) || !activeShare) return false;
-      this.insertShareGrant(grant);
-      this.insertLinkCredential(credential);
-      return true;
-    });
+    return sharesStorage.createLinkGrant(this, input);
   }
 
   getShareGrant(grantId: string): SyncRelayShareGrantRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
-                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-         FROM sync_relay_share_grants WHERE grant_id = ?`,
-      )
-      .get(grantId);
-    return row ? rowToShareGrantRow(row) : null;
+    return sharesStorage.getShareGrant(this, grantId);
   }
 
   getCurrentLinkCredential(grantId: string): SyncRelayLinkCredentialRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
-         FROM sync_relay_link_credentials
-         WHERE grant_id = ? AND retired_at_ms IS NULL
-         LIMIT 1`,
-      )
-      .get(grantId);
-    return row ? rowToLinkCredentialRow(row) : null;
+    return sharesStorage.getCurrentLinkCredential(this, grantId);
   }
 
   findLinkGrantByCredentialHash(
     secretHash: string,
   ): SyncRelayLinkCredentialGrantRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT c.credential_id, c.grant_id AS credential_grant_id, c.secret_hash,
-                c.generation AS credential_generation, c.minted_at_ms, c.retired_at_ms,
-                g.grant_id, g.share_id, g.principal_kind, g.principal_user_id,
-                g.principal_email, g.access, g.generation, g.status, g.created_at_ms,
-                g.revoked_at_ms, g.parent_grant_id
-         FROM sync_relay_link_credentials c
-         JOIN sync_relay_share_grants g ON g.grant_id = c.grant_id
-         WHERE c.secret_hash = ? AND c.retired_at_ms IS NULL
-         LIMIT 1`,
-      )
-      .get(secretHash);
-    if (!row) return null;
-    return {
-      credential: rowToLinkCredentialRow({
-        ...row,
-        grant_id: row.credential_grant_id,
-        generation: row.credential_generation,
-      }),
-      grant: rowToShareGrantRow(row),
-    };
+    return sharesStorage.findLinkGrantByCredentialHash(this, secretHash);
   }
 
   rotateLinkGrant(input: {
@@ -4015,48 +477,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
     mintCredential: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
-    return this.tx(() => {
-      input.guard();
-      const grant = this.getShareGrant(input.grantId);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      const dependents = this.activeDependentGrants(grant.grantId);
-      if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-        return { ok: false, reason: "dependents-changed", dependents };
-      }
-      const current = this.getCurrentLinkCredential(input.grantId);
-      if (!current || current.generation !== grant.generation) {
-        return { ok: false };
-      }
-      const credential = input.mintCredential();
-      if (!credential.credentialId || !credential.secretHash) return { ok: false };
-      const generation = grant.generation + 1;
-      this.db
-        .prepare("UPDATE sync_relay_share_grants SET generation = ? WHERE grant_id = ?")
-        .run(generation, grant.grantId);
-      this.retireCurrentLinkCredential(grant.grantId, input.rotatedAtMs);
-      this.insertLinkCredential({
-        credentialId: credential.credentialId,
-        grantId: grant.grantId,
-        secretHash: credential.secretHash,
-        generation,
-        mintedAtMs: input.rotatedAtMs,
-        retiredAtMs: null,
-      });
-      this.db
-        .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
-        .run(grant.grantId);
-      this.pruneRetiredLinkCredentials(grant.grantId);
-      this.incrementActiveDependentGenerations(grant.grantId);
-      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
-    });
+    return sharesStorage.rotateLinkGrant(this, input);
   }
 
   retuneShareGrant(input: {
@@ -4068,89 +489,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     guard: () => void;
     mintCredential?: () => SyncRelayLinkCredentialMint;
   }): LinkGrantTransitionResult {
-    return this.tx(() => {
-      input.guard();
-      const grant = this.getShareGrant(input.grantId);
-      const from = grant ? shareAccessRank(grant.access) : -1;
-      const to = shareAccessRank(input.access);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        from < 0 ||
-        to < 0 ||
-        from === to
-      ) {
-        return { ok: false };
-      }
-
-      const dependents = this.activeDependentGrants(grant.grantId);
-      if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-        return { ok: false, reason: "dependents-changed", dependents };
-      }
-
-      const widening = to > from;
-      const current = this.getCurrentLinkCredential(grant.grantId);
-      if (!current || current.generation !== grant.generation) {
-        return { ok: false };
-      }
-      if (widening && !input.mintCredential) {
-        return { ok: false };
-      }
-      if (!widening && input.mintCredential) {
-        return { ok: false };
-      }
-
-      const wideningCredential = widening ? input.mintCredential!() : null;
-      if (
-        wideningCredential &&
-        (!wideningCredential.credentialId || !wideningCredential.secretHash)
-      ) {
-        return { ok: false };
-      }
-
-      const generation = widening ? grant.generation + 1 : grant.generation;
-      this.db
-        .prepare(
-          "UPDATE sync_relay_share_grants SET access = ?, generation = ? WHERE grant_id = ?",
-        )
-        .run(input.access, generation, grant.grantId);
-
-      if (wideningCredential) {
-        this.retireCurrentLinkCredential(grant.grantId, input.changedAtMs);
-        this.insertLinkCredential({
-          credentialId: wideningCredential.credentialId,
-          grantId: grant.grantId,
-          secretHash: wideningCredential.secretHash,
-          generation,
-          mintedAtMs: input.changedAtMs,
-          retiredAtMs: null,
-        });
-        this.db
-          .prepare("DELETE FROM sync_relay_link_usage WHERE grant_id = ?")
-          .run(grant.grantId);
-        this.pruneRetiredLinkCredentials(grant.grantId);
-        this.incrementActiveDependentGenerations(grant.grantId);
-      } else {
-        this.nextShareDiscussionRevision(grant.shareId);
-        for (const dependent of dependents) {
-          const dependentRank = shareAccessRank(dependent.access);
-          if (dependentRank > to) {
-            this.db
-              .prepare(
-                `UPDATE sync_relay_share_grants
-                 SET access = ?
-                 WHERE grant_id = ? AND status = 'active'`,
-              )
-              .run(input.access, dependent.grantId);
-          }
-        }
-        this.incrementActiveDependentGenerations(grant.grantId);
-      }
-      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
-    });
+    return sharesStorage.retuneShareGrant(this, input);
   }
 
   revokeShareGrant(input: {
@@ -4160,43 +499,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     expectedDependentGrantIds?: readonly string[];
     guard?: () => void;
   }): LinkGrantTransitionResult {
-    return this.tx(() => {
-      input.guard?.();
-      const grant = this.getShareGrant(input.grantId);
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      if (grant.principalKind === "link" && input.expectedDependentGrantIds !== undefined) {
-        const dependents = this.activeDependentGrants(grant.grantId);
-        if (!dependentGrantIdsMatch(dependents, input.expectedDependentGrantIds)) {
-          return { ok: false, reason: "dependents-changed", dependents };
-        }
-      }
-      const revokedAtMs = Math.trunc(input.revokedAtMs);
-      this.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
-           SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
-           WHERE grant_id = ?`,
-        )
-        .run(revokedAtMs, grant.grantId);
-      if (grant.principalKind === "link") {
-        this.retireCurrentLinkCredential(grant.grantId, revokedAtMs);
-        this.db
-          .prepare(
-            `UPDATE sync_relay_share_grants
-             SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
-             WHERE parent_grant_id = ? AND status = 'active'`,
-          )
-          .run(revokedAtMs, grant.grantId);
-      }
-      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
-    });
+    return sharesStorage.revokeShareGrant(this, input);
   }
 
   promoteShareGrant(input: {
@@ -4206,107 +509,14 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     expectedParentGeneration: number;
     guard: () => void;
   }): ShareGrantTransitionResult {
-    return this.tx(() => {
-      input.guard();
-      const grant = this.getShareGrant(input.grantId);
-      const parent = grant?.parentGrantId
-        ? this.getShareGrant(grant.parentGrantId)
-        : null;
-      if (
-        !grant ||
-        grant.shareId !== input.shareId ||
-        grant.principalKind !== "user" ||
-        !grant.principalUserId ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        grant.parentGrantId !== input.expectedParentGrantId ||
-        !parent ||
-        parent.shareId !== grant.shareId ||
-        parent.principalKind !== "link" ||
-        parent.generation !== input.expectedParentGeneration ||
-        parent.status !== "active" ||
-        parent.revokedAtMs !== null
-      ) {
-        return { ok: false };
-      }
-      this.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
-           SET parent_grant_id = NULL, generation = generation + 1
-           WHERE grant_id = ?`,
-        )
-        .run(grant.grantId);
-      return { ok: true, grant: this.getShareGrant(grant.grantId)! };
-    });
+    return sharesStorage.promoteShareGrant(this, input);
   }
 
   mintLinkSession(input: {
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard?: () => void;
   }): boolean {
-    const { session } = input;
-    if (
-      !session.capabilityHash ||
-      session.expiresAtMs <= session.mintedAtMs ||
-      session.generation < 1
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      input.guard?.();
-      const grant = this.getShareGrant(session.grantId);
-      if (
-        !grant ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.generation !== session.generation
-      ) {
-        return false;
-      }
-      this.db
-        .prepare("DELETE FROM sync_relay_link_sessions WHERE expires_at_ms < ?")
-        .run(Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS));
-      const liveSessionCount = Number(
-        this.db
-          .prepare(
-            "SELECT COUNT(*) AS count FROM sync_relay_link_sessions WHERE grant_id = ?",
-          )
-          .get(session.grantId)?.count ?? 0,
-      );
-      const sessionsToDelete =
-        liveSessionCount - this.options.linkSessionsPerGrantLimit + 1;
-      if (sessionsToDelete > 0) {
-        this.db
-          .prepare(
-            `DELETE FROM sync_relay_link_sessions
-             WHERE session_id IN (
-               SELECT session_id
-               FROM sync_relay_link_sessions
-               WHERE grant_id = ?
-               ORDER BY minted_at_ms ASC, session_id ASC
-               LIMIT ?
-             )`,
-          )
-          .run(session.grantId, sessionsToDelete);
-      }
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_link_sessions (
-             session_id, capability_hash, grant_id, generation, minted_at_ms,
-             expires_at_ms, principal_id
-           ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
-        )
-        .run(
-          session.sessionId,
-          session.capabilityHash,
-          session.grantId,
-          session.generation,
-          Math.trunc(session.mintedAtMs),
-          Math.trunc(session.expiresAtMs),
-        );
-      this.upsertLinkUsage(session.grantId, session.mintedAtMs);
-      return true;
-    });
+    return sharesStorage.mintLinkSession(this, input);
   }
 
   replaceLinkSession(input: {
@@ -4314,90 +524,13 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     session: Omit<SyncRelayLinkSessionRow, "principalId">;
     guard: () => void;
   }): boolean {
-    const { currentSession, session } = input;
-    if (
-      !currentSession.capabilityHash ||
-      !session.capabilityHash ||
-      currentSession.sessionId === session.sessionId ||
-      currentSession.capabilityHash === session.capabilityHash ||
-      currentSession.grantId !== session.grantId ||
-      currentSession.generation !== session.generation ||
-      currentSession.expiresAtMs + LINK_SESSION_RENEWAL_GRACE_MS <
-        session.mintedAtMs ||
-      session.expiresAtMs <= session.mintedAtMs ||
-      session.generation < 1
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      input.guard();
-      const storedCurrent = this.db
-        .prepare(
-          `SELECT principal_id
-           FROM sync_relay_link_sessions
-           WHERE session_id = ?
-             AND capability_hash = ?
-             AND grant_id = ?
-             AND generation = ?
-             AND expires_at_ms >= ?`,
-        )
-        .get(
-          currentSession.sessionId,
-          currentSession.capabilityHash,
-          currentSession.grantId,
-          currentSession.generation,
-          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
-        );
-      if (!storedCurrent) return false;
-      const retired = this.db
-        .prepare(
-          `DELETE FROM sync_relay_link_sessions
-           WHERE session_id = ?
-             AND capability_hash = ?
-             AND grant_id = ?
-             AND generation = ?
-             AND expires_at_ms >= ?`,
-        )
-        .run(
-          currentSession.sessionId,
-          currentSession.capabilityHash,
-          currentSession.grantId,
-          currentSession.generation,
-          Math.trunc(session.mintedAtMs - LINK_SESSION_RENEWAL_GRACE_MS),
-        );
-      if (Number(retired.changes ?? 0) !== 1) return false;
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_link_sessions (
-             session_id, capability_hash, grant_id, generation, minted_at_ms,
-             expires_at_ms, principal_id
-           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          session.sessionId,
-          session.capabilityHash,
-          session.grantId,
-          session.generation,
-          Math.trunc(session.mintedAtMs),
-          Math.trunc(session.expiresAtMs),
-          storedCurrent.principal_id ?? null,
-        );
-      this.upsertLinkUsage(session.grantId, session.mintedAtMs);
-      return true;
-    });
+    return sharesStorage.replaceLinkSession(this, input);
   }
 
   findLinkSessionByCapabilityHash(
     capabilityHash: string,
   ): SyncRelayLinkSessionRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT session_id, capability_hash, grant_id, generation, minted_at_ms,
-                expires_at_ms, principal_id
-         FROM sync_relay_link_sessions WHERE capability_hash = ? LIMIT 1`,
-      )
-      .get(capabilityHash);
-    return row ? rowToLinkSessionRow(row) : null;
+    return sharesStorage.findLinkSessionByCapabilityHash(this, capabilityHash);
   }
 
   appendLinkDiscussionMessage(input: {
@@ -4409,314 +542,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     createdAtMs: number;
     guard?: () => void;
   }): AppendLinkDiscussionMessageResult {
-    const body = normalizeShareDiscussionBody(input.body);
-    const hasClaimedName =
-      input.claimedName !== undefined && input.claimedName !== null;
-    const claimedName = hasClaimedName
-      ? normalizeDiscussionDisplayName(input.claimedName)
-      : null;
-    if (
-      body === null ||
-      (hasClaimedName && claimedName === null) ||
-      !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
-      !input.capabilityHash ||
-      !input.profileTokenHash ||
-      !Number.isSafeInteger(input.createdAtMs) ||
-      input.createdAtMs < 0
-    ) {
-      return { ok: false, reason: "invalid-input" };
-    }
-    const createdAtMs = Math.trunc(input.createdAtMs);
-    const requestHash = linkDiscussionRequestHash(body, claimedName);
-
-    // This gate lets the HTTP boundary refresh its already-derived capability
-    // immediately before the storage transaction. The transaction still owns
-    // the final live-authority decision below.
-    input.guard?.();
-    return this.tx(() => {
-      // This is the final authority read. The same BEGIN IMMEDIATE transaction
-      // holds the write lock through principal mint, binding, budget charge,
-      // and message insert.
-      const authority = this.db
-        .prepare(
-          `SELECT session.session_id, session.principal_id AS session_principal_id,
-                  session.grant_id, session.generation AS session_generation,
-                  session.minted_at_ms, session.expires_at_ms,
-                  grant.share_id, grant.generation AS grant_generation,
-                  grant.access, grant.status, grant.revoked_at_ms,
-                  share.workspace_id, share.granter_user_id,
-                  share.link_writes_paused_at_ms,
-                  share.discussion_revision,
-                  workspace.owner_user_id
-           FROM sync_relay_link_sessions AS session
-           JOIN sync_relay_share_grants AS grant ON grant.grant_id = session.grant_id
-           JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-           JOIN sync_relay_workspaces AS workspace
-             ON workspace.workspace_id = share.workspace_id
-           WHERE session.capability_hash = ?
-           LIMIT 1`,
-        )
-        .get(input.capabilityHash);
-      if (
-        !authority ||
-        authority.status !== "active" ||
-        authority.revoked_at_ms !== null ||
-        Number(authority.session_generation) !== Number(authority.grant_generation) ||
-        Number(authority.minted_at_ms) > createdAtMs ||
-        Number(authority.expires_at_ms) <= createdAtMs ||
-        authority.owner_user_id !== authority.granter_user_id
-      ) {
-        return { ok: false, reason: "not-authorized" };
-      }
-      const grantId = String(authority.grant_id);
-      const shareId = String(authority.share_id);
-      const workspaceId = String(authority.workspace_id);
-      const activityRevision = Number(authority.discussion_revision);
-      if (!Number.isSafeInteger(activityRevision) || activityRevision < 0) {
-        throw new Error("share discussion revision is invalid");
-      }
-      const existingPrincipalRow = this.db
-        .prepare(
-          `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                  display_name, created_at_ms, blocked_at_ms,
-                  discussion_revision, storage_bytes
-           FROM sync_relay_link_principals
-           WHERE grant_id = ? AND profile_token_hash = ?
-           LIMIT 1`,
-        )
-        .get(grantId, input.profileTokenHash);
-      let principal = existingPrincipalRow
-        ? rowToLinkPrincipalRow(existingPrincipalRow)
-        : null;
-      const sessionPrincipalId = nullableText(authority.session_principal_id);
-      if (
-        (principal && sessionPrincipalId !== null && sessionPrincipalId !== principal.principalId) ||
-        (!principal && sessionPrincipalId !== null)
-      ) {
-        return { ok: false, reason: "not-authorized" };
-      }
-      if (principal) {
-        const replayRow = this.db
-          .prepare(
-            `SELECT message_id, share_id, idempotency_key, request_hash,
-                    author_kind, author_user_id, link_grant_id, link_principal_id,
-                    display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                     deleted_by_user_id, discussion_revision, storage_bytes
-             FROM sync_relay_share_discussion_messages
-             WHERE share_id = ?
-               AND author_kind = 'link'
-               AND link_principal_id = ?
-               AND idempotency_key = ?
-             LIMIT 1`,
-          )
-          .get(shareId, principal.principalId, input.idempotencyKey);
-        if (replayRow) {
-          if (replayRow.request_hash !== requestHash) {
-            return { ok: false, reason: "idempotency-conflict" };
-          }
-          return {
-            ok: true,
-            replayed: true,
-            principal,
-            message: rowToShareDiscussionMessageRow(replayRow),
-          };
-        }
-      }
-      if (authority.access !== "comment") {
-        return { ok: false, reason: "not-authorized" };
-      }
-      if (principal && principal.blockedAtMs !== null) {
-        return { ok: false, reason: "blocked", activityRevision };
-      }
-      if (authority.link_writes_paused_at_ms !== null) {
-        return { ok: false, reason: "paused", activityRevision };
-      }
-      if (
-        principal &&
-        claimedName !== null &&
-        principal.displayName !== null &&
-        claimedName !== principal.displayName
-      ) {
-        return { ok: false, reason: "name-already-set" };
-      }
-
-      if (!principal) {
-        const principalCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_link_principals
-               WHERE grant_id = ? AND mint_generation = ?`,
-            )
-            .get(grantId, Number(authority.grant_generation))?.count ?? 0,
-        );
-        if (principalCount >= this.options.linkDiscussionPrincipalLimit) {
-          return { ok: false, reason: "principal-limit" };
-        }
-      }
-
-      if (principal) {
-        const rateCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_share_discussion_messages
-               WHERE author_kind = 'link'
-                 AND link_principal_id = ?
-                 AND created_at_ms > ?`,
-            )
-            .get(
-              principal.principalId,
-              createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
-            )?.count ?? 0,
-        );
-        if (rateCount >= this.options.discussionMessageRateLimit) {
-          return { ok: false, reason: "rate-limit" };
-        }
-        const lifetimeCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_share_discussion_messages
-               WHERE author_kind = 'link' AND link_principal_id = ?`,
-            )
-            .get(principal.principalId)?.count ?? 0,
-        );
-        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
-          return { ok: false, reason: "lifetime-limit" };
-        }
-      }
-      const shareRowCount = Number(
-        this.db
-          .prepare(
-            `SELECT COUNT(*) AS count
-             FROM sync_relay_share_discussion_messages
-             WHERE share_id = ? AND author_kind IN ('named', 'link')`,
-          )
-          .get(shareId)?.count ?? 0,
-      );
-      if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
-        return { ok: false, reason: "share-limit" };
-      }
-
-      const principalId = principal?.principalId ?? this.newDiscussionId();
-      const messageId = this.newDiscussionId();
-      if (!principalId || !messageId || principalId === messageId) {
-        throw new Error("discussion id generator returned an invalid identifier");
-      }
-      const committedName = principal?.displayName ?? claimedName;
-      const displayNameSnapshot = committedName ?? "Anonymous";
-      const principalAddedBytes = principal
-        ? 0
-        : linkPrincipalStorageBytes({
-            principalId,
-            grantId,
-            profileTokenHash: input.profileTokenHash,
-          });
-      const messageStorageBytes = discussionMessageStorageBytes({
-        messageId,
-        shareId,
-        idempotencyKey: input.idempotencyKey,
-        requestHash,
-        authorKind: "link",
-        authorUserId: null,
-        linkGrantId: grantId,
-        linkPrincipalId: principalId,
-        displayNameSnapshot,
-        body,
-      });
-      if (
-        this.workspaceUsageBytes(workspaceId) + principalAddedBytes + messageStorageBytes >
-        this.options.workspaceQuotaBytes
-      ) {
-        return { ok: false, reason: "workspace-quota" };
-      }
-      const discussionRevision = this.nextShareDiscussionRevision(shareId);
-
-      if (!principal) {
-        this.db
-          .prepare(
-            `INSERT INTO sync_relay_link_principals (
-               principal_id, grant_id, mint_generation, profile_token_hash,
-               display_name, created_at_ms, blocked_at_ms,
-               discussion_revision, storage_bytes
-             ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)`,
-          )
-          .run(
-            principalId,
-            grantId,
-            Number(authority.grant_generation),
-            input.profileTokenHash,
-            committedName,
-            createdAtMs,
-            discussionRevision,
-            principalAddedBytes,
-          );
-        principal = this.getLinkPrincipal(principalId)!;
-      } else if (principal.displayName === null && committedName !== null) {
-        this.db
-          .prepare(
-            `UPDATE sync_relay_link_principals
-             SET display_name = ?, discussion_revision = ?
-             WHERE principal_id = ? AND display_name IS NULL`,
-          )
-          .run(committedName, discussionRevision, principal.principalId);
-        principal = this.getLinkPrincipal(principal.principalId)!;
-      }
-
-      if (sessionPrincipalId === null) {
-        const bound = this.db
-          .prepare(
-            `UPDATE sync_relay_link_sessions
-             SET principal_id = ?
-             WHERE session_id = ? AND capability_hash = ? AND principal_id IS NULL`,
-          )
-          .run(principal.principalId, authority.session_id, input.capabilityHash);
-        if (Number(bound.changes ?? 0) !== 1) {
-          throw new Error("link discussion session binding changed inside transaction");
-        }
-      }
-
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_share_discussion_messages (
-             message_id, share_id, idempotency_key, request_hash, author_kind,
-             author_user_id, link_grant_id, link_principal_id,
-             display_name_snapshot, body, created_at_ms, deleted_at_ms,
-             deleted_by_user_id, discussion_revision, storage_bytes
-           ) VALUES (?, ?, ?, ?, 'link', NULL, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-        )
-        .run(
-          messageId,
-          shareId,
-          input.idempotencyKey,
-          requestHash,
-          grantId,
-          principal.principalId,
-          displayNameSnapshot,
-          body,
-          createdAtMs,
-          discussionRevision,
-          messageStorageBytes,
-        );
-      const message = this.db
-        .prepare(
-          `SELECT message_id, share_id, idempotency_key, request_hash,
-                  author_kind, author_user_id, link_grant_id, link_principal_id,
-                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, discussion_revision, storage_bytes
-           FROM sync_relay_share_discussion_messages
-           WHERE message_id = ?`,
-        )
-        .get(messageId);
-      if (!message) throw new Error("inserted discussion message is missing");
-      return {
-        ok: true,
-        replayed: false,
-        principal,
-        message: rowToShareDiscussionMessageRow(message),
-      };
-    });
+    return discussionStorage.appendLinkDiscussionMessage(this, input);
   }
 
   appendAuthenticatedDiscussionMessage(input: {
@@ -4729,184 +555,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     readGuard: () => "owner" | "recipient";
     appendGuard: () => "owner" | "recipient";
   }): AppendAuthenticatedDiscussionMessageResult {
-    const body = normalizeShareDiscussionBody(input.body);
-    const displayName = normalizeDiscussionDisplayName(input.displayName);
-    if (
-      body === null ||
-      !input.shareId ||
-      !validDiscussionDeletingUserId(input.authorUserId) ||
-      displayName === null ||
-      displayName !== input.displayName ||
-      !validLinkDiscussionIdempotencyKey(input.idempotencyKey) ||
-      !Number.isSafeInteger(input.createdAtMs) ||
-      input.createdAtMs < 0
-    ) {
-      return { ok: false, reason: "invalid-input" };
-    }
-    const createdAtMs = Math.trunc(input.createdAtMs);
-    const requestHash = namedDiscussionRequestHash(body);
-
-    return this.tx(() => {
-      // The caller's server-derived identity and current read authority are
-      // rechecked under this write lock before any durable replay is exposed.
-      const readerRole = input.readGuard();
-      if (readerRole !== "owner" && readerRole !== "recipient") {
-        throw new Error("discussion authority guard returned an invalid role");
-      }
-      const share = this.db
-        .prepare(
-          `SELECT workspace_id
-           FROM sync_relay_shares
-           WHERE share_id = ?
-           LIMIT 1`,
-        )
-        .get(input.shareId);
-      if (!share) return { ok: false, reason: "invalid-input" };
-
-      const replayRow = this.db
-        .prepare(
-          `SELECT message_id, share_id, idempotency_key, request_hash,
-                  author_kind, author_user_id, link_grant_id, link_principal_id,
-                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, discussion_revision, storage_bytes
-           FROM sync_relay_share_discussion_messages
-           WHERE share_id = ?
-             AND author_kind IN ('owner', 'named')
-             AND author_user_id = ?
-             AND idempotency_key = ?
-           LIMIT 1`,
-        )
-        .get(input.shareId, input.authorUserId, input.idempotencyKey);
-      if (replayRow) {
-        if (replayRow.request_hash !== requestHash) {
-          return { ok: false, reason: "idempotency-conflict" };
-        }
-        return {
-          ok: true,
-          replayed: true,
-          message: rowToShareDiscussionMessageRow(replayRow),
-        };
-      }
-
-      // Only a genuinely new insert needs current Comment/Edit authority. This
-      // second check shares the transaction's write lock with all budget work.
-      const authorRole = input.appendGuard();
-      if (authorRole !== "owner" && authorRole !== "recipient") {
-        throw new Error("discussion append guard returned an invalid role");
-      }
-      const authorKind = authorRole === "owner" ? "owner" : "named";
-
-      if (authorRole === "recipient") {
-        const rateCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_share_discussion_messages
-               WHERE share_id = ?
-                 AND author_kind = 'named'
-                 AND author_user_id = ?
-                 AND created_at_ms > ?`,
-            )
-            .get(
-              input.shareId,
-              input.authorUserId,
-              createdAtMs - DISCUSSION_MESSAGE_RATE_WINDOW_MS,
-            )?.count ?? 0,
-        );
-        if (rateCount >= this.options.discussionMessageRateLimit) {
-          return { ok: false, reason: "rate-limit" };
-        }
-        const lifetimeCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_share_discussion_messages
-               WHERE share_id = ?
-                 AND author_kind = 'named'
-                 AND author_user_id = ?`,
-            )
-            .get(input.shareId, input.authorUserId)?.count ?? 0,
-        );
-        if (lifetimeCount >= this.options.discussionLifetimeMessageLimit) {
-          return { ok: false, reason: "lifetime-limit" };
-        }
-        const shareRowCount = Number(
-          this.db
-            .prepare(
-              `SELECT COUNT(*) AS count
-               FROM sync_relay_share_discussion_messages
-               WHERE share_id = ? AND author_kind IN ('named', 'link')`,
-            )
-            .get(input.shareId)?.count ?? 0,
-        );
-        if (shareRowCount >= this.options.discussionNonOwnerShareRowLimit) {
-          return { ok: false, reason: "share-limit" };
-        }
-      }
-
-      const messageId = this.newDiscussionId();
-      if (!messageId) {
-        throw new Error("discussion id generator returned an invalid identifier");
-      }
-      const messageStorageBytes = discussionMessageStorageBytes({
-        messageId,
-        shareId: input.shareId,
-        idempotencyKey: input.idempotencyKey,
-        requestHash,
-        authorKind,
-        authorUserId: input.authorUserId,
-        linkGrantId: null,
-        linkPrincipalId: null,
-        displayNameSnapshot: displayName,
-        body,
-      });
-      if (
-        this.workspaceUsageBytes(String(share.workspace_id)) + messageStorageBytes >
-        this.options.workspaceQuotaBytes
-      ) {
-        return { ok: false, reason: "workspace-quota" };
-      }
-      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
-
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_share_discussion_messages (
-             message_id, share_id, idempotency_key, request_hash, author_kind,
-             author_user_id, link_grant_id, link_principal_id,
-             display_name_snapshot, body, created_at_ms, deleted_at_ms,
-             deleted_by_user_id, discussion_revision, storage_bytes
-           ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, NULL, NULL, ?, ?)`,
-        )
-        .run(
-          messageId,
-          input.shareId,
-          input.idempotencyKey,
-          requestHash,
-          authorKind,
-          input.authorUserId,
-          displayName,
-          body,
-          createdAtMs,
-          discussionRevision,
-          messageStorageBytes,
-        );
-      const message = this.db
-        .prepare(
-          `SELECT message_id, share_id, idempotency_key, request_hash,
-                  author_kind, author_user_id, link_grant_id, link_principal_id,
-                  display_name_snapshot, body, created_at_ms, deleted_at_ms,
-                  deleted_by_user_id, discussion_revision, storage_bytes
-           FROM sync_relay_share_discussion_messages
-           WHERE message_id = ?`,
-        )
-        .get(messageId);
-      if (!message) throw new Error("inserted discussion message is missing");
-      return {
-        ok: true,
-        replayed: false,
-        message: rowToShareDiscussionMessageRow(message),
-      };
-    });
+    return discussionStorage.appendAuthenticatedDiscussionMessage(this, input);
   }
 
   listShareDiscussionMessages(input: {
@@ -4916,117 +565,11 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     direction?: SyncRelayShareDiscussionPageDirection;
     limit: number;
   }): SyncRelayShareDiscussionPage {
-    if (
-      !Number.isSafeInteger(input.limit) ||
-      input.limit < 1 ||
-      input.limit > LINK_DISCUSSION_PAGE_LIMIT
-    ) {
-      throw new Error(`discussion page limit must be between 1 and ${LINK_DISCUSSION_PAGE_LIMIT}`);
-    }
-    const direction = input.direction ?? "oldest-first";
-    if (direction !== "oldest-first" && direction !== "newest-first") {
-      throw new Error("discussion page direction is invalid");
-    }
-    const cursor =
-      direction === "newest-first" ? (input.before ?? null) : (input.after ?? null);
-    if (
-      cursor !== null &&
-      (!Number.isSafeInteger(cursor.createdAtMs) || !cursor.messageId)
-    ) {
-      throw new Error("discussion page cursor is invalid");
-    }
-    return this.readTx(() => {
-      const share = this.db
-        .prepare(
-          `SELECT link_writes_paused_at_ms, discussion_revision
-           FROM sync_relay_shares
-           WHERE share_id = ?`,
-        )
-        .get(input.shareId);
-      const rows = (
-        cursor === null
-          ? this.db
-              .prepare(
-                `SELECT message.message_id, message.share_id,
-                        message.idempotency_key, message.request_hash,
-                        message.author_kind, message.author_user_id,
-                        message.link_grant_id, message.link_principal_id,
-                        message.display_name_snapshot, message.body,
-                        message.created_at_ms, message.deleted_at_ms,
-                        message.deleted_by_user_id, message.discussion_revision,
-                        message.storage_bytes,
-                        principal.blocked_at_ms AS link_principal_blocked_at_ms
-                 FROM sync_relay_share_discussion_messages AS message
-                 LEFT JOIN sync_relay_link_principals AS principal
-                   ON principal.principal_id = message.link_principal_id
-                  AND principal.grant_id = message.link_grant_id
-                 WHERE message.share_id = ?
-                  ORDER BY message.created_at_ms ${direction === "newest-first" ? "DESC" : "ASC"},
-                           message.message_id ${direction === "newest-first" ? "DESC" : "ASC"}
-                  LIMIT ?`,
-              )
-              .all(input.shareId, input.limit + 1)
-          : this.db
-              .prepare(
-                `SELECT message.message_id, message.share_id,
-                        message.idempotency_key, message.request_hash,
-                        message.author_kind, message.author_user_id,
-                        message.link_grant_id, message.link_principal_id,
-                        message.display_name_snapshot, message.body,
-                        message.created_at_ms, message.deleted_at_ms,
-                        message.deleted_by_user_id, message.discussion_revision,
-                        message.storage_bytes,
-                        principal.blocked_at_ms AS link_principal_blocked_at_ms
-                 FROM sync_relay_share_discussion_messages AS message
-                 LEFT JOIN sync_relay_link_principals AS principal
-                   ON principal.principal_id = message.link_principal_id
-                  AND principal.grant_id = message.link_grant_id
-                 WHERE message.share_id = ?
-                    AND (message.created_at_ms ${direction === "newest-first" ? "<" : ">"} ? OR
-                         (message.created_at_ms = ? AND
-                          message.message_id ${direction === "newest-first" ? "<" : ">"} ?))
-                  ORDER BY message.created_at_ms ${direction === "newest-first" ? "DESC" : "ASC"},
-                           message.message_id ${direction === "newest-first" ? "DESC" : "ASC"}
-                  LIMIT ?`,
-              )
-              .all(
-                input.shareId,
-                cursor.createdAtMs,
-                cursor.createdAtMs,
-                cursor.messageId,
-                input.limit + 1,
-              )
-      ).map((row) => ({
-        ...rowToShareDiscussionMessageRow(row),
-        linkPrincipalBlocked:
-          row.author_kind === "link"
-            ? row.link_principal_blocked_at_ms !== null
-            : null,
-      }));
-      const hasMore = rows.length > input.limit;
-      const messages = hasMore ? rows.slice(0, input.limit) : rows;
-      const last = messages.at(-1);
-      return {
-        messages,
-        nextCursor:
-          hasMore && last
-            ? { createdAtMs: last.createdAtMs, messageId: last.messageId }
-            : null,
-        linkCommentsPaused: share?.link_writes_paused_at_ms != null,
-        activityRevision: Number(share?.discussion_revision ?? 0),
-      };
-    });
+    return discussionStorage.listShareDiscussionMessages(this, input);
   }
 
   getShareDiscussionRevision(shareId: string): number | null {
-    const row = this.db
-      .prepare(
-        `SELECT discussion_revision
-         FROM sync_relay_shares
-         WHERE share_id = ?`,
-      )
-      .get(shareId);
-    return row ? Number(row.discussion_revision) : null;
+    return discussionStorage.getShareDiscussionRevision(this, shareId);
   }
 
   listShareDiscussionActivity(input: {
@@ -5034,142 +577,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sinceRevision: number;
     limit: number;
   }): SyncRelayShareDiscussionActivityPage {
-    if (
-      !Number.isSafeInteger(input.sinceRevision) ||
-      input.sinceRevision < 0 ||
-      !Number.isSafeInteger(input.limit) ||
-      input.limit < 1 ||
-      input.limit > LINK_DISCUSSION_PAGE_LIMIT
-    ) {
-      throw new Error("discussion activity query is invalid");
-    }
-    return this.readTx(() => {
-      const share = this.db
-        .prepare(
-          `SELECT link_writes_paused_at_ms, discussion_revision
-           FROM sync_relay_shares
-           WHERE share_id = ?`,
-        )
-        .get(input.shareId);
-      const latestRevision = Number(share?.discussion_revision ?? 0);
-      if (input.sinceRevision > latestRevision) {
-        throw new Error("discussion activity revision is ahead of storage");
-      }
-      const changedRevisions = this.db
-        .prepare(
-          `SELECT discussion_revision
-           FROM (
-             SELECT message.discussion_revision AS discussion_revision
-             FROM sync_relay_share_discussion_messages AS message
-             WHERE message.share_id = ?
-               AND message.discussion_revision > ?
-             UNION
-             SELECT principal.discussion_revision AS discussion_revision
-             FROM sync_relay_link_principals AS principal
-             JOIN sync_relay_share_grants AS grant
-               ON grant.grant_id = principal.grant_id
-             WHERE grant.share_id = ?
-               AND principal.discussion_revision > ?
-           )
-           ORDER BY discussion_revision
-           LIMIT ?`,
-        )
-        .all(
-          input.shareId,
-          input.sinceRevision,
-          input.shareId,
-          input.sinceRevision,
-          input.limit + 1,
-        )
-        .map((row) => Number(row.discussion_revision));
-      const hasMore = changedRevisions.length > input.limit;
-      const cursorRevision = hasMore
-        ? changedRevisions[input.limit - 1]!
-        : latestRevision;
-      const messages = this.db
-        .prepare(
-          `SELECT message.message_id, message.share_id,
-                  message.idempotency_key, message.request_hash,
-                  message.author_kind, message.author_user_id,
-                  message.link_grant_id, message.link_principal_id,
-                  message.display_name_snapshot, message.body,
-                  message.created_at_ms, message.deleted_at_ms,
-                  message.deleted_by_user_id, message.discussion_revision,
-                  message.storage_bytes,
-                  principal.blocked_at_ms AS link_principal_blocked_at_ms
-           FROM sync_relay_share_discussion_messages AS message
-           LEFT JOIN sync_relay_link_principals AS principal
-             ON principal.principal_id = message.link_principal_id
-            AND principal.grant_id = message.link_grant_id
-           WHERE message.share_id = ?
-             AND message.discussion_revision > ?
-             AND message.discussion_revision <= ?
-           ORDER BY message.created_at_ms, message.message_id`,
-        )
-        .all(input.shareId, input.sinceRevision, cursorRevision)
-        .map((row) => ({
-          ...rowToShareDiscussionMessageRow(row),
-          linkPrincipalBlocked:
-            row.author_kind === "link"
-              ? row.link_principal_blocked_at_ms !== null
-              : null,
-        }));
-      const principals = this.db
-        .prepare(
-          `SELECT principal.principal_id, principal.grant_id,
-                  principal.mint_generation, principal.profile_token_hash,
-                  principal.display_name, principal.created_at_ms,
-                  principal.blocked_at_ms, principal.discussion_revision,
-                  principal.storage_bytes
-           FROM sync_relay_link_principals AS principal
-           JOIN sync_relay_share_grants AS grant
-             ON grant.grant_id = principal.grant_id
-           WHERE grant.share_id = ?
-             AND principal.discussion_revision > ?
-             AND principal.discussion_revision <= ?
-           ORDER BY principal.discussion_revision, principal.principal_id`,
-        )
-        .all(input.shareId, input.sinceRevision, cursorRevision)
-        .map(rowToLinkPrincipalRow);
-      return {
-        latestRevision,
-        cursorRevision,
-        hasMore,
-        messages,
-        principals,
-        linkCommentsPaused: share?.link_writes_paused_at_ms != null,
-      };
-    });
+    return discussionStorage.listShareDiscussionActivity(this, input);
   }
 
   getLinkPrincipal(principalId: string): SyncRelayLinkPrincipalRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                display_name, created_at_ms, blocked_at_ms,
-                discussion_revision, storage_bytes
-         FROM sync_relay_link_principals
-         WHERE principal_id = ?`,
-      )
-      .get(principalId);
-    return row ? rowToLinkPrincipalRow(row) : null;
+    return discussionStorage.getLinkPrincipal(this, principalId);
   }
 
   getLinkPrincipalForGrantProfile(
     grantId: string,
     profileTokenHash: string,
   ): SyncRelayLinkPrincipalRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT principal_id, grant_id, mint_generation, profile_token_hash,
-                display_name, created_at_ms, blocked_at_ms,
-                discussion_revision, storage_bytes
-         FROM sync_relay_link_principals
-         WHERE grant_id = ? AND profile_token_hash = ?
-         LIMIT 1`,
-      )
-      .get(grantId, profileTokenHash);
-    return row ? rowToLinkPrincipalRow(row) : null;
+    return discussionStorage.getLinkPrincipalForGrantProfile(this, grantId, profileTokenHash);
   }
 
   setLinkPrincipalBlocked(input: {
@@ -5179,48 +598,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     actorUserId: string;
     blockedAtMs: number | null;
   }): boolean {
-    if (
-      !validDiscussionDeletingUserId(input.actorUserId) ||
-      (input.blockedAtMs !== null &&
-        (!Number.isSafeInteger(input.blockedAtMs) || input.blockedAtMs < 0))
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      const principal = this.db
-        .prepare(
-          `SELECT principal.principal_id
-           FROM sync_relay_link_principals AS principal
-           JOIN sync_relay_share_grants AS grant ON grant.grant_id = principal.grant_id
-           JOIN sync_relay_shares AS share ON share.share_id = grant.share_id
-           JOIN sync_relay_workspaces AS workspace
-             ON workspace.workspace_id = share.workspace_id
-           WHERE principal.principal_id = ?
-             AND share.share_id = ?
-             AND workspace.workspace_id = ?
-             AND workspace.owner_user_id = ?`,
-        )
-        .get(
-          input.principalId,
-          input.shareId,
-          input.workspaceId,
-          input.actorUserId,
-        );
-      if (!principal) return false;
-      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
-      this.db
-        .prepare(
-          `UPDATE sync_relay_link_principals
-           SET blocked_at_ms = ?, discussion_revision = ?
-           WHERE principal_id = ?`,
-        )
-        .run(
-          input.blockedAtMs === null ? null : Math.trunc(input.blockedAtMs),
-          discussionRevision,
-          input.principalId,
-        );
-      return true;
-    });
+    return discussionStorage.setLinkPrincipalBlocked(this, input);
   }
 
   setShareLinkWritesPaused(input: {
@@ -5229,37 +607,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     actorUserId: string;
     pausedAtMs: number | null;
   }): boolean {
-    if (
-      !validDiscussionDeletingUserId(input.actorUserId) ||
-      (input.pausedAtMs !== null &&
-        (!Number.isSafeInteger(input.pausedAtMs) || input.pausedAtMs < 0))
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      const updated = this.db
-        .prepare(
-          `UPDATE sync_relay_shares
-           SET link_writes_paused_at_ms = ?,
-               discussion_revision = discussion_revision + 1
-           WHERE share_id = ?
-             AND discussion_revision < ${MAX_DISCUSSION_REVISION}
-             AND EXISTS (
-               SELECT 1
-               FROM sync_relay_workspaces AS workspace
-               WHERE workspace.workspace_id = sync_relay_shares.workspace_id
-                 AND workspace.workspace_id = ?
-                 AND workspace.owner_user_id = ?
-             )`,
-        )
-        .run(
-          input.pausedAtMs === null ? null : Math.trunc(input.pausedAtMs),
-          input.shareId,
-          input.workspaceId,
-          input.actorUserId,
-        );
-      return Number(updated.changes ?? 0) === 1;
-    });
+    return discussionStorage.setShareLinkWritesPaused(this, input);
   }
 
   deleteShareDiscussionMessage(input: {
@@ -5269,151 +617,18 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     deletedAtMs: number;
     actorUserId: string;
   }): SyncRelayDeletedDiscussionMessage | null {
-    if (
-      !Number.isSafeInteger(input.deletedAtMs) ||
-      input.deletedAtMs < 0 ||
-      !validDiscussionDeletingUserId(input.actorUserId)
-    ) {
-      return null;
-    }
-    return this.tx(() => {
-      const message = this.db
-        .prepare(
-          `SELECT message.message_id, message.created_at_ms
-           FROM sync_relay_share_discussion_messages AS message
-           JOIN sync_relay_shares AS share ON share.share_id = message.share_id
-           JOIN sync_relay_workspaces AS workspace
-             ON workspace.workspace_id = share.workspace_id
-           WHERE message.share_id = ?
-             AND message.message_id = ?
-             AND message.deleted_at_ms IS NULL
-             AND workspace.workspace_id = ?
-             AND workspace.owner_user_id = ?
-           LIMIT 1`,
-        )
-        .get(
-          input.shareId,
-          input.messageId,
-          input.workspaceId,
-          input.actorUserId,
-        );
-      if (!message) return null;
-      const deletedAtMs = Math.trunc(input.deletedAtMs);
-      const discussionRevision = this.nextShareDiscussionRevision(input.shareId);
-      const deleted = this.db
-        .prepare(
-          `UPDATE sync_relay_share_discussion_messages
-           SET body = NULL,
-               deleted_at_ms = ?,
-               deleted_by_user_id = ?,
-               discussion_revision = ?
-           WHERE share_id = ? AND message_id = ? AND deleted_at_ms IS NULL`,
-        )
-        .run(
-          deletedAtMs,
-          input.actorUserId,
-          discussionRevision,
-          input.shareId,
-          input.messageId,
-        );
-      if (Number(deleted.changes ?? 0) !== 1) return null;
-      return {
-        messageId: String(message.message_id),
-        createdAtMs: Number(message.created_at_ms),
-        deletedAtMs,
-      };
-    });
+    return discussionStorage.deleteShareDiscussionMessage(this, input);
   }
 
   mintLinkHandoffCode(input: {
     code: SyncRelayLinkHandoffCodeRow;
     guard: () => boolean;
   }): boolean {
-    const { code } = input;
-    if (
-      !code.codeId ||
-      !code.codeHash ||
-      !Number.isInteger(code.generation) ||
-      code.generation < 1 ||
-      !Number.isSafeInteger(code.mintedAtMs) ||
-      !Number.isSafeInteger(code.expiresAtMs) ||
-      code.expiresAtMs <= code.mintedAtMs
-    ) {
-      return false;
-    }
-    return this.tx(() => {
-      if (!input.guard()) return false;
-      const grant = this.getShareGrant(code.grantId);
-      if (
-        !grant ||
-        grant.principalKind !== "link" ||
-        grant.status !== "active" ||
-        grant.revokedAtMs !== null ||
-        grant.generation !== code.generation ||
-        (grant.access !== "view" && grant.access !== "comment")
-      ) {
-        return false;
-      }
-
-      this.db
-        .prepare("DELETE FROM sync_relay_link_handoff_codes WHERE expires_at_ms <= ?")
-        .run(Math.trunc(code.mintedAtMs));
-      const currentCount = Number(
-        this.db
-          .prepare(
-            `SELECT COUNT(*) AS count
-             FROM sync_relay_link_handoff_codes
-             WHERE grant_id = ?`,
-          )
-          .get(code.grantId)?.count ?? 0,
-      );
-      const codesToDelete =
-        currentCount - LINK_HANDOFF_CODES_PER_GRANT_LIMIT + 1;
-      if (codesToDelete > 0) {
-        const evicted = this.db
-          .prepare(
-            `DELETE FROM sync_relay_link_handoff_codes
-             WHERE code_id IN (
-               SELECT code_id
-               FROM sync_relay_link_handoff_codes
-               WHERE grant_id = ? AND result_grant_id IS NULL
-               ORDER BY minted_at_ms ASC, code_id ASC
-               LIMIT ?
-             )`,
-          )
-          .run(code.grantId, codesToDelete);
-        if (Number(evicted.changes ?? 0) !== codesToDelete) return false;
-      }
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_link_handoff_codes (
-             code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms
-           ) VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(
-          code.codeId,
-          code.codeHash,
-          code.grantId,
-          code.generation,
-          Math.trunc(code.mintedAtMs),
-          Math.trunc(code.expiresAtMs),
-        );
-      return true;
-    });
+    return handoffStorage.mintLinkHandoffCode(this, input);
   }
 
   hasLinkHandoffCode(codeHash: string): boolean {
-    if (!codeHash) return false;
-    return (
-      this.db
-        .prepare(
-          `SELECT 1
-           FROM sync_relay_link_handoff_codes
-           WHERE code_hash = ?
-           LIMIT 1`,
-        )
-        .get(codeHash) !== undefined
-    );
+    return handoffStorage.hasLinkHandoffCode(this, codeHash);
   }
 
   redeemLinkHandoffCode(input: {
@@ -5423,490 +638,69 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     mintGrantId: () => string;
     guard: (code: SyncRelayLinkHandoffCodeRow) => boolean;
   }): LinkHandoffRedeemResult {
-    if (
-      !input.codeHash ||
-      !input.principalUserId ||
-      !Number.isSafeInteger(input.redeemedAtMs)
-    ) {
-      return { ok: false };
-    }
-    return this.tx(() => {
-      const storedRow = this.db
-        .prepare(
-          `SELECT code_id, code_hash, grant_id, generation, minted_at_ms, expires_at_ms,
-                  result_grant_id
-           FROM sync_relay_link_handoff_codes
-           WHERE code_hash = ?
-           LIMIT 1`,
-        )
-        .get(input.codeHash);
-      if (!storedRow) return { ok: false };
-      const code = rowToLinkHandoffCodeRow(storedRow);
-      if (!constantTimeHashEqual(input.codeHash, code.codeHash)) {
-        return { ok: false };
-      }
-      const deleteCode = (): void => {
-        this.db
-          .prepare(
-            `DELETE FROM sync_relay_link_handoff_codes
-             WHERE code_id = ? AND code_hash = ?`,
-          )
-          .run(code.codeId, code.codeHash);
-      };
-      const recordResultGrant = (grantId: string): boolean => {
-        const recorded = this.db
-          .prepare(
-            `UPDATE sync_relay_link_handoff_codes
-             SET result_grant_id = ?
-             WHERE code_id = ? AND code_hash = ? AND result_grant_id IS NULL`,
-          )
-          .run(grantId, code.codeId, code.codeHash);
-        return Number(recorded.changes ?? 0) === 1;
-      };
-      if (code.expiresAtMs <= input.redeemedAtMs) {
-        deleteCode();
-        return { ok: false };
-      }
-
-      if (code.resultGrantId !== null) {
-        const grant = this.getShareGrant(code.resultGrantId);
-        if (grant?.principalUserId !== input.principalUserId) {
-          return { ok: false };
-        }
-        if (
-          grant.principalKind !== "user" ||
-          grant.status !== "active" ||
-          grant.revokedAtMs !== null ||
-          (grant.access !== "view" && grant.access !== "comment")
-        ) {
-          deleteCode();
-          return { ok: false };
-        }
-        return { ok: true, shareId: grant.shareId, grant };
-      }
-
-      const refuseAndConsume = (): LinkHandoffRedeemResult => {
-        deleteCode();
-        return { ok: false };
-      };
-
-      let authorized = false;
-      try {
-        authorized = input.guard(code);
-      } catch {
-        authorized = false;
-      }
-      if (!authorized) return refuseAndConsume();
-
-      const parent = this.getShareGrant(code.grantId);
-      if (
-        !parent ||
-        parent.principalKind !== "link" ||
-        parent.status !== "active" ||
-        parent.revokedAtMs !== null ||
-        parent.generation !== code.generation ||
-        (parent.access !== "view" && parent.access !== "comment")
-      ) {
-        return refuseAndConsume();
-      }
-      const share = this.getShare(parent.shareId);
-      if (!share || share.granterUserId === input.principalUserId) {
-        return refuseAndConsume();
-      }
-
-      const dependents = this.db
-        .prepare(
-          `SELECT grant_id, share_id, principal_kind, principal_user_id,
-                  principal_email, access, generation, status, created_at_ms,
-                  revoked_at_ms, parent_grant_id
-           FROM sync_relay_share_grants
-           WHERE parent_grant_id = ? AND principal_user_id = ?
-           ORDER BY created_at_ms, grant_id`,
-        )
-        .all(parent.grantId, input.principalUserId)
-        .map(rowToShareGrantRow);
-      if (dependents.some((dependent) => dependent.status === "revoked")) {
-        return refuseAndConsume();
-      }
-      const existing = dependents.find(
-        (dependent) => dependent.status === "active",
-      );
-      if (existing) {
-        if (!recordResultGrant(existing.grantId)) return { ok: false };
-        return { ok: true, shareId: share.shareId, grant: existing };
-      }
-
-      const activeDependentCount = Number(
-        this.db
-          .prepare(
-            `SELECT COUNT(*) AS count
-             FROM sync_relay_share_grants
-             WHERE parent_grant_id = ? AND status = 'active'`,
-          )
-          .get(parent.grantId)?.count ?? 0,
-      );
-      if (activeDependentCount >= ACTIVE_LINK_DEPENDENT_GRANT_LIMIT) {
-        return refuseAndConsume();
-      }
-
-      const grant: SyncRelayShareGrantRow = {
-        grantId: input.mintGrantId(),
-        shareId: share.shareId,
-        principalKind: "user",
-        principalUserId: input.principalUserId,
-        principalEmail: null,
-        access: parent.access,
-        generation: 1,
-        status: "active",
-        createdAtMs: Math.trunc(input.redeemedAtMs),
-        revokedAtMs: null,
-        parentGrantId: parent.grantId,
-      };
-      if (!recordResultGrant(grant.grantId)) return { ok: false };
-      this.insertShareGrant(grant);
-      return { ok: true, shareId: share.shareId, grant };
-    });
+    return handoffStorage.redeemLinkHandoffCode(this, input);
   }
 
-  private insertShareGrant(grant: SyncRelayShareGrantRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_share_grants (
-           grant_id, share_id, principal_kind, principal_user_id, principal_email,
-           access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        grant.grantId,
-        grant.shareId,
-        grant.principalKind,
-        grant.principalUserId,
-        grant.principalEmail,
-        grant.access,
-        grant.generation,
-        grant.status,
-        Math.trunc(grant.createdAtMs),
-        grant.revokedAtMs,
-        grant.parentGrantId,
-      );
+  insertShareGrant(grant: SyncRelayShareGrantRow): void {
+    return sharesStorage.insertShareGrant(this, grant);
   }
 
-  private nextShareDiscussionRevision(shareId: string): number {
-    const row = this.db
-      .prepare(
-        `UPDATE sync_relay_shares
-         SET discussion_revision = discussion_revision + 1
-         WHERE share_id = ?
-           AND discussion_revision < ${MAX_DISCUSSION_REVISION}
-         RETURNING discussion_revision`,
-      )
-      .get(shareId);
-    if (!row) throw new Error("share discussion revision cannot advance");
-    const revision = Number(row.discussion_revision);
-    if (!Number.isSafeInteger(revision)) {
-      throw new Error("share discussion revision is invalid");
-    }
-    return revision;
+  nextShareDiscussionRevision(shareId: string): number {
+    return discussionStorage.nextShareDiscussionRevision(this, shareId);
   }
 
-  private insertShare(share: SyncRelayShareRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_shares (
-           share_id, workspace_id, granter_user_id, selector_json, created_at_ms
-         ) VALUES (?, ?, ?, ?, ?)`,
-      )
-      .run(
-        share.shareId,
-        share.workspaceId,
-        share.granterUserId,
-        share.selectorJson,
-        Math.trunc(share.createdAtMs),
-      );
+  insertShare(share: SyncRelayShareRow): void {
+    return sharesStorage.insertShare(this, share);
   }
 
-  private insertLinkCredential(credential: SyncRelayLinkCredentialRow): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_link_credentials (
-           credential_id, grant_id, secret_hash, generation, minted_at_ms, retired_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        credential.credentialId,
-        credential.grantId,
-        credential.secretHash,
-        credential.generation,
-        Math.trunc(credential.mintedAtMs),
-        credential.retiredAtMs,
-      );
+  insertLinkCredential(credential: SyncRelayLinkCredentialRow): void {
+    return sharesStorage.insertLinkCredential(this, credential);
   }
 
-  private upsertLinkUsage(grantId: string, lastUsedAtMs: number): void {
-    this.db
-      .prepare(
-        `INSERT INTO sync_relay_link_usage (grant_id, last_used_at_ms)
-         VALUES (?, ?)
-         ON CONFLICT (grant_id) DO UPDATE SET
-           last_used_at_ms = MAX(
-             sync_relay_link_usage.last_used_at_ms,
-             excluded.last_used_at_ms
-           )`,
-      )
-      .run(grantId, Math.trunc(lastUsedAtMs));
+  upsertLinkUsage(grantId: string, lastUsedAtMs: number): void {
+    return sharesStorage.upsertLinkUsage(this, grantId, lastUsedAtMs);
   }
 
-  private retireCurrentLinkCredential(grantId: string, retiredAtMs: number): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE sync_relay_link_credentials
-         SET retired_at_ms = ?
-         WHERE grant_id = ? AND retired_at_ms IS NULL`,
-      )
-      .run(Math.trunc(retiredAtMs), grantId);
-    return Number(result.changes ?? 0) > 0;
+  retireCurrentLinkCredential(grantId: string, retiredAtMs: number): boolean {
+    return sharesStorage.retireCurrentLinkCredential(this, grantId, retiredAtMs);
   }
 
-  private pruneRetiredLinkCredentials(grantId: string): void {
-    this.db
-      .prepare(
-        `DELETE FROM sync_relay_link_credentials
-         WHERE credential_id IN (
-           SELECT credential_id
-           FROM sync_relay_link_credentials
-           WHERE grant_id = ? AND retired_at_ms IS NOT NULL
-           ORDER BY minted_at_ms DESC
-           LIMIT -1 OFFSET ?
-         )`,
-      )
-      .run(grantId, RETIRED_LINK_CREDENTIAL_HISTORY_LIMIT);
+  pruneRetiredLinkCredentials(grantId: string): void {
+    return sharesStorage.pruneRetiredLinkCredentials(this, grantId);
   }
 
-  private activeDependentGrants(parentGrantId: string): SyncRelayShareGrantRow[] {
-    return this.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
-                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-         FROM sync_relay_share_grants
-         WHERE parent_grant_id = ? AND status = 'active'
-         ORDER BY grant_id`,
-      )
-      .all(parentGrantId)
-      .map(rowToShareGrantRow);
+  activeDependentGrants(parentGrantId: string): SyncRelayShareGrantRow[] {
+    return sharesStorage.activeDependentGrants(this, parentGrantId);
   }
 
-  private incrementActiveDependentGenerations(parentGrantId: string): void {
-    this.db
-      .prepare(
-        `UPDATE sync_relay_share_grants
-         SET generation = generation + 1
-         WHERE parent_grant_id = ? AND status = 'active'`,
-      )
-      .run(parentGrantId);
+  incrementActiveDependentGenerations(parentGrantId: string): void {
+    return sharesStorage.incrementActiveDependentGenerations(this, parentGrantId);
   }
 
   claimPendingSharesForEmail(email: string, userId: string): number {
-    const normalized = email.trim().toLowerCase();
-    if (!normalized) return 0;
-    const result = this.db
-      .prepare(
-        `UPDATE sync_relay_share_grants
-         SET principal_kind = 'user', principal_user_id = ?, principal_email = NULL
-         WHERE principal_kind = 'email' AND principal_email = ? AND status = 'active'`,
-      )
-      .run(userId, normalized);
-    return Number(result.changes ?? 0);
+    return sharesStorage.claimPendingSharesForEmail(this, email, userId);
   }
 
   getShare(shareId: string): SyncRelayShareRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT share_id, workspace_id, granter_user_id, selector_json, created_at_ms
-         FROM sync_relay_shares WHERE share_id = ?`,
-      )
-      .get(shareId);
-    return row ? rowToShareRow(row) : null;
+    return sharesStorage.getShare(this, shareId);
   }
 
   listActiveShareGrantsForRecipient(
     shareId: string,
     recipientUserId: string,
   ): SyncRelayShareGrantRow[] {
-    return this.db
-      .prepare(
-        `SELECT grant_id, share_id, principal_kind, principal_user_id, principal_email,
-                access, generation, status, created_at_ms, revoked_at_ms, parent_grant_id
-         FROM sync_relay_share_grants
-         WHERE share_id = ? AND principal_kind = 'user' AND principal_user_id = ?
-           AND status = 'active'
-         ORDER BY created_at_ms DESC, grant_id`,
-      )
-      .all(shareId, recipientUserId)
-      .map(rowToShareGrantRow);
+    return sharesStorage.listActiveShareGrantsForRecipient(this, shareId, recipientUserId);
   }
 
   listSharesGrantedBy(granterUserId: string): SyncRelayShareWithGrantRow[] {
-    return this.db
-      .prepare(
-        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
-                s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
-                g.principal_kind, g.principal_user_id, g.principal_email, g.access,
-                g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
-                g.revoked_at_ms, g.parent_grant_id
-         FROM sync_relay_shares s
-         JOIN sync_relay_share_grants g ON g.share_id = s.share_id
-         WHERE s.granter_user_id = ? AND g.parent_grant_id IS NULL
-         ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
-      )
-      .all(granterUserId)
-      .map(rowToShareWithGrantRow);
+    return sharesStorage.listSharesGrantedBy(this, granterUserId);
   }
 
   listLinkGrantsByWorkspace(
     workspaceId: string,
     cursor?: SyncRelayLinkInventoryCursor,
   ): SyncRelayLinkInventoryPage {
-    const afterCursor = cursor
-      ? `AND (s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id)
-             > (?, ?, ?, ?)`
-      : "";
-    const rows = this.db
-      .prepare(
-        `WITH page_links AS (
-           SELECT s.created_at_ms AS share_created_at_ms, s.share_id,
-                  link.created_at_ms AS link_created_at_ms, link.grant_id
-           FROM sync_relay_shares s
-           JOIN sync_relay_share_grants link
-             ON link.share_id = s.share_id AND link.principal_kind = 'link'
-           WHERE s.workspace_id = ?
-             ${afterCursor}
-           ORDER BY s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id
-           LIMIT ${LINK_INVENTORY_PAGE_SIZE + 1}
-         ), bounded_links AS (
-           SELECT *
-           FROM page_links
-           ORDER BY share_created_at_ms, share_id, link_created_at_ms, grant_id
-           LIMIT ${LINK_INVENTORY_PAGE_SIZE}
-         )
-         SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
-                s.created_at_ms AS share_created_at_ms,
-                link.grant_id AS link_grant_id, link.share_id AS link_share_id,
-                link.principal_kind AS link_principal_kind,
-                link.principal_user_id AS link_principal_user_id,
-                link.principal_email AS link_principal_email,
-                link.access AS link_access, link.generation AS link_generation,
-                link.status AS link_status, link.created_at_ms AS link_created_at_ms,
-                link.revoked_at_ms AS link_revoked_at_ms,
-                link.parent_grant_id AS link_parent_grant_id,
-                usage.last_used_at_ms AS last_used_at_ms,
-                credential.minted_at_ms AS url_issued_at_ms,
-                dependent.grant_id AS dependent_grant_id,
-                dependent.share_id AS dependent_share_id,
-                dependent.principal_kind AS dependent_principal_kind,
-                dependent.principal_user_id AS dependent_principal_user_id,
-                dependent.principal_email AS dependent_principal_email,
-                dependent.access AS dependent_access,
-                dependent.generation AS dependent_generation,
-                dependent.status AS dependent_status,
-                dependent.created_at_ms AS dependent_created_at_ms,
-                dependent.revoked_at_ms AS dependent_revoked_at_ms,
-                dependent.parent_grant_id AS dependent_parent_grant_id,
-                (SELECT COUNT(*) FROM page_links) AS page_link_count
-         FROM bounded_links page
-         JOIN sync_relay_shares s ON s.share_id = page.share_id
-         JOIN sync_relay_share_grants link ON link.grant_id = page.grant_id
-         LEFT JOIN sync_relay_link_usage usage
-           ON usage.grant_id = link.grant_id
-         LEFT JOIN sync_relay_link_credentials credential
-           ON credential.grant_id = link.grant_id
-          AND credential.retired_at_ms IS NULL
-          AND link.status = 'active'
-         LEFT JOIN sync_relay_share_grants dependent
-           ON dependent.parent_grant_id = link.grant_id
-          AND dependent.status = 'active'
-          AND link.status = 'active'
-         ORDER BY s.created_at_ms, s.share_id, link.created_at_ms, link.grant_id,
-                  dependent.grant_id`,
-      )
-      .all(
-        workspaceId,
-        ...(cursor
-          ? [
-              cursor.shareCreatedAtMs,
-              cursor.shareId,
-              cursor.linkCreatedAtMs,
-              cursor.grantId,
-            ]
-          : []),
-      );
-    const links = new Map<string, SyncRelayLinkInventoryRow>();
-    for (const row of rows) {
-      const grantId = String(row.link_grant_id);
-      let link = links.get(grantId);
-      if (!link) {
-        link = {
-          share: rowToShareRow({
-            ...row,
-            created_at_ms: row.share_created_at_ms,
-          }),
-          grant: rowToShareGrantRow({
-            grant_id: row.link_grant_id,
-            share_id: row.link_share_id,
-            principal_kind: row.link_principal_kind,
-            principal_user_id: row.link_principal_user_id,
-            principal_email: row.link_principal_email,
-            access: row.link_access,
-            generation: row.link_generation,
-            status: row.link_status,
-            created_at_ms: row.link_created_at_ms,
-            revoked_at_ms: row.link_revoked_at_ms,
-            parent_grant_id: row.link_parent_grant_id,
-          }),
-          dependents: [],
-          lastUsedAtMs:
-            row.last_used_at_ms === null || row.last_used_at_ms === undefined
-              ? null
-              : Number(row.last_used_at_ms),
-          urlIssuedAtMs:
-            row.url_issued_at_ms === null || row.url_issued_at_ms === undefined
-              ? null
-              : Number(row.url_issued_at_ms),
-        };
-        links.set(grantId, link);
-      }
-      if (row.dependent_grant_id !== null && row.dependent_grant_id !== undefined) {
-        link.dependents.push(
-          rowToShareGrantRow({
-            grant_id: row.dependent_grant_id,
-            share_id: row.dependent_share_id,
-            principal_kind: row.dependent_principal_kind,
-            principal_user_id: row.dependent_principal_user_id,
-            principal_email: row.dependent_principal_email,
-            access: row.dependent_access,
-            generation: row.dependent_generation,
-            status: row.dependent_status,
-            created_at_ms: row.dependent_created_at_ms,
-            revoked_at_ms: row.dependent_revoked_at_ms,
-            parent_grant_id: row.dependent_parent_grant_id,
-          }),
-        );
-      }
-    }
-    const pageLinks = [...links.values()];
-    const last = pageLinks.at(-1);
-    const hasMore = Number(rows[0]?.page_link_count ?? 0) > LINK_INVENTORY_PAGE_SIZE;
-    return {
-      links: pageLinks,
-      nextCursor:
-        hasMore && last
-          ? {
-              shareCreatedAtMs: last.share.createdAtMs,
-              shareId: last.share.shareId,
-              linkCreatedAtMs: last.grant.createdAtMs,
-              grantId: last.grant.grantId,
-            }
-          : null,
-    };
+    return sharesStorage.listLinkGrantsByWorkspace(this, workspaceId, cursor);
   }
 
   listActiveIndependentShareGrants(input: {
@@ -5914,115 +708,15 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     shareIds: readonly string[];
     cursor?: SyncRelayIndependentGrantInventoryCursor;
   }): SyncRelayIndependentGrantInventoryPage {
-    const shareIds = [...new Set(input.shareIds)];
-    if (shareIds.length === 0) return { grants: [], nextCursor: null };
-    if (shareIds.length > LINK_INVENTORY_PAGE_SIZE) {
-      throw new Error("link inventory share page exceeds its limit");
-    }
-    const afterCursor = input.cursor
-      ? "AND (grant.share_id, grant.created_at_ms, grant.grant_id) > (?, ?, ?)"
-      : "";
-    const rows = this.db
-      .prepare(
-        `SELECT grant.grant_id, grant.share_id, grant.principal_kind,
-                grant.principal_user_id, grant.principal_email, grant.access,
-                grant.generation, grant.status, grant.created_at_ms,
-                grant.revoked_at_ms, grant.parent_grant_id
-         FROM sync_relay_share_grants grant
-         JOIN sync_relay_shares share ON share.share_id = grant.share_id
-         WHERE share.workspace_id = ?
-           AND grant.share_id IN (${shareIds.map(() => "?").join(", ")})
-           AND grant.status = 'active'
-           AND grant.parent_grant_id IS NULL
-           AND grant.principal_kind != 'link'
-           ${afterCursor}
-         ORDER BY grant.share_id, grant.created_at_ms, grant.grant_id
-         LIMIT ${LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT + 1}`,
-      )
-      .all(
-        input.workspaceId,
-        ...shareIds,
-        ...(input.cursor
-          ? [
-              input.cursor.shareId,
-              input.cursor.grantCreatedAtMs,
-              input.cursor.grantId,
-            ]
-          : []),
-      )
-      .map(rowToShareGrantRow);
-    const grants = rows.slice(0, LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT);
-    const last = grants.at(-1);
-    return {
-      grants,
-      nextCursor:
-        rows.length > LINK_INVENTORY_INDEPENDENT_GRANT_LIMIT && last
-          ? {
-              shareId: last.shareId,
-              grantCreatedAtMs: last.createdAtMs,
-              grantId: last.grantId,
-            }
-          : null,
-    };
+    return sharesStorage.listActiveIndependentShareGrants(this, input);
   }
 
   listSharesReceivedBy(recipientUserId: string): SyncRelayShareWithGrantRow[] {
-    return this.db
-      .prepare(
-        `SELECT s.share_id, s.workspace_id, s.granter_user_id, s.selector_json,
-                s.created_at_ms, g.grant_id, g.share_id AS grant_share_id,
-                g.principal_kind, g.principal_user_id, g.principal_email, g.access,
-                g.generation, g.status, g.created_at_ms AS grant_created_at_ms,
-                g.revoked_at_ms, g.parent_grant_id
-         FROM sync_relay_shares s
-         JOIN sync_relay_share_grants g ON g.share_id = s.share_id
-         WHERE g.principal_kind = 'user' AND g.principal_user_id = ? AND g.status = 'active'
-         ORDER BY s.created_at_ms DESC, s.share_id, g.created_at_ms, g.grant_id`,
-      )
-      .all(recipientUserId)
-      .map(rowToShareWithGrantRow);
+    return sharesStorage.listSharesReceivedBy(this, recipientUserId);
   }
 
   revokeShare(shareId: string, revokedAtMs: number): boolean {
-    return this.tx(() => {
-      const existing = this.db
-        .prepare("SELECT 1 AS present FROM sync_relay_shares WHERE share_id = ?")
-        .get(shareId);
-      if (existing === undefined) return false;
-      const revoked = this.db
-        .prepare(
-          `UPDATE sync_relay_share_grants
-           SET status = 'revoked', generation = generation + 1, revoked_at_ms = ?
-           WHERE share_id = ? AND status = 'active'`,
-        )
-        .run(Math.trunc(revokedAtMs), shareId);
-      this.db
-        .prepare(
-          `UPDATE sync_relay_link_credentials
-           SET retired_at_ms = ?
-           WHERE retired_at_ms IS NULL
-             AND grant_id IN (
-               SELECT grant_id FROM sync_relay_share_grants WHERE share_id = ?
-             )`,
-        )
-        .run(Math.trunc(revokedAtMs), shareId);
-      if (Number(revoked.changes ?? 0) > 0) {
-        // Ending a share settles what it was still carrying. An
-        // open proposal outlives the grant it came through — the recipient
-        // can no longer withdraw it, and its content stays pinned out of the
-        // blob sweep for as long as it stays open. Declining is the honest
-        // state: the granter ended the share instead of answering, and the
-        // recipient's own copy still has the changes.
-        this.db
-          .prepare(
-            `UPDATE sync_relay_share_proposals
-             SET state = 'declined', settled_at_ms = ?
-             WHERE share_id = ? AND state = 'open'`,
-          )
-          .run(Math.trunc(revokedAtMs), shareId);
-      }
-      return true;
-    });
+    return sharesStorage.revokeShare(this, shareId, revokedAtMs);
   }
 
   listObjectMomentLogRowsByBlob(input: {
@@ -6032,84 +726,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     semantics: "historical-log" | "current-state";
     selectorPaths?: readonly string[];
   }): SyncRelayLogRow[] {
-    if (input.selectorPaths?.length === 0) return [];
-    const selectorPathsCte = input.selectorPaths
-      ? `selector_paths(path) AS (
-           VALUES ${input.selectorPaths.map(() => "(?)").join(", ")}
-         ),`
-      : "";
-    const selectorPathsCondition = input.selectorPaths
-      ? `AND EXISTS (
-             SELECT 1
-             FROM selector_paths selected
-             WHERE candidate_moment.path = selected.path
-                OR substr(candidate_moment.path, 1, length(selected.path) + 1) = selected.path || '/'
-           )`
-      : "";
-    const candidateCtes =
-      input.semantics === "current-state"
-        ? `candidate_objects AS MATERIALIZED (
-             SELECT DISTINCT matching.object_id
-             FROM sync_relay_object_moments matching
-             WHERE matching.workspace_id = ? AND matching.version_id = ?
-               AND matching.blob_sha256 = ?
-           ),
-           latest_by_object AS (
-             SELECT candidate.object_id,
-                    (
-                      SELECT latest.relay_seq
-                      FROM sync_relay_object_moments latest
-                      WHERE latest.workspace_id = ? AND latest.version_id = ?
-                        AND latest.object_id = candidate.object_id
-                      ORDER BY latest.relay_seq DESC
-                      LIMIT 1
-                    ) AS relay_seq
-             FROM candidate_objects candidate
-           ),
-           candidates AS (
-             SELECT candidate_moment.relay_seq
-             FROM latest_by_object latest
-             JOIN sync_relay_object_moments candidate_moment
-               ON candidate_moment.workspace_id = ?
-              AND candidate_moment.object_id = latest.object_id
-              AND candidate_moment.relay_seq = latest.relay_seq
-             WHERE candidate_moment.blob_sha256 = ?
-               ${selectorPathsCondition}
-             ORDER BY candidate_moment.relay_seq DESC
-             LIMIT ?
-           )`
-        : `candidates AS (
-             SELECT MAX(candidate_moment.relay_seq) AS relay_seq
-             FROM sync_relay_object_moments candidate_moment
-             WHERE candidate_moment.workspace_id = ?
-               AND candidate_moment.version_id = ?
-               AND candidate_moment.blob_sha256 = ?
-               ${selectorPathsCondition}
-             GROUP BY candidate_moment.object_id
-             ORDER BY relay_seq DESC
-             LIMIT ?
-           )`;
-    return this.db
-      .prepare(
-        `WITH ${selectorPathsCte}
-         ${candidateCtes}
-         SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
-         FROM candidates c
-         JOIN sync_relay_log l ON l.relay_seq = c.relay_seq
-         ORDER BY c.relay_seq DESC`,
-      )
-      .all(
-        ...(input.selectorPaths ?? []),
-        input.workspaceId,
-        input.versionId,
-        input.sha256,
-        ...(input.semantics === "current-state"
-          ? [input.workspaceId, input.versionId, input.workspaceId, input.sha256]
-          : []),
-        SHARED_BLOB_CANDIDATE_LIMIT,
-      )
-      .map(rowToLogRow);
+    return objectIndexStorage.listObjectMomentLogRowsByBlob(this, input);
   }
 
   listVersionCreateLogRowsByBlob(input: {
@@ -6117,156 +734,36 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     sha256: string;
   }): SyncRelayLogRow[] {
-    return this.db
-      .prepare(
-        `SELECT l.workspace_id, l.origin_id, l.origin_seq, l.op_kind,
-                l.payload_json, l.recorded_at_ms, l.relay_seq
-         FROM sync_relay_version_snapshot_blobs candidate
-         JOIN sync_relay_log l ON l.relay_seq = candidate.relay_seq
-         WHERE candidate.workspace_id = ? AND candidate.version_id = ?
-           AND candidate.blob_sha256 = ?
-         ORDER BY candidate.relay_seq DESC
-         LIMIT ?`,
-      )
-      .all(
-        input.workspaceId,
-        input.versionId,
-        input.sha256,
-        SHARED_BLOB_CANDIDATE_LIMIT,
-      )
-      .map(rowToLogRow);
+    return objectIndexStorage.listVersionCreateLogRowsByBlob(this, input);
   }
 
   findThreadCreateChannelWireId(
     workspaceId: string,
     threadId: string,
   ): string | null | undefined {
-    if (!threadId) return undefined;
-    for (const row of this.threadCreateRows(workspaceId, threadId)) {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(String(row.payload_json));
-      } catch {
-        continue;
-      }
-      const record = asRecord(payload);
-      if (!record || record.threadId !== threadId) continue;
-      // The earliest matching op is authoritative, whatever it says: a string
-      // channelWireId with no linked-file owner is the binding; anything else
-      // (a file-linked/both-owned thread or a pre-wire-id slug binding) is "no
-      // shareable binding" — fail closed.
-      return record.linkedObjectId === undefined &&
-        typeof record.channelWireId === "string" &&
-        record.channelWireId.length > 0
-        ? record.channelWireId
-        : null;
-    }
-    return undefined;
+    return objectIndexStorage.findThreadCreateChannelWireId(this, workspaceId, threadId);
   }
 
   findChannelCreateKind(
     workspaceId: string,
     channelWireId: string,
   ): "channel" | "dm" | "agent" | null | undefined {
-    if (!channelWireId) return undefined;
-    // Canonical payload JSON sorts keys, so this exact fragment is a useful
-    // pre-filter. Escaping LIKE metacharacters prevents a hostile wire id from
-    // widening the scan; parsed exact equality below remains authoritative.
-    const needle = `"wireId":${JSON.stringify(channelWireId)}`
-      .replaceAll("\\", "\\\\")
-      .replaceAll("%", "\\%")
-      .replaceAll("_", "\\_");
-    const rows = this.db
-      .prepare(
-        `SELECT payload_json FROM sync_relay_log
-         WHERE workspace_id = ? AND op_kind = 'chat.channel.create'
-           AND payload_json LIKE ? ESCAPE '\\'
-         ORDER BY relay_seq`,
-      )
-      .all(workspaceId, `%${needle}%`);
-    for (const row of rows) {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(String(row.payload_json));
-      } catch {
-        continue;
-      }
-      const record = asRecord(payload);
-      if (!record || record.wireId !== channelWireId) continue;
-      // The earliest exact create is authoritative even when malformed; do not
-      // skip forward to a later op that could forge a shareable kind. Require
-      // the engine's basic replay shape and reserved agent-wire/kind invariant
-      // before trusting a human kind; malformed creates resolve permanently
-      // unshareable.
-      if (
-        typeof record.channelId !== "string" ||
-        record.channelId.length === 0 ||
-        typeof record.name !== "string" ||
-        record.name.length === 0 ||
-        typeof record.slug !== "string" ||
-        record.slug.length === 0 ||
-        (record.kind !== "channel" && record.kind !== "dm" && record.kind !== "agent") ||
-        typeof record.createdAtMs !== "number" ||
-        !Number.isFinite(record.createdAtMs) ||
-        ((record.kind === "agent") !== (record.wireId === AGENT_CHANNEL_WIRE_ID))
-      ) {
-        return null;
-      }
-      return record.kind;
-    }
-    return undefined;
+    return objectIndexStorage.findChannelCreateKind(this, workspaceId, channelWireId);
   }
 
   findThreadCreateFileBinding(
     workspaceId: string,
     threadId: string,
   ): ThreadFileBinding | null | undefined {
-    if (!threadId) return undefined;
-    for (const row of this.threadCreateRows(workspaceId, threadId)) {
-      let payload: unknown;
-      try {
-        payload = JSON.parse(String(row.payload_json));
-      } catch {
-        continue;
-      }
-      const record = asRecord(payload);
-      if (!record || record.threadId !== threadId) continue;
-      // The earliest matching op is authoritative, whatever it says. Exactly
-      // one binding shape may be present: an op claiming both is malformed,
-      // and reading either half of it would let a crafted create bind a
-      // thread twice.
-      const objectId = record.linkedObjectId;
-      const path = record.linkedPath;
-      const hasObject = typeof objectId === "string" && objectId.length > 0;
-      const hasPath = typeof path === "string" && path.length > 0;
-      if (hasObject && hasPath) return null;
-      if (hasObject) return { kind: "object", objectId: objectId as string };
-      if (hasPath) return { kind: "path", path: path as string };
-      return null;
-    }
-    return undefined;
+    return objectIndexStorage.findThreadCreateFileBinding(this, workspaceId, threadId);
   }
 
   objectIdAtPath(workspaceId: string, path: string): string | undefined {
-    if (!path) return undefined;
-    const row = this.db
-      .prepare(
-        "SELECT object_id FROM sync_relay_object_paths \
-         WHERE workspace_id = ? AND path = ? ORDER BY relay_seq DESC LIMIT 1",
-      )
-      .get(workspaceId, path);
-    return typeof row?.object_id === "string" ? row.object_id : undefined;
+    return objectIndexStorage.objectIdAtPath(this, workspaceId, path);
   }
 
   objectCurrentPath(workspaceId: string, objectId: string): string | null | undefined {
-    if (!objectId) return undefined;
-    const row = this.db
-      .prepare(
-        "SELECT path FROM sync_relay_object_paths WHERE workspace_id = ? AND object_id = ?",
-      )
-      .get(workspaceId, objectId);
-    if (row === undefined) return undefined;
-    return typeof row.path === "string" && row.path.length > 0 ? row.path : null;
+    return objectIndexStorage.objectCurrentPath(this, workspaceId, objectId);
   }
 
   objectIdAtPathInVersion(input: {
@@ -6274,28 +771,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     path: string;
   }): string | undefined {
-    if (!input.path || !input.versionId) return undefined;
-    // The object whose latest moment in this version sits at this path. A
-    // moment that moved the object away leaves a newer row naming another
-    // path, so that object no longer answers here — which is what makes this
-    // "who is at this path now, in this version" rather than "who was ever".
-    const row = this.db
-      .prepare(
-        `SELECT m.object_id
-         FROM sync_relay_object_moments m
-         WHERE m.workspace_id = ? AND m.version_id = ? AND m.path = ?
-           AND m.relay_seq = (
-             SELECT MAX(latest.relay_seq)
-             FROM sync_relay_object_moments latest
-             WHERE latest.workspace_id = m.workspace_id
-               AND latest.object_id = m.object_id
-               AND latest.version_id = m.version_id
-           )
-         ORDER BY m.relay_seq DESC
-         LIMIT 1`,
-      )
-      .get(input.workspaceId, input.versionId, input.path);
-    return typeof row?.object_id === "string" ? row.object_id : undefined;
+    return objectIndexStorage.objectIdAtPathInVersion(this, input);
   }
 
   objectMoment(input: {
@@ -6304,20 +780,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     versionId: string;
     blobSha256?: string;
   }): ObjectMomentRow | null {
-    if (!input.objectId || !input.versionId) return null;
-    if (input.blobSha256 !== undefined && !input.blobSha256) return null;
-    const params: unknown[] = [input.workspaceId, input.objectId, input.versionId];
-    if (input.blobSha256 !== undefined) params.push(input.blobSha256);
-    const row = this.db
-      .prepare(
-        `SELECT moment_id, version_id, path, blob_sha256, content_kind, byte_length, recorded_at_ms
-         FROM sync_relay_object_moments
-         WHERE workspace_id = ? AND object_id = ? AND version_id = ?
-           ${input.blobSha256 === undefined ? "" : "AND blob_sha256 = ?"}
-         ORDER BY relay_seq DESC LIMIT 1`,
-      )
-      .get(...params);
-    return row ? rowToObjectMomentRow(row) : null;
+    return objectIndexStorage.objectMoment(this, input);
   }
 
   insertShareProposal(input: {
@@ -6331,105 +794,23 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     ops: ShareProposalOpRow[];
     guard?: () => void;
   }): { proposalId: string; created: boolean } {
-    return this.tx(() => {
-      // The same posture appendLogBatch takes: the caller's authorization is
-      // re-run under the write lock, so a revoke or a level narrowed
-      // mid-flight loses the race rather than slipping a submit through.
-      input.guard?.();
-      const existing = this.db
-        .prepare(
-          "SELECT proposal_id FROM sync_relay_share_proposals WHERE share_id = ? AND submit_id = ?",
-        )
-        .get(input.shareId, input.submitId);
-      if (existing) {
-        return { proposalId: String(existing.proposal_id), created: false };
-      }
-      this.db
-        .prepare(
-          `INSERT INTO sync_relay_share_proposals (
-            proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
-            submit_id, state, created_at_ms, settled_at_ms
-          ) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, NULL)`,
-        )
-        .run(
-          input.proposalId,
-          input.shareId,
-          input.workspaceId,
-          input.proposedByUserId,
-          input.versionId,
-          input.submitId,
-          Math.trunc(input.createdAtMs),
-        );
-      const insertOp = this.db.prepare(
-        `INSERT INTO sync_relay_share_proposal_ops (
-          proposal_id, op_index, based_on_path, based_on_object_id, based_on_blob_sha256,
-          operation, after_path, after_blob_sha256, after_content_kind, after_byte_length,
-          recorded_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      for (const op of input.ops) {
-        insertOp.run(
-          input.proposalId,
-          op.opIndex,
-          op.basedOnPath,
-          op.basedOnObjectId,
-          op.basedOnBlobSha256,
-          op.operation,
-          op.afterPath,
-          op.afterBlobSha256,
-          op.afterContentKind,
-          op.afterByteLength,
-          Math.trunc(op.recordedAtMs),
-        );
-      }
-      return { proposalId: input.proposalId, created: true };
-    });
+    return proposalsStorage.insertShareProposal(this, input);
   }
 
   getShareProposal(
     proposalId: string,
   ): (ShareProposalRow & { ops: ShareProposalOpRow[] }) | null {
-    const row = this.db
-      .prepare(
-        `SELECT proposal_id, share_id, workspace_id, proposed_by_user_id, version_id,
-                state, created_at_ms, settled_at_ms
-         FROM sync_relay_share_proposals WHERE proposal_id = ?`,
-      )
-      .get(proposalId);
-    if (!row) return null;
-    return { ...rowToProposalRow(row), ops: this.proposalOps(proposalId) };
+    return proposalsStorage.getShareProposal(this, proposalId);
   }
 
   listShareProposalsForShare(shareId: string): Array<ShareProposalRow & { opCount: number }> {
-    return this.db
-      .prepare(
-        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.version_id,
-                p.state, p.created_at_ms, p.settled_at_ms,
-                (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
-                  WHERE o.proposal_id = p.proposal_id) AS op_count
-         FROM sync_relay_share_proposals p
-         WHERE p.share_id = ?
-         ORDER BY p.created_at_ms DESC, p.proposal_id`,
-      )
-      .all(shareId)
-      .map((row) => ({ ...rowToProposalRow(row), opCount: Number(row.op_count ?? 0) }));
+    return proposalsStorage.listShareProposalsForShare(this, shareId);
   }
 
   listShareProposalsForWorkspace(
     workspaceId: string,
   ): Array<ShareProposalRow & { opCount: number }> {
-    return this.db
-      .prepare(
-        `SELECT p.proposal_id, p.share_id, p.workspace_id, p.proposed_by_user_id, p.version_id,
-                p.state, p.created_at_ms, p.settled_at_ms,
-                (SELECT COUNT(*) FROM sync_relay_share_proposal_ops o
-                  WHERE o.proposal_id = p.proposal_id) AS op_count
-         FROM sync_relay_share_proposals p
-         WHERE p.workspace_id = ? AND p.state = 'open'
-         ORDER BY p.created_at_ms, p.proposal_id`,
-      )
-      .all(workspaceId)
-      .map((row) => ({ ...rowToProposalRow(row), opCount: Number(row.op_count ?? 0) }));
+    return proposalsStorage.listShareProposalsForWorkspace(this, workspaceId);
   }
 
   settleShareProposal(
@@ -6437,14 +818,12 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     to: Exclude<ShareProposalState, "open">,
     settledAtMs: number,
   ): boolean {
-    return this.tx(() =>
-      this.settleShareProposalInTransaction(proposalId, to, settledAtMs),
-    );
+    return proposalsStorage.settleShareProposal(this, proposalId, to, settledAtMs);
   }
 
   // One write transaction, so a caller states what it writes rather than the
   // BEGIN/COMMIT/ROLLBACK frame around it.
-  private tx<T>(run: () => T): T {
+  tx<T>(run: () => T): T {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const result = run();
@@ -6458,7 +837,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     }
   }
 
-  private readTx<T>(run: () => T): T {
+  readTx<T>(run: () => T): T {
     this.db.exec("BEGIN");
     try {
       const result = run();
@@ -6477,63 +856,22 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     to: Exclude<ShareProposalState, "open">,
     settledAtMs: number,
   ): boolean {
-    // `state = 'open'` in the WHERE is the whole concurrency answer: the row
-    // moves exactly once, and every later mover sees zero changed rows.
-    const result = this.db
-      .prepare(
-        `UPDATE sync_relay_share_proposals
-         SET state = ?, settled_at_ms = ?
-         WHERE proposal_id = ? AND state = 'open'`,
-      )
-      .run(to, Math.trunc(settledAtMs), proposalId);
-    return Number(result.changes ?? 0) > 0;
+    return proposalsStorage.settleShareProposalInTransaction(this, proposalId, to, settledAtMs);
   }
 
   maxOriginSeq(workspaceId: string, originId: string): number {
-    const row = this.db
-      .prepare(
-        `SELECT COALESCE(MAX(origin_seq), -1) AS max_seq
-         FROM sync_relay_log WHERE workspace_id = ? AND origin_id = ?`,
-      )
-      .get(workspaceId, originId);
-    return Number(row?.max_seq ?? -1);
+    return logStorage.maxOriginSeq(this, workspaceId, originId);
   }
 
-  private proposalOps(proposalId: string): ShareProposalOpRow[] {
-    return this.db
-      .prepare(
-        `SELECT op_index, based_on_path, based_on_object_id, based_on_blob_sha256, operation,
-                after_path, after_blob_sha256, after_content_kind, after_byte_length,
-                recorded_at_ms
-         FROM sync_relay_share_proposal_ops
-         WHERE proposal_id = ?
-         ORDER BY op_index`,
-      )
-      .all(proposalId)
-      .map(rowToProposalOpRow);
+  proposalOps(proposalId: string): ShareProposalOpRow[] {
+    return proposalsStorage.proposalOps(this, proposalId);
   }
 
-  // The workspace's chat.thread.create rows that might name this threadId, in
-  // relay order. LIKE pre-filter on the exact JSON fragment the canonical
-  // (sorted-key, JSON.stringify-escaped) payload stores, wildcards escaped so
-  // a hostile threadId cannot widen the match; the caller's JSON.parse
-  // comparison makes the real decision.
-  private threadCreateRows(
+  threadCreateRows(
     workspaceId: string,
     threadId: string,
   ): Array<Record<string, unknown>> {
-    const needle = `"threadId":${JSON.stringify(threadId)}`
-      .replaceAll("\\", "\\\\")
-      .replaceAll("%", "\\%")
-      .replaceAll("_", "\\_");
-    return this.db
-      .prepare(
-        `SELECT payload_json FROM sync_relay_log
-         WHERE workspace_id = ? AND op_kind = 'chat.thread.create'
-           AND payload_json LIKE ? ESCAPE '\\'
-         ORDER BY relay_seq`,
-      )
-      .all(workspaceId, `%${needle}%`);
+    return objectIndexStorage.threadCreateRows(this, workspaceId, threadId);
   }
 
   fetchLogPage(input: {
@@ -6541,22 +879,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sinceRelaySeq: number;
     limit: number;
   }): FetchLogPageResult {
-    const rows = this.db
-      .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND relay_seq > ?
-         ORDER BY relay_seq
-         LIMIT ?`,
-      )
-      .all(input.workspaceId, input.sinceRelaySeq, input.limit + 1);
-    const pageRows = rows.slice(0, input.limit).map(rowToLogRow);
-    const last = pageRows[pageRows.length - 1];
-    return {
-      rows: pageRows,
-      nextCursor: last?.relaySeq ?? input.sinceRelaySeq,
-      hasMore: rows.length > input.limit,
-    };
+    return logStorage.fetchLogPage(this, input);
   }
 
   readCurrentFileState(input: {
@@ -6565,57 +888,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     selectorPaths: readonly string[];
     limit: number;
   }): CurrentFileStateSnapshot {
-    if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
-      throw new Error("current file limit must be a positive safe integer");
-    }
-    this.db.exec("BEGIN");
-    try {
-      const workspace = this.db
-        .prepare(
-          `SELECT COALESCE(epoch_log_floor, 0) AS epoch_log_floor
-           FROM sync_relay_workspaces
-           WHERE workspace_id = ?`,
-        )
-        .get(input.workspaceId);
-      const cursor = this.db
-        .prepare(
-          `SELECT relay_seq
-           FROM sync_relay_log INDEXED BY idx_sync_relay_log_page
-           WHERE workspace_id = ?
-           ORDER BY relay_seq DESC
-           LIMIT 1`,
-        )
-        .get(input.workspaceId);
-      const epochLogFloor = Number(workspace?.epoch_log_floor ?? 0);
-      const nextCursor = Number(cursor?.relay_seq ?? 0);
-      const query = currentFileStateQuery(input.selectorPaths);
-      const rows = this.db
-        .prepare(query.sql)
-        .all(
-          input.workspaceId,
-          input.versionId,
-          epochLogFloor,
-          nextCursor,
-          ...query.selectorParams,
-          input.limit + 1,
-        );
-      this.db.exec("COMMIT");
-      return {
-        files: rows.slice(0, input.limit).map((row) => ({
-          path: String(row.path),
-          blobSha256: String(row.blob_sha256),
-          contentKind: row.content_kind === "binary" ? "binary" : "text",
-        })),
-        nextCursor,
-        epochLogFloor,
-        tooMany: rows.length > input.limit,
-      };
-    } catch (error) {
-      try {
-        this.db.exec("ROLLBACK");
-      } catch {}
-      throw error;
-    }
+    return currentFilesStorage.readCurrentFileState(this, input);
   }
 
   currentFileBlobByteLength(input: {
@@ -6625,19 +898,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     sha256: string;
     epochLogFloor: number;
   }): number | null {
-    const query = currentFileBlobByteLengthQuery(input.selectorPaths);
-    const row = this.db
-      .prepare(query.sql)
-      .get(
-        input.workspaceId,
-        input.versionId,
-        input.sha256,
-        input.epochLogFloor,
-        ...query.selectorParams,
-      );
-    return row && typeof row.byte_length === "string"
-      ? Number(row.byte_length)
-      : null;
+    return currentFilesStorage.currentFileBlobByteLength(this, input);
   }
 
   fetchLogPageDescending(input: {
@@ -6645,27 +906,7 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     beforeRelaySeq: number | null;
     limit: number;
   }): SyncRelayLogRow[] {
-    const rows =
-      input.beforeRelaySeq === null
-        ? this.db
-            .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-               FROM sync_relay_log
-               WHERE workspace_id = ?
-               ORDER BY relay_seq DESC
-               LIMIT ?`,
-            )
-            .all(input.workspaceId, input.limit)
-        : this.db
-            .prepare(
-              `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-               FROM sync_relay_log
-               WHERE workspace_id = ? AND relay_seq < ?
-               ORDER BY relay_seq DESC
-               LIMIT ?`,
-            )
-            .all(input.workspaceId, input.beforeRelaySeq, input.limit);
-    return rows.map(rowToLogRow);
+    return logStorage.fetchLogPageDescending(this, input);
   }
 
   fetchLogCoordinate(input: {
@@ -6673,335 +914,6 @@ class SqliteSyncRelayStorage implements SyncRelayStorage {
     originId: string;
     originSeq: number;
   }): SyncRelayLogRow | null {
-    const row = this.db
-      .prepare(
-        `SELECT workspace_id, origin_id, origin_seq, op_kind, payload_json, recorded_at_ms, relay_seq
-         FROM sync_relay_log
-         WHERE workspace_id = ? AND origin_id = ? AND origin_seq = ?`,
-      )
-      .get(input.workspaceId, input.originId, input.originSeq);
-    return row ? rowToLogRow(row) : null;
-  }
-}
-
-function sha256HexUtf8(text: string): string {
-  return createHash("sha256").update(text, "utf8").digest("hex");
-}
-
-function workspaceIdentityFromRow(
-  row: Record<string, unknown>,
-): WorkspaceSyncIdentity | null {
-  const replicationEpoch = row.replication_epoch;
-  const streamIdentity = row.stream_identity;
-  if (replicationEpoch == null && streamIdentity == null) return null;
-  if (typeof replicationEpoch !== "string" || typeof streamIdentity !== "string") {
-    throw new Error("sync relay workspace identity is partially populated");
-  }
-  return { replicationEpoch, streamIdentity };
-}
-
-function versionIdFromVersionCreatePayload(payloadJson: string): string | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return null;
-  }
-  const record = asRecord(parsed);
-  return record ? readableString(record.versionId) : null;
-}
-
-// Every blob sha an op requires the relay to already hold before the op may be
-// durably logged. This must mirror dohc-engine-sync collect_blob_refs exactly:
-// the push client uploads precisely this set (text + binary) before
-// POST /log, so validating the same set neither rejects an honest push nor
-// lets a referencing op slip through unvalidated. Enumerated by op kind:
-//   - moment.append:      payloadBefore/After/before blob shas (both content
-//                         kinds ship as uploaded blobs).
-//   - conflict.open: base/current/incoming state shas, but only for
-//                         binary states -- text conflict states carry their
-//                         bytes INLINE in the payload and are never uploaded,
-//                         so requiring them would wrongly reject a valid op.
-//   - version.create:     every forkSnapshot blob sha (both content kinds).
-//   - secret.file.put:    the ciphertext blob sha.
-//   - secret.version.fork: every row's ciphertext blob sha.
-// conflict.resolve formatVersion 1 is the narrow exception to opaque payload
-// handling: its compact state transition is parsed strictly so every required
-// side and successor blob is pinned before the atomic append. A malformed
-// compound payload throws a classified 400 instead of yielding no roots.
-// All other kinds (workspace.init, secret.file.delete, chat.*, reserved
-// version.rename/chat.thread.update, and any unknown/opaque kind) reference no
-// uploaded blobs. Fully defensive: a malformed payload shape yields no refs
-// for that branch rather than throwing (the store's apply-time validation is
-// the fail-closed backstop for shape).
-export function referencedBlobShas(
-  opKind: string,
-  payloadJson: string,
-  context: ConflictResolveEnvelopeContext,
-): string[] {
-  if (opKind === "conflict.resolve") {
-    return conflictResolveBlobShas(payloadJson, context);
-  }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(payloadJson);
-  } catch {
-    return [];
-  }
-  const record = asRecord(parsed);
-  if (!record) return [];
-  const shas: string[] = [];
-  const push = (value: unknown): void => {
-    if (typeof value === "string" && value.length > 0) shas.push(value);
-  };
-  if (opKind === "moment.append") {
-    push(record.payloadBeforeBlobSha256);
-    push(record.payloadAfterBlobSha256);
-    push(record.beforeBlobSha256);
-  } else if (opKind === "conflict.open") {
-    for (const key of ["base", "current", "incoming"] as const) {
-      const state = asRecord(record[key]);
-      if (state && state.exists === true && state.contentKind === "binary") {
-        push(state.sha256);
-      }
-    }
-  } else if (opKind === "version.create") {
-    const snapshots = Array.isArray(record.forkSnapshots) ? record.forkSnapshots : [];
-    for (const raw of snapshots) {
-      const snapshot = asRecord(raw);
-      if (snapshot) push(snapshot.blobSha256);
-    }
-  } else if (opKind === "ydoc.update") {
-    // A ydoc.update's Yjs bytes are content-addressed like any binary blob. The
-    // relay stays content-agnostic (dumb log) but must count this reference so
-    // (a) append-time validation requires the blob uploaded first, and (b) the
-    // blob GC treats a blob a live ydoc.update op references as a ROOT — a live
-    // rich-doc update blob is never collected out from under the log.
-    push(record.updateBlobSha256);
-  } else if (opKind === "secret.file.put") {
-    push(record.ciphertextSha256);
-  } else if (opKind === "secret.version.fork") {
-    const rows = Array.isArray(record.rows) ? record.rows : [];
-    for (const raw of rows) {
-      const row = asRecord(raw);
-      if (row) push(row.ciphertextSha256);
-    }
-  }
-  return shas;
-}
-
-function nullableText(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value);
-}
-
-function nullableInt(value: unknown): number | null {
-  return value === null || value === undefined ? null : Number(value);
-}
-
-function rowToObjectMomentRow(row: Record<string, unknown>): ObjectMomentRow {
-  return {
-    momentId: String(row.moment_id),
-    versionId: String(row.version_id),
-    path: nullableText(row.path),
-    blobSha256: nullableText(row.blob_sha256),
-    contentKind: nullableText(row.content_kind),
-    byteLength: nullableInt(row.byte_length),
-    recordedAtMs: Number(row.recorded_at_ms),
-  };
-}
-
-function rowToProposalRow(row: Record<string, unknown>): ShareProposalRow {
-  return {
-    proposalId: String(row.proposal_id),
-    shareId: String(row.share_id),
-    workspaceId: String(row.workspace_id),
-    proposedByUserId: String(row.proposed_by_user_id),
-    versionId: String(row.version_id),
-    state: String(row.state) as ShareProposalState,
-    createdAtMs: Number(row.created_at_ms),
-    settledAtMs: nullableInt(row.settled_at_ms),
-  };
-}
-
-function rowToProposalOpRow(row: Record<string, unknown>): ShareProposalOpRow {
-  return {
-    opIndex: Number(row.op_index),
-    basedOnPath: nullableText(row.based_on_path),
-    basedOnObjectId: nullableText(row.based_on_object_id),
-    basedOnBlobSha256: nullableText(row.based_on_blob_sha256),
-    operation: String(row.operation) === "delete" ? "delete" : "write",
-    afterPath: nullableText(row.after_path),
-    afterBlobSha256: nullableText(row.after_blob_sha256),
-    afterContentKind:
-      row.after_content_kind === "binary"
-        ? "binary"
-        : row.after_content_kind === "text"
-          ? "text"
-          : null,
-    afterByteLength: nullableInt(row.after_byte_length),
-    recordedAtMs: Number(row.recorded_at_ms),
-  };
-}
-
-function rowToShareRow(row: Record<string, unknown>): SyncRelayShareRow {
-  return {
-    shareId: String(row.share_id),
-    workspaceId: String(row.workspace_id),
-    granterUserId: String(row.granter_user_id),
-    selectorJson: String(row.selector_json),
-    createdAtMs: Number(row.created_at_ms),
-  };
-}
-
-function rowToShareGrantRow(row: Record<string, unknown>): SyncRelayShareGrantRow {
-  const principalKind = String(row.principal_kind);
-  const status = String(row.status);
-  if (principalKind !== "user" && principalKind !== "email" && principalKind !== "link") {
-    throw new Error("stored share grant has an invalid principal kind");
-  }
-  if (status !== "active" && status !== "revoked") {
-    throw new Error("stored share grant has an invalid status");
-  }
-  return {
-    grantId: String(row.grant_id),
-    shareId: String(row.share_id),
-    principalKind,
-    principalUserId: nullableText(row.principal_user_id),
-    principalEmail: nullableText(row.principal_email),
-    access: String(row.access),
-    generation: Number(row.generation),
-    status,
-    createdAtMs: Number(row.created_at_ms),
-    revokedAtMs: nullableInt(row.revoked_at_ms),
-    parentGrantId: nullableText(row.parent_grant_id),
-  };
-}
-
-function rowToLinkCredentialRow(
-  row: Record<string, unknown>,
-): SyncRelayLinkCredentialRow {
-  return {
-    credentialId: String(row.credential_id),
-    grantId: String(row.grant_id),
-    secretHash: String(row.secret_hash),
-    generation: Number(row.generation),
-    mintedAtMs: Number(row.minted_at_ms),
-    retiredAtMs: nullableInt(row.retired_at_ms),
-  };
-}
-
-function rowToLinkPrincipalRow(
-  row: Record<string, unknown>,
-): SyncRelayLinkPrincipalRow {
-  return {
-    principalId: String(row.principal_id),
-    grantId: String(row.grant_id),
-    mintGeneration: Number(row.mint_generation),
-    profileTokenHash: String(row.profile_token_hash),
-    displayName: nullableText(row.display_name),
-    createdAtMs: Number(row.created_at_ms),
-    blockedAtMs: nullableInt(row.blocked_at_ms),
-    discussionRevision: Number(row.discussion_revision),
-    storageBytes: Number(row.storage_bytes),
-  };
-}
-
-function rowToShareDiscussionMessageRow(
-  row: Record<string, unknown>,
-): SyncRelayShareDiscussionMessageRow {
-  const authorKind = String(row.author_kind);
-  if (authorKind !== "owner" && authorKind !== "named" && authorKind !== "link") {
-    throw new Error("stored discussion message has an invalid author kind");
-  }
-  return {
-    messageId: String(row.message_id),
-    shareId: String(row.share_id),
-    idempotencyKey: String(row.idempotency_key),
-    requestHash: String(row.request_hash),
-    authorKind,
-    authorUserId: nullableText(row.author_user_id),
-    linkGrantId: nullableText(row.link_grant_id),
-    linkPrincipalId: nullableText(row.link_principal_id),
-    displayNameSnapshot: String(row.display_name_snapshot),
-    body: nullableText(row.body),
-    createdAtMs: Number(row.created_at_ms),
-    deletedAtMs: nullableInt(row.deleted_at_ms),
-    deletedByUserId: nullableText(row.deleted_by_user_id),
-    discussionRevision: Number(row.discussion_revision),
-    storageBytes: Number(row.storage_bytes),
-  };
-}
-
-function rowToLinkSessionRow(row: Record<string, unknown>): SyncRelayLinkSessionRow {
-  return {
-    sessionId: String(row.session_id),
-    capabilityHash: String(row.capability_hash),
-    grantId: String(row.grant_id),
-    generation: Number(row.generation),
-    mintedAtMs: Number(row.minted_at_ms),
-    expiresAtMs: Number(row.expires_at_ms),
-    principalId: nullableText(row.principal_id),
-  };
-}
-
-function rowToLinkHandoffCodeRow(
-  row: Record<string, unknown>,
-): StoredSyncRelayLinkHandoffCodeRow {
-  return {
-    codeId: String(row.code_id),
-    codeHash: String(row.code_hash),
-    grantId: String(row.grant_id),
-    generation: Number(row.generation),
-    mintedAtMs: Number(row.minted_at_ms),
-    expiresAtMs: Number(row.expires_at_ms),
-    resultGrantId: nullableText(row.result_grant_id),
-  };
-}
-
-function rowToShareWithGrantRow(
-  row: Record<string, unknown>,
-): SyncRelayShareWithGrantRow {
-  return {
-    share: rowToShareRow(row),
-    grant: rowToShareGrantRow({
-      ...row,
-      share_id: row.grant_share_id,
-      created_at_ms: row.grant_created_at_ms,
-    }),
-  };
-}
-
-function rowToLogRow(row: Record<string, unknown>): SyncRelayLogRow {
-  return {
-    workspaceId: String(row.workspace_id),
-    originId: String(row.origin_id),
-    originSeq: Number(row.origin_seq),
-    opKind: String(row.op_kind),
-    payloadJson: String(row.payload_json),
-    recordedAtMs: Number(row.recorded_at_ms),
-    relaySeq: Number(row.relay_seq),
-  };
-}
-
-export class SyncRelayConflictError extends RelayError {
-  constructor(message: string) {
-    super("conflict", message);
-  }
-}
-
-export class SyncRelayQuotaExceededError extends RelayError {
-  constructor(message: string) {
-    super("quota_exceeded", message);
-  }
-}
-
-// A log append referenced a blob the relay does not hold. 422 (not 409): the
-// push client reserves 409 for same-origin log divergence (rewind/probe
-// recovery), so a blob-missing rejection must use a distinct retryable status
-// the client surfaces as a generic failure and retries -- its next push
-// re-uploads the missing blob (via /blobs/have) before re-posting the batch.
-export class SyncRelayBlobMissingError extends RelayError {
-  constructor(message: string) {
-    super("blob_missing", message);
+    return logStorage.fetchLogCoordinate(this, input);
   }
 }
