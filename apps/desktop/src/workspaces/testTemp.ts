@@ -1,3 +1,4 @@
+import { errorMessage } from "./workspaceError";
 import { existsSync, mkdirSync, mkdtempSync } from "node:fs";
 import {
   lstat,
@@ -313,8 +314,4 @@ function errorCode(error: unknown): string {
   return error instanceof Error && "code" in error
     ? String((error as NodeJS.ErrnoException).code ?? "")
     : "";
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

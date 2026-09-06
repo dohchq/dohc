@@ -1,3 +1,4 @@
+import { workspacePathKey } from "./workspacePathKey";
 import {
   sameFsEntry,
   type FsEntryIdentity,
@@ -388,9 +389,7 @@ class PreparedWorkspaceFileReadCapability implements PreparedWorkspaceFileRead {
     } catch {
       throw new Error(FILE_IDENTITY_UNVERIFIABLE);
     }
-    const pathKey = (value: string) =>
-      process.platform === "win32" ? value.toLowerCase() : value;
-    if (pathKey(currentCanonical) !== pathKey(this.#realTarget)) {
+    if (workspacePathKey(currentCanonical) !== workspacePathKey(this.#realTarget)) {
       throw new Error(FILE_CHANGED_DURING_READ);
     }
     assertSameFile(this.#identity, pathInfo);
@@ -790,8 +789,6 @@ export function createOrderedWorkspaceTextAccess(deps: {
   const rootTails = new Map<string, Promise<void>>();
   const targetTails = new Map<string, Promise<void>>();
   const scheduler = deps.scheduler ?? createWorkspaceOperationScheduler();
-  const pathKey = (value: string) =>
-    process.platform === "win32" ? value.toLowerCase() : value;
 
   const admit = async <T>(
     rootPath: string,
@@ -803,9 +800,13 @@ export function createOrderedWorkspaceTextAccess(deps: {
     // resolution at workspace scope, then admit the resolved operation in
     // that order. The target queue owns the operation so other files proceed.
     let admittedOperation!: Promise<T>;
-    await enqueueOrdered(rootTails, pathKey(rootPath), async () => {
+    await enqueueOrdered(rootTails, workspacePathKey(rootPath), async () => {
       const target = await deps.resolveTarget(rootPath, relativePath, access);
-      admittedOperation = enqueueOrdered(targetTails, pathKey(target), () => run(target));
+      admittedOperation = enqueueOrdered(
+        targetTails,
+        workspacePathKey(target),
+        () => run(target),
+      );
     });
     return admittedOperation;
   };
@@ -874,7 +875,7 @@ export function createOrderedWorkspaceTextAccess(deps: {
       run: () => Promise<T>,
     ): Promise<T> =>
       scheduler.shared(rootPath, () =>
-        enqueueOrdered(targetTails, pathKey(resolvedTarget), run),
+        enqueueOrdered(targetTails, workspacePathKey(resolvedTarget), run),
       ),
     // The caller already owns scheduler admission for this exact root. Taking
     // another shared admission can deadlock behind a queued exclusive request.
@@ -889,7 +890,7 @@ export function createOrderedWorkspaceTextAccess(deps: {
       } catch (error) {
         return Promise.reject(error);
       }
-      return enqueueOrdered(targetTails, pathKey(resolvedTarget), () => {
+      return enqueueOrdered(targetTails, workspacePathKey(resolvedTarget), () => {
         scheduler.assertActiveLease(rootPath, lease);
         return run();
       });

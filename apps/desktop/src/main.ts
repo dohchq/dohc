@@ -799,7 +799,7 @@ import {
 } from "./workspaces/workspaceSettingsFile";
 import { createSearchRegistry } from "./workspaces/workspaceSearch";
 import { WorkspaceSearchOwner } from "./workspaces/workspaceSearchOwner";
-import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemonAdapter";
+import { createWorkspaceSearchDaemonQuery } from "./workspaces/workspaceSearchDaemon";
 import { rgPath } from "@vscode/ripgrep";
 import {
   startCliServer,
