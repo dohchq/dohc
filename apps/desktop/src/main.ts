@@ -1,3 +1,4 @@
+import { createAgentRunsIpc } from "./ipc/agentRunsIpc";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -55,9 +56,6 @@ import { existsSync, realpathSync, statSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import {
-  ListAutomationFailuresPayload,
-  DismissAutomationFailurePayload,
-  ListAutomationFailuresResult,
   OpenExternalUrlPayload,
   ImportToDatabasePayload,
   ImportToDatabaseResult,
@@ -71,22 +69,8 @@ import {
   PluginPanelInvalidatedEvent,
   PluginWebAppFailedEvent,
   WorkspaceIdPayload,
-  ChatRunRecordsForThreadPayload,
-  ChatRunRecordsForThreadResult,
   ReloadRendererRequestPayload,
-  AgentRunPayload,
-  EndAgentRunPayload,
-  StartAgentRunResult,
-  AgentRunStatusResult,
   McpConfigResult,
-  AgentPanelSnapshotResult,
-  AgentPermissionResponsePayload,
-  StopAgentRunPayload,
-  ResumeThreadDispatchPayload,
-  ChatDispatchStateForThreadPayload,
-  ChatDispatchStateForThreadResult,
-  RunnerSelfTestPayload,
-  RunnerSelfTestResult,
   DesktopUserSettingsResult,
   SetTitlebarThemePayload,
   StepWindowZoomPayload,
@@ -197,7 +181,6 @@ import {
   type WorkspaceAuthorityReservation,
 } from "./workspaces/workspaceAuthorityOwner";
 import {
-  unacknowledgedAutomationFailures,
   type RegistryEntry,
 } from "./workspaces/registryStore";
 import {
@@ -5858,67 +5841,18 @@ function registerIpcHandlers(
     notifyRenderer,
   });
 
-  // Automation failures (ADR 0008): the engine's failed claim rows — one
-  // row per automation with the newest error and a counting generation —
-  // minus what the owner has acknowledged in the registry.
-  ipcMain.handle(CHANNELS.listAutomationFailures, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListAutomationFailuresPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Automation notice read stopped because this window changed workspaces.",
-      async (operation) => {
-        const result = await withEngineAdapter(
-          receivedShareEngine.workspaceForRegistered(operation.workspace),
-          async (adapter) => await adapter.listAutomationFailures(),
-        );
-        return ListAutomationFailuresResult.parse({
-          failures: unacknowledgedAutomationFailures(
-            result?.failures ?? [],
-            operation.workspace.automationFailureAcks,
-          ),
-        });
-      },
-    );
+  const agentRunsIpc = createAgentRunsIpc<WebContents, IpcMainInvokeEvent, RegistryEntry, DesktopRendererWorkspaceOperation>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine, withEngineAdapter,
+    acknowledgeWorkspaceAutomationFailure, notifyAutomationFailuresChanged, requireEngineCapture,
+    linkedChatStoreFor, agentDispatchStoreHandleFor, requireWorkspace, assertAgentRunnableWorkspace,
+    assertChatRunnerIdle, startAgentRunWithWorkspaceActivity,
+    get cachedAgentSessions() { return cachedAgentSessions; },
+    agentIntegration, mcpShareAccessOf, mcpConfigFor, sharedViewOf, pluginWorkspaceRuntimes,
+    agentSessionManager, senderWorkspaceAuthority, chatDispatchService, assertWritableWorkspace,
+    openWorkspaceActivity,
   });
-
-  // Record that the user has seen an automation's failures. It does not
-  // delete the claim rows — they are the remaining evidence of what failed.
-  // Acknowledging hides the notice; a failure recorded after the render has
-  // a higher generation, so it comes back on its own. The generation is
-  // clamped to what the engine actually holds, so a claimed generation
-  // above the current one cannot pre-acknowledge failures yet to happen.
-  ipcMain.handle(CHANNELS.dismissAutomationFailure, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = DismissAutomationFailurePayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Automation notice update stopped because this window changed workspaces.",
-      async (operation) => {
-        const result = await withEngineAdapter(
-          receivedShareEngine.workspaceForRegistered(operation.workspace),
-          async (adapter) => await adapter.listAutomationFailures(),
-        );
-        if (!result) {
-          throw new Error("The workspace engine is not running.");
-        }
-        const current = result.failures.find(
-          (failure) => failure.automationId === input.automationId,
-        );
-        // No failed claims for that automation: nothing to acknowledge.
-        if (!current) return;
-        operation.assertCurrent();
-        acknowledgeWorkspaceAutomationFailure(
-          input.workspaceId,
-          input.automationId,
-          Math.min(input.generation, current.generation),
-        );
-        notifyAutomationFailuresChanged(input.workspaceId);
-      },
-    );
-  });
+  agentRunsIpc.registerAutomationFailures();
 
   registerShareProposalsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
@@ -6195,40 +6129,7 @@ function registerIpcHandlers(
     activity, chatDispatchService, desktopChatBookmarks, notifyRenderer,
   });
 
-  ipcMain.handle(CHANNELS.chatRunRecordsForThread, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ChatRunRecordsForThreadPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    const linkedChatStore = linkedChatStoreFor(workspace);
-    await linkedChatStore.ensureOpen();
-    const dispatchStore = agentDispatchStoreHandleFor(workspace).store;
-    const found = await dispatchStore.runRecordsForThread(
-      workspace.workspaceId,
-      input.threadId,
-      { limit: 200 },
-    );
-    const runs = Object.fromEntries(
-      Object.entries(found).map(([messageId, run]) => [
-        messageId,
-        {
-          runId: run.runId,
-          threadId: run.threadId,
-          triggerMessageId: run.triggerMessageId,
-          command: run.command,
-          startedAtMs: run.startedAtMs,
-          ...(run.endedAtMs !== undefined
-            ? { endedAtMs: run.endedAtMs }
-            : {}),
-          ...(run.exitCode !== undefined ? { exitCode: run.exitCode } : {}),
-          ...(run.logPath ? { logPath: run.logPath } : {}),
-        },
-      ]),
-    );
-    return ChatRunRecordsForThreadResult.parse({ runs });
-  });
+  agentRunsIpc.registerChatRunRecords();
 
   registerDirectMessagesIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
@@ -6249,145 +6150,7 @@ function registerIpcHandlers(
 
   workspaceEngineIpc.registerStatusAndRepair();
 
-  // Enabling agents starts a local run: the workspace must already be open (the
-  // watcher must be live for the run slot to attach), so open it first.
-  ipcMain.handle(CHANNELS.startAgentRun, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertAgentRunnableWorkspace(workspace.workspaceId);
-    assertChatRunnerIdle(workspace.workspaceId);
-    return StartAgentRunResult.parse(
-      await startAgentRunWithWorkspaceActivity(workspace),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.endAgentRun, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = EndAgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    // A driver-backed run owns a live session (a child process). Ending such
-    // a run must go through the session manager so the child is actually
-    // stopped and disposed — not just the run record closed (this stop used
-    // to live on the retired Agent panel; Settings' stop lands here now).
-    // stopSession finalizes the run through agentIntegration.endAgentRun
-    // exactly once, so onRunEnded fires as before. No cached manager means
-    // no session ever started — plain run-record end.
-    const session = cachedAgentSessions?.panelSnapshot(input.workspaceId).session;
-    if (
-      cachedAgentSessions &&
-      session?.runId === input.runId &&
-      ["starting", "ready", "running", "waiting-permission"].includes(session.status)
-    ) {
-      // Keep the caller's explicit outcome (e.g. "failed") on the record.
-      await cachedAgentSessions.stopSession(input.workspaceId, input.status);
-      return;
-    }
-    await agentIntegration.endAgentRun(input.workspaceId, input.runId, input.status ?? "complete");
-  });
-
-  ipcMain.handle(CHANNELS.getAgentRunStatus, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    return AgentRunStatusResult.parse(await agentIntegration.getAgentRunStatus(input.workspaceId));
-  });
-
-  // The copyable MCP config snippet for the user's AI tool. Main owns the real
-  // command/args so the renderer never invents a launch path.
-  ipcMain.handle(CHANNELS.getMcpConfig, (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // A shared view hands out the MCP profile for its level, so the user's AI
-    // tool is offered only the write tools the grant allows.
-    const shareAccess = mcpShareAccessOf(workspace.shareView);
-    return McpConfigResult.parse(mcpConfigFor(workspace.rootPath, shareAccess));
-  });
-
-  ipcMain.handle(CHANNELS.probeAgentDrivers, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    // Every driver is plugin-contributed, and workspace open only warms the
-    // plugin runtime in the background. A probe that ran ahead of it would
-    // answer "no drivers" and the caller would cache that for its lifetime.
-    if (!sharedViewOf(workspace.workspaceId)) {
-      await pluginWorkspaceRuntimes.ensure(workspace);
-    }
-    const sessions = await agentSessionManager();
-    await sessions.probeDrivers(input.workspaceId);
-    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-  });
-
-  ipcMain.handle(CHANNELS.getAgentSessionState, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentRunPayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(sessions.panelSnapshot(input.workspaceId));
-  });
-
-  ipcMain.handle(CHANNELS.answerAgentPermission, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = AgentPermissionResponsePayload.parse(payload);
-    requireWorkspace(input.workspaceId);
-    const sessions = await agentSessionManager();
-    return AgentPanelSnapshotResult.parse(await sessions.answerPermission(input));
-  });
-
-  ipcMain.handle(CHANNELS.stopAgentRun, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = StopAgentRunPayload.parse(payload);
-    await senderWorkspaceAuthority.withActiveWorkspace(
-      event.sender,
-      input.workspaceId,
-      "Agent run stop",
-      async () => {
-        await chatDispatchService.stopAgentRun(input.workspaceId, input.runId);
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.chatDispatchStateForThread, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ChatDispatchStateForThreadPayload.parse(payload);
-    await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    return ChatDispatchStateForThreadResult.parse(
-      await chatDispatchService.dispatchStateForThread(
-        input.workspaceId,
-        input.threadId,
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.resumeThreadDispatch, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ResumeThreadDispatchPayload.parse(payload);
-    const { workspace } = await requireEngineCapture(
-      input.workspaceId,
-      "Chats",
-    );
-    assertWritableWorkspace(workspace);
-    await chatDispatchService.resumeThreadDispatch(
-      input.workspaceId,
-      input.threadId,
-    );
-  });
-
-  ipcMain.handle(CHANNELS.runnerSelfTest, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RunnerSelfTestPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    assertAgentRunnableWorkspace(workspace.workspaceId);
-    await openWorkspaceActivity(workspace);
-    return RunnerSelfTestResult.parse(
-      await chatDispatchService.runnerSelfTest(input.workspaceId),
-    );
-  });
+  agentRunsIpc.registerAgentRuns();
 
   const settingsIpc = createSettingsIpc<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
