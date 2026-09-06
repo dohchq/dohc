@@ -20,6 +20,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@dohc/live-session-contract": "workspace:*",
     "@dohc/security-contract": "workspace:*",
     "@dohc/service-http": "workspace:*",
     "@dohc/workspace-contracts": "workspace:*",
@@ -32,7 +33,6 @@
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
-    "@dohc/live-session-contract": "workspace:*",
     "@dohc/sync-relay": "workspace:*",
     "@dohc/workspace-auth": "workspace:*",
     "@playwright/test": "^1.62.1",
