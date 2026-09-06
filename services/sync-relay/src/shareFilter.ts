@@ -130,6 +130,15 @@ export function isChatChannelSelector(
   return "kind" in selector && (selector as { kind?: unknown }).kind === "chat-channel";
 }
 
+export function isLiveEditShareSelector(
+  selector: AnyShareSelector,
+): selector is ShareSelector {
+  return !isChatChannelSelector(selector)
+    && selector.access === "edit"
+    && selector.versionId === null
+    && selector.paths.length > 0;
+}
+
 export type ChatChannelSelectorValidation =
   | { ok: true; selector: StoredChatChannelShareSelector }
   | {
@@ -394,7 +403,7 @@ function isCanonicalSharePath(path: string): boolean {
 // serves or stores a path must serve this one: the check normalizes before
 // deciding, so serving the caller's own spelling would persist a string this
 // relay never validated — and one the granter may be unable to resolve.
-function visibleSharePath(selector: ShareSelector, path: string): string | null {
+export function visibleSharePath(selector: ShareSelector, path: string): string | null {
   const validated = validateUserWritePath(path);
   if (!validated.ok) return null;
   if (classifyEngineFilePath(validated.normalized).kind !== "tracked") return null;
