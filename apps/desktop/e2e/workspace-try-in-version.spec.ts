@@ -8,7 +8,6 @@ import {
   createTempWorkspace,
   openHistoryView,
   openWorkspaceFromFirstRun,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
   type WorkspaceFileWrite,
@@ -139,9 +138,6 @@ test("the loop: try a task in a version, review, and merge lands on Main", async
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     // The perf-budget corpus: 200 engine-ownable text files.
     const corpus: WorkspaceFileWrite[] = Array.from({ length: 199 }, (_, i) => ({
       path: `notes/file-${String(i).padStart(3, "0")}.md`,
@@ -284,9 +280,6 @@ test("a run that changes nothing says so, and set-aside returns to Main with the
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await writeWorkspaceFiles(temp, [
       { path: "docs/readme.md", contents: "hello\n" },
     ]);

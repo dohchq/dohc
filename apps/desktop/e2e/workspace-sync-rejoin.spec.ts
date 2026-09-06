@@ -30,7 +30,6 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   waitForWorkspaceReady,
   activeWorkspace,
@@ -159,7 +158,6 @@ test("offline edits reach the Electron conflict review and its resolution surviv
     const capture = createWorkspaceEngineCapture({
       ...liveSource.workspace,
       rustEngineSessions: liveSource.sessions,
-      daemonOwnsCapture: true,
     });
     sourceCapture = capture;
     const sourceRelay = liveSource.relay.bind({
@@ -568,7 +566,6 @@ test("protected join rolls back for a missing passphrase, then restores exact se
     sourceCapture = createWorkspaceEngineCapture({
       ...sourceWorkspace.workspace,
       rustEngineSessions: sourceWorkspace.sessions,
-      daemonOwnsCapture: true,
     });
     const sourceRelay = sourceWorkspace.relay.bind({
       ...sourceWorkspace.workspace,
@@ -695,7 +692,6 @@ test("enabling sync claims the workspace on the relay alone (no workspace-api pr
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
     await writeWorkspaceFiles(temp, [{ path: "notes/plan.md", contents: "local draft\n" }]);
 
     // A real relay is the only cloud service. The workspace is not pre-claimed:

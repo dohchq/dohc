@@ -22,7 +22,7 @@ test("@two-client two desktops resolve conflicting offline edits and keep the ch
     const seedRoot = join(first.baseDir, "seed");
     await mkdir(seedRoot);
     const source = await openLiveDaemonWorkspace({ workspaceId, rootPath: seedRoot });
-    const capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions, daemonOwnsCapture: true });
+    const capture = createWorkspaceEngineCapture({ ...source.workspace, rustEngineSessions: source.sessions });
     try {
       const remote = source.relay.bind({ ...source.workspace, relay: { baseUrl: relay.baseUrl, token: "test:e2e-user" } });
       await remote.claim();

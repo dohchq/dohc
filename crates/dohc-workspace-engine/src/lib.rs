@@ -5,7 +5,7 @@
 mod automation_recovery;
 pub(crate) mod capture_driver;
 pub mod capture_sink;
-pub mod shadow_fence;
+pub mod root_binding;
 
 #[cfg(feature = "harness")]
 pub use capture_driver::{CaptureApplyProbe, EARLY_IMPORT_MIN_ADDED_FILES};
@@ -43,10 +43,10 @@ use dohc_engine_protocol::{
 };
 use dohc_engine_runtime::actor::YdocSeedMaterialization;
 use dohc_engine_runtime::{
-    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, LifecycleState, NoFaults,
-    PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation, RelayOperationOutcome,
-    RuntimeError, SearchError, SearchPageDisposition, SearchResultKey, SearchSurface,
-    WorkspaceSupervisor,
+    ActorHandle, ApplyOutcome, CancellationToken, ConflictApplyResult, FaultInjector,
+    LifecycleState, NoFaults, PostCommitMaterializeOutcome, RelayConfiguration, RelayOperation,
+    RelayOperationOutcome, RuntimeError, SearchError, SearchPageDisposition, SearchResultKey,
+    SearchSurface, WorkspaceSupervisor,
 };
 use dohc_engine_sync::{
     RelayCursor, RelayError, ReplicationEnvelope, ShareCursor, SyncError, SyncPassOutcome,
@@ -907,7 +907,7 @@ struct OpenWorkspace {
     handle_kind: WorkspaceHandleKind,
     relay: Option<RelayConfiguration>,
     /// The autonomous capture driver (files actor + watcher + reconcile
-    /// loop), spawned only after the shadow binding succeeded. Shared so the
+    /// loop), spawned only after the root binding succeeded. Shared so the
     /// teardown paths can take it exactly once.
     capture: Arc<Mutex<Option<capture_driver::CaptureDriver>>>,
     automation_recovery: Arc<Mutex<Option<automation_recovery::AutomationRecovery>>>,
@@ -1080,6 +1080,9 @@ pub struct EngineService {
         Arc<tokio::sync::Notify>,
         Arc<std::sync::atomic::AtomicBool>,
     )>,
+    /// Faults for the root-binding stamp a fresh open writes.
+    #[cfg(test)]
+    bind_root_faults: Option<Arc<dyn FaultInjector>>,
     /// PER-EngineService by design. Production runs exactly one EngineService per
     /// daemon process (the stdio host constructs a single service), so the
     /// `BLOB_EGRESS_BYTE_BUDGET` resident-memory ceiling is per-process there.
@@ -1290,6 +1293,8 @@ impl EngineService {
             capture_apply_probe: None,
             #[cfg(test)]
             open_install_probe: None,
+            #[cfg(test)]
+            bind_root_faults: None,
             blob_egress_budget: BlobEgressBudget::new(BLOB_EGRESS_BYTE_BUDGET),
         }
     }
@@ -2043,10 +2048,8 @@ impl EngineService {
             }
             serial = Arc::clone(&self.open_lock).lock_owned() => serial,
         };
-        let validated =
-            shadow_fence::validate_shadow_root(PathBuf::from(&params.root_dir).as_path())
-                .map_err(map_shadow_fence)?;
-        let root = validated.root;
+        let root = root_binding::canonical_root(PathBuf::from(&params.root_dir).as_path())
+            .map_err(map_root_binding)?;
         let requested_mode = if params.skip_startup_maintenance {
             WorkspaceOpenMode::ReadOnly
         } else {
@@ -2183,7 +2186,14 @@ impl EngineService {
         let now_ms = now_ms()?;
         #[cfg(test)]
         let open_install_probe = self.open_install_probe.clone();
-        let shadow_token = validated.token.clone();
+        #[cfg(test)]
+        let bind_root_faults: Arc<dyn FaultInjector> = self
+            .bind_root_faults
+            .clone()
+            .unwrap_or_else(|| Arc::new(NoFaults));
+        #[cfg(not(test))]
+        let bind_root_faults: Arc<dyn FaultInjector> = Arc::new(NoFaults);
+        let binding_root = root.clone();
         let mut opening = tokio::task::spawn_blocking(move || {
             let opened = match requested_mode {
                 WorkspaceOpenMode::Full => supervisor.open(&actor_path, now_ms),
@@ -2201,20 +2211,49 @@ impl EngineService {
                     .and_then(|open| open.created_actor.then_some(actor_path)),
                 _open_serial,
             };
-            // The shadow bind runs here, inside the task no cancellation can
+            // The root binding runs here, inside the task no cancellation can
             // interrupt, not as the first await after it. The first open of a
             // workspace creates and migrates engine.db; a request dropped
             // between that commit and the bind left the store migrated but
             // unbound, and every later open then refused it as a mismatch,
             // permanently. Now the store is either bound or the actor
             // is closed before the request can observe either.
-            let opened = opened.and_then(|open| {
+            //
+            // A root with no binding yet gets a fresh token only when the
+            // store is fresh too: an existing engine.db under an unbound root
+            // was copied or moved here, and adopting it would let one
+            // database serve two roots.
+            //
+            // A fresh store whose binding cannot be read, written, or
+            // stamped is deleted again before the refusal returns. Leaving it
+            // would make the next open find an existing engine.db under a
+            // bound root it never recorded and refuse it as a mismatch, for
+            // good. So the stamp's storage failure lands in the same `bound`
+            // error as the marker's, not in the open's own error.
+            let opened = opened.map(|open| {
                 if !open.created_actor {
-                    return Ok((open, None));
+                    return (open, Ok(()));
                 }
-                let bound = tokio::runtime::Handle::current()
-                    .block_on(open.actor.bind_shadow_clone(shadow_token))?;
-                Ok((open, Some(bound)))
+                let bound = (|| {
+                    let token = match root_binding::read_root_binding(&binding_root)? {
+                        Some(token) => token,
+                        None if open.store_freshly_created => {
+                            root_binding::write_new_root_binding(&binding_root)?
+                        }
+                        None => return Err(root_binding::RootBindingError::DatabaseMismatch),
+                    };
+                    match tokio::runtime::Handle::current()
+                        .block_on(open.actor.bind_root(token, bind_root_faults))
+                    {
+                        Ok(true) => Ok(()),
+                        Ok(false) => Err(root_binding::RootBindingError::DatabaseMismatch),
+                        Err(error) => {
+                            eprintln!("engine: root binding stamp failed: {error}");
+                            Err(root_binding::RootBindingError::Unstamped)
+                        }
+                    }
+                })();
+                (open, bound)
             });
             #[cfg(test)]
             if open_guard.db_path.is_some()
@@ -2253,10 +2292,33 @@ impl EngineService {
             ));
         }
         let actor = actor_open.actor;
-        if bound != Some(true) {
-            return Err(map_shadow_fence(
-                shadow_fence::ShadowFenceError::DatabaseTokenMismatch,
-            ));
+        if let Err(error) = bound {
+            if actor_open.store_freshly_created {
+                // The guard's close finishes on a blocking task; the delete
+                // has to wait for it, or SQLite still holds the file.
+                drop(actor);
+                let removed = supervisor.begin_close(&db_path);
+                if let Ok(Some(closing)) = removed {
+                    let _ = tokio::task::spawn_blocking(move || closing.finish()).await;
+                }
+                open_guard.disarm();
+                // A delete that fails leaves the store the next open refuses
+                // as a mismatch. The refusal stands; the path says why.
+                for suffix in ["", "-wal", "-shm"] {
+                    let mut path = db_path.clone().into_os_string();
+                    path.push(suffix);
+                    let path = std::path::PathBuf::from(path);
+                    if let Err(error) = std::fs::remove_file(&path)
+                        && error.kind() != std::io::ErrorKind::NotFound
+                    {
+                        eprintln!(
+                            "engine: could not delete the orphaned store file {}: {error}",
+                            path.display()
+                        );
+                    }
+                }
+            }
+            return Err(map_root_binding(error));
         }
         let sequence = self
             .next_handle
@@ -2286,9 +2348,9 @@ impl EngineService {
                 .materialize_replay_pending(root.clone(), params.workspace_id.clone(), now_ms)
                 .await
                 .map_err(map_runtime)?;
-            // The files layer spawns only here — after the shadow binding
-            // succeeded — so an unmarked or mismatched root can never grow a
-            // watcher or files actor (the shadow-scope dormancy invariant).
+            // The files layer spawns only here, after the root binding
+            // succeeded, so an unbound or mismatched root can never grow a
+            // watcher or files actor.
             let capture = capture_enabled.then(|| {
                 capture_driver::CaptureDriver::spawn(
                     root.clone(),
@@ -13355,8 +13417,8 @@ fn map_search_code(error: SearchError) -> ErrorCode {
     }
 }
 
-fn map_shadow_fence(_error: shadow_fence::ShadowFenceError) -> WireError {
-    wire(ErrorCode::InvalidParams, "shadow workspace refused")
+fn map_root_binding(error: root_binding::RootBindingError) -> WireError {
+    WireError::new(ErrorCode::InvalidParams, error.to_string())
 }
 
 fn method_requires_initial_capture_ready(method: &str) -> bool {
@@ -13458,12 +13520,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dohc_engine_runtime::{FaultInjector, FaultPoint, LifecycleState};
+    use dohc_engine_runtime::{FaultPoint, LifecycleState};
     use dohc_engine_sync::ObservedBytes;
-    use dohc_engine_testkit::{GateFaults, ScratchDir};
+    use dohc_engine_testkit::{GateFaults, ScratchDir, ScriptedFaults};
     use std::time::Duration;
 
-    const SHADOW_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    const BINDING_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
     fn collection_number_marker_shaped_user_objects_use_depth_neutral_key_escaping() {
@@ -13874,8 +13936,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn opening_a_workspace_over_a_foreign_engine_db_names_the_refusal() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let engine_dir = scratch.path().join(".dohc").join("engine");
         std::fs::create_dir_all(&engine_dir).expect("engine dir");
         {
@@ -14247,8 +14307,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn workspace_rebind_preserves_a_runner_owned_by_the_desktop() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let first_service = EngineService::with_supervisor(supervisor);
@@ -14350,16 +14408,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn automation_recovery_follows_full_workspace_lifetime_without_requiring_capture() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         store
-            .bind_shadow_clone_token(SHADOW_TOKEN)
-            .expect("bind shadow token");
+            .bind_root_token(BINDING_TOKEN, &NoFaults)
+            .expect("bind root token");
         drop(store);
         for (capture_enabled, read_only, seed_claim) in [
             (false, false, true),
@@ -14429,16 +14486,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_open_does_not_apply_pending_migrations() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
@@ -14487,16 +14543,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn maintenance_free_handle_is_not_reused_for_full_open() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         std::fs::create_dir_all(db_path.parent().expect("engine parent"))
             .expect("engine directory");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
 
@@ -14560,8 +14615,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_mode_none_preserves_disk_drift_while_full_open_reconciles_it() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = EngineService::with_supervisor(supervisor);
@@ -15356,8 +15409,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn binary_write_records_suppression_in_the_root_scoped_registry() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let service = EngineService::new();
         let workspace_id = "binary-root-scoped-suppression";
         let opened = service
@@ -15455,17 +15506,61 @@ mod tests {
         drop(held);
     }
 
+    /// A fresh store whose root-binding stamp fails is deleted with the
+    /// refusal, so the next open mints again instead of finding an engine.db
+    /// that never recorded the marker and refusing it as a mismatch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fresh_store_whose_stamp_fails_is_deleted_and_the_next_open_binds() {
+        let scratch = ScratchDir::new().expect("scratch");
+        let supervisor: &'static WorkspaceSupervisor =
+            Box::leak(Box::new(WorkspaceSupervisor::new()));
+        let mut service = EngineService::with_supervisor(supervisor);
+        // One-shot: the first stamp's transaction rolls back as a
+        // `PersistFailed`; the second open's stamp commits.
+        service.bind_root_faults = Some(ScriptedFaults::crash_at(FaultPoint::StorageBeforePersist));
+        let params = json!({
+            "rootDir": scratch.path().to_string_lossy(),
+            "workspaceId": "stamp-fails",
+            "captureMode": "none"
+        });
+        let db_path = scratch.path().join(".dohc/engine/engine.db");
+
+        let refused = service
+            .workspace_open(&RequestContext::unbounded(), params.clone())
+            .await
+            .expect_err("a stamp that fails refuses the open");
+        assert_eq!(refused.code, ErrorCode::InvalidParams);
+        assert_eq!(
+            refused.message,
+            "engine database could not record its root binding"
+        );
+        assert!(!db_path.exists(), "the unstamped store is deleted");
+        assert!(
+            root_binding::read_root_binding(scratch.path())
+                .expect("read")
+                .is_some(),
+            "the marker the open minted stays"
+        );
+
+        let opened = service
+            .workspace_open(&RequestContext::unbounded(), params)
+            .await
+            .expect("the next open binds the fresh store to the marker");
+        let _handle: WorkspaceHandle =
+            serde_json::from_value(opened["workspace"].clone()).expect("workspace handle");
+        assert!(db_path.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_open_releases_actor_before_immediate_reopen() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
+        root_binding::write_root_binding(scratch.path(), BINDING_TOKEN).expect("root binding");
         let db_path = scratch.path().join(".dohc/engine/engine.db");
         let mut store = dohc_engine_storage::EngineStore::open(&db_path, 1).expect("fixture store");
         assert!(
             store
-                .bind_shadow_clone_token(SHADOW_TOKEN)
-                .expect("bind shadow token")
+                .bind_root_token(BINDING_TOKEN, &NoFaults)
+                .expect("bind root token")
         );
         drop(store);
         let supervisor: &'static WorkspaceSupervisor =
@@ -15537,8 +15632,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn mutation_write_waits_for_session_ops_before_lease_check_and_commit() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15601,8 +15694,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cancelled_workspace_close_keeps_reopen_serialized_until_actor_is_closed() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15717,8 +15808,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn aborted_workspace_close_cannot_retain_a_cancelled_capture_driver() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         std::fs::write(scratch.path().join("seed.md"), "captured before close").expect("seed file");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
@@ -15811,8 +15900,6 @@ mod tests {
     #[tokio::test]
     async fn two_services_share_close_reopen_serialization_for_one_root() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service_a = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15876,8 +15963,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn capture_driver_status_tracks_the_workspace_lifecycle() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));
@@ -15923,8 +16008,6 @@ mod tests {
     #[tokio::test]
     async fn interleaved_workspace_reopens_return_live_actors_without_leaks() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         // Isolated supervisor so the actor-count baseline can't race other tests
         // sharing the process-global one.
         let supervisor: &'static WorkspaceSupervisor =
@@ -16002,8 +16085,6 @@ mod tests {
     #[tokio::test]
     async fn evicting_a_dead_binding_drops_its_pending_cursors() {
         let scratch = ScratchDir::new().expect("scratch");
-        shadow_fence::write_shadow_marker_for_harness(scratch.path(), SHADOW_TOKEN)
-            .expect("shadow marker");
         let supervisor: &'static WorkspaceSupervisor =
             Box::leak(Box::new(WorkspaceSupervisor::new()));
         let service = Arc::new(EngineService::with_supervisor(supervisor));

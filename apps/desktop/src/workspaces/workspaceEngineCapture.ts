@@ -57,7 +57,6 @@ import * as Y from "yjs";
 import {
   isTextMediaType,
   mediaTypeForPath,
-  scanWorkspaceFilesTolerant,
 } from "@dohc/workspace-fs";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
@@ -118,78 +117,38 @@ export async function probeEngineStoreRefusal(
   }
 }
 
-// PR 0M-3 watcher->engine capture + PR 0M-4 named-version operations +
-// PR 0M-5 history/restore (which ended the 0M-3 interim dual-write).
+// Watcher-to-engine capture, named-version operations, and history/restore
+// for one workspace. The Rust daemon owns filesystem observation and version
+// materialization; this layer serializes the version operations, Y.Doc
+// sessions, and relay materialization that must not interleave with them,
+// and keeps the expected-event registry that stops the watcher re-capturing
+// dohc's own disk writes. Engine state lives under `<root>/.dohc/engine/`.
 //
-// While a workspace's `experimental.workspaceEngineAlpha` flag is on, the
-// engine is the workspace's sole history recorder: every settled watcher
-// batch is captured into the versioned text store, the history UI reads
-// engine moments, and restore routes through the engine. No legacy.
-// Dohc/history change set is written for flagged workspaces; unflagged
-// workspaces keep the legacy path untouched. Engine state lives under
-// `<root>/.dohc/engine/`.
-//
-// The workspace folder on disk always materializes the active
-// version (engine-owned, persisted in engine.db, default Main). Capture and
-// reconciliation route to the active version — read per chain task, never
-// cached across switches. Version operations (create/switch/compare/merge/
-// resolve) run as tasks on the same chain, so they can never interleave with
-// batch capture or with each other.
+// The workspace folder on disk always materializes the active version
+// (engine-owned, persisted in engine.db, default Main). Version operations
+// (create/switch/compare/merge/resolve) run as tasks on one chain, so they
+// can never interleave with each other or with Y.Doc session work.
 //
 // What the engine owns (shared policy, not local heuristics):
 //   - resolveEffectivePolicy (@dohc/security-contract) decides engine
-//     ownership: the classifyEngineFilePath hard floor (ignored segments, `.env`-style
-//     secret paths — the same floor engine search uses) that.dohc policy
-//     files can never override, plus workspace policy from.dohc/files.toml
-//     which can only narrow (tracked = false), never widen.
-//   - Only UTF-8 text files up to the engine's MAX_TEXT_BYTES are
-//     captured (the legacy history snapshot pipeline's text heuristics).
-//     Binary, oversized, non-UTF-8, and secret files are skipped entirely —
-//     no metadata-only engine moments; if a previously captured path stops
-//     being engine-ownable text, it is removed from engine state so engine
-//     state never goes stale-but-authoritative.
-//   - The same boundary limits switching: versions cover engine-owned text
-//     files; binary/secret/ignored files are untouched by a version switch
-//     (the UI states this honestly).
+//     ownership: the classifyEngineFilePath hard floor (ignored segments,
+//     `.env`-style secret paths, the same floor engine search uses) that
+//     .dohc policy files can never override, plus workspace policy from
+//     .dohc/files.toml which can only narrow (tracked = false), never widen.
 //   - `.dohc/files.toml` and `.dohc/visibility.toml` are re-read at the top
-//     of every serialized capture/version task. `.dohc/**` is already ignored
-//     by the watcher, so policy edits do not generate watcher events; the
-//     fresh-read rule makes the next capture pass or version operation honor
-//     policy changes without cache invalidation.
+//     of every serialized task.
 //
-// Single engine record per physical write:
-//   - a settled batch carries one final on-disk state per path, so rapid
-//     writes coalesce into at most one engine moment per path per batch;
-//   - a batch whose content already equals engine state is a no-op (this
-//     also makes startup reconciliation idempotent);
-//   - engine-originated disk writes (restore flows, version switch/merge
-//     materialization, coordinated renames) register expected events via
-//     registerExpectedEngineEvents and the matching watcher observation skips
-//     engine re-capture (consume-once with expiry, the
-//     ActiveLocalOperation/expectedEvents precedent). With legacy recording
-//     off for flagged workspaces this registry is the only suppression a
-//     self-write needs.
+// The daemon owns capture: it watches the folder, ingests it, and recognizes
+// its own writes. The chain still writes the folder for restore, merge and
+// relay materialization, and coordinated renames. A removal it makes is
+// registered as an expected engine event, with expiry, so the detached-debt
+// cleanup and a failing-close session can tell dohc's own removal from an
+// external delete.
 //
-// Switch-flow crash ordering (the honest story): the engine records the
-// DESTINATION as active before the disk is rewritten, and the recovery
-// invariant is "disk state reconciles into whichever version is recorded as
-// active". A failure mid-materialization (live error or process crash)
-// therefore resolves the same way: the next reconcile — run immediately on a
-// live error, or by the startup pass after a crash — captures the actual disk
-// state into the destination version. Nothing is ever lost: the previous
-// version's tip was captured in full before the switch began, and the
-// destination's pre-switch tip remains in its moment history.
-//
-// Concurrency and failure:
-//   - all engine work runs on one internal promise chain in the main process,
-//     off the IPC hot path: batch capture, startup reconciliation, and
-//     version operations are serialized against each other and never block
-//     the renderer;
-//   - engine failures are logged and surfaced via onError but never crash the
-//     watcher (fail visible; the disk stays the source of record and the next
-//     reconcile pass captures anything a failed batch missed). Version and
-//     restore operations reject to their caller so the UI can surface the
-//     failure.
+// All engine work runs on one internal promise chain in the main process,
+// off the IPC hot path. A failed background task logs through onError and
+// the chain stays alive; version and restore operations reject to their
+// caller so the UI can surface the failure.
 
 export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 
@@ -211,12 +170,11 @@ export const EXPECTED_ENGINE_EVENT_EXPIRY_MS = 10_000;
 // which a daemon that never fails never enters.
 export const YDOC_OPEN_RETRY_DEADLINE_MS =
   2 * (WORKSPACE_OPEN_DEADLINE_MS + TRANSPORT_REBIND_MAX_BACKOFF_MS);
+// An engine-originated removal the chain is about to make on disk. The
+// detached-debt cleanup reads it to tell dohc's own removal from an external
+// delete; a failing-close session reads it to arm its removal suppression.
 export interface ExpectedEngineEvent {
   path: string;
-  operation: "write" | "delete";
-  // sha256 of the written UTF-8 text or raw binary bytes; required for writes so a later user
-  // edit to the same path can never be swallowed by a stale registration.
-  sha256?: string;
 }
 
 export interface WorkspaceVersionsSnapshot {
@@ -417,9 +375,7 @@ type RestartSafeYDocSession = WorkspaceEngineYDocProviderSession & {
 };
 
 export interface WorkspaceEngineCapture {
-  // Kicks the background startup reconciliation (closed-period edits — and,
-  // after a mid-switch crash, the recovery pass). Runs on the capture chain,
-  // so it cannot interleave with live batch capture.
+  // Starts the daemon capture health poll on the capture chain.
   start(): void;
   // Enqueues a settled watcher batch for engine capture. Synchronous and
   // non-throwing: the watcher's record chain never waits on the engine.
@@ -645,7 +601,7 @@ export interface WorkspaceEngineCaptureOptions {
   createId?: () => string;
   onError?: (context: string, error: unknown) => void;
   // Outcome of each background HISTORY-CAPTURE task (batch capture and
-  // reconciliation passes). With the engine as a flagged workspace's sole
+  // reconciliation passes). With the engine as the workspace's sole
   // recorder, a persistently failing store means history capture fails
   // silently — this hook lets the product raise a capture-failure notice on
   // ok:false and clear it when a later pass succeeds. Deliberately narrower
@@ -657,27 +613,10 @@ export interface WorkspaceEngineCaptureOptions {
   // without real fs faults. Defaults to careful direct fs writes with
   // containment checks.
   diskWriter?: EngineDiskWriter;
-  // The live agent-run slot (workspaceActivity owns it; AgentIntegration sets
-  // it while a dohc-tracked run is open). PR 0N-1 attribution rule — the same
-  // rule the legacy recorder used: the slot is read once when the batch
-  // settles (captureBatch is called from the watcher's settle path), never
-  // when the capture chain later executes. A run that ends between settle and
-  // capture still owns the batch it caused; writes that settle after the run
-  // ended are actor-neutral. Reconciliation passes and version operations
-  // never read the slot — only physically observed watcher batches carry an
-  // author.
-  activeAgentRun?: () => ActiveAgentRun | null;
   // The reconnect-safe session owner supplies the daemon-backed text, secret,
   // and Y.Doc paths. Production cannot construct a capture without it.
   // Injectable stores still take precedence in focused tests.
   rustEngineSessions: EngineWorkspaceSessions;
-  // The close-retry ladders' first delay and cap. Tests shrink them so a
-  // retry window is milliseconds, not seconds.
-  teardownRetryMs?: { initial: number; cap: number };
-  // The real Rust daemon owns filesystem observation and version
-  // materialization. Tests backed by the in-process loopback omit this because
-  // that transport has no autonomous watcher or disk writer.
-  daemonOwnsCapture?: boolean;
   // Injectable only to simulate daemon generations in focused restart tests.
   openRustYDocProviderSession?: (
     options: EngineYdocProviderSessionOptions,
@@ -686,6 +625,9 @@ export interface WorkspaceEngineCaptureOptions {
       artifactAssets?: EngineYdocProviderSession["artifactAssets"];
     }
   >;
+  // The close-retry ladders' first delay and cap. Tests shrink them so a
+  // retry window is milliseconds, not seconds.
+  teardownRetryMs?: { initial: number; cap: number };
 }
 
 export type WorkspaceEngineCaptureFailure =
@@ -1148,41 +1090,6 @@ export type DiskTextState =
     }
   // Transiently unreadable (EACCES/EBUSY/...): leave engine state alone.
   | { kind: "unreadable" };
-
-type ReconcileScanFile = { path: string };
-
-// A reconciliation disk listing plus the workspace-relative paths (files or
-// directory prefixes) the tolerant scan could not read. Failed paths are
-// carried alongside the listing so the retire pass never mistakes
-// "unreadable right now" for "deleted while dohc was closed".
-type ReconcileScan = {
-  files: readonly ReconcileScanFile[];
-  failedPaths: readonly string[];
-};
-
-function isUnderScanFailedPath(path: string, failedPaths: readonly string[]): boolean {
-  return failedPaths.some(
-    (failed) => failed === "." || path === failed || path.startsWith(`${failed}/`),
-  );
-}
-
-// Confirmed-absent delete gate: the reconcile scan drives adds/updates, but a
-// scan is not trusted to authorize a DELETE. Before retiring any
-// previously-tracked path absent from the scan, this confirms the absence with a
-// direct lstat: only a genuinely gone path (ENOENT/ENOTDIR) is retired. A path
-// that still exists in any form — even transiently unreadable — is left tracked,
-// so an incomplete listing can never drive a false delete on any platform. lstat
-// (never stat) so a symlink leaf is treated as present, matching
-// readDiskTextState's symlink handling.
-async function pathConfirmedAbsentOnDisk(rootPath: string, path: string): Promise<boolean> {
-  try {
-    await lstat(join(rootPath, path));
-    return false;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" || code === "ENOTDIR";
-  }
-}
 
 /**
  * What the engine can own of a file the caller names ABSOLUTELY, for an
@@ -2528,15 +2435,6 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  // Reconciliation-tolerant listing: an unreadable or racy
-  // path is skipped and reported as a failed path instead of aborting the
-  // whole scan, so one bad directory can never stop every other existing
-  // file from seeding the engine on a cold adoption.
-  async function scanWorkspaceFilesForReconcile(): Promise<ReconcileScan> {
-    const scan = await scanWorkspaceFilesTolerant(rootPath);
-    return { files: scan.files, failedPaths: scan.failures.map((failure) => failure.path) };
-  }
-
   // The serialization point: batch capture, reconciliation, and version
   // operations all run here, strictly in order. A failed background task logs
   // and the chain stays alive; a failed version operation rejects to its
@@ -2599,24 +2497,6 @@ export function createWorkspaceEngineCapture(
     return active?.id ?? ENGINE_MAIN_VERSION_ID;
   }
 
-  // "Which paths does the Y.Doc editor own?", memoized for one task. Only a
-  // retirement decision needs it, so a task that retires nothing never builds
-  // it; a task that retires many pays for one listing, not one per path.
-  function makeYdocOwnedPathsLookup(
-    engine: CaptureVersionedTextStore,
-    versionId: string,
-  ): () => Promise<Set<string>> {
-    let cache: Set<string> | null = null;
-    return async () => {
-      cache ??= new Set(
-        (await listTextFileMetadata(engine, versionId))
-          .filter((file) => file.hasYdocMarker)
-          .map((file) => file.path),
-      );
-      return cache;
-    };
-  }
-
   async function listTextFileMetadata(
     engine: CaptureVersionedTextStore,
     versionId: string,
@@ -2624,42 +2504,11 @@ export function createWorkspaceEngineCapture(
     return await engine.listTextFileMetadata({ workspaceId, versionId });
   }
 
-  function consumeExpectedEvent(
-    operation: "write" | "delete",
-    path: string,
-    sha256?: string,
-  ): boolean {
+  // Whether an engine-originated removal of `path` is registered and unexpired.
+  function peekExpectedEvent(path: string): boolean {
     const nowMs = now();
     expectedEvents = expectedEvents.filter((event) => event.expiresAtMs > nowMs);
-    const index = expectedEvents.findIndex(
-      (event) =>
-        event.path === path &&
-        event.operation === operation &&
-        (operation === "delete" || event.sha256 === sha256),
-    );
-    if (index < 0) return false;
-    expectedEvents.splice(index, 1);
-    return true;
-  }
-
-  // Same verdict as `consumeExpectedEvent`, without spending the token: a
-  // caller that only needs to know whether an event is expected — not to be
-  // the one downstream gate that acts on it — must not steal the answer
-  // from whichever gate consumes it for real (#681 round 5, CodeRabbit
-  // Major). The single consumption stays at each branch's original site.
-  function peekExpectedEvent(
-    operation: "write" | "delete",
-    path: string,
-    sha256?: string,
-  ): boolean {
-    const nowMs = now();
-    return expectedEvents.some(
-      (event) =>
-        event.expiresAtMs > nowMs &&
-        event.path === path &&
-        event.operation === operation &&
-        (operation === "delete" || event.sha256 === sha256),
-    );
+    return expectedEvents.some((event) => event.path === path);
   }
 
   function registerExpectedEngineEvents(
@@ -2754,84 +2603,20 @@ export function createWorkspaceEngineCapture(
     return true;
   }
 
-  // Secret-path capture: the file's on-disk plaintext goes INTO the
-  // encrypted store; the recorded moment is metadata-only ("Updated .env" —
-  // never content, never diffs). Attribution is deliberately actor-neutral:
-  // secret moments never carry an author. The store's content-equality no-op
-  // rule keeps one moment per real change, same as text capture.
-  async function captureSecretPath(
-    versionId: string,
-    path: string,
-    metadata: ActorNeutralWriteMetadata,
-  ): Promise<void> {
-    const secrets = secretStoreFor();
-    const disk = await readDiskSecretState(rootPath, path);
-    if (disk.kind === "unreadable") return;
-    if (disk.kind === "text") {
-      if (consumeExpectedEvent("write", path, disk.sha256)) return;
-      await secrets.writeSecretFile({
-        workspaceId,
-        versionId,
-        path,
-        text: disk.text,
-        metadata: { ...metadata, summary: `Updated ${pathBasename(path)}` },
-      });
-      return;
-    }
-    // Confirmed absent, or no longer capturable UTF-8 text: retire it so the
-    // protected state never goes stale-but-authoritative (the delete no-ops
-    // when nothing was tracked).
-    if (disk.kind === "absent" && consumeExpectedEvent("delete", path)) return;
-    await secrets.deleteSecretFile({
-      workspaceId,
-      versionId,
-      path,
-      metadata: { ...metadata, summary: `Deleted ${pathBasename(path)}` },
-    });
-  }
-
   // A detached-debt marker's cleanup on removal must not depend on whether
   // policy tracks the path, or on any other capture-side gate: a debt can
-  // exist for a path policy later excludes (or one that was tracked when
-  // the session opened it and is not now), and running this after such a
-  // gate left an external delete of an excluded path unable to ever clear
-  // the marker it left behind. Cleanup runs
-  // whether the delete is EXTERNAL or expected:
-  // an engine-materialized removal — a version switch whose target omits
-  // the file, a relay fast-forward delete — is registered as an expected
-  // event so it never re-journals as a new moment, but it is exactly as
-  // terminal for an abandoned write as an external delete. The path is
-  // gone either way; only the REASON differs, and only the trace needs to
-  // say which.
+  // exist for a path policy later excludes, and an external delete of an
+  // excluded path must still clear the marker it left behind. Cleanup runs
+  // whether the delete is external or expected: an engine-materialized
+  // removal (a version switch whose target omits the file, a relay
+  // fast-forward delete) is registered as an expected event so it never
+  // re-journals as a new moment, but it is exactly as terminal for an
+  // abandoned write as an external delete. Only the trace needs to say
+  // which.
   //
-  // A separate function from `captureOnePath`, called for every batched
-  // event regardless of `daemonOwnsCapture`:
-  // registry maintenance is not capture. Production sets
-  // `daemonOwnsCapture: true` (engineCaptureGate.ts), under which
-  // `captureBatch` never calls `captureOnePath` at all — the daemon
-  // performs the disk-to-engine write itself — but a detached debt is
-  // purely JS-side bookkeeping about a Y.Doc session's own close failure,
-  // unrelated to which side captures disk content, and the watcher
-  // reports the same events either way. Living inside `captureOnePath`
-  // left this entire mechanism (rounds 3-5) dead in the shipped
-  // configuration; every prior test exercised the JS-capture harness.
-  //
-  // GATED ON A DEBT EXISTING (#681 round 5, CodeRabbit Major + security).
-  // Only a path with a registered debt needs this early answer at all —
-  // every other path, secrets included, must see the capture-side gates
-  // (secret floor, then live-session, then policy) completely untouched.
-  // Consuming the expected-event token here for a path with no debt stole
-  // it from whichever gate owns that path's own verdict — a secret path's
-  // removal read as external and recorded a spurious protected "Deleted"
-  // moment, because `captureSecretPath` never got the chance to consume
-  // its own token. Reading disk here unconditionally also meant reading
-  // secret plaintext through the plaintext reader before the secret
-  // floor, and charging a disk read to every excluded/deferred path on
-  // every event. Peek decides the trace and whether to cancel; the single
-  // real consumption stays at `captureOnePath`'s own original site (or
-  // inside `captureSecretPath`, for the — believed unreachable — case of
-  // a secret path somehow carrying a debt: peeking rather than consuming
-  // leaves that path's own verdict intact either way).
+  // Only a path with a registered debt is touched: every other path,
+  // secrets included, keeps its own verdict. Peek decides the trace and
+  // whether to cancel, so the expected-event token is never spent here.
   async function cleanupDetachedDebtForEvent(event: WatcherEvent): Promise<void> {
     if (!detachedLockedDebts.has(event.path)) {
       // `captureBatch`'s own synchronous pass, at watcher-delivery time,
@@ -2841,7 +2626,7 @@ export function createWorkspaceEngineCapture(
       return;
     }
     if (event.operation === "delete") {
-      const isExternalDelete = !peekExpectedEvent("delete", event.path);
+      const isExternalDelete = !peekExpectedEvent(event.path);
       cancelSuspendedDebts(
         suspendDetachedDebts((path) => path === event.path),
         isExternalDelete
@@ -2852,7 +2637,7 @@ export function createWorkspaceEngineCapture(
     }
     const peeked = await readDiskTextState(rootPath, event.path);
     if (peeked.kind !== "absent") return;
-    const isExternalAbsence = !peekExpectedEvent("delete", event.path);
+    const isExternalAbsence = !peekExpectedEvent(event.path);
     cancelSuspendedDebts(
       suspendDetachedDebts((path) => path === event.path),
       isExternalAbsence
@@ -2861,284 +2646,10 @@ export function createWorkspaceEngineCapture(
     );
   }
 
-  async function captureOnePath(
-    engine: VersionedTextStore,
-    versionId: string,
-    event: WatcherEvent,
-    policy: WorkspaceEnginePolicySnapshot,
-    metadata: ActorNeutralWriteMetadata,
-    ydocOwnedPaths: () => Promise<Set<string>>,
-    author?: MomentAuthor,
-  ): Promise<void> {
-    // The secret floor outranks policy: secret paths route to the encrypted
-    // driver and never reach the plaintext text store (which would refuse
-    // them anyway — the store has its own gate).
-    if (isSecretPath(event.path)) {
-      await captureSecretPath(versionId, event.path, metadata);
-      return;
-    }
-    // WS-G2-C-2 watcher coexistence. The settle's own.md self-write
-    // is suppressed precisely below by consumeExpectedEvent (onSettled registers
-    // the settled sha before the disk write): a matching sha is our own write and
-    // never re-journals. A watcher event on a live path whose sha does not match
-    // an expected settle self-write is a genuine external edit (agent/other
-    // editor) and must not be dropped — it is captured normally below (it becomes
-    // a moment; on a shared workspace that surfaces as a real conflict, which is
-    // correct, not silent loss). Folding an external edit into the live doc as
-    // CRDT deltas is G2-C-3; here the bar is simply not-dropping.
-    //
-    // The blanket defer covers any session that is not healthy: a failing
-    // teardown may still hold the reservation with the on-disk state
-    // indeterminate, and a dead generation still owns the path through its
-    // canonical doc. Neither may have a partial write journaled under it.
-    //
-    // An ORPHAN is the exception, and it has to be, or the discharge above
-    // promises a recovery it cannot reach. That entry exists because a
-    // refused open could not release its session, and the retry that
-    // discharges it converges only once the file is captured — so deferring
-    // capture for the entry waiting on that capture is a deadlock, and the
-    // document stays read-only for the rest of the run.
-    // It is also the safe exception: the doc was never handed out and holds
-    // nothing the user typed, so there is no partial write to journal under
-    // it, and the file is the only truth this path has.
-    const liveSession = liveYDocSessions.get(event.path);
-    if (
-      liveSession !== undefined &&
-      liveSession.status !== "live" &&
-      !liveSession.orphaned
-    ) {
-      return;
-    }
-    if (!policyTracksPath(event.path, policy)) return;
-    // Deletes trust the watcher's confirmed-absent check; updates re-read the
-    // current disk state so rapid successive writes coalesce to the final
-    // content instead of replaying stale event snapshots. This is the one
-    // real consumption of the expected-event token for this event — the
-    // debt cleanup above only ever peeked.
-    if (event.operation === "delete") {
-      if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, versionId, event.path, metadata, author);
-      return;
-    }
-    const disk = await readDiskTextState(rootPath, event.path);
-    if (disk.kind === "unreadable") return;
-    if (disk.kind === "absent") {
-      if (consumeExpectedEvent("delete", event.path)) return;
-      await deleteIfTracked(engine, versionId, event.path, metadata, author);
-      return;
-    }
-    if (disk.kind === "untracked-content") {
-      // Our own settle materialization can land here. A Y.Doc is not bounded
-      // by the engine's MAX_TEXT_BYTES, so a document grown past
-      // it materializes a file this reader classifies as un-ownable — and
-      // retiring the record would DELETE the document's engine history while
-      // the editor reports "Saved". (The dogfood journey's repro was 131,442
-      // bytes, right into this trap.) Every other branch here checks the
-      // expected-event registry first; this one must too, with the same
-      // sha-precise identity so a genuine external oversized write still
-      // retires the path as designed.
-      if (
-        disk.sha256 !== undefined &&
-        consumeExpectedEvent("write", event.path, disk.sha256)
-      ) {
-        return;
-      }
-      // OWNERSHIP decides, exactly as the startup reconcile decides. A Y.Doc
-      // is bounded by nothing, so its settled artifact routinely reads as
-      // un-ownable here — and that is true whoever wrote the bytes and
-      // whether or not the doc is open. An agent writing the .md directly is
-      // a first-class dohc flow, so keying this on a live session would
-      // retire records the reconcile keeps. This is not the blanket
-      // live-path skip gate fix 1 removed: ordinary capture of a live path is
-      // untouched; only the retirement decision defers to ownership.
-      // Two checks, and both are load-bearing. The marker lookup answers
-      // "has this document ever settled", so a session opened on a path with
-      // no marker yet is absent from it. The live-session check covers exactly
-      // that document; deleting it would retire the record of a doc the user
-      // just opened and has not saved.
-      if (liveYDocSessions.has(event.path)) return;
-      if ((await ydocOwnedPaths()).has(event.path)) return;
-      // The path stopped being engine-ownable text: retire it from engine
-      // state rather than leaving a stale snapshot behind. The batch author
-      // rides along — the run's write is what retired it.
-      await deleteIfTracked(
-        engine,
-        versionId,
-        event.path,
-        { ...metadata, summary: "Stopped tracking non-text content" },
-        author,
-      );
-      return;
-    }
-    if (consumeExpectedEvent("write", event.path, disk.sha256)) return;
-    await writeIfChanged(engine, versionId, event.path, disk, metadata, author);
-  }
-
-  // Disk -> engine reconciliation for one version: after it completes, the
-  // version's engine state mirrors the workspace folder's engine-ownable text
-  // files exactly. Used for startup (closed-period edits), as the
-  // nothing-is-ever-lost capture before a switch, and as the crash-honest
-  // recovery when a switch fails mid-materialization.
-  async function reconcileDiskIntoVersion(
-    engine: CaptureVersionedTextStore,
-    versionId: string,
-    policy: WorkspaceEnginePolicySnapshot,
-    metadata: ActorNeutralWriteMetadata,
-    // Callers that must pin the disk listing to the start of their task
-    // (before other per-task reads run) pass the scan in — and own its
-    // failed paths (the startup pass degrades and reports). Everyone else
-    // lets this function scan, and a scan failure fails the operation
-    // (version operations reject to their caller, exactly as the strict
-    // scan made them before).
-    scan?: ReconcileScan,
-  ): Promise<void> {
-    const { files: scanned, failedPaths } = scan ?? (await scanWorkspaceFilesForReconcile());
-    if (!scan && failedPaths.length > 0) {
-      throw new Error(
-        `Could not scan workspace paths: ${failedPaths.join(", ")}`,
-      );
-    }
-    const diskPaths = new Set<string>();
-    const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
-    // Secret paths reconcile into the encrypted store: capture the
-    // current disk plaintext (metadata-only moments), and retire entries
-    // whose files vanished. Transiently unreadable secrets are left alone.
-    const secretDiskPaths = new Set<string>();
-    const secretUnreadablePaths = new Set<string>();
-    for (const file of scanned) {
-      if (isSecretPath(file.path)) {
-        const disk = await readDiskSecretState(rootPath, file.path);
-        if (disk.kind === "unreadable") {
-          secretUnreadablePaths.add(file.path);
-          continue;
-        }
-        if (disk.kind === "text") {
-          secretDiskPaths.add(file.path);
-          await secretStoreFor().writeSecretFile({
-            workspaceId,
-            versionId,
-            path: file.path,
-            text: disk.text,
-            metadata: { ...metadata, summary: `Updated ${pathBasename(file.path)}` },
-          });
-        }
-        // absent/untracked-content fall through to the retire pass below.
-        continue;
-      }
-      if (!policyTracksPath(file.path, policy)) {
-        // A path.dohc/files.toml stopped tracking is retired from engine
-        // state on the next reconcile pass — the same never-stale-but-
-        // authoritative rule as content that stops being engine-ownable
-        // text — with an honest summary (not the pass's generic one). The
-        // disk file itself is untouched, and prior moments remain in
-        // history. Live batch capture just skips untracked paths; this
-        // convergence happens here.
-        await deleteIfTracked(engine, versionId, file.path, {
-          ...metadata,
-          summary: "Stopped tracking by policy",
-        });
-        continue;
-      }
-      diskPaths.add(file.path);
-      const disk = await readDiskTextState(rootPath, file.path);
-      if (disk.kind === "unreadable") continue;
-      if (disk.kind === "text" || disk.kind === "binary") {
-        await writeIfChanged(engine, versionId, file.path, disk, metadata);
-      } else if (
-        disk.kind === "untracked-content" &&
-        (await ydocOwnedPaths()).has(file.path)
-      ) {
-        // A path the Y.Doc EDITOR owns. Its content is whatever the CRDT
-        // projects — a settle is bounded by nothing, so it routinely exceeds
-        // the caps ordinary captured text is held to, and the reader then
-        // reports it as un-ownable. Retiring here would journal a "Stopped
-        // tracking" delete for a document the user is actively editing, on
-        // every single launch, and drop it back to the plain editor.
-        //
-        // The expected-event registry cannot help at this layer: those
-        // entries expire in seconds and reconciliation runs at startup, long
-        // after the write. Ownership is the durable fact, so ownership is
-        // what this asks.
-        continue;
-      } else {
-        // absent (raced a delete) or no longer engine-ownable text.
-        await deleteIfTracked(engine, versionId, file.path, metadata);
-        diskPaths.delete(file.path);
-      }
-    }
-    // Files the engine tracked that no longer exist on disk were deleted
-    // outside a live capture window; reconcile the deletions too. A tracked
-    // path the tolerant scan failed to read (unreadable directory, racy
-    // delete) is left alone: absent-from-a-degraded-listing is not evidence
-    // of deletion, and retiring it here would record a false delete moment.
-    const tracked = await listTextFileMetadata(engine, versionId);
-    for (const file of tracked) {
-      if (diskPaths.has(file.path)) continue;
-      if (isUnderScanFailedPath(file.path, failedPaths)) continue;
-      // Confirm the absence before retiring: the scan is trusted for
-      // adds/updates but never to authorize a delete on its own.
-      if (!(await pathConfirmedAbsentOnDisk(rootPath, file.path))) continue;
-      await deleteIfTracked(engine, versionId, file.path, metadata);
-    }
-    // Same rule for the encrypted store: protected files deleted while dohc
-    // was closed retire from the secret state (metadata-only moment).
-    const trackedSecrets = await secretStoreFor().listSecretFiles({
-      workspaceId,
-      versionId,
-    });
-    for (const stat of trackedSecrets) {
-      if (secretDiskPaths.has(stat.path)) continue;
-      if (secretUnreadablePaths.has(stat.path)) continue;
-      if (isUnderScanFailedPath(stat.path, failedPaths)) continue;
-      // Same confirmed-absent delete gate for protected files: an incomplete
-      // scan must never retire a secret whose file is still on disk.
-      if (!(await pathConfirmedAbsentOnDisk(rootPath, stat.path))) continue;
-      await secretStoreFor().deleteSecretFile({
-        workspaceId,
-        versionId,
-        path: stat.path,
-        metadata: { ...metadata, summary: `Deleted ${pathBasename(stat.path)}` },
-      });
-    }
-  }
-
-  // Returns true when the pass covered the whole tree; false when the
-  // tolerant scan had to skip paths (the pass still seeded everything
-  // readable, but the outcome is DEGRADED and must reach the capture
-  // notice, never pass silently).
-  async function reconcile(): Promise<boolean> {
-    const engine = await engineStore();
-    // One actor-neutral correlation id ties the pass's per-file moments
-    // together as "reconciled offline edits" without inventing an author.
-    const metadata: ActorNeutralWriteMetadata = {
-      origin: "local-file",
-      summary: "Reconciled offline edits",
-      correlationId: `reconcile-${createId()}`,
-    };
-    // Routes to the active version: after a mid-switch crash this is the
-    // recovery pass (the destination was recorded active before the disk was
-    // rewritten, so the actual disk state reconciles into it).
-    const versionId = await activeVersionIdOf(engine);
-    // Scan before the policy read: the pass reconciles the files present
-    // when the task began; edits landing while this task's own per-task
-    // reads run belong to the next serialized batch, not to this pass.
-    const scan = await scanWorkspaceFilesForReconcile();
-    if (scan.failedPaths.length > 0) {
-      onError(
-        "reconciliation scan",
-        new Error(`skipped unreadable paths: ${scan.failedPaths.join(", ")}`),
-      );
-    }
-    const policy = await readPolicyForTask();
-    await reconcileDiskIntoVersion(engine, versionId, policy, metadata, scan);
-    return scan.failedPaths.length === 0;
-  }
-
-  // Applies engine-owned text state to the workspace folder, registering
-  // every write/delete as an expected engine event (sha256 for writes) so the
-  // watcher's observation of our own writes never re-captures them. Throws on
-  // the first failed operation; the failed operation's registration is
-  // cancelled so it can never swallow a later real user edit.
+  // Applies engine-owned state to the workspace folder, registering each
+  // delete as an expected removal so the watcher does not read it as a user
+  // edit. Throws on the first failed operation; that operation's registration
+  // is cancelled so it can never swallow a later real user edit.
   async function materialize(
     operations: readonly MaterializeOperation[],
     policy: WorkspaceEnginePolicySnapshot,
@@ -3149,20 +2660,9 @@ export function createWorkspaceEngineCapture(
       });
       const absolute = join(rootPath, operation.path);
       const cancel =
-        operation.kind === "write" || operation.kind === "write-binary"
-          ? registerExpectedEngineEvents([
-              {
-                path: operation.path,
-                operation: "write",
-                sha256:
-                  operation.kind === "write"
-                    ? sha256Utf8(operation.text)
-                    : sha256Bytes(operation.bytes),
-              },
-            ])
-          : registerExpectedEngineEvents([
-              { path: operation.path, operation: "delete" },
-            ]);
+        operation.kind === "delete"
+          ? registerExpectedEngineEvents([{ path: operation.path }])
+          : () => undefined;
       try {
         if (operation.kind === "write") {
           await diskWriter.writeTextFile(absolute, operation.text);
@@ -3183,93 +2683,7 @@ export function createWorkspaceEngineCapture(
     }
   }
 
-  // Diff a version's engine state against the current disk state and plan the
-  // disk mutations that make the folder show that version. In-cap binaries
-  // now follow versions; oversized, ignored, secret, and transiently
-  // unreadable paths are never touched.
-  async function planMaterialization(
-    engine: CaptureVersionedTextStore,
-    targetVersionId: string,
-    previousVersionId: string,
-    policy: WorkspaceEnginePolicySnapshot,
-  ): Promise<MaterializeOperation[]> {
-    const targetFiles = await listTextFileMetadata(engine, targetVersionId);
-    const targetPaths = new Set(targetFiles.map((file) => file.path));
-    const targetTextSnapshots = new Map(
-      (
-        await Promise.all(
-          targetFiles
-            .filter(
-              (file) =>
-                file.contentKind === "text" &&
-                policyTracksPath(file.path, policy),
-            )
-            .map(async (file) => {
-              const snapshot = await engine.readTextFile({
-                workspaceId,
-                versionId: targetVersionId,
-                path: file.path,
-              });
-              if (!snapshot || snapshot.contentKind === "binary") {
-                throw new Error(
-                  `Text content for ${file.path} is no longer available.`,
-                );
-              }
-              return [file.path, snapshot] as const;
-            }),
-        )
-      ),
-    );
-    const operations: MaterializeOperation[] = [];
-    for (const file of targetFiles) {
-      if (!policyTracksPath(file.path, policy)) continue;
-      const disk = await readDiskTextState(rootPath, file.path);
-      // Never clobber content the engine does not own (oversized/symlinked)
-      // and never write over a transiently unreadable path.
-      if (disk.kind === "untracked-content" || disk.kind === "unreadable") continue;
-      if (file.contentKind === "binary") {
-        if (disk.kind === "binary" && disk.sha256 === file.sha256) continue;
-        const bytes = await engine.readBinaryFile({
-          workspaceId,
-          versionId: targetVersionId,
-          path: file.path,
-        });
-        if (!bytes) continue;
-        operations.push({ kind: "write-binary", path: file.path, bytes });
-        continue;
-      }
-      const snapshot = targetTextSnapshots.get(file.path);
-      if (!snapshot) {
-        throw new Error(`Text content for ${file.path} is no longer available.`);
-      }
-      if (
-        disk.kind === "text" &&
-        (file.sha256 !== null
-          ? disk.sha256 === file.sha256
-          : disk.sha256 === sha256Utf8(snapshot.text))
-      ) {
-        continue;
-      }
-      operations.push({ kind: "write", path: file.path, text: snapshot.text });
-    }
-    // Only paths the previous version tracked are deletable: the pre-switch
-    // reconcile captured every engine-ownable text file into it, so this set
-    // is exactly "text files the engine owns on disk right now".
-    const previousFiles = await listTextFileMetadata(
-      engine,
-      previousVersionId,
-    );
-    for (const file of previousFiles) {
-      if (targetPaths.has(file.path)) continue;
-      if (!policyTracksPath(file.path, policy)) continue;
-      const disk = await readDiskTextState(rootPath, file.path);
-      if (disk.kind !== "text" && disk.kind !== "binary") continue;
-      operations.push({ kind: "delete", path: file.path });
-    }
-    return operations;
-  }
-
-  // The secret half of a version switch: protected files follow the
+  // The secret half of a version switch (PR 08): protected files follow the
   // version. Plaintext is produced here through the store's single authorized
   // materialization accessor, held only in the in-memory operation list on
   // its way to the workspace folder, and every write/delete registers an
@@ -3512,16 +2926,7 @@ export function createWorkspaceEngineCapture(
 
   return {
     start() {
-      if (options.daemonOwnsCapture) {
-        pollDaemonCaptureHealth();
-        return;
-      }
-      enqueue("startup reconciliation", () =>
-        // reconcile() reports false when the tolerant scan skipped paths:
-        // everything readable seeded, but the pass is degraded, so the
-        // capture-failure notice raises instead of a silent partial pass.
-        reportCaptureOutcome(() => reconcile()),
-      );
+      pollDaemonCaptureHealth();
     },
 
     captureBatch(events) {
@@ -3547,7 +2952,7 @@ export function createWorkspaceEngineCapture(
       // nothing here can expire, because nothing here is a map entry.
       for (const event of batch) {
         if (event.operation !== "delete") continue;
-        const expected = peekExpectedEvent("delete", event.path);
+        const expected = peekExpectedEvent(event.path);
         if (!detachedLockedDebts.has(event.path)) {
           noteExternalDeleteWithNoDebt(event.path, expected);
         }
@@ -3556,11 +2961,10 @@ export function createWorkspaceEngineCapture(
           live.armRemovalSuppression(expected, now());
         }
       }
-      // Registry maintenance, not capture: runs
-      // for every batch regardless of `daemonOwnsCapture`, ahead of the
-      // early return below. See `cleanupDetachedDebtForEvent`'s own
-      // comment for why a debt's cleanup cannot be skipped just because
-      // the daemon owns the disk-to-engine write.
+      // Registry maintenance, not capture: the daemon performs the
+      // disk-to-engine write, but a detached debt is JS-side bookkeeping
+      // about a Y.Doc session's own close failure, and its cleanup must run
+      // for every batch (see `cleanupDetachedDebtForEvent`).
       enqueue("detached-debt cleanup", async () => {
         for (const event of batch) {
           try {
@@ -3570,54 +2974,10 @@ export function createWorkspaceEngineCapture(
           }
         }
       });
-      if (options.daemonOwnsCapture) return;
-      // Attribution is decided here, at settle (captureBatch runs on the
-      // watcher's settle path), not when the chain task executes — the legacy
-      // recorder's rule, kept: a dohc-tracked run owns every batch that
-      // settles while it is active, even if the run ends before the capture
-      // chain drains. The stamp is a synchronous slot read; no extra IO.
-      const run = options.activeAgentRun?.() ?? null;
-      const author: MomentAuthor | undefined = run
-        ? {
-            kind: "agent",
-            agentId: run.agentId,
-            onBehalfOf: run.onBehalfOf,
-            agentRunId: run.agentRunId,
-          }
-        : undefined;
-      enqueue("batch capture", () =>
-        reportCaptureOutcome(async () => {
-          const policy = await readPolicyForTask();
-          const engine = await engineStore();
-          const versionId = await activeVersionIdOf(engine);
-          const metadata: ActorNeutralWriteMetadata = { origin: "local-file" };
-          const ydocOwnedPaths = makeYdocOwnedPathsLookup(engine, versionId);
-          let pathFailures = 0;
-          for (const event of batch) {
-            try {
-              await captureOnePath(
-                engine,
-                versionId,
-                event,
-                policy,
-                metadata,
-                ydocOwnedPaths,
-                author,
-              );
-            } catch (error) {
-              // One bad path must not drop the rest of the batch.
-              pathFailures += 1;
-              onError(`batch capture of ${event.path}`, error);
-            }
-          }
-          return pathFailures === 0;
-        }),
-      );
     },
 
     setActiveAgentRun(run) {
       return enqueueResult("daemon capture authorship", async () => {
-        if (!options.daemonOwnsCapture) return;
         const engine = await engineStore();
         if (run === null) await engine.flushCapture?.();
         await engine.setCaptureAuthor?.(
@@ -3973,15 +3333,6 @@ export function createWorkspaceEngineCapture(
             reportSaveState("changed-on-disk", token);
             return;
           }
-          // The file holds the settled bytes, so the ENGINE's write of them is
-          // ours: register it, and a watcher event that lands after the
-          // live-path guard lifts on close is recognized instead of re-journaled
-          // as an external edit. Registering on the drift path instead would arm
-          // a suppression for bytes nobody wrote, which could swallow a later
-          // genuine event carrying that same sha.
-          registerExpectedEngineEvents([
-            { path: input.path, operation: "write", sha256: result.sha256 },
-          ]);
           reportSaveState("saved", token);
         };
         // Claim exactly what this settle can carry. The daemon serves one
@@ -4807,7 +4158,7 @@ export function createWorkspaceEngineCapture(
             // The reservation may still be held and the on-disk state is
             // indeterminate — retain a failing-close guard so a retry/force-close
             // can complete the teardown, and DO NOT swallow (data-integrity
-            // teardown). captureOnePath keeps deferring this path meanwhile.
+            // teardown).
             if (liveYDocSessions.get(input.path) === liveEntry) {
               liveEntry.status = "failing-close";
               scheduleTransientCloseRetry(error, opts);
@@ -5092,7 +4443,6 @@ export function createWorkspaceEngineCapture(
 
     createVersion(name) {
       return enqueueResult("create version", async () => {
-        const policy = await readPolicyForTask();
         const engine = await engineStore();
         const fromVersionId = await activeVersionIdOf(engine);
         // WS-G2-C-2: create-and-switch makes the new fork active,
@@ -5105,20 +4455,7 @@ export function createWorkspaceEngineCapture(
         );
         // Fork from exactly what's on disk right now — capture the latest
         // edits first so the new version starts as a faithful copy.
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        } else {
-          await reconcileDiskIntoVersion(
-            engine,
-            fromVersionId,
-            policy,
-            {
-              origin: "local-file",
-              summary: "Saved latest edits",
-              correlationId: `version-create-${createId()}`,
-            },
-          );
-        }
+        await engine.flushCapture?.();
         const version = await engine.createNamedVersion({
           workspaceId,
           name,
@@ -5141,7 +4478,6 @@ export function createWorkspaceEngineCapture(
 
     switchVersion(versionId) {
       return enqueueResult("switch version", async () => {
-        const policy = await readPolicyForTask();
         const engine = await engineStore();
         const fromVersionId = await activeVersionIdOf(engine);
         if (versionId === fromVersionId) {
@@ -5159,76 +4495,30 @@ export function createWorkspaceEngineCapture(
           () => true,
           "Saved latest edits before switching versions",
         );
-        if (options.daemonOwnsCapture) {
-          // The daemon watcher owns the source version. Force it to settle
-          // before comparing heads, otherwise both the changed-file count and
-          // the version being left can be based on pre-save state.
-          await engine.flushCapture?.();
-          const [before, after, secretOperations] = await Promise.all([
-            listTextFileMetadata(engine, fromVersionId),
-            listTextFileMetadata(engine, versionId),
-            // The daemon performs the actual materialization after setActive;
-            // this plan is used only to include protected paths in the result.
-            planSecretMaterialization(versionId, fromVersionId),
-          ]);
-          const beforeByPath = new Map(
-            before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
-          );
-          const afterByPath = new Map(
-            after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
-          );
-          const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
-          let changedFileCount = secretOperations.length;
-          for (const path of changedPaths) {
-            if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
-          }
-          await engine.setActiveVersion({ workspaceId, versionId });
-          return { activeVersionId: versionId, changedFileCount };
-        }
-        // Nothing is ever lost: the current disk state (including edits still
-        // inside the watcher settle window) is captured into the version the
-        // user is leaving.
-        const correlationId = `version-switch-${createId()}`;
-        await reconcileDiskIntoVersion(
-          engine,
-          fromVersionId,
-          policy,
-          {
-            origin: "local-file",
-            summary: "Saved latest edits before switching versions",
-            correlationId,
-          },
+        // The daemon watcher owns the source version. Force it to settle
+        // before comparing heads, otherwise both the changed-file count and
+        // the version being left can be based on pre-save state.
+        await engine.flushCapture?.();
+        const [before, after, secretOperations] = await Promise.all([
+          listTextFileMetadata(engine, fromVersionId),
+          listTextFileMetadata(engine, versionId),
+          // The daemon performs the actual materialization after setActive;
+          // this plan is used only to include protected paths in the result.
+          planSecretMaterialization(versionId, fromVersionId),
+        ]);
+        const beforeByPath = new Map(
+          before.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
         );
-        const operations = [
-          ...(await planMaterialization(engine, versionId, fromVersionId, policy)),
-          // Secrets follow the switch through the encrypted path.
-          ...(await planSecretMaterialization(versionId, fromVersionId)),
-        ];
-        // Record the destination before rewriting the disk (see the module
-        // note on crash ordering): recovery always reconciles disk state into
-        // the version recorded as active.
-        await engine.setActiveVersion({ workspaceId, versionId });
-        try {
-          await materialize(operations, policy);
-        } catch (error) {
-          // Live-failure recovery mirrors crash recovery: capture the actual
-          // (possibly partial) disk state into the now-active destination so
-          // engine and disk agree, then surface the failure.
-          await reconcileDiskIntoVersion(
-            engine,
-            versionId,
-            policy,
-            {
-              origin: "local-file",
-              summary: "Recovered from an interrupted version switch",
-              correlationId,
-            },
-          ).catch((recoveryError) => {
-            onError("switch recovery reconciliation", recoveryError);
-          });
-          throw error;
+        const afterByPath = new Map(
+          after.map((file) => [file.path, `${file.contentKind}:${file.sha256 ?? ""}`]),
+        );
+        const changedPaths = new Set([...beforeByPath.keys(), ...afterByPath.keys()]);
+        let changedFileCount = secretOperations.length;
+        for (const path of changedPaths) {
+          if (beforeByPath.get(path) !== afterByPath.get(path)) changedFileCount += 1;
         }
-        return { activeVersionId: versionId, changedFileCount: operations.length };
+        await engine.setActiveVersion({ workspaceId, versionId });
+        return { activeVersionId: versionId, changedFileCount };
       });
     },
 
@@ -5237,28 +4527,13 @@ export function createWorkspaceEngineCapture(
         compareOptions?.targetVersionId ?? ENGINE_MAIN_VERSION_ID;
       const afterPath = compareOptions?.afterPath;
       return enqueueResult("compare versions", async () => {
-        const policy = await readPolicyForTask();
         const engine = await engineStore();
         // Capture the latest disk edits first so the comparison reflects what
         // the user actually sees in the folder. Only the first page captures:
         // a later page continues the same comparison, and re-capturing under
         // it could move the cursor's ground truth mid-walk.
         if (afterPath === undefined) {
-          const activeVersionId = await activeVersionIdOf(engine);
-          if (options.daemonOwnsCapture) {
-            await engine.flushCapture?.();
-          } else {
-            await reconcileDiskIntoVersion(
-              engine,
-              activeVersionId,
-              policy,
-              {
-                origin: "local-file",
-                summary: "Saved latest edits",
-                correlationId: `version-compare-${createId()}`,
-              },
-            );
-          }
+          await engine.flushCapture?.();
         }
         const textPage = await compareVersionFilesPage(engine, {
           workspaceId,
@@ -5309,9 +4584,7 @@ export function createWorkspaceEngineCapture(
     compareVersionsChangedCount(sourceVersionId) {
       return enqueueResult("count changed files", async () => {
         const engine = await engineStore();
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        }
+        await engine.flushCapture?.();
         let count = 0;
         let afterPath: string | undefined;
         do {
@@ -5356,20 +4629,7 @@ export function createWorkspaceEngineCapture(
         );
         // Capture the latest disk edits so the merge sees them (whichever
         // side is active).
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        } else {
-          await reconcileDiskIntoVersion(
-            engine,
-            activeVersionId,
-            policy,
-            {
-              origin: "local-file",
-              summary: "Saved latest edits",
-              correlationId,
-            },
-          );
-        }
+        await engine.flushCapture?.();
         const versions = await engine.listVersions({ workspaceId });
         const source = versions.find((version) => version.id === sourceVersionId);
         if (!source || source.kind !== "named") {
@@ -5450,15 +4710,6 @@ export function createWorkspaceEngineCapture(
             continue;
           }
           mergedFileCount += 1;
-          if (!options.daemonOwnsCapture) {
-            if (result.operation === "write") {
-              materializations.push(
-                await materializeWriteForSnapshot(engine, result.write.snapshot),
-              );
-            } else {
-              materializations.push({ kind: "delete", path });
-            }
-          }
         }
         // Secret files merge through the encrypted path: whole-file,
         // fork-base-aware, and never a conflict record (conflict records
@@ -5558,9 +4809,7 @@ export function createWorkspaceEngineCapture(
       return enqueueResult("resolve conflict", async () => {
         const policy = await readPolicyForTask();
         const engine = await engineStore();
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        }
+        await engine.flushCapture?.();
         const result = await engine.resolveTextConflict({
           workspaceId,
           conflictId,
@@ -5688,9 +4937,7 @@ export function createWorkspaceEngineCapture(
     async readMoment(momentId) {
       await chain;
       const engine = await engineStore();
-      if (options.daemonOwnsCapture) {
-        await engine.flushCapture?.();
-      }
+      await engine.flushCapture?.();
       const moment = await engine.getMoment({ workspaceId, momentId });
       if (moment) return { protected: false, moment };
       // Protected moments live in the secret store; the detail is
@@ -5708,9 +4955,7 @@ export function createWorkspaceEngineCapture(
         const policy = await readPolicyForTask();
         const engine = await engineStore();
         const activeVersionId = await activeVersionIdOf(engine);
-        if (options.daemonOwnsCapture) {
-          await engine.flushCapture?.();
-        }
+        await engine.flushCapture?.();
         const moment = await engine.getMoment({ workspaceId, momentId });
         if (!moment) {
           // Protected restore: the whole round trip stays encrypted —
@@ -5918,9 +5163,7 @@ export function createWorkspaceEngineCapture(
       // Drain the chain so a just-captured file is immediately chat-able.
       await chain;
       const engine = await engineStore();
-      if (options.daemonOwnsCapture) {
-        await engine.flushCapture?.();
-      }
+      await engine.flushCapture?.();
       const activeVersionId = await activeVersionIdOf(engine);
       const snapshot = await engine.readTextFile({
         workspaceId,
@@ -6463,10 +5706,7 @@ export function createWorkspaceEngineCapture(
           onError(`prepare rename of ${fromPath}`, error);
           return finishWithoutRollback;
         }
-        const cancel = registerExpectedEngineEvents([
-          { path: fromPath, operation: "delete" },
-          { path: toPath, operation: "write", sha256: disk.sha256 },
-        ]);
+        const cancel = registerExpectedEngineEvents([{ path: fromPath }]);
         return async (ok: boolean) => {
           // A move that landed has nothing to undo, so it ends exactly like
           // one the engine never recorded.
@@ -6587,9 +5827,7 @@ export function createWorkspaceEngineCapture(
           // caller can make its next edit. Otherwise a fast local edit can
           // coalesce with this materialization as the path's first sight, and
           // capture correctly refuses to claim the foreign sync head.
-          if (options.daemonOwnsCapture) {
-            await engine.reconcileCapture?.();
-          }
+          await engine.reconcileCapture?.();
         };
         return await task(materializePage);
       });
@@ -6597,11 +5835,9 @@ export function createWorkspaceEngineCapture(
 
     async flush() {
       await chain;
-      if (options.daemonOwnsCapture) {
-        const engine = await engineStore();
-        await engine.flushCapture?.();
-        await drainPendingCollectionAdoptions(engine);
-      }
+      const engine = await engineStore();
+      await engine.flushCapture?.();
+      await drainPendingCollectionAdoptions(engine);
     },
 
     async stop() {
@@ -6614,7 +5850,7 @@ export function createWorkspaceEngineCapture(
       }
       await chain;
       try {
-        if (options.daemonOwnsCapture && store) {
+        if (store) {
           await store.flushCapture?.();
           await drainPendingCollectionAdoptions(store);
         }

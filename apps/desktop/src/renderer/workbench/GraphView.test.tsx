@@ -625,7 +625,7 @@ describe("GraphView", () => {
 
     render(
       <GraphView
-        workspaceId="ws-unflagged"
+        workspaceId="ws-no-mentions"
         activePath={null}
         refreshKey="0"
         chatMentionsAvailable={false}
@@ -636,7 +636,7 @@ describe("GraphView", () => {
     await waitFor(() => expect(readWorkspaceGraph).toHaveBeenCalled());
     expect(screen.queryByTestId("graph-chat-mentions-toggle")).toBeNull();
     expect(readWorkspaceGraph).toHaveBeenCalledWith({
-      workspaceId: "ws-unflagged",
+      workspaceId: "ws-no-mentions",
       includeChatMentions: false,
     });
   });

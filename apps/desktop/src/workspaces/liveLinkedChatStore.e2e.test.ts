@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
@@ -22,13 +21,6 @@ describe("live linked chat store real daemon", () => {
         workspaceId: `workspace-live-chat-e2e-${process.pid}`,
         rootPath,
       };
-      const markerDirectory = join(rootPath, ".dohc", "engine");
-      await mkdir(markerDirectory, { recursive: true });
-      await writeFile(
-        join(markerDirectory, "SHADOW_CLONE"),
-        randomBytes(32).toString("hex"),
-        { encoding: "utf8", flag: "wx", mode: 0o600 },
-      );
       const lifecycle = new EngineDaemonLifecycle({
         command: engine.require(),
       });

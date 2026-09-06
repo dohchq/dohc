@@ -7,7 +7,6 @@ import {
   openWorkspaceFromFirstRun,
   seedPluginSource,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
 } from "./helpers/workspace";
 
 const pluginSource = fileURLToPath(new URL("../plugins/codex/", import.meta.url));
@@ -35,9 +34,6 @@ test("the Codex plugin serves its chat and sends a message to Codex", async () =
 
   try {
     await seedWorkspaceManifest(temp, "codex-chat-plugin-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     await seedPluginSource(temp, { fixtureRoot: pluginSource, pluginId: "codex" });
 
     desktop = await launchDesktopApp({

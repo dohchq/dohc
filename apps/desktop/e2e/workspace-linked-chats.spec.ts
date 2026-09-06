@@ -9,7 +9,6 @@ import {
   openWorkspaceFromFirstRun,
   revealExplorerPath,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   waitForWorkspaceFile,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
@@ -45,9 +44,6 @@ test("create a chat about a file, send a message, survive relaunch and rename", 
   let desktop: Awaited<ReturnType<typeof launchDesktopApp>> | null = null;
 
   try {
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const workspace = await openWorkspaceFromFirstRun(desktop.page, temp);
     let page = desktop.page;
@@ -158,10 +154,7 @@ test("agent-authored messages render as \"<User Name>'s agent\"", async () => {
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
-    // Seed before launch, through the engine daemon (post-cutover the
+    // Seed BEFORE launch, through the engine daemon (post-cutover the
     // retired TS in-process store is refused): the file exists in the engine
     // (and identically on disk so startup reconciliation is a no-op), with a
     // linked chat that already carries one human and one agent message.

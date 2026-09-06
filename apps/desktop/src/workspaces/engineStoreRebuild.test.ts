@@ -137,14 +137,14 @@ describe("moveEngineStoreAside", () => {
       "engine.db-journal": "journal",
       "engine.db-wal": "wal",
       "engine.db-shm": "shm",
-      SHADOW_CLONE: "token",
+      ROOT_BINDING: "token",
     });
 
     await expect(moveEngineStoreAside(root)).resolves.toBe("moved");
 
     await expectCompleteStore();
     expect((await readdir(engineDir)).sort()).toEqual([
-      "SHADOW_CLONE",
+      "ROOT_BINDING",
       "pre-v2-backup",
     ]);
   });

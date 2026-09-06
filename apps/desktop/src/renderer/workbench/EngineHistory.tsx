@@ -319,8 +319,8 @@ function GroupRow(props: {
   );
 }
 
-// The timeline body for flagged workspaces (side panel History view, history
-// tab render this over the same root-owned page state).
+// The timeline body (side panel History view and the history tab render
+// this over the same root-owned page state).
 export function EngineHistoryView(props: {
   moments: EngineMomentRecord[];
   hasMore: boolean;

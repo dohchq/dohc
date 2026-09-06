@@ -90,24 +90,18 @@ function assertSafeRelativePath(path: string): void {
   }
 }
 
-// Seeds .dohc/settings.local.json before launch so a spec can flip
-// per-workspace flags (e.g. experimental.workspaceEngineAlpha) without
-// driving the settings UI. Built FROM DEFAULT_WORKSPACE_SETTINGS (the strict
-// schema's canonical default) so the seed can never drift from the shape the
-// app parses.
+// Seeds .dohc/settings.local.json before launch so a spec can set
+// per-workspace settings without driving the settings UI. Built FROM
+// DEFAULT_WORKSPACE_SETTINGS (the strict schema's canonical default) so the
+// seed can never drift from the shape the app parses.
 export async function seedWorkspaceSettings(
   workspace: Pick<TempWorkspace, "rootPath">,
   overrides: {
-    experimental?: { workspaceEngineAlpha?: boolean };
     files?: Partial<(typeof DEFAULT_WORKSPACE_SETTINGS)["files"]>;
   } = {},
 ): Promise<void> {
   const settings = {
     ...DEFAULT_WORKSPACE_SETTINGS,
-    experimental: {
-      ...DEFAULT_WORKSPACE_SETTINGS.experimental,
-      ...overrides.experimental,
-    },
     files: {
       ...DEFAULT_WORKSPACE_SETTINGS.files,
       ...overrides.files,

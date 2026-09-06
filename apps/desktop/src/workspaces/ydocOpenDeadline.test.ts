@@ -20,7 +20,10 @@ import {
   isEngineWorkspaceOpenRefusedError,
   type EngineWorkspaceRunOptions,
 } from "@dohc/workspace-engine-client/daemon";
-import { mockLiveSessions } from "../testing/liveEngineSessions";
+import {
+  daemonCaptureLifecycleAnswer,
+  mockLiveSessions,
+} from "../testing/liveEngineSessions";
 import {
   YDOC_OPEN_RETRY_DEADLINE_MS,
   MAX_ENGINE_CAPTURE_TEXT_BYTES,
@@ -90,6 +93,7 @@ function captureWith(root: string, sessions: EngineWorkspaceSessions) {
       lineage: "existing" as const,
       applyLocalUpdate: async () => undefined,
       settleNow: async () => ({ sha256: "a".repeat(64), content: "" }) as never,
+      applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
       close: async () => undefined,
       evict: async () => undefined,
     }),
@@ -131,7 +135,9 @@ describe("the document open's capture-chain hold", () => {
         if (request.method === "workspace.close") {
           return { id: request.id, result: { closed: true } };
         }
-        return await loopback.sendRequest(request);
+        return (
+          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
+        );
       },
     };
     const sessions = new EngineWorkspaceSessions(
@@ -160,6 +166,8 @@ describe("the document open's capture-chain hold", () => {
     // The budget stopped the ladder well inside the six attempts it would
     // otherwise have spent holding the chain.
     expect(sleeps.length).toBeLessThanOrEqual(3);
+    // stop() flushes daemon capture, so the daemon has to be back for it.
+    daemonDown = false;
     await engine.stop();
   });
 
@@ -202,7 +210,9 @@ describe("the document open's capture-chain hold", () => {
             }, deadlineMs);
           });
         }
-        return await loopback.sendRequest(request);
+        return (
+          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
+        );
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
@@ -311,7 +321,9 @@ describe("the document open's capture-chain hold", () => {
             }, deadlineMs);
           });
         }
-        return await loopback.sendRequest(request);
+        return (
+          daemonCaptureLifecycleAnswer(request) ?? (await loopback.sendRequest(request))
+        );
       },
     };
     const sessions = new EngineWorkspaceSessions({ currentClient: () => client });
@@ -442,6 +454,7 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async () => {
             throw closeError;
           },
@@ -531,6 +544,8 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
             close: async () => {
               closes += 1;
               // The refusal release: the budget stopped waiting for it.
@@ -642,6 +657,7 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
             settleOnRefusal?: boolean;
@@ -728,6 +744,8 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -802,6 +820,8 @@ describe("the document open's capture-chain hold", () => {
             applyLocalUpdate: async () => undefined,
             settleNow: async () =>
               ({ sha256: "a".repeat(64), content: "" }) as never,
+            applyExternalMarkdownEdit: async () =>
+              ({ kind: "merged" }) as never,
             close: async () => {
               throw new DaemonRefusalError(
                 {
@@ -868,6 +888,7 @@ describe("the document open's capture-chain hold", () => {
           applyLocalUpdate: async () => undefined,
           settleNow: async () =>
             ({ sha256: "a".repeat(64), content: "" }) as never,
+          applyExternalMarkdownEdit: async () => ({ kind: "merged" }) as never,
           close: async (closeOptions?: {
             settle?: boolean;
             settleOnRefusal?: boolean;
@@ -901,82 +922,6 @@ describe("the document open's capture-chain hold", () => {
         expect(call, "drop the entry-level policy -> the sweep's `{ settle: false }` arrives without `settleOnRefusal: false`, the provider escalates, and the doc lands on the user's uncaptured bytes.").toMatchObject({ settle: false, settleOnRefusal: false });
       }
       expect(await readFile(join(root, "note.md"), "utf8")).toBe(uncaptured);
-      await engine.stop();
-    });
-
-    it("captures the file an orphan is waiting on, so the retry converges", async () => {
-      // codex r21. Round 20 said the retry "converges once the watcher
-      // captures the file" — and a retained orphan is marked failing-close,
-      // which made captureOnePath drop that path's events. The capture the
-      // discharge waits for could never run: permanently read-only, with a
-      // retry that could never succeed. The promise has to be reachable.
-      const root = await createTestScratch("dohc-ydoc-deadline-");
-      await write(root, "note.md", "the user's bytes\n");
-      const { sessions } = recordingSessions();
-      const doc = new Y.Doc();
-      let captured = false;
-      let opens = 0;
-      const engine = createWorkspaceEngineCapture({
-        workspaceId: WORKSPACE_ID,
-        rootPath: root,
-        rustEngineSessions: sessions,
-        openRustYDocProviderSession: async () => {
-          opens += 1;
-          // Open 1 binds absent-head over content and its release refuses,
-          // which orphans the session. Once the file is captured the lineage
-          // is no longer dirty against it, so the discharge releases and the
-          // reopen has a head to bind.
-          const absent = !captured;
-          return {
-            doc,
-            initialUpdate: Y.encodeStateAsUpdate(doc),
-            contentKind: "plaintext" as const,
-            path: "note.md",
-            head: absent ? ("absent" as const) : ("present" as const),
-            lineage: absent ? ("absent" as const) : ("existing" as const),
-            applyLocalUpdate: async () => undefined,
-            settleNow: async () =>
-              ({ sha256: "a".repeat(64), content: "" }) as never,
-            close: async () => {
-              if (!captured) throw new Error("unsettled-close");
-            },
-            // The evict fails, so the orphan is retained and the capture
-            // exception below is what it still depends on. The daemon that
-            // lets go is the other test above.
-            evict: async () => {
-              throw new Error("evict failed: transport-error");
-            },
-          };
-        },
-      });
-      engine.start();
-      await engine.flush();
-
-      const refusal = await engine
-        .openYDocSession({ path: "note.md", onRemoteUpdate: () => undefined })
-        .catch((error: unknown) => error);
-      expect(refusal).toBeInstanceOf(YDocSessionUnreleasedError);
-
-      // The step that could not happen: the watcher's event for the path the
-      // orphan is holding. Counted against a before, because the startup
-      // capture of this file already left a moment — an "any moments at all"
-      // assertion would pass whether or not this one ran.
-      const before = (await engine.listMoments({ limit: 200 })).moments.length;
-      await write(root, "note.md", "the user's bytes, edited outside dohc\n");
-      engine.captureBatch([{ path: "note.md", operation: "update" }]);
-      await engine.flush();
-      const after = (await engine.listMoments({ limit: 200 })).moments.length;
-      expect(after, "defer capture for an orphan like any other failing-close entry -> this records nothing, and the retry below refuses forever.").toBeGreaterThan(before);
-      captured = true;
-
-      // The retry discharges the orphan and binds.
-      const session = await engine.openYDocSession({
-        path: "note.md",
-        onRemoteUpdate: () => undefined,
-      });
-      expect(session.doc).toBe(doc);
-      expect(opens).toBe(2);
-      await session.close({ settle: false });
       await engine.stop();
     });
 

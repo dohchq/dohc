@@ -122,13 +122,6 @@ interface ChatDispatchServiceOptions {
   isPackaged(): boolean;
   resourcesPath?: () => string | undefined;
   queueSync(workspace: ChatDispatchWorkspace): void | boolean | Promise<void | boolean>;
-  // The engine opt-out gate: when it resolves false, a scan is a no-op.
-  // Merely resolving the chat/dispatch stores opens the workspace in the
-  // engine daemon, which would create an engine store for a workspace that
-  // opted out of recording anything.
-  scanEligible?(
-    workspace: ChatDispatchWorkspace,
-  ): boolean | Promise<boolean>;
   prepareRunWorkspace?(
     workspace: ChatDispatchWorkspace,
   ): Promise<void | (() => Promise<void>)>;
@@ -1564,7 +1557,6 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
         return;
       }
       scannedWorkspace = workspace;
-      if ((await options.scanEligible?.(workspace)) === false) return;
       await scanAndDrain(workspace);
     });
     void scan.catch(() => {
@@ -1750,8 +1742,8 @@ export function createChatDispatchService(options: ChatDispatchServiceOptions) {
       if (!command) return { ok: false, detail: "Configure a runner command first." };
 
       // A self-test spawns a real runner and writes a scratch thread, so it
-      // takes the same run lease and engine gate as a claimed run. An opted-out
-      // workspace refuses here, before chatStoreFor creates an engine store.
+      // takes the same run lease and engine gate as a claimed run. A workspace
+      // without a capture refuses here, before chatStoreFor opens the engine.
       try {
         releaseWorkspace = (await options.prepareRunWorkspace?.(workspace)) ?? null;
       } catch (error) {

@@ -31,7 +31,7 @@ fn valid_hello_frame() -> Vec<u8> {
         &Envelope::Hello(Hello {
             protocol_version: PROTOCOL_VERSION,
             auth_token: "fuzz-seed-token".to_owned(),
-            capabilities: vec!["shadow-r13".to_owned()],
+            capabilities: vec!["blobs".to_owned()],
             last_session_generation: None,
             max_frame_bytes: None,
         }),

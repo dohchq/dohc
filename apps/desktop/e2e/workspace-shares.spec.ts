@@ -23,7 +23,6 @@ import {
   seedCloudCredentials,
   seedWorkspaceManifest,
   seedWorkspaceRegistry,
-  seedWorkspaceSettings,
   writeWorkspaceFiles,
 } from "./helpers/workspace";
 
@@ -168,7 +167,6 @@ test("grant side: share a file by email from the explorer, copy the code, and en
 
   try {
     await seedWorkspaceManifest(temp, workspaceId);
-    await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
     await writeWorkspaceFiles(temp, [
       { path: "docs/plan.md", contents: "# Plan\n\nShare me.\n" },
     ]);
@@ -296,7 +294,6 @@ confidentialTest.describe("View link lifecycle", () => {
 
     try {
       await seedWorkspaceManifest(temp, workspaceId);
-      await seedWorkspaceSettings(temp, { experimental: { workspaceEngineAlpha: true } });
       await writeWorkspaceFiles(temp, [
         { path: "docs/shared.md", contents: selectedText },
         { path: "private/hidden.md", contents: privateText },

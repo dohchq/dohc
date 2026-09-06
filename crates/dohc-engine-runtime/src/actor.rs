@@ -1290,8 +1290,9 @@ enum CaptureIndexing {
 }
 
 enum Command {
-    BindShadowClone {
+    BindRoot {
         token: String,
+        faults: Arc<dyn FaultInjector>,
         reply: oneshot::Sender<Result<bool, StorageError>>,
     },
     VersionedTextWrite {
@@ -2805,12 +2806,21 @@ impl ActorHandle {
 
     // --- Async API (drives the tokio loop from within a runtime) ---
 
-    /// Stamp a fresh shadow database or verify an existing shadow binding on
-    /// the actor-owned connection before the workspace can accept writes.
-    pub async fn bind_shadow_clone(&self, token: String) -> Result<bool, RuntimeError> {
+    /// Stamp a fresh database with its root's binding token, or verify an
+    /// existing binding, on the actor-owned connection before the workspace
+    /// can accept writes.
+    pub async fn bind_root(
+        &self,
+        token: String,
+        faults: Arc<dyn FaultInjector>,
+    ) -> Result<bool, RuntimeError> {
         let (reply, reply_rx) = oneshot::channel();
         self.tx
-            .send(Command::BindShadowClone { token, reply })
+            .send(Command::BindRoot {
+                token,
+                faults,
+                reply,
+            })
             .await
             .map_err(|_| RuntimeError::ActorUnavailable)?;
         reply_rx
@@ -7644,8 +7654,12 @@ fn worker_main(
     // once every sender is dropped.
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            Command::BindShadowClone { token, reply } => {
-                let _ = reply.send(store.bind_shadow_clone_token(&token));
+            Command::BindRoot {
+                token,
+                faults,
+                reply,
+            } => {
+                let _ = reply.send(store.bind_root_token(&token, faults.as_ref()));
             }
             Command::VersionedTextWrite {
                 input,

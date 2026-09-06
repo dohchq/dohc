@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { WorkspaceDaemonRequester } from "@dohc/workspace-engine-client";
@@ -250,13 +249,6 @@ describe("EngineRelayClient real daemon", () => {
 async function createShadowRoot(prefix: string): Promise<string> {
   const rootPath = await createTestScratch(prefix);
   scratchRoots.push(rootPath);
-  const markerDirectory = join(rootPath, ".dohc", "engine");
-  await mkdir(markerDirectory, { recursive: true });
-  await writeFile(
-    join(markerDirectory, "SHADOW_CLONE"),
-    randomBytes(32).toString("hex"),
-    { encoding: "utf8", flag: "wx", mode: 0o600 },
-  );
   return rootPath;
 }
 

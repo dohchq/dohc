@@ -1,5 +1,4 @@
-import { randomBytes } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { ChatsLiveAdapter } from "@dohc/workspace-engine-client";
 import { describe, expect, it } from "vitest";
@@ -20,13 +19,6 @@ describe("live agent dispatch store real daemon", () => {
     async () => {
       const root = await createTestScratch("dohc-live-dispatch-e2e-");
       const workspaceId = `workspace-live-e2e-${process.pid}`;
-      const markerDirectory = join(root, ".dohc", "engine");
-      await mkdir(markerDirectory, { recursive: true });
-      await writeFile(
-        join(markerDirectory, "SHADOW_CLONE"),
-        randomBytes(32).toString("hex"),
-        { encoding: "utf8", flag: "wx", mode: 0o600 },
-      );
 
       const lifecycle = new EngineDaemonLifecycle({
         command: engine.require(),

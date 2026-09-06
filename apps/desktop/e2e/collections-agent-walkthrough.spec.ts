@@ -9,7 +9,6 @@ import {
   createTempWorkspace,
   openWorkspaceFromFirstRun,
   seedWorkspaceManifest,
-  seedWorkspaceSettings,
   type TempWorkspace,
 } from "./helpers/workspace";
 
@@ -117,9 +116,6 @@ test("an agent's file-written collection opens live and answers its MCP queries"
 
   try {
     await seedWorkspaceManifest(temp, "collections-agent-walkthrough-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);
@@ -212,9 +208,6 @@ test("an agent's MCP field set and record create land live with agent attributio
 
   try {
     await seedWorkspaceManifest(temp, "collections-agent-writes-e2e");
-    await seedWorkspaceSettings(temp, {
-      experimental: { workspaceEngineAlpha: true },
-    });
     desktop = await launchDesktopApp({ workspace: temp });
     const page = desktop.page;
     await openWorkspaceFromFirstRun(page, temp);

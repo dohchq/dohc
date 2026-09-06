@@ -29,6 +29,7 @@ export interface EngineMoment {
   path: string;
   operation: string;
   text: string;
+  summary: string | null;
 }
 
 // Only a database that cannot be opened reads as "not ready, poll again", and
@@ -57,6 +58,7 @@ const SCHEMA_READ_HERE: ReadonlyArray<readonly [string, readonly string[]]> = [
       "moment_order",
       "payload_after_blob_sha256",
       "payload_after_content_kind",
+      "metadata_summary",
     ],
   ],
   ["blobs", ["sha256", "text"]],
@@ -159,7 +161,8 @@ function readMoments(db: EngineDb, path?: string): EngineMoment[] {
   const rows = db
     .prepare(
       `SELECT m.path AS path, m.operation AS operation,
-              m.payload_after_blob_sha256 AS sha, b.text AS text
+              m.payload_after_blob_sha256 AS sha, b.text AS text,
+              m.metadata_summary AS summary
        FROM moments m
        LEFT JOIN blobs b ON b.sha256 = m.payload_after_blob_sha256
        WHERE m.payload_after_blob_sha256 IS NOT NULL
@@ -176,7 +179,12 @@ function readMoments(db: EngineDb, path?: string): EngineMoment[] {
           "wrong or the store is corrupt.",
       );
     }
-    return { path: String(row.path), operation: String(row.operation), text: row.text };
+    return {
+      path: String(row.path),
+      operation: String(row.operation),
+      text: row.text,
+      summary: typeof row.summary === "string" ? row.summary : null,
+    };
   });
 }
 

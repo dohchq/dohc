@@ -16,8 +16,7 @@ import {
   runReactionToggle,
 } from "./chatMessages";
 
-// Linked Chats surface (PR 0M-5, workspace-engine alpha) — the Chats
-// panel's "This file" tab. Per-file Chats
+// Linked Chats surface (PR 0M-5) — the Chats panel's "This file" tab. Per-file Chats
 // stored in the engine and linked to the file's stable object id, so a chat
 // follows its file through renames. Product vocabulary: these are Chats.
 // Message rendering + composer are the shared chatMessages pieces
