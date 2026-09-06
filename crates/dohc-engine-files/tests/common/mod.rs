@@ -1,13 +1,13 @@
-//! Shared test helpers: a self-cleaning scratch workspace and an independent
-//! SHA-256 (a second code path from the crate's streaming pooled hasher, so a
-//! hash assertion is non-tautological), plus a best-effort symlink helper.
+//! Shared test helpers: a self-cleaning scratch workspace plus a best-effort
+//! symlink helper. Expected hashes come from `dohc_engine_storage::hex_sha256`,
+//! a second code path from the crate's streaming pooled hasher, so a hash
+//! assertion is non-tautological.
 //!
 //! Each integration test file is its own crate and uses a different subset of
 //! these helpers, so unused items are expected in any one crate.
 #![allow(dead_code)]
 
 use dohc_test_scratch::ScratchDir;
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
 /// A unique temp directory, removed on `Drop`.
@@ -140,15 +140,4 @@ impl Scratch {
             false
         }
     }
-}
-
-/// Independent lowercase-hex SHA-256 for expected values in tests.
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        use std::fmt::Write as _;
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }

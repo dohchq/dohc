@@ -11,14 +11,14 @@ use dohc_engine_storage::{
     FaultPoint, MaterializationJobSpec, Preimage, StorageError, enqueue_job, hex_sha256,
     put_binary_blob,
 };
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use rusqlite::params;
 
 const WS: &str = "binhead-rev2";
 
 fn open() -> (ScratchDir, EngineStore) {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db path");
+    let db = engine_db_path(&scratch).expect("db path");
     let mut store = EngineStore::open(&db, 1).expect("open");
     VersionedTextStore::new(&mut store)
         .ensure_main_version(WS, "main", 1, &NoFaults)

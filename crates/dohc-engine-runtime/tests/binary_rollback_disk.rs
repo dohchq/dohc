@@ -12,7 +12,7 @@ use dohc_engine_runtime::{
     SelfWriteRecorder, WorkspaceSupervisor,
 };
 use dohc_engine_storage::{EngineStore, FaultAction, FaultInjector, FaultPoint};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -22,13 +22,6 @@ const WORKSPACE: &str = "ws-binary-rollback-disk";
 const BYTES: &[u8] = &[0, 1, 2, 3, 0xff];
 const UPDATED_BYTES: &[u8] = &[9, 8, 7, 6, 0xfe];
 const OTHER_LINEAGE_BYTES: &[u8] = &[4, 3, 2, 1, 0xfd];
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 #[derive(Default)]
 struct CountingRecorder {
@@ -121,7 +114,7 @@ fn rollback(version_id: &str, path: &str, moment_id: &str) -> RollbackTextFileMu
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_restore_uses_current_generation_over_newer_completed_lineage() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -153,7 +146,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
         .versioned_binary_write(
             binary_write_for("main", "shared.bin", "main-seed", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -163,7 +156,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
         .versioned_binary_write(
             binary_write_for("main", "shared.bin", "main-mutation", UPDATED_BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -175,7 +168,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "other-lineage".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 30,
             },
             Arc::new(NoFaults),
@@ -192,7 +185,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
                 OTHER_LINEAGE_BYTES,
             ),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -204,7 +197,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 40,
             },
             Arc::new(NoFaults),
@@ -221,7 +214,7 @@ async fn rollback_restore_uses_current_generation_over_newer_completed_lineage()
         .versioned_text_rollback(
             rollback("main", "shared.bin", "main-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -265,7 +258,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
     let database = ScratchDir::new().expect("database scratch");
     let root_a = ScratchDir::new().expect("workspace A root");
     let root_b = ScratchDir::new().expect("workspace B root");
-    let db = database.engine_db_path().expect("db");
+    let db = engine_db_path(&database).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     for workspace_id in [WORKSPACE_A, WORKSPACE_B] {
@@ -298,7 +291,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
         .versioned_binary_write(
             write(WORKSPACE_A, "a-seed", BYTES, 10),
             root_a.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -308,7 +301,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
         .versioned_binary_write(
             write(WORKSPACE_A, "a-mutation", UPDATED_BYTES, 20),
             root_a.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -328,7 +321,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
                 author_json: None,
             },
             root_a.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -344,7 +337,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
         .versioned_binary_write(
             write(WORKSPACE_B, "b-higher-generation", OTHER_LINEAGE_BYTES, 30),
             root_b.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -405,7 +398,7 @@ async fn rollback_restore_generation_fence_is_scoped_to_its_workspace() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -413,7 +406,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
         .versioned_binary_write(
             binary_write_for("main", "tip.bin", "tip-seed", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -423,7 +416,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
         .versioned_binary_write(
             binary_write_for("main", "tip.bin", "tip-mutation", UPDATED_BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -435,7 +428,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
         .versioned_text_rollback(
             rollback("main", "tip.bin", "tip-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -465,7 +458,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
                 OTHER_LINEAGE_BYTES,
             ),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -505,7 +498,7 @@ async fn write_after_tip_rollback_is_newer_than_the_completed_restore() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_binary_delete_rollback_restores_file_bytes() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -513,7 +506,7 @@ async fn completed_binary_delete_rollback_restores_file_bytes() {
         .versioned_binary_write(
             binary_write("deleted.bin", "delete-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -523,7 +516,7 @@ async fn completed_binary_delete_rollback_restores_file_bytes() {
         .versioned_text_delete(
             delete("deleted.bin", "completed-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -535,7 +528,7 @@ async fn completed_binary_delete_rollback_restores_file_bytes() {
         .versioned_text_rollback(
             rollback("main", "deleted.bin", "completed-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -553,7 +546,7 @@ async fn completed_binary_delete_rollback_restores_file_bytes() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -561,7 +554,7 @@ async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path
         .versioned_binary_write(
             binary_write("old.bin", "rename-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -583,7 +576,7 @@ async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -599,7 +592,7 @@ async fn completed_binary_rename_rollback_restores_old_path_and_removes_new_path
         .versioned_text_rollback(
             rollback("main", "new.bin", "completed-rename"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -620,7 +613,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
     // isolates the post-commit race: the write remains retryable while another
     // disk action terminalizes its paired delete before the replay reloads it.
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -628,7 +621,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
         .versioned_binary_write(
             binary_write("cancelled-old.bin", "cancelled-rename-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -650,7 +643,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -664,7 +657,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
         .versioned_text_rollback(
             rollback_input.clone(),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -703,7 +696,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
         .versioned_text_rollback(
             rollback_input,
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -742,7 +735,7 @@ async fn deduped_rename_rollback_reports_a_cancelled_paired_delete_as_conflict()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -750,7 +743,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
         .versioned_binary_write(
             binary_write("old-pending.bin", "pending-rename-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -772,7 +765,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -784,7 +777,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
         .versioned_text_rollback(
             rollback("main", "new-pending.bin", "pending-rename"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults,
             CancellationToken::new(),
         )
@@ -874,7 +867,7 @@ async fn capture_ignores_a_pending_rename_rollback_delete_until_retry() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -882,7 +875,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
         .versioned_binary_write(
             binary_write("conflict-old.bin", "conflict-rename-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -904,7 +897,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -917,7 +910,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
         .versioned_text_rollback(
             rollback("main", "conflict-new.bin", "conflicted-rollback"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1028,7 +1021,7 @@ async fn conflicted_rename_rollback_terminates_delete_and_capture_sees_survivor(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -1061,7 +1054,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "inactive-rename".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 3,
             },
             Arc::new(NoFaults),
@@ -1073,7 +1066,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
         .versioned_binary_write(
             binary_write_for("inactive-rename", "branch-old.bin", "branch-seed", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1095,7 +1088,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
                 now_ms: 10,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1107,7 +1100,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 20,
             },
             Arc::new(NoFaults),
@@ -1120,7 +1113,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
         .versioned_text_rollback(
             rollback("inactive-rename", "branch-new.bin", "branch-rename"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1205,7 +1198,7 @@ async fn capture_ingests_an_inactive_versions_pending_rename_destination() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
 
@@ -1213,7 +1206,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
         .versioned_binary_write(
             binary_write("target-old.bin", "target-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1235,7 +1228,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1245,7 +1238,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
         .versioned_binary_write(
             binary_write("unrelated-old.bin", "unrelated-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1267,7 +1260,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
                 now_ms: 30,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1301,7 +1294,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
         .versioned_text_rollback(
             rollback("main", "target-new.bin", "target"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1360,7 +1353,7 @@ async fn rollback_rename_namespaces_around_retained_normal_rename_jobs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reopen() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     std::fs::write(scratch.path().join("capture.bin"), BYTES).expect("disk capture seed");
@@ -1389,7 +1382,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
         .versioned_text_delete(
             delete("capture.bin", "capture-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1401,7 +1394,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
         .versioned_text_rollback(
             rollback("main", "capture.bin", "capture-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -1462,7 +1455,7 @@ async fn pending_delete_rollback_restore_is_not_seeded_for_capture_retire_on_reo
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_delete_rollback_drains_when_version_becomes_active() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -1493,7 +1486,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
         .versioned_binary_write(
             binary_write("inactive.bin", "inactive-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1503,7 +1496,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
         .versioned_text_delete(
             delete("inactive.bin", "inactive-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1515,7 +1508,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "empty-branch".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 30,
             },
             Arc::new(NoFaults),
@@ -1528,7 +1521,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
         .versioned_text_rollback(
             rollback("main", "inactive.bin", "inactive-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1567,7 +1560,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 32,
             },
             Arc::new(NoFaults),
@@ -1597,7 +1590,7 @@ async fn inactive_delete_rollback_drains_when_version_becomes_active() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn superseded_inactive_restore_is_drained_after_switch_projection() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -1628,7 +1621,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
         .versioned_binary_write(
             binary_write("switch-back.bin", "switch-back-seed"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1638,7 +1631,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
         .versioned_text_delete(
             delete("switch-back.bin", "switch-back-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1650,7 +1643,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "active-newer".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 30,
             },
             Arc::new(NoFaults),
@@ -1663,7 +1656,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
         .versioned_text_rollback(
             rollback("main", "switch-back.bin", "switch-back-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1678,7 +1671,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
                 OTHER_LINEAGE_BYTES,
             ),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1691,7 +1684,7 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 40,
             },
             Arc::new(NoFaults),
@@ -1720,14 +1713,14 @@ async fn superseded_inactive_restore_is_drained_after_switch_projection() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn post_commit_active_version_lookup_failure_returns_committed_rollback() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
         .versioned_binary_write(
             binary_write("lookup.bin", "lookup-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1739,7 +1732,7 @@ async fn post_commit_active_version_lookup_failure_returns_committed_rollback() 
         .versioned_text_rollback(
             rollback("main", "lookup.bin", "lookup-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -1787,7 +1780,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
     let database = ScratchDir::new().expect("database scratch");
     let root_a = ScratchDir::new().expect("workspace A root");
     let root_b = ScratchDir::new().expect("workspace B root");
-    let db = database.engine_db_path().expect("db");
+    let db = engine_db_path(&database).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     for workspace_id in [WORKSPACE_A, WORKSPACE_B] {
@@ -1819,7 +1812,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
                 request_id: None,
             },
             root_a.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1838,7 +1831,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
                 author_json: None,
             },
             root_a.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -1855,7 +1848,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
         .materialize_replay_pending_for_fence(
             root_b.path().to_path_buf(),
             WORKSPACE_B.to_owned(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             20,
         )
         .await
@@ -1882,7 +1875,7 @@ async fn rollback_replay_cannot_delete_another_workspaces_file() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     let spoofed_moment_id = "rollback-restore_ordinary-write";
@@ -1892,7 +1885,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
         .versioned_binary_write(
             binary_write("spoof.bin", spoofed_moment_id),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             faults.clone(),
             CancellationToken::new(),
         )
@@ -1909,7 +1902,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
         .versioned_binary_write(
             binary_write_for("main", "spoof.bin", "newer-write", UPDATED_BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -1948,7 +1941,7 @@ async fn ordinary_rollback_prefixed_write_is_superseded_normally() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     std::fs::write(scratch.path().join("captured.bin"), BYTES).expect("capture disk seed");
@@ -1994,7 +1987,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "inactive".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 12,
             },
             Arc::new(NoFaults),
@@ -2017,7 +2010,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
                 now_ms: 13,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2029,7 +2022,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 14,
             },
             Arc::new(NoFaults),
@@ -2041,7 +2034,7 @@ async fn inactive_rollback_write_does_not_hide_active_capture_retire() {
         .versioned_text_rollback(
             rollback("inactive", "captured.bin", "inactive-delete"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2096,7 +2089,7 @@ async fn legacy_global_pending_job_is_fenced_by_newer_scoped_completion() {
 
     let database = ScratchDir::new().expect("database scratch");
     let root = ScratchDir::new().expect("workspace root");
-    let db = database.engine_db_path().expect("db");
+    let db = engine_db_path(&database).expect("db");
     let store = EngineStore::open(&db, 1).expect("open store");
     let old_sha = store.put_binary_blob(BYTES).expect("stage old bytes");
     let new_sha = store
@@ -2158,7 +2151,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
     const PATH: &str = "inactive-shared.bin";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -2174,7 +2167,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
         .versioned_binary_write(
             binary_write_for("main", PATH, "active-seed", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2201,7 +2194,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: BRANCH.to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 12,
             },
             Arc::new(NoFaults),
@@ -2224,7 +2217,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2241,7 +2234,7 @@ async fn inactive_delete_rollback_reprojects_the_still_active_version() {
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 21,
             },
             switch_faults.clone(),
@@ -2302,7 +2295,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
     const NEW_PATH: &str = "inactive-rename-new.bin";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -2318,7 +2311,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
         .versioned_binary_write(
             binary_write_for("main", OLD_PATH, "rename-main-seed", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2348,7 +2341,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
                 OTHER_LINEAGE_BYTES,
             ),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2360,7 +2353,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: BRANCH.to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 12,
             },
             Arc::new(NoFaults),
@@ -2384,7 +2377,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
                 now_ms: 20,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2403,7 +2396,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 21,
             },
             switch_faults.clone(),
@@ -2421,7 +2414,7 @@ async fn inactive_rename_rollback_removes_destination_from_the_active_projection
         .versioned_text_rollback(
             rollback(BRANCH, NEW_PATH, "inactive-rename-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2450,7 +2443,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
     const PATH: &str = "inactive-created.bin";
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -2483,7 +2476,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: BRANCH.to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 3,
             },
             Arc::new(NoFaults),
@@ -2495,7 +2488,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
         .versioned_binary_write(
             binary_write_for(BRANCH, PATH, "inactive-create-mutation", BYTES),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2513,7 +2506,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
                 workspace_id: WORKSPACE.to_owned(),
                 version_id: "main".to_owned(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 10,
             },
             switch_faults.clone(),
@@ -2531,7 +2524,7 @@ async fn inactive_create_rollback_removes_created_path_from_the_active_projectio
         .versioned_text_rollback(
             rollback(BRANCH, PATH, "inactive-create-mutation"),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2564,7 +2557,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
     );
 
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let actor = supervisor.open(&db, 1).expect("open actor").actor;
     actor
@@ -2597,7 +2590,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
                 workspace_id: workspace_id.clone(),
                 version_id: version_id.clone(),
                 root_dir: scratch.path().to_path_buf(),
-                self_writes: Arc::new(NoRecorder),
+                self_writes: Arc::new(()),
                 now_ms: 3,
             },
             Arc::new(NoFaults),
@@ -2623,7 +2616,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
         .versioned_binary_write(
             write("long-identity-seed", BYTES, 10),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2633,7 +2626,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
         .versioned_binary_write(
             write(mutation_moment_id, UPDATED_BYTES, 20),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2652,7 +2645,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2675,7 +2668,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
         .versioned_binary_write(
             write(conflict_moment_id, UPDATED_BYTES, 30),
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )
@@ -2695,7 +2688,7 @@ async fn long_rollback_identity_uses_a_bounded_temp_sibling() {
                 author_json: None,
             },
             scratch.path().to_path_buf(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             Arc::new(NoFaults),
             CancellationToken::new(),
         )

@@ -14,23 +14,14 @@ mod common;
 use common::*;
 use dohc_engine_collab::{
     apply_remote_update, load_persisted, maybe_compact, record_local_update, ydoc::OffsetMode,
-    CollabError, CompactOutcome, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome, Ydoc,
+    CollabError, CompactOutcome, ContentKind, Regime, RemoteUpdate, ReplicationApplyOutcome,
+    WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{NoFaults, TxnOutcome};
+use dohc_engine_testkit::decode_hex;
 
 const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
 const OVERLAP_U2_HEX: &str = "01010c00040109706c61696e546578740561f09f988000";
-
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
-}
 
 fn setup_parity_store(tag: &str, regime: Regime) -> (TempStore, dohc_engine_collab::DocKey) {
     let mut ts = fresh_store(tag);
@@ -426,6 +417,7 @@ fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
 
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "split-peer".to_owned(),
@@ -442,6 +434,7 @@ fn replay_parity_rejects_parked_interior_split_on_dependency_arrival() {
 
     let error = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "dependency-peer".to_owned(),
@@ -517,6 +510,7 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
     let (mut remote, rkey) = setup_parity_store(&format!("{tag}-remote"), Regime::Replicated);
     apply_remote_update(
         &mut remote.store,
+        &mut WriterDocCache::new(),
         &rkey,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
@@ -531,6 +525,7 @@ fn assert_delete_boundary_rejected(tag: &str, base_hex: &str, candidate_hex: &st
     .expect("remote base");
     let error = apply_remote_update(
         &mut remote.store,
+        &mut WriterDocCache::new(),
         &rkey,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
@@ -581,6 +576,7 @@ fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arriva
 
     let parked = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "delete-peer".to_owned(),
@@ -604,6 +600,7 @@ fn replay_parity_rejects_parked_delete_in_dependency_scalar_on_dependency_arriva
 
     let error = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "dependency-peer".to_owned(),
@@ -649,6 +646,7 @@ fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
     let base = producer.plaintext_insert(0, "\u{1F1FA}\u{1F1F3}Z ");
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
@@ -664,6 +662,7 @@ fn replay_parity_stays_fail_closed_on_multi_unit_pending_diff_inputs() {
     let follow = producer.plaintext_insert(2, "x");
     let outcome = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
@@ -715,6 +714,7 @@ fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
     let u1 = decode_hex(OVERLAP_U1_HEX);
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer-overlap".to_owned(),
@@ -733,6 +733,7 @@ fn replay_parity_rejects_overlap_slice_divergence_on_remote_path() {
     let u2_sha = dohc_engine_collab::hex_sha256(&u2);
     let error = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer-overlap".to_owned(),
@@ -805,6 +806,7 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
     let (mut remote, remote_key) = setup_parity_store("mixed-parity-remote", Regime::Replicated);
     apply_remote_update(
         &mut remote.store,
+        &mut WriterDocCache::new(),
         &remote_key,
         &RemoteUpdate {
             origin_id: "peer-overlap".to_owned(),
@@ -819,6 +821,7 @@ fn replay_parity_rejects_mixed_parked_and_discarded_clocks_on_both_paths() {
     .expect("remote overlap base");
     let remote_error = apply_remote_update(
         &mut remote.store,
+        &mut WriterDocCache::new(),
         &remote_key,
         &RemoteUpdate {
             origin_id: "peer-mixed".to_owned(),
@@ -931,6 +934,7 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
 
     let parked = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "origin-b".to_owned(),
@@ -952,6 +956,7 @@ fn replay_parity_parks_cross_origin_missing_dependency_then_converges() {
 
     let resolved = apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "origin-a".to_owned(),
@@ -987,6 +992,7 @@ fn compaction_preserves_parked_updates_until_dependency_arrives() {
 
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "origin-b".to_owned(),
@@ -1012,6 +1018,7 @@ fn compaction_preserves_parked_updates_until_dependency_arrives() {
 
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "origin-a".to_owned(),
@@ -1315,6 +1322,7 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
             setup_parity_store(&format!("xtype-{name}-remote"), Regime::Replicated);
         apply_remote_update(
             &mut remote.store,
+            &mut WriterDocCache::new(),
             &rkey,
             &RemoteUpdate {
                 origin_id: "peer".to_owned(),
@@ -1329,6 +1337,7 @@ fn replay_parity_rejects_cross_type_redefinition_on_both_paths() {
         .expect("remote string base accepted");
         let rerr = apply_remote_update(
             &mut remote.store,
+            &mut WriterDocCache::new(),
             &rkey,
             &RemoteUpdate {
                 origin_id: "peer".to_owned(),
@@ -1505,6 +1514,7 @@ fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
     let insert = producer.plaintext_insert(0, "abc");
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),
@@ -1521,6 +1531,7 @@ fn replay_parity_accepts_honest_delete_gc_resend_on_remote_path() {
     let resend = producer.encode_full_state();
     apply_remote_update(
         &mut ts.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "peer".to_owned(),

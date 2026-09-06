@@ -724,20 +724,6 @@ pub fn update_text_conflict_row(
 }
 
 impl VersionedTextStore<'_> {
-    pub fn list_text_conflicts(
-        &self,
-        workspace_id: &str,
-        status: Option<&str>,
-    ) -> Result<Vec<TextConflict>, DomainError> {
-        if !matches!(status, None | Some("open") | Some("resolved")) {
-            return Err(DomainError::InvalidInput {
-                reason: "conflict status is invalid",
-            });
-        }
-        self.store
-            .read_with(|conn| list_conflicts(conn, workspace_id, status, None, None))
-    }
-
     /// Return one bounded keyset page. The continuation id is resolved without
     /// the status filter so a conflict resolved between `status = open` page
     /// requests still advances from its original stable ordering key.
@@ -761,14 +747,6 @@ impl VersionedTextStore<'_> {
                 Some(TEXT_CONFLICT_QUERY_LIMIT),
             )
         })
-    }
-
-    pub fn resolve_text_conflict(
-        &mut self,
-        input: &ResolveTextConflict,
-        faults: &dyn FaultInjector,
-    ) -> Result<ResolveTextConflictResult, DomainError> {
-        self.resolve_text_conflict_with(input, faults, |_, _, _| Ok(()), |_, _, ()| Ok(()))
     }
 
     /// Resolve a conflict with caller-supplied same-transaction checks and
@@ -2024,7 +2002,7 @@ mod tests {
 
     fn open_store() -> (ScratchDir, EngineStore) {
         let scratch = ScratchDir::new().expect("scratch directory");
-        let path = scratch.engine_db_path().expect("database path");
+        let path = dohc_engine_testkit::engine_db_path(&scratch).expect("database path");
         let mut store = EngineStore::open(&path, 1).expect("open engine store");
         store
             .write_with(&NoFaults, |tx| {

@@ -9,31 +9,14 @@
 //! pinned by the `a_parked_update_drained_on_*` rpc tests.
 
 use dohc_engine_collab::DocKey;
-use dohc_engine_runtime::{
-    CancellationToken, CaptureIngest, NoFaults, SelfWriteRecorder, WorkspaceSupervisor,
-};
+use dohc_engine_runtime::{CancellationToken, CaptureIngest, NoFaults, WorkspaceSupervisor};
 use dohc_engine_storage::{EngineStore, FaultPoint, StorageError};
-use dohc_engine_sync::{LeaseProbe, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
-use dohc_engine_testkit::{ScratchDir, ScriptedFaults};
+use dohc_engine_sync::{AlwaysLive, NoLiveLeases, ReplicationEnvelope, apply_ydoc_envelope};
+use dohc_engine_testkit::{ScratchDir, ScriptedFaults, engine_db_path};
 use std::sync::Arc;
 
 const WS: &str = "ws-drain-windows";
 const PATH: &str = "notes/live.md";
-
-struct AlwaysLive;
-
-impl LeaseProbe for AlwaysLive {
-    fn is_live(&self, _key: &DocKey) -> bool {
-        true
-    }
-}
-
-struct NoRecorder;
-
-impl SelfWriteRecorder for NoRecorder {
-    fn record(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-    fn retract(&self, _workspace_id: &str, _path: &str, _sha256: &str) {}
-}
 
 fn deferred_rows(db: &std::path::Path) -> i64 {
     let store = EngineStore::open_read_only(db).expect("open probe store");
@@ -60,7 +43,7 @@ fn applied_update_rows(db: &std::path::Path) -> i64 {
 /// A captured head, a replicated base, and one update parked behind a live
 /// lease — the state a crashed session leaves for a later drain to apply.
 async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(scratch).expect("db");
     let supervisor = WorkspaceSupervisor::new();
     let handle = supervisor.open(&db, 1).expect("open actor").actor;
     let written = handle
@@ -112,7 +95,14 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
         }),
         recorded_at_ms: 110,
     };
-    apply_ydoc_envelope(&mut store, &base, &NoFaults, &NoLiveLeases).expect("apply verified base");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &base,
+        &NoFaults,
+        &NoLiveLeases,
+    )
+    .expect("apply verified base");
 
     let update_bytes = doc.plaintext_insert(6, " parked");
     let blob_sha = store.put_binary_blob(&update_bytes).expect("blob");
@@ -133,7 +123,14 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
         }),
         recorded_at_ms: 120,
     };
-    apply_ydoc_envelope(&mut store, &envelope, &NoFaults, &AlwaysLive).expect("park");
+    apply_ydoc_envelope(
+        &mut store,
+        &mut dohc_engine_collab::WriterDocCache::new(),
+        &envelope,
+        &NoFaults,
+        &AlwaysLive,
+    )
+    .expect("park");
     drop(store);
     assert_eq!(deferred_rows(&db), 1, "the envelope starts parked");
     key
@@ -147,7 +144,7 @@ async fn seed_parked_update(scratch: &ScratchDir) -> DocKey {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
 
     // An open sync conflict on the object, in the shape
@@ -239,7 +236,7 @@ async fn an_open_refused_by_a_sync_conflict_keeps_the_parked_queue_for_the_retry
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry() {
     let scratch = ScratchDir::new().expect("scratch");
-    let db = scratch.engine_db_path().expect("db");
+    let db = engine_db_path(&scratch).expect("db");
     let key = seed_parked_update(&scratch).await;
 
     let supervisor = WorkspaceSupervisor::new();
@@ -249,7 +246,7 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
         .ydoc_close_session_materialized(
             scratch.path().to_path_buf(),
             key.clone(),
-            Arc::new(NoRecorder),
+            Arc::new(()),
             200,
             faults.clone(),
             CancellationToken::new(),
@@ -275,7 +272,7 @@ async fn a_close_that_fails_to_materialize_keeps_the_parked_queue_for_the_retry(
         .ydoc_close_session_materialized(
             scratch.path().to_path_buf(),
             key,
-            Arc::new(NoRecorder),
+            Arc::new(()),
             300,
             Arc::new(NoFaults),
             CancellationToken::new(),

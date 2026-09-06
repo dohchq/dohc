@@ -13,6 +13,7 @@ use dohc_engine_collab::{
     ContentKind, DocKey, Regime, WriterDocCache, Ydoc,
 };
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
+use dohc_engine_testkit::decode_hex;
 
 const OVERLAP_U1_HEX: &str = "01010c00040109706c61696e546578740461efbfbd00";
 /// A skip claims client 12 clocks `[0, 3)` but carries no integrable content.
@@ -51,17 +52,6 @@ fn setup(tag: &str, regime: Regime) -> (TempStore, DocKey) {
 /// base (no origin dependencies), so appends can be sequenced freely.
 fn independent_insert(text: &str) -> Vec<u8> {
     Ydoc::wire().plaintext_insert(0, text)
-}
-
-fn decode_hex(encoded: &str) -> Vec<u8> {
-    encoded
-        .as_bytes()
-        .chunks_exact(2)
-        .map(|pair| {
-            let pair = std::str::from_utf8(pair).expect("hex utf8");
-            u8::from_str_radix(pair, 16).expect("hex byte")
-        })
-        .collect()
 }
 
 /// Redefine an update's plaintext payload in place (same client, same clocks,

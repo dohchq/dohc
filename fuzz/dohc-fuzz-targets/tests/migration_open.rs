@@ -6,7 +6,7 @@
 use dohc_engine_storage::{
     CorruptionKind, ENGINE_SCHEMA_VERSION, EngineStore, SQLITE_DATABASE_HEADER_BYTES, classify,
 };
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 use proptest::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -37,7 +37,7 @@ fn valid_db_image() -> &'static [u8] {
     static IMAGE: OnceLock<Vec<u8>> = OnceLock::new();
     IMAGE.get_or_init(|| {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = engine_db_path(&scratch).expect("db path");
         let store = EngineStore::open(&path, 1_000).expect("create valid engine db");
         drop(store);
         remove_sidecars(&path);
@@ -49,7 +49,7 @@ fn valid_db_image() -> &'static [u8] {
 fn fresh_db() -> (ScratchDir, PathBuf, Vec<u8>) {
     let bytes = valid_db_image().to_vec();
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     std::fs::write(&path, &bytes).expect("seed valid engine db");
     (scratch, path, bytes)
 }
@@ -83,7 +83,7 @@ proptest! {
     #[test]
     fn arbitrary_file_bytes_fail_closed(bytes in prop::collection::vec(any::<u8>(), 1..4096)) {
         let scratch = ScratchDir::new().expect("scratch");
-        let path = scratch.engine_db_path().expect("db path");
+        let path = engine_db_path(&scratch).expect("db path");
         std::fs::write(&path, &bytes).expect("write fuzz database");
 
         assert_rejected_as_corruption(&path);
@@ -145,7 +145,7 @@ fn seed_valid_database_opens() {
 #[test]
 fn seed_all_zeros_classifies_as_corruption() {
     let scratch = ScratchDir::new().expect("scratch");
-    let path = scratch.engine_db_path().expect("db path");
+    let path = engine_db_path(&scratch).expect("db path");
     std::fs::write(&path, [0u8; 512]).expect("write zeros");
     assert_rejected_as_corruption(&path);
 }

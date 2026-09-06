@@ -17,6 +17,7 @@ use dohc_engine_runtime::{
     CaptureSecretRetire, MAX_CAPTURE_INGEST_BATCH_BYTES, MAX_CAPTURE_INGEST_BATCH_OPS, NoFaults,
     RuntimeError, WorkspaceRootGuard,
 };
+use dohc_engine_storage::hex_sha256;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Read};
@@ -721,7 +722,7 @@ impl StoreCaptureSink {
         match content {
             SecretContent::Text(text) => {
                 let size = text.len() as u64;
-                let sha256 = sha256_hex(text.as_bytes());
+                let sha256 = hex_sha256(text.as_bytes());
                 if suppress_self_write
                     && self.self_writes.consume(&self.workspace_id, path, &sha256)
                 {
@@ -991,7 +992,7 @@ fn prepare_added_text_prefix_parallel_with(
                     let prepared = match read_candidate(candidate) {
                         Ok(CurrentContent::Text(text)) => {
                             let size = text.len() as u64;
-                            let sha256 = sha256_hex(text.as_bytes());
+                            let sha256 = hex_sha256(text.as_bytes());
                             PreparedCandidate::Text(PreparedTextContent { text, size, sha256 })
                         }
                         Ok(
@@ -1326,7 +1327,7 @@ impl CaptureSink for StoreCaptureSink {
                 // the manifest must record reality or a later revert to the
                 // scan-time bytes would diff clean and never re-ingest.
                 let size = text.len() as u64;
-                let sha256 = sha256_hex(text.as_bytes());
+                let sha256 = hex_sha256(text.as_bytes());
                 if changed && self.self_writes.consume(&self.workspace_id, path, &sha256) {
                     return Ok(IngestOutcome::Captured { size, sha256 });
                 }
@@ -1392,7 +1393,7 @@ impl CaptureSink for StoreCaptureSink {
                 // the bytes' identity, which equals the scanner's hash of the
                 // same file bytes.
                 let size = bytes.len() as u64;
-                let sha256 = sha256_hex(&bytes);
+                let sha256 = hex_sha256(&bytes);
                 match self.ingest_binary(path, bytes, claim_foreign_head)? {
                     DomainIngest::Persisted => Ok(IngestOutcome::Captured { size, sha256 }),
                     DomainIngest::NameRefused => Ok(IngestOutcome::NotOwned),
@@ -1462,17 +1463,6 @@ impl CaptureSink for StoreCaptureSink {
             (PathClassification::Tracked, _) => Ok(()),
         }
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    use std::fmt::Write;
-    let digest = Sha256::digest(bytes);
-    let mut hex = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        let _ = write!(hex, "{byte:02x}");
-    }
-    hex
 }
 
 enum SecretContent {
@@ -1782,7 +1772,7 @@ mod tests {
         scratch: &ScratchDir,
         supervisor: &WorkspaceSupervisor,
     ) -> (PathBuf, StoreCaptureSink) {
-        let db = scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(scratch).expect("engine db path");
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         (
             db,
@@ -1934,9 +1924,9 @@ mod tests {
 
         assert_eq!(prepared.len(), 2);
         assert_eq!(prepared[0].text, "alpha");
-        assert_eq!(prepared[0].sha256, sha256_hex(b"alpha"));
+        assert_eq!(prepared[0].sha256, hex_sha256(b"alpha"));
         assert_eq!(prepared[1].text, "bravo");
-        assert_eq!(prepared[1].sha256, sha256_hex(b"bravo"));
+        assert_eq!(prepared[1].sha256, hex_sha256(b"bravo"));
         assert!(matches!(
             prepare_added_text_prefix_parallel(scratch.path(), &captured_root, &candidates[2..],),
             PreparedTextPrefix::FallbackFirst
@@ -2959,7 +2949,7 @@ mod tests {
             Some("engine")
         );
 
-        let written_sha = sha256_hex(written.as_bytes());
+        let written_sha = hex_sha256(written.as_bytes());
         assert!(
             sink.self_writes
                 .has_pending(WORKSPACE_ID, "tasks/alpha.md", &written_sha),
@@ -4310,7 +4300,7 @@ mod tests {
             updated,
             IngestOutcome::Captured {
                 size: 6,
-                sha256: sha256_hex(b"latest"),
+                sha256: hex_sha256(b"latest"),
             }
         );
 
@@ -4345,7 +4335,7 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(
             binary_head(&db, "logo.png").as_deref(),
-            Some(sha256_hex(&[0, 1, 2, 255]).as_str())
+            Some(hex_sha256(&[0, 1, 2, 255]).as_str())
         );
         assert_eq!(moment_count(&db, "logo.png"), 1);
     }
@@ -4502,7 +4492,7 @@ mod tests {
             flipped,
             IngestOutcome::Captured {
                 size: 3,
-                sha256: sha256_hex(&[0xff, 0xfe, 0x00]),
+                sha256: hex_sha256(&[0xff, 0xfe, 0x00]),
             }
         );
 
@@ -4511,7 +4501,7 @@ mod tests {
         // One transition: the binary head replaced the text head atomically.
         assert_eq!(
             binary_head(&db, "flip.md").as_deref(),
-            Some(sha256_hex(&[0xff, 0xfe, 0x00]).as_str())
+            Some(hex_sha256(&[0xff, 0xfe, 0x00]).as_str())
         );
         assert_eq!(moment_count(&db, "flip.md"), 2);
     }
@@ -4539,7 +4529,7 @@ mod tests {
         supervisor.close(&db).expect("close actor");
         assert_eq!(
             binary_head(&db, "photo.png").as_deref(),
-            Some(sha256_hex(b"plain ascii bytes").as_str())
+            Some(hex_sha256(b"plain ascii bytes").as_str())
         );
         assert_eq!(moment_count(&db, "photo.png"), 1, "equal re-ingest deduped");
     }
@@ -4727,7 +4717,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
@@ -4768,7 +4758,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
@@ -4793,7 +4783,7 @@ mod tests {
             PreparedTextContent {
                 text: "must not commit".to_owned(),
                 size: 15,
-                sha256: sha256_hex(b"must not commit"),
+                sha256: hex_sha256(b"must not commit"),
             },
         );
         let batch = sink.commit_added_text_batch(vec![prepared]);
@@ -4826,7 +4816,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
@@ -4872,7 +4862,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
@@ -4947,7 +4937,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "tasks/collection.yaml", b"name: Tasks\n");
@@ -5024,7 +5014,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, "first.md", b"first");
@@ -5099,7 +5089,7 @@ mod tests {
         let moved_root = capture_scratch.path().join("workspace-moved");
         std::fs::create_dir(&root).expect("create capture root");
         write_file(&root, "first.md", b"first");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let mut seed =
@@ -5130,7 +5120,7 @@ mod tests {
         let store_scratch = ScratchDir::new().expect("store scratch");
         let capture_scratch = ScratchDir::new().expect("capture scratch");
         let root = capture_scratch.path().join("workspace");
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         let mut stale =
@@ -5361,7 +5351,7 @@ mod tests {
             first,
             IngestOutcome::Captured {
                 size: 11,
-                sha256: sha256_hex(b"TOKEN=alpha"),
+                sha256: hex_sha256(b"TOKEN=alpha"),
             }
         );
         // The key file was minted on first use and is reused thereafter.
@@ -5396,7 +5386,7 @@ mod tests {
             "{}-moved",
             root.file_name().expect("root name").to_string_lossy()
         ));
-        let db = store_scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&store_scratch).expect("engine db path");
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 1).expect("open actor").actor;
         write_file(&root, ".env", b"TOKEN=original");
@@ -5425,7 +5415,7 @@ mod tests {
     #[test]
     fn secret_changed_ingest_consumes_an_engine_self_write() {
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("engine db path");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("engine db path");
         let key = create_key_file(scratch.path()).expect("secret key");
         let mut store = EngineStore::open(&db, 1).expect("open store");
         VersionedTextStore::new(&mut store)
@@ -5454,7 +5444,7 @@ mod tests {
         let supervisor = WorkspaceSupervisor::new();
         let actor = supervisor.open(&db, 3).expect("actor").actor;
         let self_writes = SelfWriteSuppression::default();
-        self_writes.record(WORKSPACE_ID, ".env", &sha256_hex(b"MODE=feature\n"));
+        self_writes.record(WORKSPACE_ID, ".env", &hex_sha256(b"MODE=feature\n"));
         let mut sink = StoreCaptureSink::new_with_self_writes(
             actor,
             WORKSPACE_ID,
@@ -5467,7 +5457,7 @@ mod tests {
             CaptureProvenance::default(),
         );
         let observed_sha = match sink.read_current_secret(".env").expect("read secret") {
-            SecretContent::Text(text) => sha256_hex(text.as_bytes()),
+            SecretContent::Text(text) => hex_sha256(text.as_bytes()),
             SecretContent::Untracked => panic!("fixture secret must be tracked"),
         };
         assert!(
@@ -5622,7 +5612,7 @@ mod tests {
         // NonOwnable. Retiring it destroys a document the user just saved.
         // An ordinary CAPTURE head of the same shape must still retire.
         let scratch = ScratchDir::new().expect("scratch");
-        let db = scratch.engine_db_path().expect("db");
+        let db = dohc_engine_testkit::engine_db_path(&scratch).expect("db");
         let mut store = EngineStore::open(&db, 1).expect("store");
         VersionedTextStore::new(&mut store)
             .ensure_main_version(WORKSPACE_ID, VERSION_ID, 1, &FilesNoFaults)

@@ -1,43 +1,21 @@
-//! Filesystem fixtures: a self-cleaning scratch workspace and a cross-platform
-//! directory-alias helper (symlink on POSIX, junction/symlink on Windows) used
-//! to prove canonical-identity convergence.
+//! Filesystem fixtures: the self-cleaning scratch workspace, the engine-db
+//! location under it, and cross-platform directory-alias helpers (symlink on
+//! POSIX, junction/symlink on Windows) used to prove canonical-identity
+//! convergence.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// A unique temporary directory, removed on `Drop`. It lives under the shared
-/// run tree in the OS temp directory.
-pub struct ScratchDir {
-    inner: dohc_test_scratch::ScratchDir,
-}
+pub use dohc_test_scratch::ScratchDir;
 
-impl ScratchDir {
-    /// Create a fresh unique scratch directory.
-    pub fn new() -> io::Result<Self> {
-        Ok(Self {
-            inner: dohc_test_scratch::ScratchDir::new_named("cal1")?,
-        })
-    }
-
-    /// The root of the scratch directory.
-    pub fn path(&self) -> &Path {
-        self.inner.path()
-    }
-
-    /// The canonical engine-db location under this workspace
-    /// (`.dohc/engine/engine.db`). The parent directories are created so the
-    /// path is ready for [`dohc_engine_storage::EngineStore::open`] and for
-    /// identity resolution.
-    pub fn engine_db_path(&self) -> io::Result<PathBuf> {
-        let engine_dir = self.inner.join(".dohc").join("engine");
-        std::fs::create_dir_all(&engine_dir)?;
-        Ok(engine_dir.join("engine.db"))
-    }
-
-    /// A sub-path under the scratch root (not created).
-    pub fn join(&self, rel: impl AsRef<Path>) -> PathBuf {
-        self.inner.join(rel)
-    }
+/// The canonical engine-db location under a workspace root
+/// (`.dohc/engine/engine.db`). The parent directories are created so the
+/// path is ready for [`dohc_engine_storage::EngineStore::open`] and for
+/// identity resolution.
+pub fn engine_db_path(root: &Path) -> io::Result<PathBuf> {
+    let engine_dir = root.join(".dohc").join("engine");
+    std::fs::create_dir_all(&engine_dir)?;
+    Ok(engine_dir.join("engine.db"))
 }
 
 /// Attempt to create a directory alias `link` pointing at `target`.

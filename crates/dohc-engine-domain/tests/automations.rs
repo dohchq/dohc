@@ -12,13 +12,13 @@ use dohc_engine_domain::{
     subscribe_automation, unsubscribe_automation,
 };
 use dohc_engine_storage::EngineStore;
-use dohc_engine_testkit::ScratchDir;
+use dohc_engine_testkit::{ScratchDir, engine_db_path};
 
 const WS: &str = "ws-automations";
 const NO_FAULTS: NoFaults = NoFaults;
 
 fn open_store(scratch: &ScratchDir) -> EngineStore {
-    let db = scratch.engine_db_path().expect("engine db path");
+    let db = engine_db_path(scratch).expect("engine db path");
     EngineStore::open(&db, 1).expect("open store")
 }
 

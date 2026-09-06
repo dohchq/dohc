@@ -271,7 +271,7 @@ pub fn subscribe_automation_in_tx(
 }
 
 /// Remove one registered interest. Returns whether a row existed.
-pub fn unsubscribe_automation_in_tx(
+pub(crate) fn unsubscribe_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
     automation_id: &str,
@@ -431,7 +431,7 @@ pub struct AutomationFailure {
 
 /// Every automation with at least one failed claim in this workspace,
 /// ordered by automation id.
-pub fn list_automation_failures_in_tx(
+pub(crate) fn list_automation_failures_in_tx(
     conn: &Connection,
     workspace_id: &str,
 ) -> Result<Vec<AutomationFailure>, DomainError> {
@@ -470,7 +470,7 @@ pub fn list_automation_failures_in_tx(
 
 /// Flip the oldest pending claim to running with `attempts + 1` and return
 /// it; `None` when nothing is pending.
-pub fn claim_next_pending_automation_in_tx(
+pub(crate) fn claim_next_pending_automation_in_tx(
     conn: &Connection,
     workspace_id: &str,
     now_ms: i64,
@@ -511,7 +511,7 @@ pub fn claim_next_pending_automation_in_tx(
 /// Close a running claim: done, or failed with the handler's error text.
 /// Refuses a claim that is not running — a settle is not idempotent, matching
 /// the chat ledger's exactly-one-transition rule.
-pub fn settle_automation_claim_in_tx(
+pub(crate) fn settle_automation_claim_in_tx(
     conn: &Connection,
     workspace_id: &str,
     claim_id: &str,
@@ -565,7 +565,7 @@ pub fn settle_automation_claim_in_tx(
 /// process is running across a daemon rebind. Returns every transitioned
 /// claim. Deferred startup recovery supplies its observed attempts; a later
 /// attempt with the same claim ID must remain with its current executor.
-pub fn reclaim_running_automations_in_tx(
+pub(crate) fn reclaim_running_automations_in_tx(
     conn: &Connection,
     workspace_id: &str,
     attempts: Option<&[AutomationClaimAttempt]>,

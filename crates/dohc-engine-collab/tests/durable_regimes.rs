@@ -9,8 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::*;
 use dohc_engine_collab::ContentKind;
-#[cfg(feature = "fault-injection")]
-use dohc_engine_collab::WriterDocCache;
 use dohc_engine_collab::{
     apply_remote_update, apply_remote_update_in_transaction_with_projection, claim_base,
     claim_base_at_relay, close_session, ensure_marker, fresh_successor_base, load_persisted,
@@ -22,6 +20,7 @@ use dohc_engine_collab::{
     LineageClaimStatus, Regime, RemoteUpdate, ReplicationApplyOutcome, SettleOutcome,
     SuccessorIdentity, SuccessorIdentityInput, SuccessorInstallOutcome, SuccessorReplacement, Ydoc,
 };
+use dohc_engine_collab::{RemoteAppendProbe, WriterDocCache};
 use dohc_engine_storage::{EngineStore, NoFaults, TxnOutcome};
 use rusqlite::OptionalExtension;
 
@@ -1626,6 +1625,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     committed(
         apply_remote_update(
             &mut a.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "bob".to_owned(),
@@ -1643,6 +1643,7 @@ fn local_and_remote_different_field_edits_converge_in_both_collection_indexes() 
     committed(
         apply_remote_update(
             &mut b.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "alice".to_owned(),
@@ -1720,6 +1721,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     committed(
         apply_remote_update(
             &mut a.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "bob".to_owned(),
@@ -1737,6 +1739,7 @@ fn same_field_concurrent_edits_converge_and_keep_both_authored_writes() {
     committed(
         apply_remote_update(
             &mut b.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "alice".to_owned(),
@@ -1809,6 +1812,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     committed(
         apply_remote_update(
             &mut b.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "alice".to_owned(),
@@ -1844,6 +1848,7 @@ fn later_same_field_edit_wins_on_both_devices_and_keeps_earlier_history() {
     committed(
         apply_remote_update(
             &mut a.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "bob".to_owned(),
@@ -1930,6 +1935,7 @@ fn base_is_claimed_exactly_once() {
     committed(
         apply_remote_update(
             &mut ts.store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "peer-compact-base".to_owned(),
@@ -2171,6 +2177,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     committed(
         apply_remote_update(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "peer-a".to_owned(),
@@ -2341,6 +2348,7 @@ fn successor_cas_archives_the_exact_predecessor_and_replays_without_mutation() {
     committed(
         apply_remote_update(
             &mut store,
+            &mut WriterDocCache::new(),
             &key,
             &RemoteUpdate {
                 origin_id: "peer-successor".to_owned(),
@@ -2719,9 +2727,18 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // First apply: journaled, echo-suppressed (never re-emitted).
     let first = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, None, &NoFaults, 1_100)
-            .expect("apply")
-            .outcome,
+        apply_remote_update(
+            &mut ts.store,
+            &mut WriterDocCache::new(),
+            &key,
+            &remote,
+            None,
+            None,
+            &NoFaults,
+            1_100,
+        )
+        .expect("apply")
+        .outcome,
     );
     let seq = match first {
         ReplicationApplyOutcome::Applied { seq, emit_outbound } => {
@@ -2732,9 +2749,18 @@ fn remote_update_is_idempotent_and_echo_suppressed() {
     };
     // Redelivery of the same bytes is an idempotent no-op (content-addressed).
     let again = committed(
-        apply_remote_update(&mut ts.store, &key, &remote, None, None, &NoFaults, 1_200)
-            .expect("apply2")
-            .outcome,
+        apply_remote_update(
+            &mut ts.store,
+            &mut WriterDocCache::new(),
+            &key,
+            &remote,
+            None,
+            None,
+            &NoFaults,
+            1_200,
+        )
+        .expect("apply2")
+        .outcome,
     );
     assert_eq!(
         again,
@@ -2999,9 +3025,8 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
         "a rejected update must never be journaled"
     );
 
-    // Remote replication path: `apply_remote_update` ->
-    // `apply_remote_update_in_transaction` -> `validate_update_bytes` -> the
-    // same pre-validator.
+    // Remote replication path: `apply_remote_update` -> `validate_update_bytes`
+    // -> the same pre-validator.
     let mut remote = fresh_store("yrs-abort-witness-remote");
     let remote_key = test_key();
     seed_parents(&mut remote.store, &remote_key, 1_000);
@@ -3023,6 +3048,7 @@ fn yrs_abort_witness_is_rejected_fail_closed_on_both_ingestion_paths() {
     };
     let remote_result = apply_remote_update(
         &mut remote.store,
+        &mut WriterDocCache::new(),
         &remote_key,
         &remote_update,
         None,
@@ -3541,7 +3567,14 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
         a.store
             .write_with(&NoFaults, |tx| {
                 apply_remote_update_in_transaction_with_projection(
-                    tx, &key, &remote, None, None, 1_200,
+                    tx,
+                    &WriterDocCache::new(),
+                    &mut RemoteAppendProbe::default(),
+                    &key,
+                    &remote,
+                    None,
+                    None,
+                    1_200,
                 )
             })
             .expect("remote apply"),
@@ -3568,7 +3601,14 @@ fn remote_collection_apply_derives_facts_and_a_replay_derives_none() {
         a.store
             .write_with(&NoFaults, |tx| {
                 apply_remote_update_in_transaction_with_projection(
-                    tx, &key, &remote, None, None, 1_300,
+                    tx,
+                    &WriterDocCache::new(),
+                    &mut RemoteAppendProbe::default(),
+                    &key,
+                    &remote,
+                    None,
+                    None,
+                    1_300,
                 )
             })
             .expect("redelivered apply"),
@@ -3609,6 +3649,8 @@ fn a_second_synced_update_records_only_its_real_change_and_no_phantom_removal() 
                 .write_with(&NoFaults, |tx| {
                     apply_remote_update_in_transaction_with_projection(
                         tx,
+                        &WriterDocCache::new(),
+                        &mut RemoteAppendProbe::default(),
                         &key,
                         &RemoteUpdate {
                             origin_id: "peer-A".to_owned(),
@@ -3754,6 +3796,7 @@ fn attribution_persists_and_rides_the_facts_on_local_and_remote_applies() {
     // envelope's coordinate as their source.
     let applied = apply_remote_update(
         &mut b.store,
+        &mut WriterDocCache::new(),
         &key,
         &RemoteUpdate {
             origin_id: "origin-a".to_owned(),
