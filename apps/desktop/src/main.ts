@@ -1,4 +1,5 @@
 import { createPresenceIpc } from "./ipc/presenceIpc";
+import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { registerDirectMessagesIpcHandlers, peekReceivedGrantKindForShare } from "./ipc/directMessagesIpc";
 import { createChatScopeCapability } from "./ipc/chatScope";
 import { registerChatsIpcHandlers } from "./ipc/chatsIpc";
@@ -68,18 +69,7 @@ import {
   LaunchMarksResult,
   PluginPanelInvalidatedEvent,
   PluginWebAppFailedEvent,
-  ListCollectionsPayload,
-  ListCollectionsResult,
-  GetCollectionPayload,
-  GetCollectionResult,
-  QueryCollectionRecordsPayload,
-  QueryCollectionRecordsResult,
   WorkspaceIdPayload,
-  ListEngineMomentsPayload,
-  ReadEngineMomentPayload,
-  ReadEngineMomentResult,
-  RestoreEngineMomentFilePayload,
-  RestoreEngineMomentFileResult,
   ChatRunRecordsForThreadPayload,
   ChatRunRecordsForThreadResult,
   ReloadRendererRequestPayload,
@@ -107,7 +97,6 @@ import {
   WriteClipboardTextPayload,
   GetWorkspaceUiStateResult,
   SyncStatusResult,
-  RebuildEngineStorePayload,
   RebuildEngineStoreResult,
   WorkspaceSummary,
   UpdateActionResult,
@@ -187,7 +176,6 @@ import {
   completePendingEngineStoreMove,
   EngineStoreRecoveryFailedError,
   moveEngineStoreAside,
-  rebuildEngineStoreRequest,
   withEngineStoreRecoveredUnderEngineStoreLock,
 } from "./workspaces/engineStoreRebuild";
 import {
@@ -267,7 +255,6 @@ import { prepareOwnedStaticSitePreview } from "./workspaces/ownedStaticSiteFileS
 import { createShareSkipRecorder } from "./workspaces/shareSkipRecorder";
 import { SharedChannelReadOnlyError, type SyncRelayConnection } from "@dohc/workspace-contracts/relay";
 import { type ShareAccess } from "@dohc/security-contract/share-selector";
-import type { VersionedTextMomentSummary } from "@dohc/workspace-contracts/engine";
 import {
   fetchShareViewInfo,
 } from "./workspaces/shareViewInfo";
@@ -278,10 +265,6 @@ import {
   readWorkspaceDataKeyForEnrollment,
   readWorkspaceSecretState,
 } from "./workspaces/workspaceSecretEnrollmentState";
-import {
-  engineMomentDetailForIpc,
-  listEngineMomentsForIpc,
-} from "./ipc/engineHistoryIpc";
 import {
   closeWorkspaceActivityAndRelay,
   createWorkspaceActivity,
@@ -5747,64 +5730,22 @@ function registerIpcHandlers(
   });
   workspaceFilesIpc.registerListing();
 
-  // Collections: read-only engine index queries. list answers
-  // "no collections" when the daemon has no sessions, so a shared view stays
-  // quiet; get/query name the missing capability instead, because their
-  // caller is an open collection tab that must show a cause.
-  ipcMain.handle(CHANNELS.listCollections, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListCollectionsPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Collection listing stopped because this window changed workspaces.",
-      async (operation) => {
-        const result = await withEngineAdapter(
-          receivedShareEngine.workspaceForRegistered(operation.workspace),
-          async (adapter) => await adapter.listCollections(),
-        );
-        return ListCollectionsResult.parse(result ?? { collections: [] });
-      },
-    );
+  const workspaceEngineIpc = createWorkspaceEngineIpc<
+    WebContents,
+    IpcMainInvokeEvent,
+    RegistryEntry,
+    DesktopWorkspaceAuthorityState,
+    DesktopRendererWorkspaceOperation
+  >({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, withRendererWorkspaceOperation, receivedShareEngine,
+    withEngineAdapter, requireEngineCapture, localUserDisplayName, notifyRenderer,
+    requireWorkspace, assertWritableWorkspace, syncStatusWithOwnedProjection, activity,
+    workspaceAuthorities, canonicalWorkspaceFor, requireEngineSessions,
+    closeDispatchRunActivity, probeEngineStoreRefusal, moveEngineStoreAside,
+    openWorkspaceActivityUnderEngineStoreLock, engineYDocSessionIpc,
   });
-
-  ipcMain.handle(CHANNELS.getCollection, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = GetCollectionPayload.parse(payload);
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Collection read stopped because this window changed workspaces.",
-      async (operation) => {
-        const result = await withEngineAdapter(
-          receivedShareEngine.workspaceForRegistered(operation.workspace),
-          async (adapter) =>
-            await adapter.getCollection({ collectionPath: input.collectionPath }),
-        );
-        if (!result) throw new Error("The workspace engine is not running.");
-        return GetCollectionResult.parse(result);
-      },
-    );
-  });
-
-  ipcMain.handle(CHANNELS.queryCollectionRecords, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = QueryCollectionRecordsPayload.parse(payload);
-    const { workspaceId: _workspaceId, ...params } = input;
-    return withRendererWorkspaceOperation(
-      event.sender,
-      input.workspaceId,
-      "Collection query stopped because this window changed workspaces.",
-      async (operation) => {
-        const result = await withEngineAdapter(
-          receivedShareEngine.workspaceForRegistered(operation.workspace),
-          async (adapter) => await adapter.queryCollectionRecords(params),
-        );
-        if (!result) throw new Error("The workspace engine is not running.");
-        return QueryCollectionRecordsResult.parse(result);
-      },
-    );
-  });
+  workspaceEngineIpc.registerCollections();
 
   workspaceFilesIpc.registerExports();
 
@@ -6254,64 +6195,7 @@ function registerIpcHandlers(
     activity, tryInVersionSessions, desktopMarks,
   });
 
-  // Engine history + linked Chats (PR 0M-5). Workspaces read their
-  // timeline from engine moments; every handler resolves the workspace via
-  // requireWorkspace and rejects when the engine capture is not attached.
-  // The moment/conflict record mappers live in ./ipc/engineHistoryIpc (pure,
-  // unit-tested); main only injects the display-name rule below.
-  // The same display-name rule the chat rail uses. AgentIntegration
-  // stamps onBehalfOf "local" for the desktop's own user, which displays as
-  // the cloud email (or "You" when signed out); any other onBehalfOf is
-  // already a user-facing label and displays as-is.
-  function agentAuthorDisplayName(author: NonNullable<VersionedTextMomentSummary["author"]>): string {
-    return author.onBehalfOf === "local" ? localUserDisplayName() : author.onBehalfOf;
-  }
-
-  ipcMain.handle(CHANNELS.listEngineMoments, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ListEngineMomentsPayload.parse(payload);
-    const { capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Engine history",
-    );
-    return listEngineMomentsForIpc(
-      () =>
-        capture.listMoments({
-          ...(input.limit !== undefined ? { limit: input.limit } : {}),
-          ...(input.beforeMomentOrder !== undefined
-            ? { beforeMomentOrder: input.beforeMomentOrder }
-            : {}),
-        }),
-      agentAuthorDisplayName,
-    );
-  });
-
-  ipcMain.handle(CHANNELS.readEngineMoment, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = ReadEngineMomentPayload.parse(payload);
-    const { capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Engine history",
-    );
-    const moment = await capture.readMoment(input.momentId);
-    return ReadEngineMomentResult.parse({
-      moment: moment
-        ? engineMomentDetailForIpc(moment, agentAuthorDisplayName)
-        : null,
-    });
-  });
-
-  ipcMain.handle(CHANNELS.restoreEngineMomentFile, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RestoreEngineMomentFilePayload.parse(payload);
-    const { capture } = await requireEngineCapture(
-      input.workspaceId,
-      "Engine history",
-    );
-    const result = await capture.restoreFileToBeforeMoment(input.momentId);
-    notifyRenderer({ workspaceId: input.workspaceId });
-    return RestoreEngineMomentFileResult.parse(result);
-  });
+  workspaceEngineIpc.registerHistory();
 
   registerChatsIpcHandlers<WebContents, IpcMainInvokeEvent, DesktopRendererWorkspaceOperation>({
     registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
@@ -6376,75 +6260,7 @@ function registerIpcHandlers(
     assertTrustedSender, rendererWorkspaceSessions,
   });
 
-  ipcMain.handle(CHANNELS.getSyncStatus, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = WorkspaceIdPayload.parse(payload);
-    const workspace = requireWorkspace(input.workspaceId);
-    return SyncStatusResult.parse(
-      await syncStatusWithOwnedProjection(
-        workspace,
-        activity.getStatus(input.workspaceId),
-      ),
-    );
-  });
-
-  ipcMain.handle(CHANNELS.rebuildEngineStore, async (event, payload) => {
-    assertTrustedSender(event);
-    const input = RebuildEngineStorePayload.parse(payload);
-    const registered = requireWorkspace(input.workspaceId);
-    assertWritableWorkspace(registered);
-    return workspaceAuthorities.withAuthority(input.workspaceId, (lease) =>
-      runInWorkspaceAuthorityLane(lease, "engine-store",
-      async () => {
-        const workspace = canonicalWorkspaceFor(lease);
-        const sessions = requireEngineSessions();
-        return RebuildEngineStoreResult.parse(
-          await rebuildEngineStoreRequest(workspace.rootPath, {
-            isStoreRefused: () =>
-              Boolean(
-                activity.getStatus(workspace.workspaceId).engineStoreRefused,
-              ),
-            hasActiveAgentRun: () =>
-              activity.hasAgentRun(workspace.workspaceId, workspace.rootPath),
-            previousResult: () =>
-              lease.state.lastEngineStoreRebuildResult ?? undefined,
-            rememberResult: (result) =>
-              (lease.state.lastEngineStoreRebuildResult = result),
-            closeActivity: async () => {
-              try {
-                await closeDispatchRunActivity(workspace, {
-                  notifyRenderer: false,
-                });
-              } catch (error) {
-                notifyRenderer({ workspaceId: workspace.workspaceId });
-                throw error;
-              }
-            },
-            probeStoreRefusal: () =>
-              probeEngineStoreRefusal(
-                workspace,
-                sessions,
-              ),
-            rebuildGate: {
-              begin: () => sessions.beginRebuild(workspace),
-              end: () => sessions.endRebuild(workspace),
-            },
-            moveStoreAside: moveEngineStoreAside,
-            reopenActivity: async () => {
-              try {
-                await openWorkspaceActivityUnderEngineStoreLock(workspace, {
-                  afterReopenRecoverySettled: () =>
-                    sessions.endRebuild(workspace),
-                });
-              } finally {
-                notifyRenderer({ workspaceId: workspace.workspaceId });
-              }
-            },
-          }),
-        );
-      }),
-    );
-  });
+  workspaceEngineIpc.registerStatusAndRepair();
 
   // Enabling agents starts a local run: the workspace must already be open (the
   // watcher must be live for the run slot to attach), so open it first.
@@ -6777,39 +6593,7 @@ function registerIpcHandlers(
     },
   });
 
-  ipcMain.handle(CHANNELS.engineYDocOpen, async (event, payload) => {
-    assertTrustedSender(event);
-    return engineYDocSessionIpc.open(event.sender, payload);
-  });
-
-  ipcMain.handle(
-    CHANNELS.engineYDocReadArtifactAsset,
-    async (event, payload) => {
-      assertTrustedSender(event);
-      return engineYDocSessionIpc.readArtifactAsset(event.sender, payload);
-    },
-  );
-
-  ipcMain.handle(CHANNELS.engineYDocApplyUpdate, (event, payload) => {
-    assertTrustedSender(event);
-    return engineYDocSessionIpc.applyUpdate(event.sender, payload);
-  });
-
-  ipcMain.handle(
-    CHANNELS.engineYDocAcknowledgeLineageReplacement,
-    (event, payload) => {
-      assertTrustedSender(event);
-      return engineYDocSessionIpc.acknowledgeLineageReplacement(
-        event.sender,
-        payload,
-      );
-    },
-  );
-
-  ipcMain.handle(CHANNELS.engineYDocClose, async (event, payload) => {
-    assertTrustedSender(event);
-    await engineYDocSessionIpc.close(event.sender, payload);
-  });
+  workspaceEngineIpc.registerYDoc();
 
   ipcMain.handle(CHANNELS.getUpdateState, (event) => {
     assertTrustedSender(event);
