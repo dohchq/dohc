@@ -220,7 +220,7 @@ describe("SitePreviewPage", () => {
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report" />);
 
     await screen.findByText(
-      "This site has no previewable entry, dev script, or build output yet.",
+      "This app has no previewable entry, dev script, or build output yet.",
     );
     expect(screen.queryByTestId("site-preview-options")).toBeNull();
     expect(bridgeMock.startSitePreview).not.toHaveBeenCalled();
@@ -434,7 +434,7 @@ describe("SitePreviewPage", () => {
     bridgeMock.getSitePackage.mockResolvedValueOnce(ancestorSite);
     render(<SitePreviewPage workspaceId="ws-sites" siteRoot="report/legacy" />);
 
-    await screen.findByText("This site is no longer part of the workspace.");
+    await screen.findByText("This app is no longer part of the workspace.");
     expect(screen.queryByText(site.title)).toBeNull();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-share")).toBeNull();
@@ -461,7 +461,7 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
@@ -489,7 +489,7 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
@@ -521,7 +521,7 @@ describe("SitePreviewPage", () => {
 
     expect(onShareSite).not.toHaveBeenCalled();
     expect((await screen.findByTestId("site-preview-error")).textContent).toContain(
-      "This site is no longer part of the workspace.",
+      "This app is no longer part of the workspace.",
     );
   });
 
@@ -845,7 +845,7 @@ describe("SitePreviewPage", () => {
 
     expect(
       await screen.findByText(
-        "dohc scanned 5 MiB for sharing. The configured limit is 4 MiB. Reduce the site's referenced files and try again.",
+        "dohc scanned 5 MiB for sharing. The configured limit is 4 MiB. Reduce the app's referenced files and try again.",
       ),
     ).toBeTruthy();
   });
@@ -897,7 +897,7 @@ describe("SitePreviewPage", () => {
     ],
     [
       noRunnableArtifact,
-      "This site does not have a runnable static artifact to share.",
+      "This app has no static entry file or build output to share.",
     ],
   ])("renders the share refusal reason %#", async (shareManifest, message) => {
     const refusedSite: SitePackageInfo = {
@@ -1246,7 +1246,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
     expect(screen.queryByTestId("site-preview-reload")).toBeNull();
     expect(screen.queryByTestId("site-preview-open-external")).toBeNull();
@@ -1265,7 +1265,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 
@@ -1281,7 +1281,7 @@ describe("SitePreviewPage", () => {
 
     await screen.findByText("Report");
 
-    expect(await screen.findByText("This site tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
+    expect(await screen.findByText("This app tried to preview from an address dohc does not trust. Reload the preview.")).toBeTruthy();
     expect(screen.queryByTestId("site-preview-frame")).toBeNull();
   });
 

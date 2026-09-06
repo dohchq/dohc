@@ -119,10 +119,10 @@ describe("site preview lifecycle", () => {
         siteRoot: "site",
         isCurrent: () => true,
         prepare: async () => {
-          throw new Error("Not a detected site: site");
+          throw new Error("Not a detected app: site");
         },
       }),
-    ).rejects.toThrow("Not a detected site: site");
+    ).rejects.toThrow("Not a detected app: site");
 
     expect(current.stop).not.toHaveBeenCalled();
     expect(lifecycle.status("workspace-1", "site").running).toBe(true);
@@ -208,7 +208,7 @@ describe("site preview lifecycle", () => {
     finishExecution();
 
     await expect(stopping).rejects.toThrow(
-      "The site preview stop request does not target the active workspace. Open the workspace and stop the preview again.",
+      "The app preview stop request does not target the active workspace. Open the workspace and stop the preview again.",
     );
     expect(await starting).toBeInstanceOf(Error);
     expect(candidate.stop).toHaveBeenCalledTimes(1);

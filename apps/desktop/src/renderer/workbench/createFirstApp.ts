@@ -3,22 +3,22 @@ import type {
   WorkspaceFileEntry,
 } from "../../ipc/bridgeContract";
 
-const FIRST_SITE_HTML = `<!doctype html>
+const FIRST_APP_HTML = `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>My site</title>
+    <title>My app</title>
   </head>
   <body>
     <main>
-      <h1>My site</h1>
+      <h1>My app</h1>
     </main>
   </body>
 </html>
 `;
 
-export function firstSiteRoot(
+export function firstAppRoot(
   files: WorkspaceFileEntry[],
   folders: string[],
 ): string {
@@ -28,7 +28,7 @@ export function firstSiteRoot(
     folders.map((folder) => [folder.toLowerCase(), folder]),
   );
   for (let index = 1; index < 10_000; index += 1) {
-    const defaultRoot = index === 1 ? "site" : `site-${index}`;
+    const defaultRoot = index === 1 ? "app" : `app-${index}`;
     const normalizedRoot = defaultRoot.toLowerCase();
     const root = existingFolderByLowerPath.get(normalizedRoot) ?? defaultRoot;
     const entryPath = `${normalizedRoot}/index.html`;
@@ -40,10 +40,10 @@ export function firstSiteRoot(
       return root;
     }
   }
-  return `site-${Date.now()}`;
+  return `app-${Date.now()}`;
 }
 
-export async function createFirstSiteFiles(input: {
+export async function createFirstAppFiles(input: {
   workspaceId: string;
   files: WorkspaceFileEntry[];
   folders: string[];
@@ -52,7 +52,7 @@ export async function createFirstSiteFiles(input: {
     "createWorkspaceFile" | "createWorkspaceFolder"
   >;
 }): Promise<{ root: string }> {
-  const root = firstSiteRoot(input.files, input.folders);
+  const root = firstAppRoot(input.files, input.folders);
   const rootExists = input.folders.some(
     (folder) => folder.toLowerCase() === root.toLowerCase(),
   );
@@ -65,7 +65,7 @@ export async function createFirstSiteFiles(input: {
   await input.mutations.createWorkspaceFile({
     workspaceId: input.workspaceId,
     relativePath: `${root}/index.html`,
-    initialText: FIRST_SITE_HTML,
+    initialText: FIRST_APP_HTML,
   });
   return { root };
 }
