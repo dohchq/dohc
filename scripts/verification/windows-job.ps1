@@ -42,30 +42,38 @@ public static class VerificationJob {
     public static int Run(string node, string relay, string payload) {
         IntPtr job = CreateJobObject(IntPtr.Zero, null);
         if (job == IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
-        var limits = new ExtendedLimits();
-        limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE, without either breakaway flag.
-        if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits)) ||
-            !AssignProcessToJobObject(job, Process.GetCurrentProcess().Handle)) {
-            int error = Marshal.GetLastWin32Error();
-            CloseHandle(job);
-            throw new Win32Exception(error);
-        }
-        // This process owns the only job handle. Its exit closes the job, including
-        // descendants whose immediate parent has already exited.
-        var start = new ProcessStartInfo(node);
-        start.ArgumentList.Add(relay);
-        start.ArgumentList.Add(payload);
-        start.UseShellExecute = false;
-        start.CreateNoWindow = true;
-        start.RedirectStandardOutput = true;
-        start.RedirectStandardError = true;
-        using (var child = Process.Start(start)) {
-            var stdout = child.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
-            var stderr = child.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());
-            child.WaitForExit();
-            Task.WaitAll(stdout, stderr);
-            return child.ExitCode;
-        }
+        try {
+            var limits = new ExtendedLimits();
+            limits.Basic.Flags = 0x2000; // KILL_ON_JOB_CLOSE, without either breakaway flag.
+            if (!SetInformationJobObject(job, 9, ref limits, (uint)Marshal.SizeOf(limits)))
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            // This process owns the only job handle. Its exit closes the job,
+            // including descendants whose immediate parent has already exited.
+            var start = new ProcessStartInfo(node);
+            start.ArgumentList.Add(relay);
+            start.UseShellExecute = false;
+            start.CreateNoWindow = true;
+            start.RedirectStandardInput = true;
+            start.RedirectStandardOutput = true;
+            start.RedirectStandardError = true;
+            using (var child = Process.Start(start)) {
+                try {
+                    // The trusted relay waits for this payload before spawning the command.
+                    if (!AssignProcessToJobObject(job, child.Handle))
+                        throw new Win32Exception(Marshal.GetLastWin32Error());
+                    child.StandardInput.Write(payload);
+                    child.StandardInput.Close();
+                    var stdout = child.StandardOutput.BaseStream.CopyToAsync(Console.OpenStandardOutput());
+                    var stderr = child.StandardError.BaseStream.CopyToAsync(Console.OpenStandardError());
+                    child.WaitForExit();
+                    Task.WaitAll(stdout, stderr);
+                    return child.ExitCode;
+                } finally {
+                    if (!child.HasExited) child.Kill();
+                    child.WaitForExit();
+                }
+            }
+        } finally { CloseHandle(job); }
     }
 }
 '@

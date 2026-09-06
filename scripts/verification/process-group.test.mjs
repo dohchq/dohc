@@ -8,6 +8,25 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { run } from "./process.mjs";
 
+function stopWindowsDescendant(root) {
+  if (!existsSync(join(root, "descendant.json"))) return;
+  const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
+  // Retain the process handle before checking the unique fixture path.
+  execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
+    $owned = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
+    if ($owned) {
+      try {
+        $null = $owned.Handle
+        $identity = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'
+        if ($identity.CommandLine -and $identity.CommandLine.Contains('${root.replaceAll("'", "''")}') -and !$owned.HasExited) {
+          $owned.Kill(); $owned.WaitForExit(5000) | Out-Null
+        }
+      } finally { $owned.Dispose() }
+    }
+    exit 0
+  `], { windowsHide: true, timeout: 10_000, stdio: "ignore" });
+}
+
 for (const signal of ["SIGINT", "SIGTERM"]) {
   test(`POSIX repeated ${signal} waits for owned group escalation and caller cleanup`, {
     skip: process.platform === "win32" ? "Real POSIX signal delivery" : false,
@@ -242,38 +261,57 @@ test("Windows timeout kills descendants holding pipes after cmd.exe exits", {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /"closed":true/);
   } finally {
-    // Open and retain the process handle before checking the unique fixture path.
-    // If an earlier PID has exited, never use that PID for a later kill operation.
-    if (existsSync(join(root, "descendant.json"))) {
-      const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
-      execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `
-        $owned = Get-Process -Id ${pid} -ErrorAction SilentlyContinue
-        if ($owned) {
-          try {
-            $null = $owned.Handle
-            $identity = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'
-            if ($identity.CommandLine -and $identity.CommandLine.Contains('${root.replaceAll("'", "''")}') -and !$owned.HasExited) {
-              $owned.Kill(); $owned.WaitForExit(5000) | Out-Null
-            }
-          } finally { $owned.Dispose() }
-        }
-        exit 0
-      `], { windowsHide: true, timeout: 10_000, stdio: "ignore" });
-    }
+    stopWindowsDescendant(root);
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("Windows job refuses to launch the command when job assignment fails", {
+test("Windows job closes descendants after the command completes normally", {
+  skip: process.platform !== "win32", timeout: 15_000,
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "dohc-job-completion-"));
+  try {
+    writeFileSync(join(root, "descendant.mjs"), `
+      import { writeFileSync } from "node:fs";
+      writeFileSync(process.argv[2], JSON.stringify({ pid: process.pid }));
+      setInterval(() => {}, 1000);
+      process.send("ready");
+    `);
+    const result = await run(process.execPath, ["--input-type=module", "-e", `
+      import { spawn } from "node:child_process";
+      const child = spawn(process.execPath, ${JSON.stringify([join(root, "descendant.mjs"), join(root, "descendant.json")])}, {
+        windowsHide: true, stdio: ["ignore", "ignore", "ignore", "ipc"],
+      });
+      child.once("message", () => {
+        console.log("descendant ready");
+        child.disconnect();
+        process.exit(0);
+      });
+    `], { timeoutMs: 5000, quietStdout: true });
+    assert.equal(result.code, 0);
+    assert.match(result.stdout, /descendant ready/);
+    const { pid } = JSON.parse(readFileSync(join(root, "descendant.json"), "utf8"));
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
+  } finally {
+    stopWindowsDescendant(root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows job closes the relay without launching the command when child assignment fails", {
   skip: process.platform !== "win32", timeout: 10_000,
 }, () => {
   const root = mkdtempSync(join(tmpdir(), "dohc-job-assignment-"));
   try {
     const helper = readFileSync(new URL("./windows-job.ps1", import.meta.url), "utf8");
-    const invalidHandle = helper.replace("Process.GetCurrentProcess().Handle", "IntPtr.Zero");
+    const invalidHandle = helper.replace("AssignProcessToJobObject(job, child.Handle)", "AssignProcessToJobObject(job, IntPtr.Zero)");
     assert.notEqual(invalidHandle, helper);
     const script = join(root, "invalid-job.ps1");
-    writeFileSync(script, invalidHandle);
+    const relayPid = join(root, "relay.pid");
+    const recordedChild = invalidHandle.replace("using (var child = Process.Start(start)) {", `using (var child = Process.Start(start)) {
+      System.IO.File.WriteAllText(@"${relayPid.replaceAll('"', '""')}", child.Id.ToString());`);
+    assert.notEqual(recordedChild, invalidHandle);
+    writeFileSync(script, recordedChild);
     const marker = join(root, "command-ran");
     const payload = Buffer.from(JSON.stringify({ command: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] })).toString("base64");
     const quote = (value) => `'${value.replaceAll("'", "''")}'`;
@@ -285,8 +323,26 @@ test("Windows job refuses to launch the command when job assignment fails", {
     assert.equal(result.status, 1, result.stderr);
     assert.match(result.stderr, /Win32Exception/);
     assert.equal(existsSync(marker), false);
+    assert.throws(() => process.kill(Number(readFileSync(relayPid, "utf8")), 0), { code: "ESRCH" });
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+for (const input of ["", "invalid payload"]) {
+  test(`Windows command relay rejects ${input ? "invalid" : "missing"} authorization`, () => {
+    const root = mkdtempSync(join(tmpdir(), "dohc-relay-authorization-"));
+    try {
+      const marker = join(root, "command-ran");
+      const payload = Buffer.from(JSON.stringify({ command: process.execPath, args: ["-e", `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'ran')`] })).toString("base64");
+      // An argv payload must not bypass the job owner's stdin authorization.
+      const result = spawnSync(process.execPath, [fileURLToPath(new URL("./windows-command.mjs", import.meta.url)), payload], {
+        input, encoding: "utf8", windowsHide: true, timeout: 5000,
+      });
+      assert.equal(result.error, undefined, result.stderr);
+      assert.equal(result.status, 1, result.stderr);
+      assert.equal(existsSync(marker), false);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+}
 
 test("Windows job preserves arguments, environment, cwd, and unformatted output", {
   skip: process.platform !== "win32", timeout: 10_000,
