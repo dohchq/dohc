@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { classifyEngineFilePath } from "@dohc/security-contract/engine-path-floor";
 import { validateUserWritePath } from "@dohc/workspace-core";
 import { stableJsonStringify } from "./canonicalJson";
-import { RELAY_ERRORS } from "./errorCodes";
+import { SHA256_HEX_PATTERN } from "@dohc/security-contract/wire-patterns";
+import { asRecord } from "@dohc/workspace-core";
+import { RelayError } from "./errors";
 import { MAX_PAYLOAD_JSON_BYTES } from "./wireLimits";
 
-const SHA256_HEX = /^[a-f0-9]{64}$/u;
 const ASCII_CONTROL = /[\u0000-\u001f\u007f]/u;
 const MAX_IDENTIFIER_BYTES = 512;
 const MAX_WORKSPACE_PATH_BYTES = 1_024;
@@ -102,9 +103,10 @@ interface ParsedResolve {
   lineageTransition: LineageTransition | null;
 }
 
-export class SyncRelayInvalidConflictResolveError extends Error {
-  readonly statusCode = RELAY_ERRORS.bad_request.status;
-  readonly code = RELAY_ERRORS.bad_request.code;
+export class SyncRelayInvalidConflictResolveError extends RelayError {
+  constructor(message: string) {
+    super("bad_request", message);
+  }
 }
 
 function invalid(reason: string): never {
@@ -113,11 +115,10 @@ function invalid(reason: string): never {
   );
 }
 
-function asRecord(value: unknown, label: string): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    invalid(`${label} must be an object`);
-  }
-  return value as Record<string, unknown>;
+function requireRecord(value: unknown, label: string): Record<string, unknown> {
+  const record = asRecord(value);
+  if (!record) invalid(`${label} must be an object`);
+  return record;
 }
 
 function exactKeys(
@@ -125,7 +126,7 @@ function exactKeys(
   expected: readonly string[],
   label: string,
 ): Record<string, unknown> {
-  const record = asRecord(value, label);
+  const record = requireRecord(value, label);
   const actual = Object.keys(record).sort();
   const wanted = [...expected].sort();
   if (
@@ -179,7 +180,7 @@ function identifier(value: unknown, label: string): string {
 }
 
 function sha256(value: unknown, label: string): string {
-  if (typeof value !== "string" || !SHA256_HEX.test(value)) {
+  if (typeof value !== "string" || !SHA256_HEX_PATTERN.test(value)) {
     invalid(`${label} must be 64 lowercase hexadecimal characters`);
   }
   return value;
@@ -306,7 +307,7 @@ function pathRef(value: unknown, count: number, label: string): number {
 }
 
 function side(value: unknown, count: number, label: string): Side {
-  const record = asRecord(value, label);
+  const record = requireRecord(value, label);
   if (record.present === false) {
     const absent = exactKeys(value, ["present", "pathRef"], label);
     return {

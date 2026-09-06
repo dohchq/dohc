@@ -1,3 +1,4 @@
+import { isRecord } from "./records";
 export type ChangeSetKind =
   | "user-edit"
   | "agent-run"
@@ -28,10 +29,6 @@ export type {
   ChangeAuthor,
   NonEmptyLocalAuthorLabel,
 } from "@dohc/workspace-contracts/engine";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
 
 function parseCanonicalNonEmptyString(value: unknown, label: string): string {
   if (typeof value !== "string") {
