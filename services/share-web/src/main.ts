@@ -39,6 +39,7 @@ const handler = createShareWebHandler({
   relayExchangeKey: config.relayExchangeKey,
   publicHosts: config.publicHosts,
   viewerAssetsDir,
+  accountAuth: config.accountAuth,
 });
 
 const server = serveFetchHandler({
