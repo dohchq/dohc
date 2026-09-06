@@ -1406,88 +1406,8 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<CaptureRetireResult, RuntimeError>>,
     },
-    HistoryPage {
-        workspace_id: String,
-        limit: i64,
-        before_moment_order: Option<i64>,
-        protected_probe_limit: usize,
-        reply: oneshot::Sender<Result<HistoryPageRead, RuntimeError>>,
-    },
-    MaterializeSecretInband {
-        workspace_id: String,
-        version_id: String,
-        path: String,
-        key: Box<SecretDataKey>,
-        cap: usize,
-        reply: oneshot::Sender<Result<Option<InbandSecret>, RuntimeError>>,
-    },
-    WriteSecretFile {
-        input: Box<SecretWrite>,
-        key: Box<SecretDataKey>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    DeleteSecretFile {
-        input: SecretDelete,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<SecretMomentRecord>, RuntimeError>>,
-    },
-    ForkSecretVersion {
-        workspace_id: String,
-        from_version_id: String,
-        to_version_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
-    },
-    CompareSecretFiles {
-        workspace_id: String,
-        source_version_id: String,
-        target_version_id: String,
-        after_path: Option<String>,
-        limit: usize,
-        key: Option<Box<SecretDataKey>>,
-        reply: oneshot::Sender<Result<SecretComparePage, RuntimeError>>,
-    },
-    ApplySecretFile {
-        workspace_id: String,
-        path: String,
-        from_version_id: String,
-        to_version_id: String,
-        moment_id: String,
-        metadata_origin: String,
-        metadata_summary: Option<String>,
-        metadata_correlation_id: Option<String>,
-        now_ms: i64,
-        key: Box<SecretDataKey>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretWriteResult, RuntimeError>>,
-    },
-    RestoreSecretFile {
-        workspace_id: String,
-        path: String,
-        before_moment_id: String,
-        moment_id: String,
-        metadata_origin: String,
-        metadata_summary: Option<String>,
-        metadata_correlation_id: Option<String>,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SecretRestoreResult, RuntimeError>>,
-    },
     SetActiveVersion {
         input: ActiveVersionSwitch,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
-    },
-    CreateNamedVersion {
-        input: CreateNamedVersion,
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
         reply: oneshot::Sender<Result<VersionRecord, RuntimeError>>,
@@ -1503,13 +1423,6 @@ enum Command {
         seed_from_artifact: bool,
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocOpenState, RuntimeError>>,
-    },
-    YdocVersionUnsettledContentKind {
-        workspace_id: String,
-        version_id: String,
-        ignored_object_ids: Vec<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Option<ContentKind>, RuntimeError>>,
     },
     YdocMaterializeSceneSeedAssets {
         root_dir: PathBuf,
@@ -1556,15 +1469,6 @@ enum Command {
         token: CancellationToken,
         reply: oneshot::Sender<Result<YdocResyncState, RuntimeError>>,
     },
-    /// Test evidence seam: observe the actor-local writer cache without
-    /// exposing it through the product protocol.
-    YdocCacheStatsForTest {
-        reply: oneshot::Sender<CacheStats>,
-    },
-    /// Test evidence seam: force the next consumer down the cold path.
-    YdocCacheClearForTest {
-        reply: oneshot::Sender<CacheStats>,
-    },
     YdocCloseSession {
         key: DocKey,
         materialization: Option<YdocCloseMaterialization>,
@@ -1602,19 +1506,6 @@ enum Command {
         now_ms: i64,
         reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
-    ConflictList {
-        workspace_id: String,
-        status: Option<String>,
-        after_conflict_id: Option<String>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<Vec<TextConflict>, RuntimeError>>,
-    },
-    ConflictOpen {
-        conflict: Box<TextConflict>,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<bool, RuntimeError>>,
-    },
     ConflictResolve {
         input: ResolveTextConflict,
         leases: LeaseRegistry,
@@ -1629,34 +1520,6 @@ enum Command {
         leases: LeaseRegistry,
         token: CancellationToken,
         reply: oneshot::Sender<Result<ApplyOutcome<ConflictApplyResult>, RuntimeError>>,
-    },
-    SearchPage {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        query: String,
-        limit: Option<i64>,
-        now_ms: i64,
-        expected_generation: Option<u64>,
-        after: Option<SearchResultKey>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<SearchPageBatch, RuntimeError>>,
-    },
-    SearchQueryChatMessagesGranular {
-        workspace_id: String,
-        query: String,
-        limit: i64,
-        materialized_byte_budget: usize,
-        reply: oneshot::Sender<Result<GranularChatMessageSearchBatch, RuntimeError>>,
-    },
-    EnsureSearchIndex {
-        root_dir: PathBuf,
-        workspace_id: String,
-        version_id: String,
-        now_ms: i64,
-        faults: Arc<dyn FaultInjector>,
-        token: CancellationToken,
-        reply: oneshot::Sender<Result<(), RuntimeError>>,
     },
     Relay {
         transport: DeferredRelayTransport,
@@ -2616,18 +2479,60 @@ impl ActorHandle {
         before_moment_order: Option<i64>,
         protected_probe_limit: usize,
     ) -> Result<HistoryPageRead, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::HistoryPage {
-                workspace_id,
-                limit,
-                before_moment_order,
-                protected_probe_limit,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            (|| {
+                let versioned = VersionedTextStore::new(store);
+                let active_version = versioned.get_active_version(&workspace_id)?;
+                let text_moment_page = versioned.list_moments(&ListMomentsQuery {
+                    workspace_id: workspace_id.clone(),
+                    version_id: Some(active_version.version_id.clone()),
+                    object_id: None,
+                    limit,
+                    before_moment_order,
+                })?;
+                let upper_recorded_at_ms = before_moment_order
+                    .map(|cursor| {
+                        let through_cursor =
+                            cursor.checked_add(1).ok_or(DomainError::InvalidInput {
+                                reason: "before_moment_order is too large",
+                            })?;
+                        versioned
+                            .list_moments(&ListMomentsQuery {
+                                workspace_id: workspace_id.clone(),
+                                version_id: Some(active_version.version_id.clone()),
+                                object_id: None,
+                                limit: 1,
+                                before_moment_order: Some(through_cursor),
+                            })
+                            .map(|page| page.moments.first().map(|moment| moment.recorded_at_ms))
+                    })
+                    .transpose()?
+                    .flatten();
+                let lower_recorded_at_ms =
+                    text_moment_page.next_before_moment_order.and_then(|_| {
+                        text_moment_page
+                            .moments
+                            .last()
+                            .map(|moment| moment.recorded_at_ms)
+                    });
+                let protected_moments = list_secret_moments_in_time_window_keyless(
+                    store,
+                    &workspace_id,
+                    &active_version.version_id,
+                    lower_recorded_at_ms,
+                    upper_recorded_at_ms,
+                    protected_probe_limit,
+                )?;
+                Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
+                    active_version,
+                    text_moment_page,
+                    protected_moments,
+                    upper_recorded_at_ms,
+                })
+            })()
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn get_moment(
@@ -2751,19 +2656,12 @@ impl ActorHandle {
         key: SecretDataKey,
         cap: usize,
     ) -> Result<Option<InbandSecret>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::MaterializeSecretInband {
-                workspace_id,
-                version_id,
-                path,
-                key: Box::new(key),
-                cap,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            SecretFileStore::new(store, &key)
+                .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn write_secret_file(
@@ -2773,18 +2671,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::WriteSecretFile {
-                input: Box::new(input),
-                key: Box::new(key),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                SecretFileStore::new(store, &key)
+                    .write_secret_file_with(&input, faults.as_ref(), |tx, result| {
+                        journal_secret_put_outbound_in_tx(tx, result)
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn delete_secret_file(
@@ -2793,17 +2691,20 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<Option<SecretMomentRecord>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::DeleteSecretFile {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                delete_secret_file_keyless_with(
+                    store,
+                    &input,
+                    faults.as_ref(),
+                    journal_secret_delete_outbound_in_tx,
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn fork_secret_version(
@@ -2815,20 +2716,30 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ForkSecretVersion {
-                workspace_id,
-                from_version_id,
-                to_version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                fork_version_keyless_with(
+                    store,
+                    &workspace_id,
+                    &from_version_id,
+                    &to_version_id,
+                    faults.as_ref(),
+                    |tx| {
+                        journal_secret_fork_outbound_in_tx(
+                            tx,
+                            &workspace_id,
+                            &from_version_id,
+                            &to_version_id,
+                            now_ms,
+                        )
+                    },
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn list_secret_moments(
@@ -2873,20 +2784,19 @@ impl ActorHandle {
         limit: usize,
         key: Option<SecretDataKey>,
     ) -> Result<SecretComparePage, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CompareSecretFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
+        self.run(move |store, _| {
+            compare_secret_files_page_keyless(
+                store,
+                key.as_ref(),
+                &workspace_id,
+                &source_version_id,
+                &target_version_id,
+                after_path.as_deref(),
                 limit,
-                key: key.map(Box::new),
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+            )
+            .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2905,26 +2815,31 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretWriteResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ApplySecretFile {
-                workspace_id,
-                path,
-                from_version_id,
-                to_version_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                key: Box::new(key),
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                apply_secret_file_from_version_with(
+                    store,
+                    &key,
+                    &dohc_engine_domain::ApplySecretFileFromVersion {
+                        workspace_id,
+                        path,
+                        from_version_id,
+                        to_version_id,
+                        moment_id,
+                        metadata_origin,
+                        metadata_summary,
+                        metadata_correlation_id,
+                        now_ms,
+                    },
+                    faults.as_ref(),
+                    |tx, result| journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref()),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2941,24 +2856,27 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<SecretRestoreResult, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::RestoreSecretFile {
-                workspace_id,
-                path,
-                before_moment_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                restore_secret_file_verbatim_with_metadata_and_after(
+                    store,
+                    &workspace_id,
+                    &path,
+                    &before_moment_id,
+                    &moment_id,
+                    &metadata_origin,
+                    metadata_summary,
+                    metadata_correlation_id,
+                    now_ms,
+                    faults.as_ref(),
+                    |tx, result| journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref()),
+                )
+                .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     /// One secret tip's recorded byte length — keyless, no decrypt.
@@ -3065,17 +2983,18 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<VersionRecord, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::CreateNamedVersion {
-                input,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .create_named_version_with(&input, faults.as_ref(), |tx, record| {
+                        journal_version_create_outbound_in_tx(tx, record, &input.from_version_id)
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn preflight_create_named_version(
@@ -3276,18 +3195,16 @@ impl ActorHandle {
         ignored_object_ids: Vec<String>,
         token: CancellationToken,
     ) -> Result<Option<ContentKind>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocVersionUnsettledContentKind {
-                workspace_id,
-                version_id,
-                ignored_object_ids,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            ydoc_version_unsettled_content_kind_on_store(
+                store,
+                &workspace_id,
+                &version_id,
+                &ignored_object_ids,
+                &token,
+            )
+        })
+        .await
     }
 
     pub async fn ydoc_materialize_scene_seed_assets(
@@ -3410,24 +3327,21 @@ impl ActorHandle {
         reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
+    /// Test evidence seam: observe the actor-local writer cache without
+    /// exposing it through the product protocol.
     #[doc(hidden)]
     pub async fn ydoc_cache_stats_for_test(&self) -> Result<CacheStats, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCacheStatsForTest { reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+        self.run(move |_store, cache| Ok(cache.stats())).await
     }
 
+    /// Test evidence seam: force the next consumer down the cold path.
     #[doc(hidden)]
     pub async fn ydoc_cache_clear_for_test(&self) -> Result<CacheStats, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::YdocCacheClearForTest { reply })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)
+        self.run(move |_store, cache| {
+            cache.clear();
+            Ok(cache.stats())
+        })
+        .await
     }
 
     pub async fn ydoc_close_session(
@@ -3587,18 +3501,20 @@ impl ActorHandle {
         after_conflict_id: Option<String>,
         token: CancellationToken,
     ) -> Result<Vec<TextConflict>, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictList {
-                workspace_id,
-                status,
-                after_conflict_id,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                VersionedTextStore::new(store)
+                    .list_text_conflicts_page(
+                        &workspace_id,
+                        status.as_deref(),
+                        after_conflict_id.as_deref(),
+                    )
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn conflict_open(
@@ -3607,17 +3523,8 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<bool, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::ConflictOpen {
-                conflict,
-                faults,
-                token,
-                reply,
-            })
+        self.run(move |store, _| conflict_open_on_store(store, &conflict, faults.as_ref(), &token))
             .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
     }
 
     pub async fn conflict_resolve(
@@ -3702,23 +3609,28 @@ impl ActorHandle {
         after: Option<SearchResultKey>,
         token: CancellationToken,
     ) -> Result<SearchPageBatch, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SearchPage {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                expected_generation,
-                after,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                store
+                    .read_with(|conn| {
+                        search_workspace_page(
+                            conn,
+                            &root_dir,
+                            &workspace_id,
+                            &version_id,
+                            &query,
+                            limit,
+                            now_ms,
+                            expected_generation,
+                            after,
+                        )
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn search_query_chat_messages_granular(
@@ -3728,18 +3640,20 @@ impl ActorHandle {
         limit: i64,
         materialized_byte_budget: usize,
     ) -> Result<GranularChatMessageSearchBatch, RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::SearchQueryChatMessagesGranular {
-                workspace_id,
-                query,
-                limit,
-                materialized_byte_budget,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            store
+                .read_with(|conn| {
+                    query_chat_messages_granular_bounded(
+                        conn,
+                        &workspace_id,
+                        &query,
+                        limit,
+                        materialized_byte_budget,
+                    )
+                })
+                .map_err(RuntimeError::from)
+        })
+        .await
     }
 
     pub async fn ensure_search_index(
@@ -3751,20 +3665,25 @@ impl ActorHandle {
         faults: Arc<dyn FaultInjector>,
         token: CancellationToken,
     ) -> Result<(), RuntimeError> {
-        let (reply, reply_rx) = oneshot::channel();
-        self.tx
-            .send(Command::EnsureSearchIndex {
-                root_dir,
-                workspace_id,
-                version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            })
-            .await
-            .map_err(|_| RuntimeError::ActorUnavailable)?;
-        reply_rx.await.map_err(|_| RuntimeError::ActorUnavailable)?
+        self.run(move |store, _| {
+            if token.is_cancelled() {
+                Err(RuntimeError::Cancelled)
+            } else {
+                store
+                    .read_with(|conn| {
+                        ensure_search_index_for_version(
+                            conn,
+                            &root_dir,
+                            &workspace_id,
+                            &version_id,
+                            now_ms,
+                            faults.as_ref(),
+                        )
+                    })
+                    .map_err(RuntimeError::from)
+            }
+        })
+        .await
     }
 
     pub async fn chat_channel_create(
@@ -7005,247 +6924,6 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
-            Command::HistoryPage {
-                workspace_id,
-                limit,
-                before_moment_order,
-                protected_probe_limit,
-                reply,
-            } => {
-                let outcome = (|| {
-                    let versioned = VersionedTextStore::new(&mut store);
-                    let active_version = versioned.get_active_version(&workspace_id)?;
-                    let text_moment_page = versioned.list_moments(&ListMomentsQuery {
-                        workspace_id: workspace_id.clone(),
-                        version_id: Some(active_version.version_id.clone()),
-                        object_id: None,
-                        limit,
-                        before_moment_order,
-                    })?;
-                    let upper_recorded_at_ms = before_moment_order
-                        .map(|cursor| {
-                            let through_cursor =
-                                cursor.checked_add(1).ok_or(DomainError::InvalidInput {
-                                    reason: "before_moment_order is too large",
-                                })?;
-                            versioned
-                                .list_moments(&ListMomentsQuery {
-                                    workspace_id: workspace_id.clone(),
-                                    version_id: Some(active_version.version_id.clone()),
-                                    object_id: None,
-                                    limit: 1,
-                                    before_moment_order: Some(through_cursor),
-                                })
-                                .map(|page| {
-                                    page.moments.first().map(|moment| moment.recorded_at_ms)
-                                })
-                        })
-                        .transpose()?
-                        .flatten();
-                    let lower_recorded_at_ms =
-                        text_moment_page.next_before_moment_order.and_then(|_| {
-                            text_moment_page
-                                .moments
-                                .last()
-                                .map(|moment| moment.recorded_at_ms)
-                        });
-                    let protected_moments = list_secret_moments_in_time_window_keyless(
-                        &store,
-                        &workspace_id,
-                        &active_version.version_id,
-                        lower_recorded_at_ms,
-                        upper_recorded_at_ms,
-                        protected_probe_limit,
-                    )?;
-                    Ok::<HistoryPageRead, DomainError>(HistoryPageRead {
-                        active_version,
-                        text_moment_page,
-                        protected_moments,
-                        upper_recorded_at_ms,
-                    })
-                })()
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::MaterializeSecretInband {
-                workspace_id,
-                version_id,
-                path,
-                key,
-                cap,
-                reply,
-            } => {
-                let outcome = SecretFileStore::new(&mut store, &key)
-                    .materialize_secret_file_inband(&workspace_id, &version_id, &path, cap)
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::WriteSecretFile {
-                input,
-                key,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    SecretFileStore::new(&mut store, &key)
-                        .write_secret_file_with(&input, faults.as_ref(), |tx, result| {
-                            journal_secret_put_outbound_in_tx(tx, result)
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::DeleteSecretFile {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    delete_secret_file_keyless_with(
-                        &mut store,
-                        &input,
-                        faults.as_ref(),
-                        journal_secret_delete_outbound_in_tx,
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ForkSecretVersion {
-                workspace_id,
-                from_version_id,
-                to_version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    fork_version_keyless_with(
-                        &mut store,
-                        &workspace_id,
-                        &from_version_id,
-                        &to_version_id,
-                        faults.as_ref(),
-                        |tx| {
-                            journal_secret_fork_outbound_in_tx(
-                                tx,
-                                &workspace_id,
-                                &from_version_id,
-                                &to_version_id,
-                                now_ms,
-                            )
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::CompareSecretFiles {
-                workspace_id,
-                source_version_id,
-                target_version_id,
-                after_path,
-                limit,
-                key,
-                reply,
-            } => {
-                let outcome = compare_secret_files_page_keyless(
-                    &store,
-                    key.as_deref(),
-                    &workspace_id,
-                    &source_version_id,
-                    &target_version_id,
-                    after_path.as_deref(),
-                    limit,
-                )
-                .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::ApplySecretFile {
-                workspace_id,
-                path,
-                from_version_id,
-                to_version_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                key,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    apply_secret_file_from_version_with(
-                        &mut store,
-                        &key,
-                        &dohc_engine_domain::ApplySecretFileFromVersion {
-                            workspace_id,
-                            path,
-                            from_version_id,
-                            to_version_id,
-                            moment_id,
-                            metadata_origin,
-                            metadata_summary,
-                            metadata_correlation_id,
-                            now_ms,
-                        },
-                        faults.as_ref(),
-                        |tx, result| {
-                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::RestoreSecretFile {
-                workspace_id,
-                path,
-                before_moment_id,
-                moment_id,
-                metadata_origin,
-                metadata_summary,
-                metadata_correlation_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    restore_secret_file_verbatim_with_metadata_and_after(
-                        &mut store,
-                        &workspace_id,
-                        &path,
-                        &before_moment_id,
-                        &moment_id,
-                        &metadata_origin,
-                        metadata_summary,
-                        metadata_correlation_id,
-                        now_ms,
-                        faults.as_ref(),
-                        |tx, result| {
-                            journal_secret_moment_outbound_in_tx(tx, result.moment.as_ref())
-                        },
-                    )
-                    .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
             Command::SetActiveVersion {
                 input,
                 faults,
@@ -7262,27 +6940,6 @@ fn worker_main(
                     faults.as_ref(),
                     &token,
                 );
-                let _ = reply.send(outcome);
-            }
-            Command::CreateNamedVersion {
-                input,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .create_named_version_with(&input, faults.as_ref(), |tx, record| {
-                            journal_version_create_outbound_in_tx(
-                                tx,
-                                record,
-                                &input.from_version_id,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
                 let _ = reply.send(outcome);
             }
             Command::CaptureRetire {
@@ -7332,22 +6989,6 @@ fn worker_main(
                     &path,
                     content_kind,
                     seed_from_artifact,
-                    &token,
-                );
-                let _ = reply.send(outcome);
-            }
-            Command::YdocVersionUnsettledContentKind {
-                workspace_id,
-                version_id,
-                ignored_object_ids,
-                token,
-                reply,
-            } => {
-                let outcome = ydoc_version_unsettled_content_kind_on_store(
-                    &store,
-                    &workspace_id,
-                    &version_id,
-                    &ignored_object_ids,
                     &token,
                 );
                 let _ = reply.send(outcome);
@@ -7481,13 +7122,6 @@ fn worker_main(
                 );
                 let _ = reply.send(outcome);
             }
-            Command::YdocCacheStatsForTest { reply } => {
-                let _ = reply.send(doc_cache.stats());
-            }
-            Command::YdocCacheClearForTest { reply } => {
-                doc_cache.clear();
-                let _ = reply.send(doc_cache.stats());
-            }
             Command::YdocCloseSession {
                 key,
                 materialization,
@@ -7617,36 +7251,6 @@ fn worker_main(
                 });
                 let _ = reply.send(outcome);
             }
-            Command::ConflictList {
-                workspace_id,
-                status,
-                after_conflict_id,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    VersionedTextStore::new(&mut store)
-                        .list_text_conflicts_page(
-                            &workspace_id,
-                            status.as_deref(),
-                            after_conflict_id.as_deref(),
-                        )
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::ConflictOpen {
-                conflict,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome =
-                    conflict_open_on_store(&mut store, &conflict, faults.as_ref(), &token);
-                let _ = reply.send(outcome);
-            }
             Command::ConflictResolve {
                 input,
                 leases,
@@ -7696,86 +7300,6 @@ fn worker_main(
                 // A replicated conflict envelope can replace or archive a
                 // lineage (probe-covered; reset hooks stay unconditional).
                 doc_cache.clear();
-                let _ = reply.send(outcome);
-            }
-            Command::SearchPage {
-                root_dir,
-                workspace_id,
-                version_id,
-                query,
-                limit,
-                now_ms,
-                expected_generation,
-                after,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            search_workspace_page(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                &query,
-                                limit,
-                                now_ms,
-                                expected_generation,
-                                after,
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
-                let _ = reply.send(outcome);
-            }
-            Command::SearchQueryChatMessagesGranular {
-                workspace_id,
-                query,
-                limit,
-                materialized_byte_budget,
-                reply,
-            } => {
-                let outcome = store
-                    .read_with(|conn| {
-                        query_chat_messages_granular_bounded(
-                            conn,
-                            &workspace_id,
-                            &query,
-                            limit,
-                            materialized_byte_budget,
-                        )
-                    })
-                    .map_err(RuntimeError::from);
-                let _ = reply.send(outcome);
-            }
-            Command::EnsureSearchIndex {
-                root_dir,
-                workspace_id,
-                version_id,
-                now_ms,
-                faults,
-                token,
-                reply,
-            } => {
-                let outcome = if token.is_cancelled() {
-                    Err(RuntimeError::Cancelled)
-                } else {
-                    store
-                        .read_with(|conn| {
-                            ensure_search_index_for_version(
-                                conn,
-                                &root_dir,
-                                &workspace_id,
-                                &version_id,
-                                now_ms,
-                                faults.as_ref(),
-                            )
-                        })
-                        .map_err(RuntimeError::from)
-                };
                 let _ = reply.send(outcome);
             }
             Command::Relay {
