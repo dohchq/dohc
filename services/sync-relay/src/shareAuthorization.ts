@@ -2,6 +2,7 @@ import { shareAccessRank } from "@dohc/security-contract/share-selector";
 import {
   effectiveShareSelector,
   isChatChannelSelector,
+  isLiveEditShareSelector,
   parseStoredAnyShareSelectorJson,
   type AnyShareSelector,
   type ShareSelector,
@@ -19,6 +20,7 @@ export type ShareAction =
   | "append"
   | "propose"
   | "presence"
+  | "live-edit"
   | "list-own-proposals"
   | "withdraw-proposal";
 
@@ -59,12 +61,35 @@ type ShareAuthorizationInput = {
 };
 
 type ShareGrantAuthorizationInput = {
-  storage: ShareAuthorizationStorage;
+  storage: Omit<ShareAuthorizationStorage, "listActiveShareGrantsForRecipient">;
   grantId: string;
   action: ShareAction;
   principalKind: "user" | "link";
   principalUserId?: string;
 };
+
+export type NamedLiveEditShareGrantResult =
+  | AuthorizedShareAction<ShareSelector>
+  | { ok: false; reason: "not-authorized" | "stale-selector" };
+
+export function authorizeNamedLiveEditShareGrant(input: {
+  storage: ShareGrantAuthorizationInput["storage"];
+  actorUserId: string;
+  grantId: string;
+}): NamedLiveEditShareGrantResult {
+  const current = resolveCurrentShareGrant({
+    storage: input.storage,
+    grantId: input.grantId,
+    principalKind: "user",
+    principalUserId: input.actorUserId,
+  });
+  if (!current) return { ok: false, reason: "not-authorized" };
+  const validated = validateCurrentShareGrant(input.storage, current);
+  if (!validated.ok || !isLiveEditShareSelector(validated.effectiveSelector)) {
+    return { ok: false, reason: "stale-selector" };
+  }
+  return { ...validated, effectiveSelector: validated.effectiveSelector };
+}
 
 export function selectorTargetsBlockedChannel(
   storage: Pick<SyncRelayStorage, "findChannelCreateKind">,
@@ -213,7 +238,7 @@ function resolveCurrentShareGrant(
 }
 
 function validateCurrentShareGrant(
-  storage: ShareAuthorizationStorage,
+  storage: ShareGrantAuthorizationInput["storage"],
   current: SyncRelayShareWithGrantRow,
 ): ShareAuthorizationResult {
   const { share, grant } = current;
@@ -257,6 +282,9 @@ function actionAllowed(authorized: AuthorizedShareAction, action: ShareAction): 
         return true;
       }
       return false;
+    case "live-edit":
+      return authorized.grant.principalKind === "user"
+        && isLiveEditShareSelector(authorized.effectiveSelector);
   }
 }
 
