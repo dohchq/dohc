@@ -1,4 +1,5 @@
 import { createWorkspaceFileProtocolHandler } from "./security/workspaceFileProtocol";
+import { registerUpdatesIpcHandlers } from "./ipc/updatesIpc";
 import { createPresenceIpc } from "./ipc/presenceIpc";
 import { createWorkspaceEngineIpc } from "./ipc/workspaceEngineIpc";
 import { createSettingsIpc } from "./ipc/settingsIpc";
@@ -95,8 +96,6 @@ import {
   SyncStatusResult,
   RebuildEngineStoreResult,
   WorkspaceSummary,
-  UpdateActionResult,
-  UpdateCheckResult,
   UpdateStateEvent,
   ShareHandoffStatus,
 } from "./ipc/bridgeContract";
@@ -6424,47 +6423,10 @@ function registerIpcHandlers(
 
   workspaceEngineIpc.registerYDoc();
 
-  ipcMain.handle(CHANNELS.getUpdateState, (event) => {
-    assertTrustedSender(event);
-    return currentUpdateState();
-  });
-
-  ipcMain.handle(CHANNELS.checkForUpdates, async (event) => {
-    assertTrustedSender(event);
-    if (!autoUpdateController) {
-      return UpdateCheckResult.parse({
-        checked: false,
-        state: currentUpdateState(),
-      });
-    }
-    return UpdateCheckResult.parse(await autoUpdateController.checkForUpdates());
-  });
-
-  ipcMain.handle(CHANNELS.installUpdate, async (event) => {
-    assertTrustedSender(event);
-    if (!autoUpdateController) {
-      return UpdateActionResult.parse({
-        accepted: false,
-        state: currentUpdateState(),
-      });
-    }
-    // Re-ask at the quit boundary: the renderer checked
-    // before it called, and a reopen can set an edit aside in the gap. Only
-    // once main has a fresh answer does it approve the quit that
-    // quitAndInstall starts — the ask cannot veto it afterwards, because
-    // that would burn the one-shot latch.
-    if (await recoveryChecker.ask()) {
-      return UpdateActionResult.parse({
-        accepted: false,
-        state: currentUpdateState(),
-      });
-    }
-    quitGuard.approve();
-    const result = UpdateActionResult.parse(
-      await autoUpdateController.installUpdate(),
-    );
-    if (!result.accepted) quitGuard.revoke();
-    return result;
+  registerUpdatesIpcHandlers<IpcMainInvokeEvent>({
+    registerHandler: (channel, handler) => ipcMain.handle(channel, handler),
+    assertTrustedSender, currentUpdateState, recoveryChecker, quitGuard,
+    get autoUpdateController() { return autoUpdateController; },
   });
 
   ipcMain.handle(CHANNELS.recoveryCheckAnswer, (event, payload: unknown) => {
