@@ -54,7 +54,7 @@ export function run(command, args, { cwd = repoRoot, env = process.env, log, onS
     const interrupt = () => {
       if (interrupted || !child.pid || completed) return;
       interrupted = true;
-      if (process.platform === "win32") {
+      if (windows) {
         // The retained handle belongs to the job owner, even after the command exits.
         child.kill("SIGKILL");
       } else {
