@@ -8,7 +8,7 @@ import type { ChangeAuthor } from "./changeSet";
 const DB_EXT = /\.(?:db|sqlite|sqlite3)$/i;
 const SIDECAR = /^(.*\.(?:db|sqlite|sqlite3))-(?:wal|shm|journal)$/i;
 
-export type DatabaseFileKind =
+type DatabaseFileKind =
   | "visible-user" // user data db (e.g. finance/wallet.sqlite) — syncs via op-log
   | "hidden-internal" // .dohc/** db — a local cache/index, never synced
   | "sidecar" // -wal/-shm/-journal — transient, never a standalone synced file
@@ -46,7 +46,7 @@ export function classifyDatabaseFile(path: string): DatabaseFileKind {
 //   edits travel as an operation log (and the file materializes locally).
 // - ignore: sidecars (transient) and hidden internal dbs (local cache only).
 // - file-content: an ordinary file, synced as text/content.
-export type DatabaseSyncStrategy = "operation-log" | "ignore" | "file-content";
+type DatabaseSyncStrategy = "operation-log" | "ignore" | "file-content";
 
 export function databaseSyncStrategy(path: string): DatabaseSyncStrategy {
   switch (classifyDatabaseFile(path)) {
@@ -68,7 +68,7 @@ export function shouldSyncAsStandaloneFile(path: string): boolean {
 
 // A safe point at which a visible .sqlite is (re)materialized on disk and
 // surfaced to sync — never mid-write or while the WAL is still active.
-export type MaterializationTrigger =
+type MaterializationTrigger =
   | "import-complete"
   | "explicit-save"
   | "close"
@@ -79,11 +79,11 @@ export function isDatabaseMaterializationPoint(trigger: MaterializationTrigger):
   return trigger === "import-complete" || trigger === "explicit-save" || trigger === "close";
 }
 
-export type DatabaseRowOp = "insert" | "update" | "upsert" | "delete";
+type DatabaseRowOp = "insert" | "update" | "upsert" | "delete";
 
 // One structured row edit. The append-only log of these IS what syncs for a
 // database — not the raw bytes. Stored as inspectable JSONL under .dohc.
-export interface DatabaseOperation {
+interface DatabaseOperation {
   operationId: string;
   databasePath: string;
   table: string;

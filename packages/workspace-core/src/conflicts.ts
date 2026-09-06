@@ -1,4 +1,4 @@
-export interface ConflictInput {
+interface ConflictInput {
   path: string;
   localDescription: string;
   remoteDescription: string;

@@ -1,5 +1,5 @@
 import { isRecord } from "./records";
-export type ChangeSetKind =
+type ChangeSetKind =
   | "user-edit"
   | "agent-run"
   | "import"
@@ -40,7 +40,7 @@ function parseCanonicalNonEmptyString(value: unknown, label: string): string {
   return value;
 }
 
-export function parseLocalAuthorLabel(label: unknown): NonEmptyLocalAuthorLabel {
+function parseLocalAuthorLabel(label: unknown): NonEmptyLocalAuthorLabel {
   if (typeof label !== "string") {
     throw new Error("Local change author label must be a string.");
   }
@@ -82,7 +82,7 @@ export function parseChangeAuthor(value: unknown): ChangeAuthor {
   throw new Error("Change author kind is invalid.");
 }
 
-export interface FileChange {
+interface FileChange {
   path: string;
   operation: "write" | "delete" | "rename";
   mediaType?: string;
@@ -90,7 +90,7 @@ export interface FileChange {
   after?: FileChangeSnapshot | null;
 }
 
-export interface FileChangeSnapshot {
+interface FileChangeSnapshot {
   sha256?: string;
   sizeBytes?: number;
   text?: string;
@@ -100,7 +100,7 @@ export interface FileChangeSnapshot {
 
 // Where a change came from — a prompt, an import source, an agent run — so
 // history can answer "why did this change?" not just "what changed?".
-export interface ChangeProvenance {
+interface ChangeProvenance {
   source: ChangeSetKind;
   prompt?: string;
   agentRunId?: string;

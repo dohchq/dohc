@@ -1,8 +1,8 @@
-export type WorkspaceObjectId = string;
+type WorkspaceObjectId = string;
 export type VersionId = string;
 export type WorkspaceId = string;
-export type VersionedTextMomentId = string;
-export type VersionedTextConflictId = string;
+type VersionedTextMomentId = string;
+type VersionedTextConflictId = string;
 
 export const MAX_VERSIONED_BINARY_FILE_BYTES = 5 * 1024 * 1024;
 
@@ -92,7 +92,7 @@ export interface FileObjectRecord {
   createdAtMs: number;
 }
 
-export type ActorNeutralWriteOrigin =
+type ActorNeutralWriteOrigin =
   | "api"
   | "local-file"
   | "restore"
@@ -111,7 +111,7 @@ export interface ActorNeutralWriteMetadata {
 // dohc-TRACKED agent runs stamp this; ordinary edits, reconciliation, and raw
 // external agent CLIs remain actor-neutral — an absent author is the honest
 // default, not a fallback.
-export interface AgentMomentAuthor {
+interface AgentMomentAuthor {
   kind: "agent";
   agentId: string;
   onBehalfOf: string;
@@ -119,7 +119,7 @@ export interface AgentMomentAuthor {
 }
 
 export type MomentAuthor = AgentMomentAuthor;
-export type VersionedFileContentKind = "text" | "binary";
+type VersionedFileContentKind = "text" | "binary";
 
 export interface TextFileSnapshot {
   objectId: WorkspaceObjectId;
@@ -147,7 +147,7 @@ export interface VersionedTextFileState {
   metadata?: ActorNeutralWriteMetadata;
 }
 
-export type VersionedTextComparisonStatus =
+type VersionedTextComparisonStatus =
   | "same"
   | "incoming-changed"
   | "current-changed"
@@ -164,12 +164,12 @@ export interface VersionedTextComparison {
   status: VersionedTextComparisonStatus;
 }
 
-export type VersionedTextConflictStatus = "open" | "resolved";
-export type VersionedTextConflictResolution =
+type VersionedTextConflictStatus = "open" | "resolved";
+type VersionedTextConflictResolution =
   | "applied-incoming"
   | "applied-merged"
   | "kept-current";
-export type VersionedTextConflictChoice = "current" | "incoming" | "merged";
+type VersionedTextConflictChoice = "current" | "incoming" | "merged";
 
 export interface VersionedTextConflictRecord {
   id: VersionedTextConflictId;
@@ -188,7 +188,7 @@ export interface VersionedTextConflictRecord {
   resolution?: VersionedTextConflictResolution;
 }
 
-export type VersionedTextMergeResult =
+type VersionedTextMergeResult =
   | {
       kind: "unchanged";
       reason: "already-same" | "source-unchanged";
@@ -212,7 +212,7 @@ export type VersionedTextMergeResult =
       conflict: VersionedTextConflictRecord;
     };
 
-export type VersionedTextConflictResolveResult =
+type VersionedTextConflictResolveResult =
   | {
       kind: "resolved";
       conflict: VersionedTextConflictRecord;
@@ -220,7 +220,7 @@ export type VersionedTextConflictResolveResult =
       delete?: VersionedTextDeleteResult;
     };
 
-export interface VersionedTextConflictPage {
+interface VersionedTextConflictPage {
   conflicts: VersionedTextConflictRecord[];
   // Pass back as afterConflictId to fetch the next page; null when this page
   // reached the end of the listing.
@@ -236,7 +236,7 @@ export type SyncReplicationOpKind =
 // Wire encoding of "did the origin see a prior state for this object": absent
 // (no before at all), null (origin recorded an explicit no-file preimage), or
 // present (the before* fields below carry the origin's preimage snapshot).
-export type SyncMomentBeforePresence = "absent" | "null" | "present";
+type SyncMomentBeforePresence = "absent" | "null" | "present";
 
 export interface MomentAppendPayload {
   momentId: VersionedTextMomentId;
@@ -307,8 +307,8 @@ export interface ChatMessageAppendPayload {
   createdAtMs: number;
 }
 
-export type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
-export type ChatFollowState = "following" | "unfollowed";
+type ChatFollowTargetKind = "person" | "agent" | "channel" | "thread";
+type ChatFollowState = "following" | "unfollowed";
 
 export interface VersionedTextMoment {
   id: VersionedTextMomentId;
@@ -352,7 +352,7 @@ export interface VersionedTextMomentSummary {
   syncRecordOnly?: boolean;
 }
 
-export interface VersionedTextMomentPage {
+interface VersionedTextMomentPage {
   // Newest first (descending momentOrder).
   moments: VersionedTextMomentSummary[];
   // Pass back as beforeMomentOrder to fetch the next (older) page; null when
@@ -363,7 +363,7 @@ export interface VersionedTextMomentPage {
   latestMomentOrder: number;
 }
 
-export interface VersionedTextMomentPayloadSnapshot {
+interface VersionedTextMomentPayloadSnapshot {
   path: string;
   contentKind?: VersionedFileContentKind;
   sha256?: string;
@@ -371,7 +371,7 @@ export interface VersionedTextMomentPayloadSnapshot {
   text: string;
 }
 
-export interface VersionedTextMomentPayload {
+interface VersionedTextMomentPayload {
   before: VersionedTextMomentPayloadSnapshot | null;
   after: VersionedTextMomentPayloadSnapshot;
 }
@@ -546,8 +546,8 @@ export interface VersionedTextStore {
 }
 
 export type ChatThreadId = string;
-export type ChatMessageId = string;
-export type ChatChannelId = string;
+type ChatMessageId = string;
+type ChatChannelId = string;
 
 // A DM is a private channel subtype. Single-user alpha ships the
 // kind enum only — no participant sets, presence, or DM UI yet.
@@ -557,7 +557,7 @@ export type ChatActor =
   | { kind: "human"; displayName: string }
   | { kind: "agent"; displayName: string };
 
-export interface LinkedChatFileRef {
+interface LinkedChatFileRef {
   objectId: WorkspaceObjectId;
   pathHint?: string;
   linkedAtMs: number;
@@ -692,7 +692,7 @@ export interface ChatAgentReadState {
   updatedAtMs: number;
 }
 
-export interface ChatMentionRecord {
+interface ChatMentionRecord {
   threadId: ChatThreadId;
   messageId: ChatMessageId;
   handle: string;
@@ -763,9 +763,9 @@ export interface ChatFeedPage {
   readState?: ChatFeedReadState;
 }
 
-export type ChatBookmarkTargetKind = "message" | "thread";
-export type ChatBookmarkMode = "live" | "snapshot";
-export type ChatBookmarkState = "active" | "archived";
+type ChatBookmarkTargetKind = "message" | "thread";
+type ChatBookmarkMode = "live" | "snapshot";
+type ChatBookmarkState = "active" | "archived";
 export type ChatBookmarkProjectionState = "pending" | "ready" | "failed" | "stale";
 
 /**
@@ -797,19 +797,19 @@ export interface ChatBookmark {
   failureReason?: string;
 }
 
-export interface ChatBookmarkTransitionResult {
+interface ChatBookmarkTransitionResult {
   bookmark: ChatBookmark;
   // False when a materializer reports an obsolete generation. The current
   // bookmark is returned so the worker can immediately observe newer work.
   applied: boolean;
 }
 
-export type LinkedChatProjectionFileAccess =
+type LinkedChatProjectionFileAccess =
   | { kind: "allowed"; path: string }
   | { kind: "denied" }
   | { kind: "unknown" };
 
-export interface LinkedChatProjection {
+interface LinkedChatProjection {
   path: string;
   readOnly: true;
   threadId: ChatThreadId;
@@ -1096,7 +1096,7 @@ export interface LinkedChatStore {
   close(): Promise<void>;
 }
 
-export type AgentDispatchState = "pending" | "running" | "done" | "failed";
+type AgentDispatchState = "pending" | "running" | "done" | "failed";
 
 export interface AgentDispatchRecord {
   workspaceId: WorkspaceId;
@@ -1211,7 +1211,7 @@ export interface VersionFileChangeEntry {
   binary?: boolean;
 }
 
-export interface VersionFileChangeEntryPage {
+interface VersionFileChangeEntryPage {
   entries: VersionFileChangeEntry[];
   // Pass back as afterPath to fetch the next page; null when this page
   // reached the end of the comparison.
@@ -1288,7 +1288,7 @@ export interface SecretFileMoment {
   protected: true;
 }
 
-export interface SecretFileCompareEntry {
+interface SecretFileCompareEntry {
   path: string;
   // Relative to the target (for example Main): "added" = only the source has
   // it, "deleted" = only the target has it, "modified" = both differ.
@@ -1302,24 +1302,24 @@ export interface SecretFileComparePage {
   nextAfterPath: string | null;
 }
 
-export interface SecretFileWriteOutcome {
+interface SecretFileWriteOutcome {
   // False when the write matched the current tip exactly (no new moment).
   changed: boolean;
   moment?: SecretFileMoment;
 }
 
-export interface SecretFileDeleteOutcome {
+interface SecretFileDeleteOutcome {
   // Null when the path was not tracked (delete of nothing is a no-op).
   moment: SecretFileMoment | null;
 }
 
-export interface SecretFileRestoreOutcome {
+interface SecretFileRestoreOutcome {
   restored: "text" | "deleted";
   restoredMomentId: string;
   path: string;
 }
 
-export type SecretFileMaterialization =
+type SecretFileMaterialization =
   | { present: false }
   | { present: true; text: string };
 

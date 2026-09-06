@@ -48,7 +48,7 @@ async function bodyForCommand(
   return body;
 }
 
-export function buildCliRequest(
+function buildCliRequest(
   command: ParsedCliCommand,
   cwdInput: string,
   stdinBody?: string,

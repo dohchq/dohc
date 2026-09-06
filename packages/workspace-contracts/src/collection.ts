@@ -12,12 +12,12 @@ export type CollectionFieldType =
   | "relation"
   | "url";
 
-export interface ScalarFieldDefinition {
+interface ScalarFieldDefinition {
   name: string;
   type: "text" | "number" | "checkbox" | "date" | "person" | "url";
 }
 
-export interface SelectFieldDefinition {
+interface SelectFieldDefinition {
   name: string;
   type: "select" | "multi-select";
   options: string[];
@@ -132,7 +132,7 @@ export type CollectionValue =
   | CollectionValue[]
   | { [key: string]: CollectionValue };
 
-export type CollectionStatus = CollectionSchemaParseResult["status"];
+type CollectionStatus = CollectionSchemaParseResult["status"];
 
 export interface CollectionSummary {
   path: string;
@@ -242,7 +242,7 @@ export interface CollectionHistoryValue {
   value: CollectionValue;
 }
 
-export type CollectionChangeActorKind = "human" | "agent" | "automation";
+type CollectionChangeActorKind = "human" | "agent" | "automation";
 
 export interface CollectionFieldHistoryEntry {
   historyId: number;

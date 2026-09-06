@@ -40,7 +40,7 @@
     "smoke:settings:desktop": "pnpm --filter @dohc/desktop run smoke:settings",
     "check:self-host": "node scripts/check-self-host.mjs",
     "check:brand": "node scripts/check-brand.mjs",
-    "check:exports": "knip --workspace @dohc/workspace-engine-client --exports --include-entry-exports"
+    "check:exports": "knip --workspace @dohc/workspace-engine-client --workspace @dohc/cli --workspace @dohc/workspace-core --workspace @dohc/workspace-contracts --exports --include-entry-exports"
   },
   "packageManager": "pnpm@11.20.0",
   "devDependencies": {

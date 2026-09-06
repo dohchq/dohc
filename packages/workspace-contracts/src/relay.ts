@@ -223,7 +223,7 @@ export class ShareUnavailableError extends Error {
 //
 // "not-required" is a `view` share, which may push nothing and so is given no
 // identity — the absence is what keeps its local writes local.
-export type ShareViewEnrolment =
+type ShareViewEnrolment =
   | "recorded"
   | "already-recorded"
   | "not-required";
